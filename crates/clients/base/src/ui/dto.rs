@@ -242,10 +242,6 @@ pub struct RyeOsSessionDto {
     pub surface_ref: String,
     #[serde(default)]
     pub user_principal_id: Option<String>,
-    #[serde(default)]
-    pub read_only: bool,
-    #[serde(default)]
-    pub granted_caps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -344,34 +340,6 @@ pub struct RyeOsKnownProjectDto {
     pub exists: bool,
     #[serde(default)]
     pub current: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsAddProjectDto {
-    #[serde(default)]
-    pub project: RyeOsKnownProjectDto,
-    #[serde(default)]
-    pub created: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsOpenProjectDto {
-    #[serde(default)]
-    pub project: RyeOsKnownProjectDto,
-    #[serde(default)]
-    pub session: RyeOsOpenProjectSessionDto,
-    #[serde(default)]
-    pub recent: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct RyeOsOpenProjectSessionDto {
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub project_root: Option<String>,
-    #[serde(default)]
-    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

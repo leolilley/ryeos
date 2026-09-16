@@ -2,8 +2,9 @@
 //!
 //! When a route declares `auth: browser_session`, this verifier extracts the
 //! `ryeos_session` cookie from the request, looks it up in the
-//! `BrowserSessionStore`, and produces a principal with the session's
-//! granted capabilities.
+//! `BrowserSessionStore`, and produces the browser-session transport
+//! principal. The launch principal and its grants remain server-side in the
+//! compiled binding; cookie-authenticated routes cannot reuse them directly.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -67,7 +68,7 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
 
         Ok(RouteInvocationResult::Principal(RoutePrincipal {
             id: format!("session:{}", session.session_id),
-            scopes: session.granted_caps,
+            scopes: Vec::new(),
             verifier_key: "browser_session",
             verified: false,
             authorized_key_class: None,

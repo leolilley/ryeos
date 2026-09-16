@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-19T05:40:59Z:c00b097c6af773743d1c2425cbbfceea800d918823bd895b001fb50abe110477:gGlLHJvjzEkgc5c09401c9u8/l8epa9VTvL8OvL3d1//FE/374JiRZf9RZCUhb5OKMGiSDqy6LZb8Ok40t/GCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:08Z:452634eef547bcb3cae9ff12e415dc5d496373a46a78b29de724e0a158b71474:He3InEHsxpBDT3ebUCHEoVi/CGe4Lt9Khhr5oqoWA2LE+lKdhLv0L16br/RNBYc5JuI6rqSkgCvaCx+7CxMvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/graph/topology
 path: /ui/api/graph/topology
 methods:
   - GET
-auth: browser_session
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 10000

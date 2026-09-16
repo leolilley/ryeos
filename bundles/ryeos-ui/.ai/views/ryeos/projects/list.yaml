@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:997f68bc79c40074cadfa7b2e7094e66b98904c0877001146ace6d86653151da:KMn2WBJooHJHbjKkXXp1etGvofDpADOT9QGfXb+YKK7dxNAcNOqP3ZnCIgn++k+q4ZALmOilqX0eR6DOEe1zAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:39e5233d4a943b84ccb8286914c027829a905905fea63ee202e6dd97d7b62e9e:xoWQwe5ixSB5v3jjnPSAfMPRLlxCnQkl4eMbqvFyjc7jVZfLSNbyEEkpJoBY+JT0weoMewSxJ8neazUTflmoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: projects-list
 title: Projects
 version: "1.0.0"
@@ -11,8 +11,6 @@ widget: table
 sources:
   default:
     ref: service:projects/list
-    params:
-      project_path: ""
     collection: projects
 projections:
   columns:
@@ -50,5 +48,13 @@ affordances:
       args:
         local_id: "{record.local_id}"
       notice: "Opened {result.project.name}."
+  - id: register-project
+    label: Register project
+    invoke:
+      plane: rye
+      ref: service:projects/add
+      args:
+        root: "{record.root}"
+      notice: "Registered {result.project.name}."
 refresh:
   on_hint: [project]

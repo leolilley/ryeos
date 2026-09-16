@@ -1,0 +1,17 @@
+# ryeos:signed:2026-09-15T00:05:35Z:e8cca0d0b2bc1796e0a730cc850ea02c4a8ab624c3eab20ab248ec566751dbb5:NGYSv66vSf6hJTd5lTN4Z0CjPZvw5ExeQVhBQx7f/zy3PzbCiFcbyGFmlGUfnpu7V8AsJiX7ijC5BiIgOGmCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-programs
+title: Programs
+version: "1.0.0"
+description: Honest boundary until RyeOS supplies project program and readiness projections
+
+widget: text
+presentation:
+  chrome: thin
+  background: transparent
+  position: { x: 0.5, y: 0.5 }
+body:
+  lines:
+    - { text: "PROGRAMS", tone: accent }
+    - ""
+    - { text: "Program discovery and readiness are not available yet.", tone: neutral }
+    - { text: "Signed item inventory is not presented as program state.", tone: neutral }

@@ -475,14 +475,10 @@ pub fn build_scene_model(
             .and_then(|sel| sel.get("item"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut capabilities = core
-            .data
-            .session
-            .as_ref()
-            .map(|session| session.granted_caps.clone())
-            .unwrap_or_default();
+        // UI-session dispatch authority stays in the daemon-compiled binding;
+        // it is never copied into renderer state as a capability list.
+        let mut capabilities = Vec::new();
         if let Some(dimension) = &core.data.dimension {
-            capabilities.extend(dimension.session.granted_caps.clone());
             for service in &dimension.local_node.services {
                 capabilities.extend(service.required_caps.clone());
             }

@@ -972,6 +972,32 @@ mod tests {
     use crate::ui::event::RyeOsEvent;
     use crate::ui::model::{BrowserSession, BrowserViewport};
 
+    fn source_request(
+        effect: &crate::ui::effect::RyeOsEffect,
+    ) -> Option<(&str, &str, &str, &Value)> {
+        let RyeOsEffectKind::FetchSource {
+            tile_id, request, ..
+        } = &effect.kind
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &request.payload
+        else {
+            return None;
+        };
+        Some((
+            tile_id.as_str(),
+            view_ref.as_str(),
+            channel.as_str(),
+            params,
+        ))
+    }
+
     fn facts(source: &str) -> Value {
         serde_json::json!({
             "schema_version": crate::ui::field::FIELD_FACTS_SCHEMA,
@@ -1039,7 +1065,7 @@ mod tests {
                         }
                     }
                 })),
-                read_only: false,
+                posture: crate::ui::binding::UiEffectivePosture::Interactive,
                 ..Default::default()
             },
             BrowserViewport::default(),
@@ -1134,10 +1160,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(source_effects.len(), 2);
         for effect in source_effects {
-            let source = match &effect.kind {
-                RyeOsEffectKind::FetchSource { source_ref, .. } => source_ref.clone(),
-                _ => unreachable!(),
-            };
+            let source = source_request(&effect).unwrap().2.to_string();
             core.dispatch(RyeOsEvent::EffectResult {
                 result: RyeOsEffectResult {
                     id: effect.id,
@@ -1167,8 +1190,8 @@ mod tests {
         let cursor_fetches = effects
             .iter()
             .filter(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. }
-                    if params["cursor"]["mode"] == "braid_cut")
+                source_request(effect)
+                    .is_some_and(|(_, _, _, params)| params["cursor"]["mode"] == "braid_cut")
             })
             .count();
         assert_eq!(cursor_fetches, 2);
@@ -1181,9 +1204,8 @@ mod tests {
         let cut_generation = scope.generation;
 
         for effect in effects {
-            let source = match &effect.kind {
-                RyeOsEffectKind::FetchSource { source_ref, .. } => source_ref.clone(),
-                _ => continue,
+            let Some((_, _, source, _)) = source_request(&effect) else {
+                continue;
             };
             let mut data = replay_facts(&source);
             data["cursor"] = serde_json::json!({
@@ -1239,8 +1261,8 @@ mod tests {
             switched
                 .iter()
                 .filter(|effect| {
-                    matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. }
-                        if params["cursor"]["mode"] == "live")
+                    source_request(effect)
+                        .is_some_and(|(_, _, _, params)| params["cursor"]["mode"] == "live")
                 })
                 .count(),
             2
@@ -1278,12 +1300,12 @@ mod tests {
         let project = effects
             .iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
             })
             .expect("project source fetches without a selection")
             .clone();
         assert!(!effects.iter().any(|effect| {
-            matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+            source_request(effect).is_some_and(|(_, _, channel, _)| channel == "execution")
         }));
         core.dispatch(RyeOsEvent::EffectResult {
             result: RyeOsEffectResult {
@@ -1323,19 +1345,22 @@ mod tests {
         let selection = core.seat.fold().get("selection").cloned().unwrap();
         assert_eq!(selection["thread_id"], "T-two");
         assert_eq!(selection["entity_id"], "run:two");
-        assert!(effects.iter().any(|effect| {
-            matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, params, .. }
-                if source_ref == "service:execution"
-                && params["thread_id"] == "T-two"
-                && params["cursor"]["mode"] == "live")
-        }));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| source_request(effect).is_some_and(
+                    |(_, _, channel, params)| channel == "execution"
+                        && params["thread_id"] == "T-two"
+                        && params["cursor"]["mode"] == "live"
+                ))
+        );
         assert!(!effects.iter().any(|effect| {
-            matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+            source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
         }));
         let first_execution = effects
             .iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "execution")
             })
             .unwrap()
             .clone();
@@ -1403,9 +1428,9 @@ mod tests {
             "T-one"
         );
         assert!(effects.iter().any(|effect| {
-            matches!(&effect.kind, RyeOsEffectKind::FetchSource { params, .. }
-                if params["thread_id"] == "T-one"
-                && params["cursor"]["mode"] == "live")
+            source_request(effect).is_some_and(|(_, _, _, params)| {
+                params["thread_id"] == "T-one" && params["cursor"]["mode"] == "live"
+            })
         }));
         let local = core.field_local_mut(&instance_key).unwrap();
         assert_eq!(local.cursor, FieldCursorState::Live);
@@ -1442,7 +1467,7 @@ mod tests {
         let project = initial
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
             })
             .unwrap();
         core.dispatch(RyeOsEvent::EffectResult {
@@ -1472,7 +1497,7 @@ mod tests {
         let execution = execution_effects
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "execution")
             })
             .unwrap();
         let mut execution_facts = facts("execution");
@@ -1569,7 +1594,7 @@ mod tests {
             .initial_effects()
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
             })
             .unwrap();
         core.dispatch(RyeOsEvent::EffectResult {
@@ -1621,7 +1646,7 @@ mod tests {
             .initial_effects()
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
             })
             .unwrap();
         core.dispatch(RyeOsEvent::EffectResult {
@@ -1677,7 +1702,7 @@ mod tests {
             .initial_effects()
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:project")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "project")
             })
             .unwrap();
         core.dispatch(RyeOsEvent::EffectResult {
@@ -1706,7 +1731,7 @@ mod tests {
             })
             .into_iter()
             .find(|effect| {
-                matches!(&effect.kind, RyeOsEffectKind::FetchSource { source_ref, .. } if source_ref == "service:execution")
+                source_request(effect).is_some_and(|(_, _, channel, _)| channel == "execution")
             })
             .unwrap();
         let mut replay = facts("execution");
@@ -1740,7 +1765,7 @@ mod tests {
                 ok: false,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: None,
-                error: Some("unrelated fixture failure".to_string()),
+                error: Some("unrelated fixture failure".into()),
             },
         });
         assert!(
@@ -1764,7 +1789,7 @@ mod tests {
                 ok: false,
                 kind: RyeOsEffectResultKind::SourceData,
                 data: None,
-                error: Some("fixture failure".to_string()),
+                error: Some("fixture failure".into()),
             },
         });
         let playback = &core.field_local_mut(&instance_key).unwrap().playback;

@@ -29,10 +29,35 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     } else {
         format!("{} ▸ {}", vm.workspace.lens_trail.join(" ▸ "), current)
     };
-    let text = format!(
-        " {}  {}  {} ",
-        vm.presentation.chrome.version_label, crumb, vm.presentation.chrome.top_bar.layout_symbol
-    );
+    let navigation = vm
+        .navigation
+        .items
+        .iter()
+        .map(|item| {
+            if item.selected {
+                format!("[{}]", item.label)
+            } else {
+                item.label.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let text = if navigation.is_empty() {
+        format!(
+            " {}  {}  {} ",
+            vm.presentation.chrome.version_label,
+            crumb,
+            vm.presentation.chrome.top_bar.layout_symbol
+        )
+    } else {
+        format!(
+            " {}  {}  {}  {} ",
+            vm.presentation.chrome.version_label,
+            navigation,
+            crumb,
+            vm.presentation.chrome.top_bar.layout_symbol
+        )
+    };
     draw_bar(surface, 0, &text, ACCENT);
 }
 

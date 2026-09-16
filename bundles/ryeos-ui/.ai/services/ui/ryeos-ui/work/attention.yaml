@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-15T00:34:37Z:da47787605b36c49415308a7fba0247fdaa121421953ad6d9d1c40b93374bb8d:MCQYdBAbaKbtZinGa1AckIeOIS4YFqR3bXQWyRdZzdsdJuvtCZoiNcbh/K0jPM2nNdzjfkd3nt+ySnzsE/XeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/work/attention
+version: "1.0.0"
+description: Bounded principal/project attention items backed by exact domain projections.
+endpoint: ui.ryeos.work.attention
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

@@ -1,39 +1,84 @@
 // Tests for `ui.invocations.dispatch` handler.
 
 mod test_state;
-use test_state::{build_test_state, build_test_state_with_live_bundles};
+use test_state::{build_test_state, build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 
-fn test_context() -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: false,
-        granted_caps: vec!["ui.read".into()],
-        user_principal_id: None,
-    }
+async fn mint_live_session(
+    state: &ryeos_app::state::AppState,
+) -> (
+    String,
+    HandlerContext,
+    ryeos_ui::browser_session::BrowserSession,
+) {
+    let principal = format!("fp:{}", "ab".repeat(32));
+    let scopes = vec!["*".to_string()];
+    let response = ryeos_ui::handlers::ui_launch_mint::handle(
+        ryeos_ui::handlers::ui_launch_mint::Request {
+            ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
+            surface_ref: "surface:ryeos/ui/base".to_string(),
+            project_path: None,
+            user_principal_id: Some(principal.clone()),
+        },
+        HandlerContext::new(principal, scopes.clone(), true),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("compile live UI binding");
+    let session_id = response["session_id"]
+        .as_str()
+        .expect("minted session id")
+        .to_string();
+    let token = response["token"].as_str().expect("minted activation token");
+    assert_eq!(
+        get_ui_state(state)
+            .expect("UI state")
+            .browser_sessions
+            .consume_launch_token(token),
+        Some(session_id.clone())
+    );
+    let session = get_ui_state(state)
+        .expect("UI state")
+        .browser_sessions
+        .get_session(&session_id)
+        .expect("minted session");
+    (
+        session_id.clone(),
+        HandlerContext::new(format!("session:{session_id}"), scopes, false),
+        session,
+    )
 }
 
-fn read_only_context() -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: true,
-        granted_caps: vec![
-            "ui.read".into(),
-            "ryeos.execute.service.commands/submit".into(),
-        ],
-        user_principal_id: None,
-    }
+fn test_context() -> ryeos_ui::browser_session::LaunchContext {
+    launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
+        None,
+    )
+}
+
+fn observation_context() -> ryeos_ui::browser_session::LaunchContext {
+    let mut context = launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
+        None,
+    );
+    context.granted_caps = vec![
+        "ui.read".into(),
+        "ryeos.execute.service.commands/submit".into(),
+    ];
+    context
 }
 
 #[test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 fn dispatch_transport_is_unrecorded() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let ctx = PlanContext {
@@ -64,10 +109,17 @@ fn dispatch_transport_is_unrecorded() {
 #[tokio::test]
 async fn arbitrary_event_targets_are_rejected() {
     let (_tmp, state) = build_test_state();
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(test_context());
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -88,18 +140,25 @@ async fn arbitrary_event_targets_are_rejected() {
     assert!(result.is_err(), "arbitrary UI event dispatch should fail");
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
-        msg.contains("canonical ref"),
-        "expected canonical ref message, got: {msg}"
+        msg.contains("invalid ui.invocations.dispatch request"),
+        "{msg}"
     );
 }
 
 #[tokio::test]
-async fn read_only_session_rejects_nonlocal_invocation() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, _token) = get_ui_state(&state)
+async fn legacy_client_authority_flags_are_rejected() {
+    let (_tmp, state) = build_test_state();
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
-        .mint_token(read_only_context());
+        .mint_token(observation_context());
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
@@ -121,12 +180,12 @@ async fn read_only_session_rejects_nonlocal_invocation() {
 
     assert!(
         result.is_err(),
-        "read-only should reject nonlocal invocations"
+        "legacy authority-bearing payload should fail"
     );
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
-        msg.contains("read-only"),
-        "expected read-only mention, got: {msg}"
+        msg.contains("invalid ui.invocations.dispatch request"),
+        "{msg}"
     );
 }
 
@@ -138,8 +197,9 @@ async fn session_cookie_required() {
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:ui/seat/close" },
-            "params": { "thread_id": "T-1" }
+            "binding_digest": "fixture",
+            "coordinate": { "kind": "source", "view_ref": "view:test/x", "channel": "default" },
+            "payload": { "kind": "source_parameters", "params": {} }
         }),
         ctx,
         Arc::new(state),
@@ -155,12 +215,10 @@ async fn session_cookie_required() {
 }
 
 #[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, _token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(test_context());
+    let (session_id, ctx, session) = mint_live_session(&state).await;
 
     // Subscribe to the session bus before invoking.
     let mut rx = get_ui_state(&state)
@@ -168,16 +226,18 @@ async fn session_local_invocation_publishes_to_session_bus() {
         .session_bus
         .subscribe(&session_id);
 
-    let ctx = HandlerContext::new(
-        format!("session:{session_id}"),
-        vec!["ui.read".into()],
-        false,
-    );
-
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:ui/seat/open" },
-            "params": { "surface_ref": "surface:ryeos/ui/base" }
+            "binding_digest": session.compiled_binding.binding_digest,
+            "coordinate": {
+                "kind": "affordance",
+                "view_ref": "view:ryeos/projects/list",
+                "affordance_id": "register-project"
+            },
+            "payload": {
+                "kind": "selection",
+                "record": { "root": state.config.app_root }
+            }
         }),
         ctx,
         Arc::new(state),
@@ -195,30 +255,20 @@ async fn session_local_invocation_publishes_to_session_bus() {
 
     assert_eq!(event.event_type, "invocation.dispatched");
     assert_eq!(event.payload["target"]["kind"], "ref");
-    assert_eq!(event.payload["target"]["ref"], "service:ui/seat/open");
+    assert_eq!(event.payload["target"]["ref"], "service:projects/add");
     assert_eq!(event.payload["invocation_id"], invocation_id);
 }
 
 #[tokio::test]
+#[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let mut launch_context = read_only_context();
-    launch_context.granted_caps = vec!["ui.read".into()];
-    launch_context.user_principal_id =
-        Some("fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
-    let (session_id, _token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(launch_context);
-    let ctx = HandlerContext::new(
-        format!("session:{session_id}"),
-        vec!["ui.read".into()],
-        false,
-    );
+    let (_session_id, ctx, session) = mint_live_session(&state).await;
+    let binding_digest = session.compiled_binding.binding_digest.clone();
     let state = Arc::new(state);
 
     let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({ "surface_ref": "surface:ryeos/ui/base" }),
+        serde_json::json!({}),
         ctx.clone(),
         state.clone(),
     )
@@ -282,9 +332,13 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let listed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:ui/ryeos-ui/threads/list" },
-            "read_only": true,
-            "params": { "limit": 100, "sort": "watch" }
+            "binding_digest": binding_digest,
+            "coordinate": {
+                "kind": "source",
+                "view_ref": "view:ryeos/input",
+                "channel": "input.line.mentions"
+            },
+            "payload": { "kind": "source_parameters", "params": {} }
         }),
         ctx.clone(),
         state.clone(),
@@ -307,9 +361,16 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let replayed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:events/chain_replay" },
-            "read_only": true,
-            "params": { "chain_root_id": chain_root_id }
+            "binding_digest": binding_digest,
+            "coordinate": {
+                "kind": "source",
+                "view_ref": "view:ryeos/thread/transcript",
+                "channel": "default"
+            },
+            "payload": {
+                "kind": "source_parameters",
+                "params": { "chain_root_id": chain_root_id }
+            }
         }),
         ctx,
         state.clone(),

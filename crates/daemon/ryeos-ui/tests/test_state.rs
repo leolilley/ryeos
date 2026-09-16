@@ -11,6 +11,49 @@ use std::sync::Arc;
 use ryeos_app::state::AppState;
 use ryeos_engine::kind_registry::KindRegistry;
 
+#[allow(dead_code)]
+pub fn launch_context(
+    surface_ref: &str,
+    project_root: Option<&str>,
+    posture: ryeos_ui::compiled_binding::EffectiveUiPosture,
+    user_principal_id: Option<String>,
+) -> ryeos_ui::browser_session::LaunchContext {
+    use std::collections::BTreeMap;
+
+    use ryeos_api::surface_views::EffectiveUiItemIdentity;
+    use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
+    use ryeos_ui::compiled_binding::{CompiledUiBinding, SessionCompiledUiBinding};
+
+    ryeos_ui::browser_session::LaunchContext {
+        compiled_binding: Arc::new(SessionCompiledUiBinding {
+            binding_digest: "11".repeat(32),
+            posture,
+            binding: CompiledUiBinding {
+                contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
+                principal_id: "fp:test".to_string(),
+                project_root: project_root.map(str::to_string),
+                request_engine_generation_identity: "generation:test".to_string(),
+                node_policy_generation_digest: "22".repeat(32),
+                surface: EffectiveUiItemIdentity {
+                    canonical_ref: surface_ref.to_string(),
+                    effective_definition_digest: EffectiveDefinitionDigest::parse("33".repeat(32))
+                        .expect("valid fixture digest"),
+                    effective_trust_class: TrustClass::TrustedBundle,
+                },
+                views: BTreeMap::new(),
+                sources: BTreeMap::new(),
+                affordances: BTreeMap::new(),
+                surface_route: None,
+                attenuated: Vec::new(),
+            },
+        }),
+        effective_surface: serde_json::json!({"kind": "Surface"}),
+        granted_caps: vec!["ui.read".into()],
+        user_principal_id,
+        project_authority: None,
+    }
+}
+
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: std::sync::OnceLock<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
         std::sync::OnceLock::new();
@@ -43,6 +86,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -126,6 +170,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         authorized_keys_dir: tmpdir.path().join("auth"),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+    ryeos_app::identity::NodeIdentity::create(&config.operator_signing_key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -182,6 +227,22 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         commands,
         write_barrier,
         event_streams,
+    )
+}
+
+#[allow(dead_code)]
+pub fn local_operator_context(
+    state: &AppState,
+    scopes: Vec<String>,
+) -> ryeos_app::handler_context::HandlerContext {
+    let operator = ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        .expect("load fixture operator");
+    ryeos_app::handler_context::HandlerContext::new_with_authority(
+        operator.principal_id(),
+        scopes,
+        true,
+        Some(ryeos_app::identity::AuthorizedKeyPrincipalClass::LocalClient),
+        None,
     )
 }
 

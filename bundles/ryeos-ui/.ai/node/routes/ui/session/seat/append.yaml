@@ -1,0 +1,8 @@
+# ryeos:signed:2026-09-14T10:03:09Z:435b1f37a99acf29eb7796b8dcb6aed9896a1cdd66ece9bf0027077e1baa4a0d:cXl0yGUlftL81K62BVCOGrzjliryNVrhjl4LBHVPIznQJmpzYp2pAcPWWCMy/99BtNqRBfWvJbUTy4gvYCBsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/seat/append
+path: /ui/api/session/seat/append
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 65536, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/seat/append" }

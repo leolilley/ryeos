@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:dfe2fcb2527dd530aa26dcb34690aadbaeb065a1961d24bae26a82d72011a54c:BQaRT9zhe3qsn9AYSPX1E+8vR2eRq+QC0al49Q3FE7nx182ypjS0Ox16mCD2jtvSE7nJKviYNp+ot0KQXvt8CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:7226f0c0b7d8292db49a6e2e79b519da9e925b897052256e7930ab9e671ea719:FIL1Qa/i5m2JT74nqEcd7OWEqxjJ6QwZgou9yc6WodIKyyQEGlDXfmHl0HuT7N+7vZYshtxjLRUassP5abooDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: gc-status
 version: "1.0.0"
 description: Garbage collection state
@@ -8,4 +8,5 @@ sources:
   default:
     ref: service:ui/ryeos-ui/gc/status
     params:
-      project_path: ""
+      project_path: "@session:project_root"
+    requires_project: true

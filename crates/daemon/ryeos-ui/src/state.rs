@@ -96,6 +96,7 @@ impl EffectiveProgramProjectionCache for FieldProjectionCache {
 pub struct UiState {
     pub browser_sessions: Arc<BrowserSessionStore>,
     pub session_bus: Arc<SessionBus>,
+    seat_transition: Arc<Mutex<()>>,
     field_token_key: Arc<[u8; 32]>,
     field_projection_cache: Arc<FieldProjectionCache>,
 }
@@ -111,9 +112,19 @@ impl UiState {
         Self {
             browser_sessions: Arc::new(BrowserSessionStore::new()),
             session_bus: Arc::new(SessionBus::new()),
+            seat_transition: Arc::new(Mutex::new(())),
             field_token_key: Arc::new(rand::random()),
             field_projection_cache: Arc::new(FieldProjectionCache::default()),
         }
+    }
+
+    /// Serialize exact-session seat creation with predecessor activation.
+    /// This is deliberately one bounded process-local lock, not an unbounded
+    /// per-session lock registry; seat lifecycle operations are rare.
+    pub(crate) fn lock_seat_transition(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, ()>> {
+        self.seat_transition.lock()
     }
 
     pub(crate) fn sign_field_token(&self, message: &[u8]) -> String {

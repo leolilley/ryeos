@@ -1,7 +1,6 @@
 //! `ui.ryeos.field.runs` — bounded project/item-scoped run summaries.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -63,11 +62,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let limit = request.limit.clamp(1, MAX_LIMIT);
     let facets = normalize_facet_filters(request.facets)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let project_root = caller.project_root().map(|path| {
-        std::path::Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(path))
-    });
+    let project_root = caller.project_path()?;
     let filter = ThreadListFilter {
         principal: None,
         status: None,

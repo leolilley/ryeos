@@ -54,7 +54,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     // Unlike the existing operator topology endpoint, field/project has no
     // project-path parameter. Its authority comes only from the admitted UI
     // session. Project-authored view data can never select a host path.
-    let project_root = caller.project_root().map(str::to_string);
+    let project_root = caller
+        .project_path()?
+        .map(|path| path.to_string_lossy().into_owned());
     let root_surface = match &caller {
         crate::seat_auth::SeatCaller::Session(session) => Some(session.surface_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,

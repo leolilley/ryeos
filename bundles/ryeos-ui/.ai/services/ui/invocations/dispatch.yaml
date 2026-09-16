@@ -1,8 +1,8 @@
-# ryeos:signed:2026-07-25T12:15:35Z:5c26e8e341c470c2e089aca5f44208e1d47927a2417e090dea591687a0aa5cf9:UzA6jCBVUZnkMWMMplo/Dm2NuKugY7YCskMU3qDVuwgH9Y5R17LLafH32NZEpJUF0yI2ygLVBP3+zPgLhbM1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:b5f042eff332c54417cd455a3b315a2d060ac96eba406f78f70e50660c619610:4OLyXXXzF+x/4vh4P/jYi3B7K2hi2UytvGR56UL7GHO33xlBiyfBU7hwzrlqTUi0f7M4nPDfNHt5IqcoYr1MDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: invocations/dispatch
 version: "1.0.0"
-description: Dispatch already-lowered executable refs from a Rye OS UI session.
+description: Resolve a session-bound signed UI coordinate and dispatch its compiled target.
 endpoint: ui.invocations.dispatch
 availability: daemon_only
 required_caps: []

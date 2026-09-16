@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 /// Engine-reserved facet keys. Engine lenses read only these.
 pub const KEY_INPUT_ROUTE: &str = "input.route";
+pub const KEY_NAVIGATION_DESTINATION: &str = "navigation.destination";
 pub const KEY_SELECTION: &str = "selection";
 pub const KEY_WATCH: &str = "watch";
 

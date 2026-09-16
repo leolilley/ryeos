@@ -1,0 +1,8 @@
+# ryeos:signed:2026-09-14T10:03:09Z:d702bdbdb021f6a81d3edf5bfef32f3a19c009d18d19d13f5bd1606f8e3546a8:pSoE8wv+cVKk1ULlJeiL8M/edWZyp+pvc4ZUZANxL32zDXeZytaHmSDqgbxoe2KmFs/+xwtfVFasY4wn8s+/Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/seat/open
+path: /ui/api/session/seat/open
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 16384, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/seat/open" }

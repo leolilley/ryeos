@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-15T00:05:35Z:d14943877fae0c4c07061ad1566a872c2371ffaa5036cf57c416ede1a98cb8b6:T+/gXYTVOKdccQFA4ufHmrvfYAeEMru3aF/9p76z4hDDgXuYHeLbe90kjLrY32oRuDCzWuoxPPz6whaGmOzFAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-sites
+title: Sites
+version: "1.0.0"
+description: This node and configured remotes; live remote readiness is not inferred
+
+widget: sections
+sources:
+  node:
+    ref: service:node/status
+  remotes:
+    ref: service:ui/ryeos-ui/remotes/list
+    collection: remotes
+sections:
+  - title: This node
+    source_channel: node
+    projection:
+      primary: revision
+      meta: bind
+  - title: Configured remotes
+    source_channel: remotes
+    collection: remotes
+    projection:
+      primary: name
+      meta: url

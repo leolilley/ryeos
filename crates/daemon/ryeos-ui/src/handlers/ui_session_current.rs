@@ -1,7 +1,7 @@
 //! `ui.session.current` — return the authenticated session's context.
 //!
 //! The browser calls this once on load to discover its session_id,
-//! surface_ref, project_path, read_only, and events URL — plus the
+//! surface_ref, project_path, derived posture, and events URL — plus the
 //! effective surface with its bound views already embedded, so the
 //! whole boot is this one call before opening the SSE stream at
 //! `events_url`.
@@ -19,11 +19,9 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
-use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::engine::EffectiveItemRequest;
-use ryeos_engine::error::EngineError;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::compiled_binding::EffectiveUiPosture;
 use crate::state::get_ui_state;
 
 #[derive(Debug, Serialize)]
@@ -32,10 +30,12 @@ pub struct Response {
     pub ui_binding_contract_revision: &'static str,
     pub session_id: String,
     pub surface_ref: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_surface: Option<Value>,
+    pub effective_surface: Value,
     pub project_path: Option<String>,
-    pub read_only: bool,
+    pub binding_digest: String,
+    pub posture: EffectiveUiPosture,
+    pub binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds,
+    pub expires_in_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_principal_id: Option<String>,
     pub events_url: String,
@@ -67,42 +67,36 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
     let surface_ref = session.surface_ref.clone();
     let project_path = session.project_root.clone();
-    let effective_surface = CanonicalRef::parse(&surface_ref).ok().and_then(|item_ref| {
-        state
-            .engine
-            .with_checked_bundle_generation(
-                |generation| -> std::result::Result<Value, EngineError> {
-                    let effective = generation.effective_item(EffectiveItemRequest {
-                        item_ref,
-                        expected_kind: Some("surface".to_string()),
-                        project_root: project_path.clone().map(Into::into),
-                        subject_resolution_authority:
-                            ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
-                                project_path.as_deref().map(std::path::Path::new),
-                            ),
-                    })?;
-                    let mut composed = effective.composed_value;
-                    let failures = ryeos_api::surface_views::embed_surface_views_in_generation(
-                        generation,
-                        project_path.as_deref().map(std::path::Path::new),
-                        &mut composed,
-                    );
-                    for (view_ref, reason) in &failures {
-                        tracing::warn!(view_ref = %view_ref, reason = %reason, "view embed failed");
-                    }
-                    Ok(composed)
-                },
-            )
-            .ok()
-    });
+    let route_max = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| {
+            route.response.source.as_deref()
+                == Some(super::ui_invocations_dispatch::DESCRIPTOR.service_ref)
+        })
+        .map(|route| route.limits.body_bytes_max)
+        .ok_or_else(|| HandlerError::Internal("UI binding dispatch route is absent".into()))?;
 
     let response = Response {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
         session_id: session.session_id.clone(),
         surface_ref,
-        effective_surface,
+        effective_surface: session.effective_surface.clone(),
         project_path,
-        read_only: session.read_only,
+        binding_digest: session.compiled_binding.binding_digest.clone(),
+        posture: session.compiled_binding.posture,
+        binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
+            max_request_bytes: route_max,
+            max_input_bytes: route_max,
+        },
+        expires_in_ms: u64::try_from(
+            session
+                .expires_at
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX),
         user_principal_id: session.user_principal_id.clone(),
         events_url: format!("/ui/events/session/{}", session.session_id),
     };

@@ -1,19 +1,17 @@
 mod test_state;
-use test_state::build_test_state_with_live_bundles;
+use test_state::{build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
 
-fn session_context(user_principal_id: Option<String>) -> LaunchContext {
-    LaunchContext {
-        surface_ref: "surface:ryeos/ui/base".into(),
-        project_path: None,
-        read_only: true,
-        granted_caps: vec!["ui.read".into()],
+fn session_context(user_principal_id: Option<String>) -> ryeos_ui::browser_session::LaunchContext {
+    launch_context(
+        "surface:ryeos/ui/base",
+        None,
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         user_principal_id,
-    }
+    )
 }
 
 fn handler_context(session_id: &str) -> HandlerContext {
@@ -27,21 +25,28 @@ fn handler_context(session_id: &str) -> HandlerContext {
 #[tokio::test]
 async fn ui_seat_open_reattaches_running_session_seat() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(session_context(Some("fp:user-1".into())));
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     let ctx = handler_context(&session_id);
 
     let first = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({ "surface_ref": "surface:ryeos/ui/base" }),
+        serde_json::json!({}),
         ctx.clone(),
         Arc::new(state.clone()),
     )
     .await
     .expect("open seat");
     let second = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({ "surface_ref": "surface:ryeos/ui/base" }),
+        serde_json::json!({}),
         ctx,
         Arc::new(state.clone()),
     )
@@ -58,21 +63,65 @@ async fn ui_seat_open_reattaches_running_session_seat() {
         .unwrap()
         .unwrap();
     assert_eq!(detail.kind, "seat_session");
-    assert_eq!(detail.requested_by.as_deref(), Some("fp:user-1"));
+    assert_eq!(
+        detail.requested_by.as_deref(),
+        Some(format!("session:{session_id}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn same_principal_sessions_cannot_reattach_each_others_seats() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
+    let (first_id, first_token) = sessions.mint_token(session_context(Some("fp:user-1".into())));
+    let (second_id, second_token) = sessions.mint_token(session_context(Some("fp:user-1".into())));
+    assert_eq!(
+        sessions.consume_launch_token(&first_token),
+        Some(first_id.clone())
+    );
+    assert_eq!(
+        sessions.consume_launch_token(&second_token),
+        Some(second_id.clone())
+    );
+
+    let first = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        serde_json::json!({}),
+        handler_context(&first_id),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("open first session seat");
+    let second = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
+        serde_json::json!({}),
+        handler_context(&second_id),
+        Arc::new(state.clone()),
+    )
+    .await
+    .expect("open second session seat");
+
+    assert_ne!(first["thread_id"], second["thread_id"]);
+    assert_eq!(second["reattached"], false);
 }
 
 #[tokio::test]
 async fn ui_seat_append_replay_and_close_round_trip() {
     let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, _token) = get_ui_state(&state)
+    let (session_id, token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
         .mint_token(session_context(None));
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     let ctx = handler_context(&session_id);
     let state = Arc::new(state);
 
     let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        serde_json::json!({ "surface_ref": "surface:ryeos/ui/base" }),
+        serde_json::json!({}),
         ctx.clone(),
         state.clone(),
     )
@@ -117,33 +166,4 @@ async fn ui_seat_append_replay_and_close_round_trip() {
     .await
     .expect("close seat");
     assert_eq!(closed["status"], "completed");
-}
-
-#[tokio::test]
-async fn read_only_actions_allow_unrecorded_session_local_seat_services() {
-    let (_tmp, state) = build_test_state_with_live_bundles();
-    let (session_id, _token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(session_context(None));
-    let ctx = handler_context(&session_id);
-
-    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
-        serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:ui/seat/open" },
-            "params": { "surface_ref": "surface:ryeos/ui/base" }
-        }),
-        ctx,
-        Arc::new(state),
-    )
-    .await
-    .expect("read-only session may open local UI seat");
-
-    assert_eq!(result["status"], "executed");
-    assert_eq!(result["result"]["thread"]["kind"], "service_run");
-    assert_eq!(
-        result["result"]["thread"]["recorded"].as_bool(),
-        Some(false)
-    );
-    assert!(result["result"]["result"]["thread_id"].is_string());
 }

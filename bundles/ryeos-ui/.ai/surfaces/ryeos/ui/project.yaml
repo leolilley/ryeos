@@ -1,7 +1,11 @@
-# ryeos:signed:2026-08-10T09:26:26Z:160492ee32f08f20b83f162bd30328db95a4be95e40c27ded90758393940af30:vhnR7W1oNApZlUoApzfyY+nlrLykLVRcD/Nc46Kd9H6VAoL5pLJj799aeH8NpkyXndmXaM/HwhLRSprWXZY6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:e2fe56953e5792d4e02410ade6828776e8d60a2e4651df0aede8f6653ea84ac2:tVdw7DqFpwcNYXhm8Ku4SSy0IIe6I7B1m9FGFIFZJieF8j786Rfommu+aRpKAJFTJi6wafl4sey9h4C9pYDtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 version: "1.0.0"
 description: Active project explorer for files, signed items, and related execution
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
 
 tiling:
   mode: master_stack
@@ -40,14 +44,19 @@ library:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

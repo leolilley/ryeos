@@ -4,6 +4,7 @@ import { ryeosWorkspace, tileIdsForNode } from "/ui/assets/ryeos_components_work
 import { applyWorkspaceMotion, captureWorkspaceMotion } from "/ui/assets/ryeos_motion.js";
 import { applyPresentationState, presentationState } from "/ui/assets/ryeos_presentation_state.js";
 import { beginFieldFrame, endFieldFrame } from "/ui/assets/ryeos_components_field.js";
+import { ryeosNavigation } from "/ui/assets/ryeos_components_navigation.js";
 
 export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   beginFieldFrame();
@@ -26,6 +27,7 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   const layers = [
     opticFrame(vm.presentation?.frame),
     topStatusLine(vm, chromeShell),
+    ryeosNavigation(vm.navigation, dispatchUi),
     ryeosWorkspace(vm.workspace, vm.session?.ambient, presentation.motion, dispatchUi),
     statusLine(vm, chromeShell),
     overlayDialog(activeOverlayState(vm) || {}, chromeShell),

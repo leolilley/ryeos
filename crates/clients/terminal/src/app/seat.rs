@@ -12,119 +12,84 @@ use crate::transport::daemon::DaemonClient;
 /// folds it into the core when it arrives, so the daemon round trips
 /// never gate the first frame.
 pub struct SeatBootstrap {
-    pub thread_id: Option<String>,
+    pub thread_id: String,
     pub replayed: Vec<SeatEvent>,
 }
 
 /// Reattach to the freshest owned seat for this surface, or open a new
-/// one (best effort: an unreachable seat service degrades to a
-/// local-only seat, never a crash).
+/// one. A daemon-backed UI never degrades to an engine-local seat: doing so
+/// would silently discard the durable session authority the user requested.
 pub async fn bootstrap_seat(
     client: &DaemonClient,
     surface_ref: &str,
     project_path: &str,
-) -> SeatBootstrap {
-    if let Some((thread_id, replayed)) =
-        reattach_seat_thread(client, surface_ref, project_path).await
-    {
-        return SeatBootstrap {
-            thread_id: Some(thread_id),
-            replayed,
-        };
-    }
-    SeatBootstrap {
-        thread_id: open_seat_thread(client, surface_ref, project_path).await,
-        replayed: Vec::new(),
-    }
+) -> Result<SeatBootstrap, String> {
+    let (thread_id, replayed) = reattach_seat_thread(client, surface_ref, project_path).await?;
+    Ok(SeatBootstrap {
+        thread_id,
+        replayed,
+    })
 }
 
 /// Open the seat session thread.
 pub async fn open_seat_thread(
     client: &DaemonClient,
-    surface_ref: &str,
-    project_path: &str,
-) -> Option<String> {
-    let body = serde_json::json!({
-        "item_ref": "service:seat/open",
-        "ref_bindings": {},
-        "execution_policy": seat_execution_policy(),
-        "parameters": {
-            "surface_ref": surface_ref,
-            "client_ref": "client:ryeos/tui",
-            "project_path": project_path,
-        },
-    });
-    let envelope = client.signed_post("/execute", &body).await.ok()?;
+    _surface_ref: &str,
+    _project_path: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({});
+    let envelope = client
+        .signed_post("/ui/api/session/seat/open", &body)
+        .await
+        .map_err(|error| format!("open durable UI seat: {error}"))?;
     envelope
         .get("result")
         .and_then(|result| result.get("thread_id"))
         .and_then(|id| id.as_str())
         .map(str::to_string)
+        .ok_or_else(|| "open durable UI seat: response omitted thread_id".to_string())
 }
 
 async fn reattach_seat_thread(
     client: &DaemonClient,
-    surface_ref: &str,
-    project_path: &str,
-) -> Option<(String, Vec<SeatEvent>)> {
-    // Discovery via `service:seat/list`: the daemon filters by the
-    // `seat_session` kind, running status, and surface, and sorts freshest
-    // first — the client just takes the most recent. The kind name stays
-    // daemon-side rather than leaking into a `threads/list` client filter.
-    let body = serde_json::json!({
-        "item_ref": "service:seat/list",
-        "ref_bindings": {},
-        "execution_policy": seat_execution_policy(),
-        "parameters": { "surface_ref": surface_ref, "project_path": project_path },
-    });
-    let envelope = client.signed_post("/execute", &body).await.ok()?;
-    let seats: Vec<String> = envelope
+    _surface_ref: &str,
+    _project_path: &str,
+) -> Result<(String, Vec<SeatEvent>), String> {
+    // The session endpoint atomically reattaches the freshest owned seat or
+    // creates one. Clients never enumerate seat-session threads or author the
+    // execution policy that owns them.
+    let body = serde_json::json!({});
+    let envelope = client
+        .signed_post("/ui/api/session/seat/open", &body)
+        .await
+        .map_err(|error| format!("reattach durable UI seat: {error}"))?;
+    let thread_id = envelope
         .get("result")
-        .and_then(|result| result.get("seats"))
-        .and_then(serde_json::Value::as_array)?
-        .iter()
-        .filter_map(|seat| seat.get("thread_id").and_then(serde_json::Value::as_str))
-        .map(str::to_string)
-        .collect();
-    let thread_id = seats.first()?.clone();
-    // Discovery itself does not mutate presence. Renew/recreate the selected
-    // runtime lease before replay so a freshly reattached seat cannot be reaped
-    // during the first heartbeat interval.
-    if !touch_seat_thread(client, &thread_id).await {
-        return None;
-    }
-
-    // Supersede the stragglers: parallel clients share the newest seat by
-    // construction (this same freshest-first pick), so a SECOND running
-    // seat for the surface is always an orphan — a close that was skipped
-    // by a crash, a kill, or a pre-settle exit. Settle them now or they
-    // sit "running" in every thread listing forever.
-    for orphan in seats.iter().skip(1) {
-        close_seat_thread(client, orphan).await;
-    }
-
-    let replayed = replay_seat_thread(client, &thread_id).await;
-    Some((thread_id, replayed))
+        .and_then(|result| result.get("thread_id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "reattach durable UI seat: response omitted thread_id".to_string())?
+        .to_string();
+    let replayed = replay_seat_thread(client, &thread_id).await?;
+    Ok((thread_id, replayed))
 }
 
-async fn replay_seat_thread(client: &DaemonClient, thread_id: &str) -> Vec<SeatEvent> {
-    let body = serde_json::json!({
-        "item_ref": "service:events/chain_replay",
-        "ref_bindings": {},
-        "execution_policy": seat_execution_policy(),
-        "parameters": { "chain_root_id": thread_id },
-    });
-    let Ok(envelope) = client.signed_post("/execute", &body).await else {
-        return Vec::new();
-    };
+async fn replay_seat_thread(
+    client: &DaemonClient,
+    thread_id: &str,
+) -> Result<Vec<SeatEvent>, String> {
+    let body = serde_json::json!({ "chain_root_id": thread_id });
+    let envelope = client
+        .signed_post("/ui/api/session/seat/replay", &body)
+        .await
+        .map_err(|error| format!("replay durable UI seat: {error}"))?;
     let Some(events) = envelope
         .get("result")
         .and_then(|result| result.get("events"))
         .and_then(serde_json::Value::as_array)
     else {
-        return Vec::new();
+        return Err("replay durable UI seat: response omitted events".to_string());
     };
-    events.iter().filter_map(seat_event_from_replay).collect()
+    Ok(events.iter().filter_map(seat_event_from_replay).collect())
 }
 
 fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {
@@ -174,26 +139,19 @@ pub async fn append_braid(
     thread_id: &str,
     events: Vec<serde_json::Value>,
 ) -> bool {
-    let body = serde_json::json!({
-        "item_ref": "service:seat/append",
-        "ref_bindings": {},
-        "execution_policy": seat_execution_policy(),
-        "parameters": { "thread_id": thread_id, "events": events },
-    });
-    client.signed_post("/execute", &body).await.is_ok()
+    let body = serde_json::json!({ "thread_id": thread_id, "events": events });
+    client
+        .signed_post("/ui/api/session/seat/append", &body)
+        .await
+        .is_ok()
 }
 
 /// Settle the seat thread on clean exit; best effort.
 pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
     let _ = client
         .signed_post(
-            "/execute",
-            &serde_json::json!({
-                "item_ref": "service:seat/close",
-                "ref_bindings": {},
-                "execution_policy": seat_execution_policy(),
-                "parameters": { "thread_id": thread_id },
-            }),
+            "/ui/api/session/seat/close",
+            &serde_json::json!({ "thread_id": thread_id }),
         )
         .await;
 }
@@ -203,36 +161,11 @@ pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
 pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
     client
         .signed_post(
-            "/execute",
-            &serde_json::json!({
-                "item_ref": "service:seat/touch",
-                "ref_bindings": {},
-                "execution_policy": seat_execution_policy(),
-                "parameters": { "thread_id": thread_id },
-            }),
+            "/ui/api/session/seat/touch",
+            &serde_json::json!({ "thread_id": thread_id }),
         )
         .await
         .is_ok()
-}
-
-fn seat_execution_policy() -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": 2,
-        "ownership": "daemon_owned",
-        "recovery": "restart_recoverable",
-        "response": "wait",
-        "target": { "kind": "here" },
-        "environment": {
-            "kind": "project_overlay",
-            "include_operator_vault": true,
-            "name_policy": { "kind": "declared_required" },
-        },
-        "project": {
-            "kind": "live_authority",
-            "access": "read_write",
-            "child_policy": { "kind": "inherit" },
-        },
-    })
 }
 
 #[cfg(test)]

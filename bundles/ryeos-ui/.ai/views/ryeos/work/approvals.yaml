@@ -1,0 +1,69 @@
+# ryeos:signed:2026-09-15T01:11:43Z:16a0b4f0ec161dfca400dc65484d8f483db09778077ed55241588cee4baf626a:tRP4eN37aTpOgYMdjTdwio4tCel49teBR9NL7C31sW1EsyiVJw18kIWbHpCtuZZ4ofzM2tpI8QRHkwBifPjIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-approvals
+title: Approvals
+version: "1.0.0"
+description: Exact pending approval requests owned by the selected hosted work
+
+widget: table
+sources:
+  default:
+    ref: service:worker-executions/approvals
+    params:
+      chain_root_id: "@facet:selection.work.chain_root"
+    collection: approvals
+
+projections:
+  columns:
+    - { label: operation, field: operation_class, present: words }
+    - { label: state, field: state, present: words }
+    - { label: expires, field: expires_at_ms }
+  expand:
+    fields:
+      - chain_root_id
+      - approval_id
+      - placement_thread_id
+      - worker_boot_epoch
+      - request_digest
+      - operation_class
+      - requested_authority
+      - state
+      - expires_at_ms
+      - created_at_ms
+  tone:
+    field: state
+    map: { pending: warn }
+    default: neutral
+
+affordances:
+  - id: accept
+    label: Approve
+    producer: selection
+    visible_when: { field: state, equals: pending }
+    enabled_when: { field: requested_authority.accept_allowed, equals: true }
+    disabled_reason: This approval request cannot be accepted; decline it or inspect its authority.
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: true
+      notice: Approval accepted
+  - id: decline
+    label: Decline
+    producer: selection
+    visible_when: { field: state, equals: pending }
+    invoke:
+      plane: rye
+      ref: service:worker-executions/resolve-approval
+      args:
+        chain_root_id: "{record.chain_root_id}"
+        approval_id: "{record.approval_id}"
+        request_digest: "{record.request_digest}"
+        accept: false
+      notice: Approval declined
+
+refresh:
+  on_facet: selection
+  on_hint: [thread, activity]

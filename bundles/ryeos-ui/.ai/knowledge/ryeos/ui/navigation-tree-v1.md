@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-04T23:37:21Z:a8105b26cda29fb14920eefbef6e877649d14eec0d31bdb8e0758854cf240053:viy+DRhZsnTUQO78Z0uBPu+c3HZZyaJ35VfK5iLBkphtgXKFpJCVPBxdW3aHytVNvJsazqEyuRQyjY6imUHlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-15T01:39:00Z:67dced6f77e5b433f14a9f2d4c23cd7474332442600c69534972d2abe7b6d43a:Y8RFP9RhybOzU3w7L6YybYE9WoeAVSH7TP94wpEJR+RWr0ZSZXpZrGVnCM2G1QNR5+ajk7oKFsimotquzQ+IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -18,11 +18,49 @@ against this tree.
 The core rule is:
 
 ```text
-RyeOS UI is a project cockpit over durable threads.
-Threads are the execution objects.
-Chat, transcript, artifacts, files, and inspectors are lenses.
+RyeOS UI is an assistant workspace over durable logical work.
+A chain root is the stable work address; placement threads are execution bodies.
+Conversation, activity, evidence, files, and inspectors are lenses.
 Project and node are scopes.
 ```
+
+A worker process, provider thread, placement thread, or worker boot epoch is
+not an agent identity. RyeOS agent identity remains the signing principal.
+Continuation and handoff therefore update the current placement of one work
+chain rather than creating a new assistant in the product model.
+
+## Assistant Work Contract
+
+`surface:ryeos/ui/assistant` composes these signed top-level lenses:
+
+- Home: exact operator attention, active executions, recent movement, and
+  projects;
+- Work: principal-scoped chains grouped by durable chain root;
+- Review: pending approvals and redacted decision history;
+- Sites: the current node and configured remotes, without inferred readiness;
+- Programs: an explicit unavailable state until project-owned programme and
+  readiness discovery exists.
+
+Inspecting work retains its stable chain and current placement under
+`selection.work`; it does not change the composer. The explicit “Talk to work”
+affordance copies those coordinates into `input.route`, where drafts key on the
+stable logical-work address. A restart, new worker epoch, or cross-site
+continuation must therefore read as movement within the same work, not a new
+agent or unrelated conversation.
+
+All sources and affordances come from the daemon-compiled effective signed
+surface/view closure. Browser and terminal clients send only a binding digest,
+an exact compiled coordinate, and its typed producer payload. Presentation
+eligibility (`visible_when`, `enabled_when`, and `disabled_reason`) can make an
+affordance understandable, but it never grants authority; the invoked domain
+service revalidates ownership, frontier, epoch, and operation fences.
+
+Approval listing and candidate inspection are read-only projections. Approval
+resolution uses the existing exact hosted-worker resolver. Candidate evidence
+shows retained hashes, completion coordinates, evaluator identity and outcome
+without treating model completion as task success. Candidate return,
+publication, and discard must remain absent until an existing signed operation
+is addressable from the exact source-work coordinate.
 
 ## Tree
 
@@ -168,11 +206,11 @@ RyeOS UI
 |       |-- Pause / Resume
 |       `-- Fire History
 |-- Layouts / Surfaces
-|   |-- Cockpit
-|   |   |-- Left: Current Project Live Threads
-|   |   |-- Right: Selected Thread Lens
+|   |-- Assistant
+|   |   |-- Signed navigation: Home / Work / Review / Sites / Programs
+|   |   |-- Center: One selected lens
 |   |   |-- Bottom: Routed Input
-|   |   `-- Top: Node / Project Status
+|   |   `-- Optional context through signed views
 |   |-- Thread Chat
 |   |   |-- Center: Chat Lens
 |   |   |-- Bottom: Routed Input
@@ -226,9 +264,17 @@ Node
 `-- threads across project contexts on this node
 ```
 
-Project scope is the default for cockpit driving. Node scope is the broader
+Project scope is the default for project-bound work. Node scope is the broader
 operator view. Node-wide activity is not a separate object called "fleet" or
 "activity"; it is the same thread list with a wider scope.
+
+Selecting another project is an authority transition, not renderer-local
+navigation. The node pins the selected project, recompiles the same signed
+surface under that authority, and mints a successor UI session. Web clients
+redeem the successor in the same tab; native clients replace their binding,
+source subscriptions, thread tail, and seat generation together. No client
+rewrites a project path into requests, and the predecessor binding is never
+mutated in place.
 
 The UI should make scope visible whenever a thread list can include more than
 one project. Node-wide thread rows must carry a project column. Current-project
@@ -303,7 +349,7 @@ sources:
     ref: service:ui/ryeos-ui/threads/list
     params:
       project: current
-      project_path: ""
+      project_path: "@session:project_root"
 ```
 
 `view:ryeos/node/threads/history` is node-scoped:
@@ -334,34 +380,30 @@ input:
 A thread is the object. Chat, transcript, artifacts, tool calls, graph state,
 and receipts are lenses over the same durable event braid.
 
-`view:ryeos/thread/chat` is the planned driving lens. It groups turns, keeps
-tool calls collapsed, shows artifact chips, and exposes steer/interrupt/continue
-intents. It should feel close to a chat interface while staying explicitly
-routed to a thread. Do not surface this ref until its widget/source contract
-exists.
+`view:ryeos/thread/transcript` is the current conversation/activity lens. Its
+signed projection maps cognition, paired tool operations, worker turns,
+recovery, approval delivery, candidate milestones, and terminal outcome while
+retaining expandable raw event fields. Shared client semantics provide bounded
+render windows, turn folding, stable tail behaviour, and target-scoped drafts;
+web and terminal render those same semantics.
 
-`view:ryeos/thread/transcript` is the truth lens. It shows the full tail with
-sections, folds, line numbers, cognition in/out, provider stream, tool args,
-stdout/stderr, results, artifacts, receipts, cost, and raw event JSON. It is
-the right place for forensic detail, diffs, and replay inspection.
-
-Both lenses read the same route coordinates:
+The lens reads both route coordinates:
 
 ```text
 input.route.thread
 input.route.chain_root
 ```
 
-The chat lens may summarize events. The transcript lens must preserve the
-operator's ability to inspect the full event stream.
+Any later compact conversation lens may summarize events, but it must read the
+same work route and preserve a path to exact activity/evidence.
 
 ## Surface Roles
 
 ```text
-surface:ryeos/ui/cockpit
-`-- project driving surface
-    |-- left: view:ryeos/threads/history
-    |-- right: selected thread lens, currently view:ryeos/thread/transcript
+surface:ryeos/ui/assistant
+`-- assistant workspace
+    |-- navigation: signed destination-to-view bindings
+    |-- center: selected lens
     |-- bottom: view:ryeos/input
     `-- top: node/project status
 
@@ -461,7 +503,7 @@ Selection
 Scope
 |-- current project
 |-- node-wide or project-scoped list
-`-- read-only/session principal
+`-- compiled signed surface/view binding and session principal
 ```
 
 This can later become a client-local source such as
@@ -470,13 +512,13 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 
 ## References
 
-- `bundles/ryeos-ui/.ai/knowledge/ryeos/ryeos-ui/frame-v1.md`
-- `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/cockpit.yaml`
+- `bundles/ryeos-ui/.ai/knowledge/ryeos/ui/frame-v1.md`
+- `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/assistant.yaml`
 - `bundles/ryeos-ui/.ai/surfaces/ryeos/ui/thread.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/projects/list.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml`
 - `bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml`
-- `crates/clients/base/src/ryeos-ui/model.rs`
-- `crates/clients/base/src/ryeos-ui/view_model.rs`
+- `crates/clients/base/src/ui/model.rs`
+- `crates/clients/base/src/ui/view_model.rs`
 - `crates/clients/web/docs/web-parity.md`

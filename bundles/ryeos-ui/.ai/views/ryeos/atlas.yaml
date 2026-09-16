@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-17T01:35:08Z:b1227cf88360a384d967418f801fff205401f57bb570ebdc6e28704ea830354f:0KnUhKebMX63lG63VPN/BqXlJ2eXbBeLyn2R6yX2/0CTpxqEffAfyPDGngb3VXZeuB3peOm2NOxbnUznxS9KBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:0ca11dbb9bddeb55c656e3036bbc4a12357d5300a7f9a9cf6d1bffe28b53da6d:mLk+APd01iFFucoATPrkqBNSs1Yr2wyb9VeMmH9AJeEp25Ph9jps88WD8Aq1GOrDR2nM6SefS4V5RLdOZ2iICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: atlas
 version: "1.0.0"
 description: >-
@@ -10,3 +10,36 @@ description: >-
   `atlas` widget), drawn by the one generic scene renderer.
 
 widget: atlas
+sources:
+  topology:
+    ref: service:ui/graph/topology
+    role: topology
+  items:
+    ref: service:ui/ryeos-ui/items/list
+    role: items
+    params:
+      limit: 1000
+      project_path: "@session:project_root"
+    dynamic_parameters: [query, kind]
+    requires_project: true
+  file_space:
+    ref: service:ui/ryeos-ui/files/tree
+    role: file_space
+    params:
+      root: project
+      path: ""
+      max_depth: 8
+      max_entries: 3000
+      project_path: "@session:project_root"
+    dynamic_parameters: [root, path]
+    requires_project: true
+  file_read:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: project
+      project_path: "@session:project_root"
+      path: ""
+    dynamic_parameters: [root, path]
+    activation: on_demand
+    requires_project: true

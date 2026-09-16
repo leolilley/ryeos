@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
-use test_state::build_test_state;
+use test_state::{build_test_state, local_operator_context};
 
 fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
@@ -22,7 +22,7 @@ fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     }
 }
 
-fn create_running_thread(state: &AppState, thread_id: &str) {
+fn create_running_thread(state: &AppState, thread_id: &str, requested_by: &str) {
     state
         .state_store
         .create_thread_for_test(&NewThreadRecord {
@@ -35,7 +35,7 @@ fn create_running_thread(state: &AppState, thread_id: &str) {
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
-            requested_by: Some("fp:test-field".to_string()),
+            requested_by: Some(requested_by.to_string()),
             project_root: None,
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,
@@ -87,7 +87,7 @@ async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request()
             (descriptor.handler)(malformed.clone(), unauthenticated.clone(), state.clone()).await;
         let error = result.expect_err("field reads require seat authority");
         assert!(
-            format!("{error:#}").contains("browser session or verified operator required"),
+            format!("{error:#}").contains("admitted operator required"),
             "{} parsed or executed before authenticating",
             descriptor.service_ref,
         );
@@ -97,12 +97,12 @@ async fn every_field_handler_rejects_before_parsing_an_unauthenticated_request()
 #[tokio::test]
 async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() {
     let (_tmp, state) = build_test_state();
-    create_running_thread(&state, "T-selected");
-    create_running_thread(&state, "T-foreign");
+    let operator = local_operator_context(&state, Vec::new());
+    create_running_thread(&state, "T-selected", &operator.fingerprint);
+    create_running_thread(&state, "T-foreign", &operator.fingerprint);
     let selected = append_fixture_event(&state, "T-selected");
     let foreign = append_fixture_event(&state, "T-foreign");
     let state = Arc::new(state);
-    let operator = HandlerContext::new("fp:test-field".to_string(), Vec::new(), true);
 
     let cross_chain = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
         serde_json::json!({
@@ -146,10 +146,10 @@ async fn execution_handler_rejects_cross_chain_and_hash_mismatched_braid_cuts() 
 #[tokio::test]
 async fn execution_handler_applies_expansion_to_a_valid_braid_cut() {
     let (_tmp, state) = build_test_state();
-    create_running_thread(&state, "T-cut");
+    let operator = local_operator_context(&state, Vec::new());
+    create_running_thread(&state, "T-cut", &operator.fingerprint);
     let event = append_fixture_event(&state, "T-cut");
     let state = Arc::new(state);
-    let operator = HandlerContext::new("fp:test-field".to_string(), Vec::new(), true);
     let response = (ryeos_ui::handlers::ui_field_execution::DESCRIPTOR.handler)(
         serde_json::json!({
             "thread_id": "T-cut",

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::binding::{UiBindingRequest, UiBindingRequestBounds};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsEffect {
     pub id: u64,
@@ -10,93 +12,25 @@ pub struct RyeOsEffect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsEffectKind {
-    FetchDimension,
-    FetchProjects,
-    FetchTopology,
-    AddProject {
-        root: String,
-    },
-    OpenProject {
-        local_id: String,
-    },
-    FetchThreads {
-        limit: usize,
-    },
-    FetchItems {
-        tile_id: Option<String>,
-        query: Option<String>,
-        kind: Option<String>,
-        limit: usize,
-    },
-    /// Generic source fetch for a bound view: ONE mechanism for all
-    /// content-defined tiles. `{ref, params} -> result keyed to the
-    /// subscribing tile`.
+    /// Fetch one source from the daemon-compiled session binding. The
+    /// renderer receives a coordinate and bounded payload, never the source's
+    /// executable item ref or capability requirements.
     FetchSource {
         tile_id: String,
-        source_ref: String,
-        params: Value,
+        request: UiBindingRequest,
+        request_bounds: UiBindingRequestBounds,
     },
-    ListFiles {
-        tile_id: Option<String>,
-        root: String,
-        path: String,
-    },
-    FetchFileSpace {
-        /// Present when this fetch is scoped to a single atlas tile (its
-        /// `body.scope` declares a file-space root/path); the response is
-        /// cached per tile. Absent = the shared/ambient file space.
-        tile_id: Option<String>,
-        root: String,
-        path: String,
-        max_depth: usize,
-        max_entries: usize,
-    },
-    ReadFile {
-        root: String,
-        path: String,
-    },
-    DispatchInvocation {
-        item_ref: String,
-        ref_bindings: std::collections::BTreeMap<String, String>,
-        params: serde_json::Value,
-    },
-    /// Submit a typed thread-control command (continue/cancel/kill/interrupt)
-    /// to a thread through the shared control channel. Semantic intent only:
-    /// the executor maps it to the daemon's control endpoint — the client
-    /// never spells the service ref.
-    SubmitThreadCommand {
-        thread_id: String,
-        command_type: String,
-    },
-    /// THE generic rye-plane invocation. The client never interprets the
-    /// target; the substrate decides. `route_seq` carries the seat-braid
-    /// seq of `input.route` at issue time when the invocation came from
-    /// the routed input — results arriving after a later route event may
-    /// notice but never retarget.
-    Invoke {
-        target: InvokeRef,
-        params: Value,
-        /// Whether this invocation launches/continues a conversation (`Launch`)
-        /// or is a discrete service/command intent (`Service`). Recorded at
-        /// ISSUE time from the emit site — each site knows which it is — so the
-        /// result handler branches on intent, never on the target ref. A
-        /// `Service` result refreshes and preserves the input; a `Launch`
-        /// result runs the delivery/ratchet tower.
+    /// Invoke one content-declared affordance through the daemon-compiled
+    /// session binding. The signed view owns the target and substitution
+    /// template; the client sends only the producer payload.
+    InvokeBinding {
+        request: UiBindingRequest,
+        request_bounds: UiBindingRequestBounds,
         intent: InvokeIntent,
-        /// Optional success-notice template carried from the invoking affordance
-        /// (`notice:` in the affordance schema). Rendered against the result's
-        /// outcome fields (`{result.<field>}`) when the invocation succeeds;
-        /// falls back to the generic success notice when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success_notice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_seq: Option<u64>,
-        /// Whether a successful launch should ratchet the seat route onto the
-        /// produced thread (braid a conversation). Captured at ISSUE time from
-        /// the focused input's targeting capability — the result handler reads
-        /// this rather than recomputing from focus, which may have moved while
-        /// the async launch was in flight. `false` for non-routed/non-targeting
-        /// invocations (slash, affordances, steering).
         #[serde(default)]
         ratchet_on_thread_id: bool,
     },
@@ -109,6 +43,13 @@ pub enum RyeOsEffectKind {
     OpenUrl {
         url: String,
     },
+    /// Replace an immutable UI authority generation. Every renderer redeems
+    /// the one-shot URL through the predecessor session, then adopts only the
+    /// authenticated successor and reloads its compiled presentation.
+    ReplaceSession {
+        session_id: String,
+        launch_url: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,25 +60,89 @@ pub struct RyeOsEffectResult {
     #[serde(default)]
     pub data: Option<serde_json::Value>,
     #[serde(default)]
-    pub error: Option<String>,
+    pub error: Option<RyeOsUiError>,
+}
+
+/// Renderer-neutral failure returned by a platform effect or transport.
+///
+/// Keep the stable machine code, retryability, outcome certainty and
+/// remediation separate from presentation copy. In particular, an unknown
+/// mutation outcome is not an ordinary retryable refusal: renderers must
+/// preserve the effect coordinate and offer observation/recovery rather than
+/// submitting the operation again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsUiError {
+    pub code: String,
+    /// Canonical daemon error envelopes call this field `error`; Rust keeps the
+    /// less ambiguous `message` name at presentation call sites.
+    #[serde(rename = "error")]
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default)]
+    pub outcome: RyeOsEffectOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    /// Bounded structured fields retained for exact inspection. Renderers must
+    /// treat this as inert data, never executable presentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl RyeOsUiError {
+    pub fn definite(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+            outcome: RyeOsEffectOutcome::Refused,
+            remediation: None,
+            details: None,
+        }
+    }
+
+    pub fn outcome_unknown(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            outcome: RyeOsEffectOutcome::Unknown,
+            ..Self::definite(code, message)
+        }
+    }
+
+    /// Fail closed if an adapter receives a contradictory wire envelope.
+    /// Unknown mutation contact is observable/recoverable, never an automatic
+    /// retry merely because an upstream transport also said `retryable`.
+    pub fn normalized(mut self) -> Self {
+        if self.outcome == RyeOsEffectOutcome::Unknown {
+            self.retryable = false;
+        }
+        self
+    }
+}
+
+impl From<String> for RyeOsUiError {
+    fn from(message: String) -> Self {
+        Self::definite("platform_effect_failed", message)
+    }
+}
+
+impl From<&str> for RyeOsUiError {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RyeOsEffectOutcome {
+    #[default]
+    Refused,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RyeOsEffectResultKind {
-    Dimension,
-    Projects,
-    Topology,
-    ProjectAdded,
-    ProjectOpened,
-    Threads,
-    Items,
-    FilesList,
-    FileSpace,
-    FileRead,
-    InvocationDispatch,
-    ThreadCommandSubmitted,
-    Invoked,
+    BindingInvoked,
     SourceData,
     BrowserOnly,
 }
@@ -157,12 +162,18 @@ pub enum InvokeIntent {
     Service,
 }
 
-/// Target forms for the generic invocation: a canonical item ref, or
-/// command tokens resolved/bound daemon-side (token dispatch lands with
-/// the one-daemon-path slice).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "form", rename_all = "snake_case")]
-pub enum InvokeRef {
-    Ref { item_ref: String },
-    Tokens { tokens: Vec<String> },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_error_uses_canonical_wire_field_and_unknown_is_never_retryable() {
+        let mut error = RyeOsUiError::outcome_unknown("contact_unknown", "observe first");
+        error.retryable = true;
+        let value = serde_json::to_value(error.normalized()).unwrap();
+        assert_eq!(value["error"], "observe first");
+        assert!(value.get("message").is_none());
+        assert_eq!(value["outcome"], "unknown");
+        assert_eq!(value["retryable"], false);
+    }
 }

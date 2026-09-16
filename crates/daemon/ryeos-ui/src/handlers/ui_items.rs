@@ -162,7 +162,7 @@ pub async fn handle_items_list(
     // Dual-lane (browser session OR verified operator) like the other
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_path: Option<PathBuf> = caller.project_root().map(PathBuf::from).or_else(|| {
+    let project_path: Option<PathBuf> = caller.project_path()?.or_else(|| {
         params
             .get("project_path")
             .and_then(|v| v.as_str())
@@ -320,7 +320,7 @@ pub async fn handle_item_inspect(
     // Dual-lane (browser session OR verified operator) like the other
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_path: Option<PathBuf> = caller.project_root().map(PathBuf::from).or_else(|| {
+    let project_path: Option<PathBuf> = caller.project_path()?.or_else(|| {
         params
             .get("project_path")
             .and_then(|v| v.as_str())

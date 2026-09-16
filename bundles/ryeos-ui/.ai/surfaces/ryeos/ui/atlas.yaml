@@ -1,8 +1,54 @@
-# ryeos:signed:2026-07-09T06:05:19Z:75245ac9eb25cc92062694c8f2f9c9ad12449f4fdc5b4d38985f47c8f13fa75e:cfGvYLvhP5cX7BpEbp+pL1X4Zhv9JhuIQ00h2d4bxGvhYOoWIasa3gO48rbBvmeJ5DJ0oqPKPrLVnNK/3sqVCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:69c1918d3ac8208870b2b237e5d1d2404ae13e5095c78a3519504d951d9775bc:ab0u1DA6HFkv2bUI4R07GbbmNKl195zefLnJB3uCct4axtJu+RWxBOyMleQ/ygUc9HDzCeAoVybmv+XtAg8bBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-atlas
 version: "1.0.0"
 description: RyeOS UI with a Three.js 2D namespace atlas background
 
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
+
+# Shell observations remain explicit on each independently composed surface;
+# inheriting the base layout merely to obtain data authority would couple
+# layout and execution contracts.
+sources:
+  dimension:
+    ref: service:ui/ryeos-ui/dimension/get
+    role: dimension
+  projects:
+    ref: service:projects/list
+    role: projects
+  topology:
+    ref: service:ui/graph/topology
+    role: topology
+  items:
+    ref: service:ui/ryeos-ui/items/list
+    role: items
+    params:
+      limit: 1000
+      project_path: "@session:project_root"
+    dynamic_parameters: [query, kind]
+    requires_project: true
+  file_space:
+    ref: service:ui/ryeos-ui/files/tree
+    role: file_space
+    params:
+      root: project
+      path: ""
+      max_depth: 8
+      max_entries: 3000
+      project_path: "@session:project_root"
+    dynamic_parameters: [root, path]
+    requires_project: true
+  file_read:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: project
+      project_path: "@session:project_root"
+      path: ""
+    dynamic_parameters: [root, path]
+    activation: on_demand
+    requires_project: true
 tiling:
   mode: master_stack
   master: { side: right, arrange: vertical, ratio: 0.6, count: 1 }

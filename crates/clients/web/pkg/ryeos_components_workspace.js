@@ -103,7 +103,7 @@ function dockView(instanceVm, dispatchUi) {
   if (instanceVm.input) {
     body.append(inputDock(instanceVm.input, dispatchUi));
   } else {
-    body.append(view(instanceVm.view || {}, instanceVm.instance_key || "", dispatchUi));
+    body.append(view(instanceVm.view || {}, instanceVm.instance_key || "", instanceVm.tile_id || "", dispatchUi));
   }
   return body;
 }
@@ -199,9 +199,9 @@ function layoutNode(node, dispatchUi, motion = []) {
   if (node.input) {
     tile.append(chrome, inputDock(node.input, dispatchUi));
   } else if (node.chrome_hidden) {
-    tile.append(view(node.view || {}, node.instance_key || "", dispatchUi));
+    tile.append(view(node.view || {}, node.instance_key || "", node.tile_id || "", dispatchUi));
   } else {
-    tile.append(chrome, view(node.view || {}, node.instance_key || "", dispatchUi), viewFooter(node.view || {}));
+    tile.append(chrome, view(node.view || {}, node.instance_key || "", node.tile_id || "", dispatchUi), viewFooter(node.view || {}));
   }
   return tile;
 }
@@ -215,7 +215,7 @@ function motionForTile(node, motion) {
   return "";
 }
 
-function view(viewVm, instanceKey, dispatchUi) {
+function view(viewVm, instanceKey, tileId, dispatchUi) {
   const body = el("div", "ryeos-tile-body");
   switch (viewVm.type) {
     case "field":
@@ -231,13 +231,13 @@ function view(viewVm, instanceKey, dispatchUi) {
       body.append(atlasTile(viewVm.scene, dispatchUi));
       break;
     case "rows":
-      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], "rows", dispatchUi));
+      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], "rows", tileId, 0, dispatchUi));
       break;
     case "table":
-      body.append(tableView(viewVm, dispatchUi));
+      body.append(tableView(viewVm, tileId, dispatchUi));
       break;
     case "sections":
-      body.append(sectionsView(viewVm, dispatchUi));
+      body.append(sectionsView(viewVm, tileId, dispatchUi));
       break;
     case "timeline":
       body.append(timeline(viewVm));
@@ -648,7 +648,7 @@ function atlasItemVisible(atlas, item) {
   return true;
 }
 
-function rows(items, kind, dispatchUi) {
+function rows(items, kind, tileId, cursorOffset, dispatchUi) {
   const list = el("div", `ryeos-rows lf ${kind || "rows"}`);
   items.forEach((item, index) => {
     const row = el("button", `ryeos-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
@@ -663,7 +663,26 @@ function rows(items, kind, dispatchUi) {
       textEl("small", item.meta || ""),
     );
     if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
-    list.append(row);
+    const wrap = el("div", "ryeos-row-wrap");
+    wrap.append(row);
+    if (item.expandable) {
+      const expand = el("button", "ryeos-row-expand");
+      expand.type = "button";
+      expand.setAttribute("aria-expanded", String(!!item.expanded));
+      expand.setAttribute("aria-label", `${item.expanded ? "Collapse" : "Expand"} ${item.primary}`);
+      expand.textContent = item.expanded ? "▾" : "▸";
+      expand.addEventListener("click", () => {
+        dispatchUi({ type: "set_tile_cursor", tile_id: tileId, index: cursorOffset + index });
+        dispatchUi({ type: "expand_selected_row", expand: !item.expanded });
+      });
+      wrap.append(expand);
+    }
+    if (item.expanded && (item.detail || []).length) {
+      const detail = el("dl", "ryeos-row-detail");
+      for (const entry of item.detail) detail.append(textEl("dt", entry.field), textEl("dd", entry.value));
+      wrap.append(detail);
+    }
+    list.append(wrap);
   });
   return list;
 }
@@ -707,7 +726,7 @@ function applyTimedClass(node, className, timestamp, durationMs) {
 // detail (muted) unless the whole row is selected. Column count prefers the
 // declared headers, else the widest row so cells still align when headers are
 // absent.
-function tableView(viewVm, dispatchUi) {
+function tableView(viewVm, tileId, dispatchUi) {
   const wrap = el("section", "ryeos-table lf");
   wrap.append(listHeader(viewVm.title || "table", ""));
   const columns = viewVm.columns || [];
@@ -725,13 +744,13 @@ function tableView(viewVm, dispatchUi) {
     for (const column of columns) head.append(textEl("span", column, "ryeos-table-col"));
     grid.append(head);
   }
-  items.forEach((item, index) => grid.append(tableRow(item, ncols, index, dispatchUi)));
+  items.forEach((item, index) => grid.append(tableRow(item, ncols, index, tileId, dispatchUi)));
   if (!items.length) grid.append(textEl("p", "No rows loaded.", "ryeos-table-empty"));
   wrap.append(grid);
   return wrap;
 }
 
-function tableRow(item, ncols, index, dispatchUi) {
+function tableRow(item, ncols, index, tileId, dispatchUi) {
   const row = el("button", `ryeos-table-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
   applyMotion(row, item);
   row.type = "button";
@@ -750,7 +769,26 @@ function tableRow(item, ncols, index, dispatchUi) {
     row.append(textEl("span", `${tree}${cells[i] || ""}`, `ryeos-table-cell${i === 0 ? " lead" : ""}${tone}`));
   }
   if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
-  return row;
+  const wrap = el("div", "ryeos-table-row-wrap");
+  wrap.append(row);
+  if (item.expandable) {
+    const expand = el("button", "ryeos-row-expand");
+    expand.type = "button";
+    expand.setAttribute("aria-expanded", String(!!item.expanded));
+    expand.setAttribute("aria-label", `${item.expanded ? "Collapse" : "Expand"} ${(item.cells || [])[0] || "row"}`);
+    expand.textContent = item.expanded ? "▾" : "▸";
+    expand.addEventListener("click", () => {
+      dispatchUi({ type: "set_tile_cursor", tile_id: tileId, index });
+      dispatchUi({ type: "expand_selected_row", expand: !item.expanded });
+    });
+    wrap.append(expand);
+  }
+  if (item.expanded && (item.detail || []).length) {
+    const detail = el("dl", "ryeos-row-detail");
+    for (const entry of item.detail) detail.append(textEl("dt", entry.field), textEl("dd", entry.value));
+    wrap.append(detail);
+  }
+  return wrap;
 }
 
 function hierarchyPrefix(hierarchy) {
@@ -772,30 +810,42 @@ function hierarchyPrefix(hierarchy) {
 // reflects the hidden rows. Reference semantics live in the terminal's
 // widgets/sections.rs. Rows reuse the rows-widget renderer (RyeOsRowVm), so
 // tone glyph, primary/secondary/meta, and per-row intents come for free.
-function sectionsView(viewVm, dispatchUi) {
+function sectionsView(viewVm, tileId, dispatchUi) {
   const wrap = el("section", "ryeos-sections");
   wrap.append(listHeader(viewVm.title || "sections", ""));
   const body = el("div", "ryeos-sections-body");
   const sections = viewVm.sections || [];
-  for (const section of sections) body.append(sectionGroup(section, dispatchUi));
+  let cursorOffset = 0;
+  for (const [index, section] of sections.entries()) {
+    body.append(sectionGroup(section, index, tileId, cursorOffset, dispatchUi));
+    cursorOffset += section.collapsed ? 1 : (section.rows || []).length;
+  }
   if (!sections.length) body.append(textEl("p", "No sections loaded.", "ryeos-sections-empty"));
   wrap.append(body);
   return wrap;
 }
 
-function sectionGroup(section, dispatchUi) {
+function sectionGroup(section, sectionIndex, tileId, cursorOffset, dispatchUi) {
   const collapsed = !!section.collapsed;
   const group = el("div", `ryeos-section${collapsed ? " collapsed" : ""}`);
   // The header is the point that re-expands a collapsed section; when it
   // carries the cursor, highlight the full line like a selected row.
-  const header = el("div", `ryeos-section-header${section.header_selected ? " selected" : ""}`);
+  const header = el("button", `ryeos-section-header${section.header_selected ? " selected" : ""}`);
+  header.type = "button";
+  header.setAttribute("aria-expanded", String(!collapsed));
   const count = section.count ?? (section.rows || []).length;
   header.append(
     textEl("span", collapsed ? "▸" : "▾", "ryeos-section-fold"),
     textEl("strong", section.title || "section"),
     textEl("span", `(${count})`, "ryeos-section-count"),
   );
+  header.addEventListener("click", () => dispatchUi({
+    type: "set_fold",
+    tile_id: tileId,
+    section: sectionIndex,
+    collapsed: !collapsed,
+  }));
   group.append(header);
-  if (!collapsed) group.append(rows(section.rows || [], "section", dispatchUi));
+  if (!collapsed) group.append(rows(section.rows || [], "section", tileId, cursorOffset, dispatchUi));
   return group;
 }

@@ -3,10 +3,9 @@ mod test_state;
 use std::sync::Arc;
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 
-use test_state::build_test_state;
+use test_state::{build_test_state, launch_context};
 
 fn workspace_root() -> String {
     ryeos_engine::test_support::workspace_root()
@@ -18,17 +17,23 @@ fn workspace_root() -> String {
 async fn field_sources_use_the_authenticated_ui_read_lane() {
     let (_tmp, state) = build_test_state();
     let project_path = workspace_root();
-    let launch_context = LaunchContext {
-        surface_ref: "surface:ryeos/ui/atlas".to_string(),
-        project_path: Some(project_path.clone()),
-        read_only: true,
-        granted_caps: vec!["ui.read".to_string()],
-        user_principal_id: None,
-    };
-    let (session_id, _token) = get_ui_state(&state)
+    let launch_context = launch_context(
+        "surface:ryeos/ui/atlas",
+        Some(&project_path),
+        ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
+        None,
+    );
+    let (session_id, token) = get_ui_state(&state)
         .expect("ui state registered")
         .browser_sessions
         .mint_token(launch_context);
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
         vec!["ui.read".to_string()],

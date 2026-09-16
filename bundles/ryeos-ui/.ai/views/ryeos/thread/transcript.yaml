@@ -1,11 +1,12 @@
-# ryeos:signed:2026-08-04T10:21:25Z:0995c74f3d72fbc8e5d6c99100550be405470086e40df12331b1bb5150f64f94:/htMFFn/5MxmQY/RENvN5LfzaaWLPBezfT1dISbPwkD/Ckb4K3LeUSft47Spla00/S7G6jr4YEdNR8BTyIoUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
-title: Transcript
+title: Activity
 version: "1.0.0"
 description: >-
-  Full event braid transcript for the input route's conversation chain. This is
-  the truth lens over a thread: cognition, provider stream, tool calls,
-  artifacts, receipts, and raw event detail.
+  Coherent activity feed for the input route's durable work chain. It preserves
+  the exact event braid while presenting operator intent, cognition, tool
+  operations, children, placement boundaries, artifacts, receipts, and raw
+  event detail through the shared semantic timeline.
 
 widget: timeline
 sources:
@@ -32,6 +33,18 @@ projections:
       - payload.truncated_reason
       - payload.uri
       - payload.content_hash
+      - payload.turn_id
+      - payload.approval_id
+      - payload.observation.operation_class
+      - payload.decision
+      - payload.worker_boot_epoch
+      - payload.source_placement_thread_id
+      - payload.successor_placement_thread_id
+      - payload.candidate_snapshot_hash
+      - payload.candidate_evaluation.candidate_snapshot_hash
+      - payload.base_snapshot_hash
+      - payload.outcome.kind
+      - payload.terminal_reason
   event_kinds:
     seat.facet:
       primary: payload.payload.key
@@ -90,6 +103,130 @@ projections:
       primary: payload.node
       meta: payload.item_id
       role: boundary
+    hosted_session.turn_started:
+      primary: payload.turn_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.turn_started: accent
+        default: accent
+    hosted_session.turn_completed:
+      primary: payload.turn_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.turn_completed: good
+        default: good
+    hosted_session.approval_requested:
+      primary: payload.observation.operation_class
+      meta: payload.approval_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.approval_requested: warn
+        default: warn
+    hosted_approval.decision_reserved:
+      primary: payload.decision
+      meta: payload.approval_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.decision_reserved: accent
+        default: accent
+    hosted_approval.delivery_contacting:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+    hosted_approval.delivery_unknown:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_unknown: danger
+        default: danger
+    hosted_approval.delivery_settled:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_settled: good
+        default: good
+    worker_session.restored:
+      primary: payload.successor_placement_thread_id
+      meta: payload.source_placement_thread_id
+      role: line
+      tone:
+        field: event_type
+        map:
+          worker_session.restored: accent
+        default: accent
+    hosted_candidate.captured:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.captured: accent
+        default: accent
+    hosted_candidate.qualified:
+      primary: payload.candidate_evaluation.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.qualified: good
+        default: good
+    hosted_candidate.publication_reserved:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+    hosted_candidate.published:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.published: good
+        default: good
+    hosted_candidate.publication_not_applied:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_not_applied: warn
+        default: warn
+    hosted_candidate.publication_unknown:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_unknown: danger
+        default: danger
+    hosted_candidate.discarded:
+      primary: payload.candidate_snapshot_hash
+      meta: event_type
+      role: line
+    hosted_bounded_execution.terminal_outcome:
+      primary: payload.outcome.kind
+      meta: payload.terminal_reason
+      role: line
     milestone:
       primary: payload.kind
       meta: payload.node

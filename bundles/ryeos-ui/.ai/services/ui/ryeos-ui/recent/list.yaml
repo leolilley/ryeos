@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:cc12b770964e3a6b17198902f906d324bd27987ba6a1010ff2408bbce6a1da78:RiDUB6m/QZLhmsSr6xoUokpmwkzvo+pJyHHElEOh7Uth0bVlaxr8gmscbo/FqhKCNsq91vL/CdrYOCKD9S5HAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:c923a0d4fb1ba330c28c799c08d8bb44896501de9370a09d84ffeb65d0d1cbee:Hc6cFPhL2p4HPHcz4HRQJwxdiaOpyhHNtBf6XT8LN8X8/gC0zFVumRZh9EQTgJdd2trzAauN3b/i9ukyUL7JBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/recent/list
 version: "1.0.0"
 description: List rebuildable RyeOS UI recent project state from per-principal state.
 endpoint: ui.ryeos.recent.list
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

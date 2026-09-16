@@ -76,9 +76,7 @@ async function commit(envelope) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
-      runEffect(effect, {
-        project_path: envelope.view_model?.session?.project_path,
-      })
+      runEffect(effect)
         .then((result) => {
           if (result?.kind === "dimension" && result?.data) latestDimension = result.data;
           ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
@@ -100,22 +98,21 @@ async function commit(envelope) {
 async function attachSeat(session, envelope) {
   const seededEvents = safeSeatEvents().length;
   try {
-    const opened = await invokeSeatService("service:ui/seat/open", {
-      surface_ref: session.surface_ref,
-      client_ref: "client:ryeos/web",
-    });
+    // The daemon derives surface, project, and owner from the exact compiled
+    // session. Renderer-authored seat selectors would be a parallel authority.
+    const opened = await invokeSeatService("open", {});
     seatThreadId = opened?.thread_id || null;
-    if (!seatThreadId) return envelope;
+    if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
     if (seatHeartbeat) clearInterval(seatHeartbeat);
     seatHeartbeat = setInterval(() => {
       if (seatThreadId) {
-        invokeSeatService("service:ui/seat/touch", { thread_id: seatThreadId }).catch(() => {});
+        invokeSeatService("touch", { thread_id: seatThreadId }).catch(() => {});
       }
     }, 60_000);
 
     let replayedEnvelope = envelope;
     if (opened?.reattached) {
-      const replay = await invokeSeatService("service:ui/seat/replay", {
+      const replay = await invokeSeatService("replay", {
         chain_root_id: seatThreadId,
       });
       const events = Array.isArray(replay?.events) ? replay.events : [];
@@ -128,12 +125,11 @@ async function attachSeat(session, envelope) {
     seatSynced = currentEvents > seededEvents ? currentEvents : 0;
     return replayedEnvelope;
   } catch (error) {
-    console.warn("RyeOS seat attach failed; continuing with local-only seat", error);
     seatThreadId = null;
     if (seatHeartbeat) clearInterval(seatHeartbeat);
     seatHeartbeat = null;
     seatSynced = 0;
-    return envelope;
+    throw new Error(`RyeOS seat attach failed: ${error?.message || String(error)}`);
   }
 }
 
@@ -156,7 +152,7 @@ async function syncSeatBraid() {
 
   seatSyncing = true;
   try {
-    await invokeSeatService("service:ui/seat/append", {
+    await invokeSeatService("append", {
       thread_id: seatThreadId,
       events: batch,
     });
@@ -178,16 +174,22 @@ function safeSeatEvents() {
   }
 }
 
-async function invokeSeatService(commandId, args) {
-  const resp = await postJson("/ui/api/invocations/dispatch", {
-    target: { kind: "ref", ref: commandId },
-    params: args,
-  });
+async function invokeSeatService(operation, args) {
+  const resp = await postJson(`/ui/api/session/seat/${operation}`, args);
   return resp?.result?.result ?? resp?.result ?? resp;
 }
 
 function dispatchUi(event) {
   void commit(ryeos_dispatch({ type: "ui", event }));
+}
+
+function dispatchTransport(channel, freshness) {
+  void commit(ryeos_dispatch({
+    type: "transport_state_changed",
+    channel,
+    freshness,
+    observed_at_ms: BigInt(Date.now()),
+  }));
 }
 
 function rerenderShell() {
@@ -240,7 +242,15 @@ function captureTileScroll(container) {
   container?.querySelectorAll(".ryeos-tile").forEach((tile) => {
     const id = tile.dataset.tileId;
     const body = tile.querySelector(".ryeos-tile-body");
-    if (id && body) state.set(id, { top: body.scrollTop, left: body.scrollLeft });
+    if (id && body) {
+      const timeline = body.querySelector(".ryeos-timeline-entries");
+      state.set(id, {
+        top: body.scrollTop,
+        left: body.scrollLeft,
+        atTail: timeline ? scrollIsAtTail(body) : false,
+        timelineEntries: timeline?.childElementCount ?? null,
+      });
+    }
   });
   container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
     state.set(`scroll:${node.dataset.scrollKey}`, { top: node.scrollTop, left: node.scrollLeft });
@@ -252,8 +262,21 @@ function restoreTileScroll(container, state) {
   for (const [id, pos] of state || []) {
     const body = container.querySelector(`.ryeos-tile[data-tile-id="${cssEscape(id)}"] .ryeos-tile-body`);
     if (!body) continue;
-    body.scrollTop = pos.top;
+    const timeline = body.querySelector(".ryeos-timeline-entries");
+    if (timeline && pos.atTail) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = pos.top;
+    }
     body.scrollLeft = pos.left;
+    if (
+      timeline &&
+      !pos.atTail &&
+      pos.timelineEntries !== null &&
+      timeline.childElementCount > pos.timelineEntries
+    ) {
+      appendNewActivityMarker(body, timeline.childElementCount - pos.timelineEntries);
+    }
   }
   container?.querySelectorAll("[data-scroll-key]").forEach((node) => {
     const pos = state.get(`scroll:${node.dataset.scrollKey}`);
@@ -261,6 +284,22 @@ function restoreTileScroll(container, state) {
     node.scrollTop = pos.top;
     node.scrollLeft = pos.left;
   });
+}
+
+function scrollIsAtTail(node) {
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= 24;
+}
+
+function appendNewActivityMarker(body, count) {
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.className = "ryeos-new-activity";
+  marker.textContent = count === 1 ? "1 new activity" : `${count} new activities`;
+  marker.addEventListener("click", () => {
+    body.scrollTop = body.scrollHeight;
+    marker.remove();
+  });
+  body.append(marker);
 }
 
 function revealSelectedRows(container) {
@@ -323,13 +362,15 @@ function attachSessionEvents(session) {
   });
   const reconcile = () => {
     ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
-    void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+    dispatchTransport("hints", "gap_resnapshot_required");
   };
   source.addEventListener("snapshot_required", reconcile);
   source.addEventListener("open", () => {
     if (sessionOpened) reconcile();
+    else dispatchTransport("hints", "current");
     sessionOpened = true;
   });
+  source.addEventListener("error", () => dispatchTransport("hints", "reconnecting"));
   syncThreadTail(currentEnvelope?.view_model);
 }
 
@@ -370,10 +411,13 @@ function syncThreadTail(vm) {
   source.addEventListener("message", forward);
   source.addEventListener("open", () => {
     if (opened) {
-      void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+      dispatchTransport("focused_tail", "gap_resnapshot_required");
+    } else {
+      dispatchTransport("focused_tail", "current");
     }
     opened = true;
   });
+  source.addEventListener("error", () => dispatchTransport("focused_tail", "reconnecting"));
 }
 
 function attachBrowserEvents() {
@@ -413,13 +457,12 @@ function attachBrowserEvents() {
   window.addEventListener("pagehide", () => {
     if (!seatThreadId) return;
     const body = JSON.stringify({
-      target: { kind: "ref", ref: "service:ui/seat/close" },
-      params: { thread_id: seatThreadId },
+      thread_id: seatThreadId,
     });
     if (navigator.sendBeacon) {
-      navigator.sendBeacon("/ui/api/invocations/dispatch", new Blob([body], { type: "application/json" }));
+      navigator.sendBeacon("/ui/api/session/seat/close", new Blob([body], { type: "application/json" }));
     } else {
-      fetch("/ui/api/invocations/dispatch", {
+      fetch("/ui/api/session/seat/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,

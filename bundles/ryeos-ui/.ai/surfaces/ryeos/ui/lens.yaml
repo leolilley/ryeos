@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T02:11:39Z:5c20d48e183d6067cbf3638fcca1d91950b98ec4ffe6916951988f2d97f18516:86MBvJCJPFdmbQyYZt4h7qnbCSV0hd7zxpokpFmE/ixR3culyYd4yauKNdmMg02YhSyFC7UdDYFRvNPMI7HTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:192abfd53b4672f5251387934db9ab9588a31cb52e3ecdc6c1ce6fb403ef0ea1:TQ3+ilDphZwN8jKaY+ywhanM51iOF7rKhtdhl4RfuZfaeb1wmCeCxQMYUKrwX9Vl2RR0I57394D0iWr78xn4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -8,6 +8,52 @@ description: >-
   timeline lens reads as a live cognition feed you talk into. This is the
   TUI's own composition over the shared model — not the web's tiled RyeOS UI.
 
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
+
+# Shell observations remain explicit on each independently composed surface;
+# inheriting the base layout merely to obtain data authority would couple
+# layout and execution contracts.
+sources:
+  dimension:
+    ref: service:ui/ryeos-ui/dimension/get
+    role: dimension
+  projects:
+    ref: service:projects/list
+    role: projects
+  topology:
+    ref: service:ui/graph/topology
+    role: topology
+  items:
+    ref: service:ui/ryeos-ui/items/list
+    role: items
+    params:
+      limit: 1000
+      project_path: "@session:project_root"
+    dynamic_parameters: [query, kind]
+    requires_project: true
+  file_space:
+    ref: service:ui/ryeos-ui/files/tree
+    role: file_space
+    params:
+      root: project
+      path: ""
+      max_depth: 8
+      max_entries: 3000
+      project_path: "@session:project_root"
+    dynamic_parameters: [root, path]
+    requires_project: true
+  file_read:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: project
+      project_path: "@session:project_root"
+      path: ""
+    dynamic_parameters: [root, path]
+    activation: on_demand
+    requires_project: true
 # Single lens: the center holds exactly one tile and opening a view REPLACES
 # it rather than splitting. `compute_layout` renders the one tile full-bleed.
 tiling:
@@ -88,14 +134,19 @@ overlays:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

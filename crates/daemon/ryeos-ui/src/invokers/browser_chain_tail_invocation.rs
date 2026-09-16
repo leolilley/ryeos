@@ -21,10 +21,14 @@ use ryeos_app::route_raw::RawRouteSpec;
 use serde_json::Value;
 use tokio_stream::StreamExt;
 
+use crate::state::UiState;
+
 const SOURCE: &str = "browser_chain_tail";
 const REQUIRED_AUTH: &str = "browser_session";
 
-pub struct BrowserChainTailSourceFactory;
+pub struct BrowserChainTailSourceFactory {
+    pub ui: Arc<UiState>,
+}
 
 impl StreamSourceCompiler for BrowserChainTailSourceFactory {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
@@ -64,7 +68,10 @@ impl StreamSourceCompiler for BrowserChainTailSourceFactory {
             });
         }
         let invoker: Arc<dyn CompiledRouteInvocation> =
-            Arc::new(CompiledBrowserChainTailInvocation { keep_alive_secs });
+            Arc::new(CompiledBrowserChainTailInvocation {
+                keep_alive_secs,
+                ui: self.ui.clone(),
+            });
         Ok(EventStreamStrategy::PathCaptureInput {
             invoker,
             input_field: "chain_root_id".into(),
@@ -75,6 +82,7 @@ impl StreamSourceCompiler for BrowserChainTailSourceFactory {
 
 struct CompiledBrowserChainTailInvocation {
     keep_alive_secs: u64,
+    ui: Arc<UiState>,
 }
 
 static CONTRACT: RouteInvocationContract = RouteInvocationContract {
@@ -96,12 +104,17 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
             .principal
             .as_mut()
             .ok_or(RouteDispatchError::Unauthorized)?;
-        let user_principal_id = principal
-            .metadata
-            .get("user_principal_id")
-            .cloned()
-            .unwrap_or_else(|| principal.id.clone());
-        principal.id = user_principal_id;
+        let session_id = principal
+            .id
+            .strip_prefix("session:")
+            .ok_or(RouteDispatchError::Unauthorized)?;
+        let session = self
+            .ui
+            .browser_sessions
+            .get_session(session_id)
+            .ok_or(RouteDispatchError::Unauthorized)?;
+        principal.id = session.compiled_binding.binding.principal_id.clone();
+        principal.scopes = session.granted_caps;
 
         let upstream = CompiledChainTailInvocation {
             keep_alive_secs: self.keep_alive_secs,

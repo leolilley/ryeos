@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:23Z:777357db8c0ffe58e5c4bb996fb1b36490c317d053320d2f446884fd14738c82:2rnmEqwYJLH6hqoZYz6CpuTWnlMigV2S5CJlRiyo+uVa5NbuYYpSWH31wP+7Z/JA4gRP4D09ABNIohX7xeWpBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:29:56Z:18b5fab624042d67475c2fed04bfd49366b338d3d99d05e119ea848d7ecdc12a:M5pePsDb1721mQRPpM5smVzy0AaI9Kom1A5s6S/U+2O6aa1fDrh9KxcAEvYQfgRSO6SPcdPO0JSLYx6sfc65Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -33,6 +33,20 @@ composer_config:
     - name: projections
       strategy: dict_merge_root_last
       expect_value_type: mapping
+    # Ordered section composition is an authored view body. Replacing the
+    # complete sequence keeps source-channel/projection/activation entries
+    # atomic instead of inheriting partial sections by position or title.
+    - name: sections
+      strategy: replace_root_last
+      expect_value_type: array
+    - name: body
+      strategy: replace_root_last
+    - name: presentation
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: facet
+      strategy: replace_root_last
+      expect_value_type: string
     - name: affordances
       strategy: keyed_seq_merge_root_last
       key: id
@@ -43,6 +57,11 @@ composer_config:
     - name: field_state
       strategy: replace_root_last
       expect_value_type: mapping
+    # Input declarations are authored view behavior. They must participate in
+    # the effective-definition digest instead of being an uncomposed sidecar.
+    - name: input
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
 
 composed_value_contract:
   root_type: mapping
@@ -52,20 +71,184 @@ composed_value_contract:
       prim: string
   optional:
     sources:
-      type: single
-      prim: mapping
+      type: mapping
+      values:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            ref: { type: single, prim: string }
+          optional:
+            role: { type: single, prim: string }
+            params: { type: single, prim: mapping }
+            collection: { type: single, prim: string }
+            refresh: { type: single, prim: mapping }
+            dynamic_parameters:
+              type: single
+              prim: sequence
+              elements: { type: single, prim: string }
+            activation:
+              type: single
+              prim: string
+              enum: [initial, on_demand]
+            requires_project: { type: single, prim: boolean }
     selection:
       type: single
       prim: mapping
     projections:
       type: single
       prim: mapping
+    sections:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            title: { type: single, prim: string }
+            source_channel: { type: single, prim: string }
+          optional:
+            collection: { type: single, prim: string }
+            projection: { type: single, prim: mapping }
+            activate: { type: single, prim: string }
+    body:
+      type: single
+      prim: any
+    presentation:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required: {}
+        optional:
+          chrome:
+            type: single
+            prim: string
+            enum: [none]
+          background:
+            type: single
+            prim: string
+            enum: [transparent]
+          position: { type: single, prim: mapping }
+    facet:
+      type: single
+      prim: string
     affordances:
       type: single
       prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+          optional:
+            label: { type: single, prim: string }
+            category: { type: single, prim: string }
+            icon: { type: single, prim: string }
+            producer:
+              type: single
+              prim: string
+              enum: [selection, input, tokens]
+            requires_project: { type: single, prim: boolean }
+            visible_when: { type: single, prim: mapping }
+            enabled_when: { type: single, prim: mapping }
+            disabled_reason: { type: single, prim: string }
+            invoke:
+              type: single
+              prim: mapping
+              contract:
+                root_type: mapping
+                required:
+                  plane:
+                    type: single
+                    prim: string
+                    enum: [ui, rye]
+                optional:
+                  ref: { type: single, prim: string }
+                  args: { type: single, prim: mapping }
+                  tokens:
+                    type: single
+                    prim: sequence
+                    elements: { type: single, prim: string }
+                  facet: { type: single, prim: string }
+                  value: { type: single, prim: any }
+                  merge: { type: single, prim: mapping }
+                  open_view: { type: single, prim: string }
+                  drill: { type: single, prim: boolean }
+                  notice: { type: single, prim: string }
     refresh:
       type: single
       prim: mapping
     field_state:
       type: single
       prim: mapping
+    input:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          id: { type: single, prim: string }
+        optional:
+          placeholder: { type: single, prim: string }
+          target_label: { type: single, prim: string }
+          submit: { type: single, prim: string }
+          command_submit: { type: single, prim: string }
+          thread_control: { type: single, prim: string }
+          completion:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                ref: { type: single, prim: string }
+              optional:
+                collection: { type: single, prim: string }
+          mentions:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                ref: { type: single, prim: string }
+                reference: { type: single, prim: string }
+              optional:
+                collection: { type: single, prim: string }
+                label: { type: single, prim: string }
+          target:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                cycle:
+                  type: single
+                  prim: string
+                  enum: [route_chains]
+              optional: {}
+          feeds:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required: {}
+              optional:
+                param: { type: single, prim: string }
+                debounce_ms: { type: single, prim: integer }
+                fields:
+                  type: single
+                  prim: sequence
+                  elements:
+                    type: single
+                    prim: mapping
+                    contract:
+                      root_type: mapping
+                      required:
+                        param: { type: single, prim: string }
+                      optional:
+                        label: { type: single, prim: string }

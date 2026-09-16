@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-14T10:03:09Z:d198e4e0fb3e4f43f4e5078ee188a538db639dc3eca2ec9c3a9231d1d4becf68:Bu0dueyGH0xH825NezrrkVq8gWibzI1eM7SLXv58uU1nJXQutnxAcjpkeqY/FxxDN0TbqIGuxhyf1A7kLF5pDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-atlas-observe
+version: "1.0.0"
+description: Observation-only Atlas surface for the default browser launch
+extends: surface:ryeos/ui/atlas
+
+# The parent supplies the complete source and affordance ceilings. This child
+# retains read-source authority while deliberately discarding every executable
+# affordance. The daemon derives the session posture from the compiled result;
+# this is not a renderer-authored mode switch.
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: []

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-10T04:56:59Z:8c70a4d71faafb3e1d0ad7112e346b87a4c5b4643dc179ecca751a25cba6a8ce:qpb3WTpOYAADgR5Fz/vEjCRjhx5Lr0e7weLSGBs6oGlREDrA1tVv2BT2Libu1OTlYG0HLNMkZ1MpFT/xwwUWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-14T22:49:51Z:779edc08bc6c116cb5552c34e8b3d080129bf44bddff62d00ec8558f1cbdeec8:kp4jQAqeh1dqzbt09ak3SoVG+MEmnHsW8kn0MRmZMOjre4f+01X1/uGg7anwI6DetagCf9Q5oOpU7wkU4+qUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -13,6 +13,14 @@ version: "1.0.0"
 A renderer implementing this contract is a full seat. Content (`view:`
 items) composes against this contract; nothing semantic lives in client
 source.
+
+The effective signed surface supplies separate `capabilities.sources` and
+`capabilities.affordances` ceilings. The daemon compiles that surface and its
+effective view closure into a session-bound dispatch table. Renderers send
+binding coordinates and bounded producer payloads; they never select target
+refs or mint authority. A child surface may retain its parent's source ceiling
+and set `affordances: []`, yielding an observation-only binding without a UI
+mode flag.
 
 ## Content-bindable widgets (closed set)
 
@@ -36,7 +44,11 @@ widget: rows | table | sections | key_value | text | timeline | scene | field
 sources:
   default:                    # channel name; multi-source views use additional named channels
     ref: <service ref>        # substrate services; never session-gated wrappers
+    role: <projection role>   # OPTIONAL inert renderer projection; never execution authority
     params: { ... }           # values may use "@facet:<key>[.path]" (explicit references)
+    dynamic_parameters: []    # OPTIONAL bounded keys the renderer may vary at fetch time
+    activation: initial | on_demand # OPTIONAL; omitted means initial
+    requires_project: true     # OPTIONAL; daemon omits this coordinate when projectless
     collection: <field path>  # records array for rows/timeline
     refresh: { on_hint: <kind> | on_facet: <key> } # optional per-channel override
 projections:
@@ -58,10 +70,12 @@ input:                        # OPTIONAL, SINGULAR: one transient view-local buf
 affordances:
   - id: <id>
     label: <label>
+    producer: selection | input | tokens # OPTIONAL when unambiguous from the view binding
+    requires_project: true     # OPTIONAL; daemon omits this coordinate when projectless
     invoke:
       plane: ui | rye
       # ui: facet write -- facet/value or facet/merge; whole-value placeholder substitutes a payload
-      # rye: tokens + args (registry-resolved daemon-side)
+      # rye: one signed ref + args (registry-resolved daemon-side)
       # Placeholders are NAMESPACED by producer:
       #   {record.<field>} -- from selection (row activation)
       #   {value}          -- from an input submit (the buffer text; no {input} alias)
@@ -114,21 +128,29 @@ Three submit modes, all from the one capability:
    `source`; on edit (debounced by `debounce_ms`) the source refetches.
    The filter case. **One writer per source param:** if `feeds.param`
    names a param the source already declares, that is a parse error. A
-   `feeds` input works read-only (no durable write) and Enter does
+   `feeds` input works with an observation-only binding (no durable write) and Enter does
    nothing.
 
 2. **`submit: <affordance_id>`** — Enter fires that content affordance with
    the buffer text as `{value}` (the `input` producer namespace). The
    affordance does the durable thing (a `ui` facet write or `rye`
-   dispatch). The command-palette / vault-setter case. Blocked read-only.
+   dispatch). The command-palette / vault-setter case. Blocked when the
+   compiled binding contains no matching affordance coordinate.
 
 3. **`submit: route`** — a reserved value naming the engine's existing
    route-fold dispatch: classify the line (slash → tokens →
    `commands/dispatch`; plain → the `input.route` invocation template),
-   carry `route_seq` stale-protection, apply read-only / empty handling,
+   carry `route_seq` stale-protection, apply compiled-binding / empty handling,
    and ratchet the route on launch. This is the chat box
    (`view:ryeos/input`). The route metadata lives in the surface's
    top-level `input.route` block (a seat facet), not in the view.
+
+A route input may also name `command_submit` and `thread_control` affordance
+IDs. The former must declare `producer: tokens`; the latter must declare
+`producer: selection`. They are roles in signed content, not special service
+refs in a renderer. The daemon compiles their exact targets into the session
+binding, and a surface whose affordance capability lane is empty cannot invoke
+either role.
 
 Placeholder validation runs at **binding resolution** (`selection.activate
 → X`, `input.submit → Y`), not on the affordance alone: a placeholder a
@@ -197,5 +219,36 @@ renderer steps generation-keyed motion (v1: the backdrop particles
 - Unknown widgets, kinds, keys, and absent projections DEGRADE (raw +
   provenance), never error.
 - Sources are substrate services invoked through the one daemon path.
+- Surface-wide and view-local sources use the same compiled binding lane.
+  A browser cookie is transport identity only and cannot call a source route
+  directly. Optional source `role` values select inert client projections;
+  they never select a service, capability, project, or parameter authority.
+- A source enters that lane only when its resolved service is both
+  `ui_read_only: true` and `state_access: read_only_existing`. The daemon
+  derives this property from the verified service; content and clients cannot
+  assert it. Merely listing an endpoint in a surface does not make it safe.
+- Source results are retained under the exact
+  `{surface/view instance, channel, parameter identity}` coordinate that
+  requested them. In particular, on-demand file reads do not update a global
+  "current file" slot that another tile can accidentally consume.
+- `activation` and `requires_project` are signed presentation behavior. They
+  replace endpoint-name guesses in clients. Projectless compilation removes
+  project-required routes, sources, and affordances and records the attenuation.
+- The project root is an open, pinned directory authority retained by the
+  session. Dispatch rechecks its path binding and uses the descriptor-derived
+  path; a browser-supplied string is never project authority.
+- File lists, trees, and reads stay descriptor-relative for their complete
+  traversal and refuse symlink or parent-component escapes. Tree exclusions
+  come from the compiled node `ingest_ignore` policy; the UI owns no hidden
+  filename or directory ignore list.
+- A project switch cannot mutate an existing compiled binding. It mints an
+  immutable successor session. Browsers redeem its short-lived, replay-safe same-tab launch;
+  native clients replace the whole session generation, including hint streams,
+  live tails, and durable seat attachment. The predecessor remains bounded by
+  session expiry so a lost replacement response cannot strand the operator.
+- Cookie-authenticated data endpoints do not bypass the binding compiler.
+  Executable UI data is reached only by signed binding coordinates through
+  `ui/invocations/dispatch`; direct cookie routes are limited to transport and
+  session/seat lifecycle.
 - The grammar shown is the grammar held: affordances and completion are
   capability-filtered daemon-side.

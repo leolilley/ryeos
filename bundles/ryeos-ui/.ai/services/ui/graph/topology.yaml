@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:47ecef5f6f9564e48d157b1be1dac9aafa9334807924f992ac75f23880c396c4:y4SobCG1OGMt72f7d7V2i7jeZGLObHyELCzTvzbC8k4UhKmf+kpwoVei046/InGVAH6tcYrxihXT+45lp+L5DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:70e7591e40f872b0e1cadb7048a75b019791ead756f4e87e78b29b9fa22666f1:m6TeScthIBxjHHdV8zd6gIk+aGKdH97mQU/QfSnHKdRHsyUca/I3dXir8fHXI53ANvfkqYbcX7QNHQ3lNNMjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: graph/topology
 version: "1.0.0"
 description: Returns the authenticated browser session's resolved RyeOS topology graph.
 endpoint: ui.graph.topology
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

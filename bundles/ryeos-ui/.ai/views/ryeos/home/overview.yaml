@@ -1,0 +1,102 @@
+# ryeos:signed:2026-09-15T01:11:43Z:5b38bf89bd70311aadc2b1f77648e0435bfe5aa63af7ee667c0758c63ddaab30:D2fvBvQGnkrkxXhvR08NkTF7OtArSMwgiN/jNf6Yf20BZfKypjtw4ACbw3b02a1IKJ1SeV02nPFADKZ3dqa4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-home
+title: Home
+version: "1.0.0"
+description: Current node activity and projects from existing authoritative read services
+
+widget: sections
+sources:
+  active:
+    ref: service:ui/ryeos-ui/threads/list
+    params: { active: true, limit: 20, sort: watch }
+    collection: threads
+  movement:
+    ref: service:ui/ryeos-ui/node/activity
+    params:
+      event_limit: 30
+      exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
+    collection: events
+  attention:
+    ref: service:ui/ryeos-ui/work/attention
+    params: { limit: 20, project: current }
+    collection: attention
+  projects:
+    ref: service:projects/list
+    collection: projects
+affordances:
+  - id: watch-thread
+    label: Talk to work
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: review-attention
+    label: Review request
+    invoke:
+      plane: ui
+      facet: selection
+      merge:
+        work:
+          thread: "{record.placement_thread_id}"
+          chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/approvals
+      drill: true
+  - id: review-candidate
+    label: Review candidate
+    invoke:
+      plane: ui
+      facet: selection
+      merge:
+        work:
+          thread: "{record.placement_thread_id}"
+          chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/candidate
+      drill: true
+sections:
+  - title: Needs attention
+    source_channel: attention
+    collection: attention
+    projection:
+      primary: operation_class
+      meta: state
+      tone:
+        field: state
+        map: { pending: warn }
+        default: neutral
+    activate: review-attention
+  - title: Active executions
+    source_channel: active
+    collection: threads
+    projection:
+      primary: item_ref
+      meta: status
+    activate: watch-thread
+  - title: Candidates to review
+    source_channel: attention
+    collection: candidates
+    projection:
+      primary: candidate_snapshot_hash
+      meta: publication_result
+      tone:
+        field: publication_result
+        map: { retained: warn, retained_for_review: warn }
+        default: neutral
+    activate: review-candidate
+  - title: Recent movement
+    source_channel: movement
+    collection: events
+    projection:
+      primary: event_type
+      meta: thread_id
+  - title: Projects
+    source_channel: projects
+    collection: projects
+    projection:
+      primary: name
+      meta: root
+refresh:
+  on_hint: [thread, activity, project]

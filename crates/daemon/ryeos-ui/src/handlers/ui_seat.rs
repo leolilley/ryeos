@@ -1,11 +1,8 @@
 //! Session-authenticated RyeOS UI seat services for browser renderers.
 //!
-//! The terminal renderer talks directly to `service:seat/*` as a verified
-//! operator. Browser renderers arrive through a `session:<id>` wrapper, so
-//! these services bind seat ownership to the session's durable principal
-//! when present, otherwise to the session id. The persisted object is still
-//! a normal `seat_session` thread and the event namespace/shape matches the
-//! substrate seat services.
+//! Renderers arrive through a `session:<id>` wrapper. Seat identity and its
+//! surface/project authority are derived from that exact immutable session;
+//! renderer parameters cannot select or reuse another session's seat.
 
 use std::sync::Arc;
 
@@ -29,11 +26,7 @@ const SEAT_EVENT_PREFIX: &str = "seat.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OpenRequest {
-    surface_ref: String,
-    #[serde(default)]
-    client_ref: Option<String>,
-}
+struct OpenRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,10 +78,7 @@ fn browser_session(ctx: &HandlerContext, state: &AppState) -> Result<BrowserSess
 }
 
 fn seat_owner(session: &BrowserSession) -> String {
-    session
-        .user_principal_id
-        .clone()
-        .unwrap_or_else(|| format!("session:{}", session.session_id))
+    format!("session:{}", session.session_id)
 }
 
 fn require_owned_seat(
@@ -112,19 +102,56 @@ fn require_owned_seat(
     Ok(detail)
 }
 
+/// Settle every running seat owned by an exact predecessor UI session. This
+/// runs at daemon-side session activation because the successor renderer must
+/// never receive authority to close a predecessor-owned thread. Replays are
+/// harmless and finish any cleanup whose first response was lost.
+pub(crate) fn retire_session_seats(state: &AppState, session_id: &str) -> Result<()> {
+    let owner = format!("session:{session_id}");
+    loop {
+        let running = state
+            .state_store
+            .list_threads_sorted(100, Some(&owner), ryeos_state::queries::ThreadSort::Watch)?
+            .into_iter()
+            .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            break;
+        }
+        for detail in running {
+            state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: detail.thread_id.clone(),
+                status: "completed".to_string(),
+                outcome_code: None,
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })?;
+            state.state_store.remove_seat_lease(&detail.thread_id)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_open(
     params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
     let owner = seat_owner(&session);
     let req: OpenRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let surface_ref = req.surface_ref;
-    let client_ref = req
-        .client_ref
-        .unwrap_or_else(|| "client:ryeos/web".to_string());
+    let _ = req;
+    let surface_ref = session.surface_ref.clone();
+    let client_ref = "client:ryeos/ui-session".to_string();
 
     let existing = state
         .state_store
@@ -146,18 +173,20 @@ pub async fn handle_open(
         }));
     }
 
-    let project_root = session
-        .project_root
-        .as_deref()
-        .map(std::path::Path::new)
-        .unwrap_or(&state.config.app_root);
+    let project_root = match session.project_authority.as_ref() {
+        Some(authority) => {
+            authority.ensure_path_binding()?;
+            authority.descriptor_path()?
+        }
+        None => state.config.app_root.clone(),
+    };
     let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
         state
             .node_history_policy()
             .map_err(|error| HandlerError::Internal(error.to_string()))?,
         &surface_ref,
-        project_root,
+        &project_root,
         &owner,
         session.granted_caps.clone(),
         state.threads.site_id(),

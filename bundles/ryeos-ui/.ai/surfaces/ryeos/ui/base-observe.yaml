@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-14T10:03:09Z:d4e78792b00f3a3b77eab0e9581c666a9880633803b9d402494aa5b453c2a928:9m4r9Bu4enBC4ap0evx/vvDvumvxVuJInLvZFvxD94bsw8ZBBvOOQhb9jlqhSTxIP1nTRVQgB7qT647MDo3xBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-base-observe
+version: "1.0.0"
+description: Observation-only base surface for the explicit browser base command
+extends: surface:ryeos/ui/base
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: []

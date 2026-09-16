@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
+use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
 use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
@@ -23,7 +24,7 @@ pub(crate) use execution::timeline_summary_entry;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
-    RyeOsSessionVm,
+    RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,11 +40,39 @@ pub struct RyeOsViewModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
+    pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub workspace: RyeOsWorkspaceVm,
     pub overlays: Vec<RyeOsOverlayVm>,
     pub notices: Vec<RyeOsNoticeVm>,
+    pub transport: RyeOsTransportVm,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_failures: Vec<RyeOsEffectFailureVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportVm {
+    pub freshness: RyeOsTransportFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at_ms: Option<u64>,
+    pub channels: Vec<RyeOsTransportChannelVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTransportChannelVm {
+    pub channel: RyeOsTransportChannel,
+    pub freshness: RyeOsTransportFreshness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<super::effect::RyeOsUiError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsEffectFailureVm {
+    pub effect_id: u64,
+    pub error: super::effect::RyeOsUiError,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -550,11 +579,75 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_url,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
+        navigation: navigation_vm(core),
         chrome,
         workspace,
         overlays: overlays(core),
         notices: core.notices_vm(),
+        transport: transport_vm(core),
+        effect_failures: effect_failures_vm(core),
     }
+}
+
+fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
+    let destination = core
+        .seat
+        .fold()
+        .get(super::seat::KEY_NAVIGATION_DESTINATION)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let focused = core
+        .workspace
+        .tiles
+        .get(&core.workspace.focused_tile)
+        .map(|tile| tile.view.view_ref.as_str());
+    let items = core
+        .surface_navigation()
+        .into_iter()
+        .map(|entry| {
+            let selected = destination.as_deref() == Some(entry.id.as_str())
+                || (destination.is_none() && focused == Some(entry.view.as_str()));
+            RyeOsNavigationItemVm {
+                id: entry.id,
+                label: entry.label,
+                selected,
+                intent: RyeOsUiIntent::OpenView {
+                    view: ViewSpec::bound(entry.view),
+                },
+            }
+        })
+        .collect();
+    RyeOsNavigationVm { items }
+}
+
+fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
+    RyeOsTransportVm {
+        freshness: core.runtime.transport.overall_freshness(),
+        last_observed_at_ms: core.runtime.transport.last_observed_at_ms(),
+        channels: core
+            .runtime
+            .transport
+            .channels
+            .iter()
+            .map(|(channel, state)| RyeOsTransportChannelVm {
+                channel: *channel,
+                freshness: state.freshness,
+                last_observed_at_ms: state.last_observed_at_ms,
+                error: state.error.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn effect_failures_vm(core: &RyeOsCore) -> Vec<RyeOsEffectFailureVm> {
+    core.ui
+        .effect_failures
+        .iter()
+        .map(|(effect_id, error)| RyeOsEffectFailureVm {
+            effect_id: *effect_id,
+            error: error.clone(),
+        })
+        .collect()
 }
 
 fn presentation_vm(
@@ -814,7 +907,11 @@ fn status_bar_vm(
             RyeOsStatusSegmentVm {
                 id: "mode".to_string(),
                 label: None,
-                value: if session.read_only { "ro" } else { "rw" }.to_string(),
+                value: match session.posture {
+                    crate::ui::binding::UiEffectivePosture::ObservationOnly => "observe",
+                    crate::ui::binding::UiEffectivePosture::Interactive => "operate",
+                }
+                .to_string(),
                 tone: RyeOsTone::Neutral,
                 grow: false,
             },
@@ -1050,7 +1147,8 @@ fn instance_input_vm(
 ) -> Option<RyeOsInputVm> {
     let binding = core.views.get(view_ref)?;
     let input = binding.input.as_ref()?;
-    let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone());
+    let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone())
+        .scoped_for_input(input, &core.seat.fold().input_route());
     Some(input_vm(core, &key, view_ref, input))
 }
 
@@ -1192,6 +1290,8 @@ fn bound_view_vm_keyed(
                     .get(&key)
                     .map(|response| super::content::project_section(section, response))
                     .unwrap_or_default();
+                let expand_fields =
+                    super::content::expand_fields_from_projection(&section.projection);
                 let count = records.len();
                 let mut header_selected = false;
                 let mut rows = Vec::new();
@@ -1205,6 +1305,10 @@ fn bound_view_vm_keyed(
                 } else {
                     rows.reserve(count);
                     for record in records {
+                        let row_key =
+                            format!("{index}:{}", super::model::row_key(&record.raw, rows.len()));
+                        let expanded =
+                            expanded_rows.is_some_and(|expanded| expanded.contains(&row_key));
                         let selected = cursor == Some(flat);
                         if selected {
                             fold_section = Some(index);
@@ -1216,16 +1320,28 @@ fn bound_view_vm_keyed(
                             secondary: None,
                             meta: record.meta,
                             kind: None,
-                            intent: activate.map(|affordance_id| RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
+                            intent: activate.and_then(|affordance_id| {
+                                let affordance = binding.affordances.iter().find(|item| {
+                                    item.get("id").and_then(serde_json::Value::as_str)
+                                        == Some(affordance_id)
+                                })?;
+                                super::content::affordance_eligibility(affordance, &record.raw)
+                                    .enabled
+                                    .then(|| RyeOsUiIntent::InvokeAffordance {
+                                        view_ref: view_ref.to_string(),
+                                        affordance_id: affordance_id.clone(),
+                                        record: record.raw.clone(),
+                                    })
                             }),
                             tone: tone_from_name(record.tone.as_deref()),
                             selected,
-                            expandable: false,
-                            expanded: false,
-                            detail: Vec::new(),
+                            expandable: !expand_fields.is_empty(),
+                            expanded,
+                            detail: if expanded {
+                                detail_vm(&record.raw, &expand_fields)
+                            } else {
+                                Vec::new()
+                            },
                             changed_at_ms: None,
                             changed_tone: None,
                         });
@@ -1297,6 +1413,7 @@ fn bound_view_vm_keyed(
                     source_key
                         .as_ref()
                         .and_then(|key| core.data.source_errors.get(key))
+                        .map(|error| &error.message)
                         .map(String::as_str)
                         .unwrap_or("source request failed")
                 ),
@@ -1337,12 +1454,18 @@ fn bound_view_vm_keyed(
                         secondary: None,
                         meta: record.meta,
                         kind: None,
-                        intent: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
-                            }
+                        intent: activate_affordance.as_ref().and_then(|affordance_id| {
+                            let affordance = binding.affordances.iter().find(|item| {
+                                item.get("id").and_then(serde_json::Value::as_str)
+                                    == Some(affordance_id)
+                            })?;
+                            super::content::affordance_eligibility(affordance, &record.raw)
+                                .enabled
+                                .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    view_ref: view_ref.to_string(),
+                                    affordance_id: affordance_id.clone(),
+                                    record: record.raw.clone(),
+                                })
                         }),
                         tone: tone_from_name(record.tone.as_deref()),
                         selected: selected_index == Some(index),
@@ -1556,12 +1679,18 @@ fn bound_view_vm_keyed(
                                 .collect()
                         },
                         tone: tone_from_name(record.tone.as_deref()),
-                        intent: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsUiIntent::InvokeAffordance {
-                                view_ref: view_ref.to_string(),
-                                affordance_id: affordance_id.clone(),
-                                record: record.raw.clone(),
-                            }
+                        intent: activate_affordance.as_ref().and_then(|affordance_id| {
+                            let affordance = binding.affordances.iter().find(|item| {
+                                item.get("id").and_then(serde_json::Value::as_str)
+                                    == Some(affordance_id)
+                            })?;
+                            super::content::affordance_eligibility(affordance, &record.raw)
+                                .enabled
+                                .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    view_ref: view_ref.to_string(),
+                                    affordance_id: affordance_id.clone(),
+                                    record: record.raw.clone(),
+                                })
                         }),
                         selected: selected_index == Some(index),
                         expandable: !expand_fields.is_empty(),
@@ -1672,7 +1801,11 @@ fn project_field_vm(
                     .map(String::as_str),
                 response: core.data.sources.get(&key),
                 parsed: core.data.field_sources.get(&key),
-                error: core.data.source_errors.get(&key).map(String::as_str),
+                error: core
+                    .data
+                    .source_errors
+                    .get(&key)
+                    .map(|error| error.message.as_str()),
                 refreshing,
             }
         })
@@ -2199,10 +2332,7 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
             .or_else(|| {
                 dimension.and_then(|dimension| dimension.session.user_principal_id.clone())
             }),
-        read_only: browser
-            .map(|session| session.read_only)
-            .or_else(|| dimension.map(|dimension| dimension.session.read_only))
-            .unwrap_or(true),
+        posture: browser.map(|session| session.posture).unwrap_or_default(),
     }
 }
 
@@ -2413,6 +2543,10 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
             if Some(id) == activate {
                 return None; // already the row's Enter intent
             }
+            let eligibility = super::content::affordance_eligibility(aff, &row.raw);
+            if !eligibility.visible {
+                return None;
+            }
             let label = aff
                 .get("label")
                 .and_then(|v| v.as_str())
@@ -2420,14 +2554,16 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
                 .to_string();
             Some(RyeOsOverlayChoice {
                 label,
-                hint: "focused row".to_string(),
+                hint: eligibility
+                    .disabled_reason
+                    .unwrap_or_else(|| "focused row".to_string()),
                 intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: view_ref.clone(),
                     affordance_id: id.to_string(),
                     record: row.raw.clone(),
                 },
                 secondary_intent: None,
-                enabled: true,
+                enabled: eligibility.enabled,
             })
         })
         .collect()
@@ -3145,7 +3281,7 @@ mod tests {
         );
         core.data
             .source_errors
-            .insert(source_key, "metadata type mismatch".to_string());
+            .insert(source_key, "metadata type mismatch".into());
 
         let view = bound_view_vm_keyed(
             &core,
@@ -3800,7 +3936,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3883,7 +4019,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3930,7 +4066,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/history"],
                 "views": { "view:ryeos/threads/history": history }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -3979,7 +4115,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -4265,19 +4401,13 @@ mod tests {
                 ]
             }),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "/thread ".to_string(),
-                cursor: "/thread ".len(),
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "/thread ".to_string(),
+            cursor: "/thread ".len(),
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(
@@ -4306,19 +4436,13 @@ mod tests {
                 { "invocable": true, "tokens": ["thread", "list"] }
             ] }),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "/thr".to_string(),
-                cursor: 4,
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "/thr".to_string(),
+            cursor: 4,
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(
@@ -4353,19 +4477,13 @@ mod tests {
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
             ]}),
         );
-        core.ui.input_buffers.insert(
-            crate::ui::model::InputBufferKey::new(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
-                "view:ryeos/input",
-                "line",
-            )
-            .storage_key(),
-            crate::ui::model::RyeOsInputState {
-                text: "ping @directive".to_string(),
-                cursor: "ping @directive".len(),
-                ..Default::default()
-            },
-        );
+        *core
+            .focused_input_buffer_mut()
+            .expect("input buffer exists") = crate::ui::model::RyeOsInputState {
+            text: "ping @directive".to_string(),
+            cursor: "ping @directive".len(),
+            ..Default::default()
+        };
         let vm = build_view_model(&core);
         let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
         assert!(

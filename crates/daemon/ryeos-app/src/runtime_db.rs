@@ -4552,6 +4552,46 @@ pub struct NewDedicatedSessionApproval<'a> {
     pub expires_at_ms: i64,
 }
 
+/// One approval joined to its owning hosted-work root. Read projections do not
+/// grant mutation authority; the resolver revalidates every exact coordinate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedSessionApprovalProjection {
+    pub chain_root_id: String,
+    pub approval: DedicatedSessionApprovalRecord,
+}
+
+/// Minimal owner-indexed projection for a captured candidate that still has
+/// no disposition operation. It is attention evidence, not a second candidate
+/// lifecycle state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedSessionCandidateAttention {
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub state: String,
+    pub candidate_snapshot_hash: String,
+    pub candidate_validation_hash: Option<String>,
+    pub candidate_evaluation_hash: Option<String>,
+    pub publication_result: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedicatedSessionApprovalHistory {
+    pub chain_root_id: String,
+    pub placement_thread_id: String,
+    pub approval_id: String,
+    pub worker_boot_epoch: u64,
+    pub request_digest: String,
+    pub operation_class: String,
+    pub requested_authority: Value,
+    pub state: String,
+    pub decision: Option<String>,
+    pub decision_principal: Option<String>,
+    pub created_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub delivery_settled_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DedicatedSessionApprovalRecord {
@@ -8768,6 +8808,223 @@ impl RuntimeDb {
                 resolved_at_ms: row.14,
                 delivery_contacted_at_ms: row.15,
                 delivery_settled_at_ms: row.16,
+            })
+        })
+        .collect()
+    }
+
+    pub fn pending_dedicated_session_approval_attention(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<DedicatedSessionApprovalProjection>> {
+        validate_bounded_runtime_text("approval owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let mut statement = self.conn.prepare(
+            "SELECT s.chain_root_id,
+                    a.placement_thread_id, a.approval_id, a.worker_instance_id,
+                    a.worker_boot_epoch, a.request_digest, a.operation_class,
+                    a.requested_authority_json, a.state, a.decision_principal,
+                    a.decision_json, a.decision_digest, a.reservation_token,
+                    a.expires_at_ms, a.created_at_ms, a.resolved_at_ms,
+                    a.delivery_contacted_at_ms, a.delivery_settled_at_ms
+               FROM dedicated_session_approval a
+               JOIN dedicated_session s
+                 ON s.placement_thread_id = a.placement_thread_id
+              WHERE s.owner_principal=?1
+                AND (?2 IS NULL OR a.placement_thread_id IN (SELECT value FROM json_each(?2)))
+                AND s.state='awaiting_approval'
+                AND a.state='pending'
+                AND s.worker_instance_id=a.worker_instance_id
+                AND s.worker_boot_epoch=a.worker_boot_epoch
+              ORDER BY a.created_at_ms, a.approval_id
+              LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, Option<i64>>(17)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(DedicatedSessionApprovalProjection {
+                chain_root_id: row.0,
+                approval: DedicatedSessionApprovalRecord {
+                    placement_thread_id: row.1,
+                    approval_id: row.2,
+                    worker_instance_id: row.3,
+                    worker_boot_epoch: u64::try_from(row.4)?,
+                    request_digest: row.5,
+                    operation_class: row.6,
+                    requested_authority: serde_json::from_str(&row.7)?,
+                    state: row.8,
+                    decision_principal: row.9,
+                    decision: row
+                        .10
+                        .map(|value| serde_json::from_str(&value))
+                        .transpose()?,
+                    decision_digest: row.11,
+                    reservation_token: row.12,
+                    expires_at_ms: row.13,
+                    created_at_ms: row.14,
+                    resolved_at_ms: row.15,
+                    delivery_contacted_at_ms: row.16,
+                    delivery_settled_at_ms: row.17,
+                },
+            })
+        })
+        .collect()
+    }
+
+    pub fn dedicated_session_candidate_attention(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<DedicatedSessionCandidateAttention>> {
+        validate_bounded_runtime_text("candidate owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let mut statement = self.conn.prepare(
+            "SELECT chain_root_id, placement_thread_id, state,
+                    candidate_snapshot_hash, candidate_validation_hash,
+                    candidate_evaluation_hash, publication_result, updated_at_ms
+               FROM dedicated_session
+              WHERE owner_principal=?1
+                AND (?2 IS NULL OR placement_thread_id IN (SELECT value FROM json_each(?2)))
+                AND candidate_snapshot_hash IS NOT NULL
+                AND candidate_disposition_root_id IS NULL
+                AND publication_result IN ('retained','retained_for_review')
+              ORDER BY updated_at_ms DESC, placement_thread_id
+              LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok(DedicatedSessionCandidateAttention {
+                    chain_root_id: row.get(0)?,
+                    placement_thread_id: row.get(1)?,
+                    state: row.get(2)?,
+                    candidate_snapshot_hash: row.get(3)?,
+                    candidate_validation_hash: row.get(4)?,
+                    candidate_evaluation_hash: row.get(5)?,
+                    publication_result: row.get(6)?,
+                    updated_at_ms: row.get(7)?,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn dedicated_session_approval_history(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<DedicatedSessionApprovalHistory>> {
+        validate_bounded_runtime_text("approval owner principal", owner_principal, 512)?;
+        if placement_thread_ids.is_some_and(BTreeSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let placement_thread_ids = placement_thread_ids
+            .map(serde_json::to_string)
+            .transpose()?;
+        let limit = i64::try_from(limit.clamp(1, 500))?;
+        let mut statement = self.conn.prepare(
+            "SELECT s.chain_root_id,
+                    a.placement_thread_id, a.approval_id, a.worker_boot_epoch,
+                    a.request_digest, a.operation_class, a.requested_authority_json,
+                    a.state, a.decision_principal, a.decision_json,
+                    a.created_at_ms, a.resolved_at_ms, a.delivery_settled_at_ms
+               FROM dedicated_session_approval a
+               JOIN dedicated_session s
+                 ON s.placement_thread_id = a.placement_thread_id
+              WHERE s.owner_principal=?1
+                AND (?2 IS NULL OR a.placement_thread_id IN (SELECT value FROM json_each(?2)))
+                AND a.state IN ('delivery_settled','expired','stale_epoch')
+              ORDER BY COALESCE(a.resolved_at_ms, a.delivery_settled_at_ms, a.created_at_ms) DESC,
+                       a.approval_id
+              LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![owner_principal, placement_thread_ids, limit],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let row = row?;
+            let decision = row
+                .9
+                .map(|value| serde_json::from_str::<Value>(&value))
+                .transpose()?
+                .and_then(|value| {
+                    value
+                        .get("decision")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            Ok(DedicatedSessionApprovalHistory {
+                chain_root_id: row.0,
+                placement_thread_id: row.1,
+                approval_id: row.2,
+                worker_boot_epoch: u64::try_from(row.3)?,
+                request_digest: row.4,
+                operation_class: row.5,
+                requested_authority: serde_json::from_str(&row.6)?,
+                state: row.7,
+                decision_principal: row.8,
+                decision,
+                created_at_ms: row.10,
+                resolved_at_ms: row.11,
+                delivery_settled_at_ms: row.12,
             })
         })
         .collect()

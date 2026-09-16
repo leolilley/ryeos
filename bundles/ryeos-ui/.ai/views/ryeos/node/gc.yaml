@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:1c99e62c0912046ab41df2a233044d6bc6458bfbd54fe73cfc5fb2ce4c844975:5hCN30mUCsi/QvEh5BkYXbyZPk8uYUkn91fVKtHpwf8boi3532UFKqcmREdlOpyBNNIMGDrTnBmmPGC1LAFFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:f87353b2db2e40aaeca2fe3d4fba09c083a7214e0f3e336098d3714632b1fe58:62h/bAUc3rGKr0q8OBt7gBf/jG8NJXI1AQGh8UChganzgnenXS+HO2D6Y3X/1POn7CaeTta6kZyCDWrBet7zBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-gc
 title: Garbage Collection
 version: "1.0.0"
@@ -9,4 +9,5 @@ sources:
   default:
     ref: service:ui/ryeos-ui/gc/status
     params:
-      project_path: ""
+      project_path: "@session:project_root"
+    requires_project: true

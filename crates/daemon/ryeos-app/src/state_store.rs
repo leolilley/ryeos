@@ -5741,6 +5741,48 @@ impl StateStore {
             .pending_dedicated_session_approvals(placement_thread_id)
     }
 
+    pub fn pending_dedicated_session_approval_attention(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalProjection>> {
+        let g = self.lock()?;
+        g.runtime_db.pending_dedicated_session_approval_attention(
+            owner_principal,
+            placement_thread_ids,
+            limit,
+        )
+    }
+
+    pub fn dedicated_session_candidate_attention(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::DedicatedSessionCandidateAttention>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_session_candidate_attention(
+            owner_principal,
+            placement_thread_ids,
+            limit,
+        )
+    }
+
+    pub fn dedicated_session_approval_history(
+        &self,
+        owner_principal: &str,
+        placement_thread_ids: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::DedicatedSessionApprovalHistory>> {
+        let g = self.lock()?;
+        g.runtime_db.dedicated_session_approval_history(
+            owner_principal,
+            placement_thread_ids,
+            limit,
+        )
+    }
+
     pub fn dedicated_session_approval(
         &self,
         placement_thread_id: &str,

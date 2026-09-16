@@ -27,19 +27,25 @@ enum ExactThreadCaller {
 }
 
 impl ExactThreadCaller {
-    fn from_seat(caller: &SeatCaller) -> Self {
-        match caller {
+    fn from_seat(caller: &SeatCaller) -> Result<Self, HandlerError> {
+        Ok(match caller {
             SeatCaller::Session(session) => Self::Session {
                 canonical_project_root: session
-                    .project_root
+                    .project_authority
                     .as_ref()
-                    .and_then(|root| std::fs::canonicalize(root).ok()),
-                principal_id: session.user_principal_id.clone(),
+                    .map(|authority| {
+                        authority
+                            .ensure_path_binding()
+                            .map_err(|_| HandlerError::NotFound)?;
+                        Ok::<_, HandlerError>(authority.path().to_path_buf())
+                    })
+                    .transpose()?,
+                principal_id: Some(session.compiled_binding.binding.principal_id.clone()),
             },
             SeatCaller::Operator { fingerprint } => Self::Operator {
                 principal_id: fingerprint.clone(),
             },
-        }
+        })
     }
 
     fn principal_id(&self) -> Option<&str> {
@@ -90,7 +96,7 @@ pub(crate) fn authorize_exact_thread_subjects(
         return Err(HandlerError::NotFound);
     }
 
-    let caller = ExactThreadCaller::from_seat(caller);
+    let caller = ExactThreadCaller::from_seat(caller)?;
     let subjects = subjects.into_iter().flatten().collect::<Vec<_>>();
     if subjects.iter().all(|subject| caller.authorizes(subject)) {
         Ok(subjects)

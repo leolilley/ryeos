@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:39326860509952e08147195c2d4aee779ce58383ff5942a93c10d8a8acf99bee:2cQQVoNS5hBcssusYlJAsrnb/G9bj0iI6yhuJiuQrA8GcZLOn333dpD7ZEWm1G0rXrh4a57E/DlsV6m4JU3iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:35acba79510e23a0cc5b08ac4d34ba159617411f84448cf4f1dc241585f94b03:W/w2FkzHfefPANZdLvI/2cbFpf6HvYSNb83zCxOZXaqEJVA83KlUJ/7HHLZEt+q5kvOCAGjviczQNNYtVqywAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/config/get
 version: "1.0.0"
 description: Read durable local RyeOS UI user preferences.
 endpoint: ui.ryeos.config.get
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

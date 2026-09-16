@@ -118,7 +118,7 @@ export function statusLine(vm, shell) {
   line.classList.toggle("hidden", status?.visible === false);
   const segments = status?.segments || [];
   if (segments.length === 0) {
-    const mode = vm.session?.read_only ? "ro" : "rw";
+    const posture = vm.session?.posture || "observation_only";
     const health = vm.chrome?.health_label || "connecting";
     const version = ryeosVersion(shell);
     const project = vm.session?.project_path || shell?.dimension?.project?.path || "home";
@@ -126,7 +126,7 @@ export function statusLine(vm, shell) {
       textEl("strong", "rye os"),
       textEl("span", `v${version}`),
       textEl("span", health, `tone-${vm.chrome?.health_tone || "neutral"}`),
-      textEl("span", mode),
+      textEl("span", posture),
       textEl("span", project, "grow"),
       textEl("span", "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move", "keys"),
     );
@@ -382,4 +382,3 @@ function atlasStyle(ambient = {}) {
   if (ambient.mode === "namespace_atlas" || ambient.mode === "atlas_2d") return "flat_2d";
   return "flat_2d";
 }
-

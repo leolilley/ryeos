@@ -1,0 +1,44 @@
+# ryeos:signed:2026-09-15T01:11:43Z:0d04b16b389cec68fbc87c648a24cf630af3d54b1cc3b60bc6ea2a888ff7ce1c:BJIV9B5nPgDyy3bY5RUhawSV3C1ZfXRSJZgriblgmIADiOh1UoktwKu7Fl5uDZiieM31rhH4i5jJFKUaDmTACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-review-history
+title: Decision history
+version: "1.0.0"
+description: Settled, expired, and stale hosted-worker approval decisions
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/approval-history
+    params: { limit: 200, project: current }
+    collection: history
+
+projections:
+  columns:
+    - { label: operation, field: operation_class, present: words }
+    - { label: decision, field: decision, fallback: none, present: words }
+    - { label: state, field: state, present: words }
+    - { label: resolved, field: resolved_at_ms }
+  expand:
+    fields: [chain_root_id, placement_thread_id, approval_id, worker_boot_epoch, request_digest, requested_authority, decision_principal, created_at_ms, delivery_settled_at_ms]
+  tone:
+    field: state
+    map: { delivery_settled: good, expired: warn, stale_epoch: neutral }
+    default: neutral
+
+selection:
+  activate: inspect_work
+affordances:
+  - id: inspect_work
+    label: Open work
+    producer: selection
+    invoke:
+      plane: ui
+      facet: selection
+      merge:
+        work:
+          thread: "{record.placement_thread_id}"
+          chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/work/overview
+      drill: true
+
+refresh:
+  on_hint: [thread, activity]

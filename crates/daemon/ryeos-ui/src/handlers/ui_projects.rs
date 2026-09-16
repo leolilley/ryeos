@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -20,7 +20,7 @@ use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
-const RYEOS_UI_CONFIG_VERSION: u32 = 1;
+const RYEOS_UI_CONFIG_VERSION: u32 = 2;
 const RECENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,7 +57,6 @@ pub struct RyeOsConfigFile {
     pub version: u32,
     pub theme: String,
     pub landing_view: String,
-    pub default_open_mode: String,
 }
 
 impl Default for RyeOsConfigFile {
@@ -66,7 +65,6 @@ impl Default for RyeOsConfigFile {
             version: RYEOS_UI_CONFIG_VERSION,
             theme: "system".into(),
             landing_view: "projects".into(),
-            default_open_mode: "normal".into(),
         }
     }
 }
@@ -139,8 +137,6 @@ pub struct UpdateConfigRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub landing_view: Option<String>,
-    #[serde(default)]
-    pub default_open_mode: Option<String>,
 }
 
 pub async fn handle_projects_list(
@@ -150,7 +146,10 @@ pub async fn handle_projects_list(
 ) -> Result<Value> {
     let caller = require_seat_caller(&ctx, &state)?;
     let project_path = string_param(&params, "project_path");
-    let current_project = project_path.as_deref().or_else(|| caller.project_root());
+    let retained_project = caller
+        .project_path()?
+        .map(|path| path.to_string_lossy().into_owned());
+    let current_project = retained_project.as_deref().or(project_path.as_deref());
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let mut rows = projects.projects;
@@ -185,9 +184,7 @@ pub async fn handle_projects_add(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if require_seat_caller(&ctx, &state)?.read_only() {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
+    require_seat_caller(&ctx, &state)?;
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root)?;
     let root_text = root.display().to_string();
@@ -230,9 +227,7 @@ pub async fn handle_projects_forget(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if require_seat_caller(&ctx, &state)?.read_only() {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
+    require_seat_caller(&ctx, &state)?;
     let req: ForgetProjectRequest = parse_request(params)?;
     if req.local_id.is_none() && req.root.is_none() {
         return Err(HandlerError::BadRequest("local_id or root is required".into()).into());
@@ -291,11 +286,10 @@ pub async fn handle_projects_open(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = require_seat_caller(&ctx, &state)?;
-    if caller.read_only() {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
     let req: OpenProjectRequest = parse_request(params)?;
-    let current_project = caller.project_root().map(str::to_string);
+    let current_project = caller
+        .project_path()?
+        .map(|path| path.to_string_lossy().into_owned());
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     let project = if req.local_id == "current" {
@@ -318,28 +312,65 @@ pub async fn handle_projects_open(
 
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
+    let active_session = if let Some(session_id) = session_id_from_context(&ctx) {
+        let session = get_ui_state(&state)
+            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+            .browser_sessions
+            .get_session(session_id)
+            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+        if session.project_root.as_deref() != Some(root.as_str()) {
+            // The selected root came from the already resolved principal
+            // store. Pin it here and carry that exact authority forward;
+            // replacement must not reconstruct ingress authorization.
+            let project_authority = Arc::new(
+                lillux::PinnedDirectory::open(&canonical)?
+                    .context("selected UI project root disappeared")?,
+            );
+            let replacement = super::ui_launch_mint::mint_project_replacement(
+                &session,
+                project_authority,
+                state.as_ref(),
+            )?;
+            let recent = if project.local_id == "current" {
+                RecentFile::default()
+            } else {
+                store.touch_recent_project(&project.local_id)?
+            };
+            return Ok(json!({
+                "project": project_view(
+                    ProjectEntry { root: root.clone(), ..project.clone() },
+                    Some(&root),
+                    project.local_id != "current"
+                ),
+                "recent": recent.recent_projects,
+                "ui_transition": {
+                    "kind": "replace_session",
+                    "launch_url": replacement.launch_url,
+                    "session_id": replacement.session_id,
+                }
+            }));
+        }
+        Some(session)
+    } else {
+        None
+    };
     let recent = if project.local_id == "current" {
         RecentFile::default()
     } else {
         store.touch_recent_project(&project.local_id)?
     };
 
-    let session = if let Some(session_id) = session_id_from_context(&ctx) {
-        let updated_session = get_ui_state(&state)
-            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-            .browser_sessions
-            .set_project_root(session_id, Some(root.clone()))
-            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    let session = if let Some(active_session) = active_session {
         json!({
-            "session_id": updated_session.session_id,
-            "project_root": updated_session.project_root,
-            "read_only": updated_session.read_only,
+            "session_id": active_session.session_id,
+            "project_root": active_session.project_root,
+            "binding_digest": active_session.compiled_binding.binding_digest,
+            "posture": active_session.compiled_binding.posture,
         })
     } else {
         json!({
             "session_id": "",
             "project_root": root.clone(),
-            "read_only": false,
         })
     };
 
@@ -359,9 +390,7 @@ pub async fn handle_recent_touch(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if require_seat_caller(&ctx, &state)?.read_only() {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
+    require_seat_caller(&ctx, &state)?;
     let req: TouchRecentRequest = parse_request(params)?;
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
@@ -400,22 +429,13 @@ pub async fn handle_config_update(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if require_seat_caller(&ctx, &state)?.read_only() {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
+    require_seat_caller(&ctx, &state)?;
     let req: UpdateConfigRequest = parse_request(params)?;
     if let Some(theme) = req.theme.as_deref() {
         validate_choice("theme", theme, &["system", "light", "dark"])?;
     }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
-    }
-    if let Some(default_open_mode) = req.default_open_mode.as_deref() {
-        validate_choice(
-            "default_open_mode",
-            default_open_mode,
-            &["normal", "read_only"],
-        )?;
     }
     let store = locked_principal_store(&ctx, &state).await?;
     let mut config = store.load_ui_config()?;
@@ -424,9 +444,6 @@ pub async fn handle_config_update(
     }
     if let Some(landing_view) = req.landing_view {
         config.landing_view = landing_view;
-    }
-    if let Some(default_open_mode) = req.default_open_mode {
-        config.default_open_mode = default_open_mode;
     }
     store.write_ui_config(&config)?;
     Ok(json!(config))
@@ -523,10 +540,11 @@ impl LockedRyeOsPrincipalStoreExt for LockedPrincipalStore {
 }
 
 fn resolve_principal_store(ctx: &HandlerContext, state: &AppState) -> Result<PrincipalStore> {
-    if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
+    if let Some(user_principal_id) = compiled_user_principal_id() {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::resolve_with(&resolver, &user_principal_id);
     }
+    require_local_store_principal(ctx, state)?;
     PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)
 }
 
@@ -534,23 +552,35 @@ async fn locked_principal_store(
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<LockedPrincipalStore> {
-    if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
+    if let Some(user_principal_id) = compiled_user_principal_id() {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::locked_with(&resolver, &user_principal_id).await;
     }
+    require_local_store_principal(ctx, state)?;
     PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await
 }
 
-fn session_user_principal_id(ctx: &HandlerContext, state: &AppState) -> Result<Option<String>> {
-    let Some(session_id) = session_id_from_context(ctx) else {
-        return Ok(None);
-    };
-    let session = get_ui_state(state)
-        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-        .browser_sessions
-        .get_session(session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-    Ok(session.user_principal_id)
+fn compiled_user_principal_id() -> Option<String> {
+    crate::seat_auth::compiled_ui_session().and_then(|session| session.user_principal_id)
+}
+
+fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
+    if let Some(session) = crate::seat_auth::compiled_ui_session() {
+        let operator =
+            ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        if session.user_principal_id.is_some()
+            || session.compiled_binding.binding.principal_id != operator.principal_id()
+        {
+            return Err(HandlerError::Forbidden(
+                "UI session has no retained local-operator store authority".into(),
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    ryeos_app::operator_authority::require_admitted_operator(state, ctx)
+        .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
+    Ok(())
 }
 
 fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
@@ -608,6 +638,38 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+pub(crate) fn authorize_launch_project(
+    ctx: &HandlerContext,
+    state: &AppState,
+    requested_root: &str,
+) -> Result<lillux::PinnedDirectory> {
+    let requested = canonical_project_root(requested_root)?;
+    let authority = lillux::PinnedDirectory::open(&requested)?
+        .context("authorized UI project root disappeared")?;
+    if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
+        return Ok(authority);
+    }
+
+    // Non-operator principals may select only a project already recorded in
+    // their private principal space. The request path is never itself project
+    // authority.
+    let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
+    let store = PrincipalStore::resolve_with(&resolver, &ctx.fingerprint)?;
+    let projects = store.load_projects()?;
+    if projects
+        .projects
+        .iter()
+        .any(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+    {
+        Ok(authority)
+    } else {
+        Err(HandlerError::Forbidden(
+            "requested UI project is not admitted by the caller's project registry".into(),
+        )
+        .into())
+    }
 }
 
 fn same_existing_dir(left: &str, right: &str) -> bool {
@@ -786,6 +848,15 @@ mod tests {
     fn invalid_config_choices_are_rejected() {
         let err = validate_choice("theme", "neon", &["system", "light", "dark"]).unwrap_err();
         assert!(err.to_string().contains("invalid theme value 'neon'"));
+    }
+
+    #[test]
+    fn caller_authored_open_mode_is_not_a_ui_config_field() {
+        let error = serde_json::from_value::<UpdateConfigRequest>(json!({
+            "default_open_mode": "read_only"
+        }))
+        .expect_err("launch posture must come from the compiled signed surface binding");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

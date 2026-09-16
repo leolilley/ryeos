@@ -136,10 +136,28 @@ keymap rather than a second binding table.
 
 Run it with `npm test` from `crates/clients/web`.
 
+## Launcher authority boundary
+
+The browser launcher selects a signed surface and optional project context. It
+does not select or transmit an authority posture. The daemon compiles the
+effective signed surface/view closure and derives the session's exact source
+and affordance binding by intersecting it with the authenticated caller,
+project and node policy.
+
+This is a clean wire cut. `read_only`, intent-enablement and mode flags or mint
+fields are not accepted as compatibility aliases. Renderer-local intents do
+not need an authority switch, while protected invocations exist only when the
+compiled binding contains the exact eligible affordance.
+
+Project selection is an immutable authority transition. A successful signed
+`projects/open` affordance returns a generic `replace_session` effect with a
+same-origin replay-safe activation path. The browser redeems it in the current tab so
+the node replaces the HttpOnly cookie before loading the successor's compiled
+surface. JavaScript never rewrites the project path, carries the predecessor's
+grant forward, or treats the node listen address as browser routing authority.
+
 ## Notes for the next sweep
 
-- No bundle YAML or signatures were touched by this branch; nothing here rides
-  the Wave 3 republish.
 - DOM structure and focus behavior still need a real-browser harness. The
   highest-value next cases are table/sections rendering against
   `RyeOsTableRowVm` / `RyeOsSectionVm`, overlay focus trapping/restoration, and

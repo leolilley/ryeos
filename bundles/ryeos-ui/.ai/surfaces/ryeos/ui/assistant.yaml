@@ -1,0 +1,54 @@
+# ryeos:signed:2026-09-15T01:11:43Z:3782f23ff87bc440d03aa9715b93bb144bf5df13255c8196aea312a0fb912a7b:MSN4ndqOAV8D17aSuLcp5sOC1iTWmtH6rsmdXB4cBqa+pjTTFlwBV2rHEF3LD9a7Izq3L6PNJt6zxqhjZSCaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-assistant
+version: "1.0.0"
+description: Assistant-oriented RyeOS surface with signed, data-driven navigation
+
+extends: surface:ryeos/ui/lens
+
+tiling:
+  mode: single_lens
+
+tiles:
+  - view:ryeos/home/overview
+
+navigation:
+  - { id: home, label: Home, view: "view:ryeos/home/overview" }
+  - { id: work, label: Work, view: "view:ryeos/work/list" }
+  - { id: review, label: Review, view: "view:ryeos/review/pending" }
+  - { id: sites, label: Sites, view: "view:ryeos/sites/list" }
+  - { id: programs, label: Programs, view: "view:ryeos/programs/list" }
+
+library:
+  - group: Assistant
+    views:
+      - view:ryeos/home/overview
+      - view:ryeos/work/list
+      - view:ryeos/work/overview
+      - view:ryeos/thread/transcript
+      - view:ryeos/thread/tree
+      - view:ryeos/work/children
+      - view:ryeos/work/evidence
+      - view:ryeos/work/approvals
+      - view:ryeos/work/candidate
+      - view:ryeos/review/pending
+      - view:ryeos/review/history
+      - view:ryeos/sites/list
+      - view:ryeos/programs/list
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/thread/tree
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc

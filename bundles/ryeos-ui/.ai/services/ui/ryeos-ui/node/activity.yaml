@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T02:18:23Z:a939cee0ed44fdcc15158b0e6fc638726932c42f2f49a89794cf2772456729d1:TEdhU0h/cPUNdFeAJrZRHngRz4/hbPAtYzCeldWlJ6CiTWSxHRGTbtXrwromZWzahh2/zvY0SEgi65sAK2iMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:5aa3f880e54fa471be66c474736e1b65d6814511501e7d93121d52338719ddd3:Q7+1IpS8yZM6Mh44LJA0mF2EqpNWqnUl0He1vJatMQJoHpNaKL3TH+A6IrYpoFvoL8e83zdxImosVwjOtP5fDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
@@ -8,5 +8,6 @@ description: >-
   every thread on the node.
 endpoint: ui.ryeos.node.activity
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

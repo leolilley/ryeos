@@ -548,7 +548,9 @@ pub(crate) fn collect_snapshot_upload_hashes(
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if snapshot.parent_hashes != expected_parents {
+    // Re-publishing the exact current remote HEAD is idempotent. Its parent is
+    // necessarily the boundary that preceded it, not the snapshot itself.
+    if remote_known_parent != Some(snapshot_hash) && snapshot.parent_hashes != expected_parents {
         anyhow::bail!(
             "snapshot parent lineage does not match the server-issued previous HEAD boundary"
         );
@@ -723,13 +725,15 @@ pub(crate) async fn upload_missing(
                 .objects_put_blob_chunk(&staging_id, project_path_for_ref, &chunk)
                 .await?;
             validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
-            let expected = if next == total_size {
-                std::slice::from_ref(hash)
-            } else {
-                &[]
-            };
-            validate_upload_response(&response.blob_hashes, expected, "blob")?;
             validate_upload_response(&response.object_hashes, &[], "object")?;
+            if validate_blob_chunk_response(&response.blob_hashes, hash, next == total_size)? {
+                // A durable retry can begin again at offset zero after the
+                // target already completed and verified this blob. In that
+                // case the target returns the exact completed hash on the
+                // first replayed chunk. Treat that acknowledgement as
+                // authoritative and do not retransmit the remaining bytes.
+                break;
+            }
             offset = next;
         }
         blob_index += 1;
@@ -833,6 +837,24 @@ fn validate_upload_response(actual: &[String], expected: &[String], kind: &str) 
         );
     }
     Ok(())
+}
+
+fn validate_blob_chunk_response(
+    actual: &[String],
+    expected_hash: &str,
+    request_reached_end: bool,
+) -> Result<bool> {
+    match actual {
+        [] if !request_reached_end => Ok(false),
+        [hash] if hash == expected_hash => Ok(true),
+        [] => anyhow::bail!(
+            "objects/put blob hash response mismatch: expected completed hash {expected_hash}, got []"
+        ),
+        _ => anyhow::bail!(
+            "objects/put blob hash response mismatch: expected [] or [{expected_hash:?}], got {:?}",
+            actual
+        ),
+    }
 }
 
 /// Reject project paths that would walk the entire home directory
@@ -999,7 +1021,9 @@ mod refuse_walking_root_tests {
 
 #[cfg(test)]
 mod upload_batch_tests {
-    use super::{OBJECTS_PUT_BODY_BUDGET_BYTES, inline_blob_request_size};
+    use super::{
+        OBJECTS_PUT_BODY_BUDGET_BYTES, inline_blob_request_size, validate_blob_chunk_response,
+    };
 
     #[test]
     fn inline_blob_request_size_accounts_for_base64_and_entry_overhead() {
@@ -1024,5 +1048,33 @@ mod upload_batch_tests {
             inline_blob_request_size((largest_raw + 1) as u64).unwrap()
                 > OBJECTS_PUT_BODY_BUDGET_BYTES
         );
+    }
+
+    #[test]
+    fn blob_chunk_response_accepts_in_progress_and_terminal_acknowledgements() {
+        let hash = "a".repeat(64);
+        assert!(!validate_blob_chunk_response(&[], &hash, false).unwrap());
+        assert!(validate_blob_chunk_response(std::slice::from_ref(&hash), &hash, true).unwrap());
+    }
+
+    #[test]
+    fn blob_chunk_response_accepts_exact_early_completion_on_durable_retry() {
+        let hash = "b".repeat(64);
+        assert!(validate_blob_chunk_response(std::slice::from_ref(&hash), &hash, false).unwrap());
+    }
+
+    #[test]
+    fn blob_chunk_response_requires_terminal_acknowledgement() {
+        let hash = "c".repeat(64);
+        let error = validate_blob_chunk_response(&[], &hash, true).unwrap_err();
+        assert!(error.to_string().contains("expected completed hash"));
+    }
+
+    #[test]
+    fn blob_chunk_response_rejects_wrong_or_ambiguous_hashes() {
+        let hash = "d".repeat(64);
+        let wrong = "e".repeat(64);
+        assert!(validate_blob_chunk_response(std::slice::from_ref(&wrong), &hash, false).is_err());
+        assert!(validate_blob_chunk_response(&[hash.clone(), hash.clone()], &hash, false).is_err());
     }
 }

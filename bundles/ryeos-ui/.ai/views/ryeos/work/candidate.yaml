@@ -1,0 +1,66 @@
+# ryeos:signed:2026-09-15T01:18:42Z:b425284c35c40dd84f7bca913d6ee8886e6f6c90fa396aa509cd64f05acde43d:rSjOwEVraWoEyMxodjjocKzucLutEaOlcslEQ4Iv+k/oubC9FqIFu2wxQlTddjY0A9PCbTtnD64bUcHqF+aDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-candidate
+title: Candidate
+version: "1.0.0"
+description: Exact retained candidate, completion, validation, and evaluator evidence without inferred success
+
+widget: sections
+sources:
+  detail:
+    ref: service:ui/ryeos-ui/work/candidate
+    params:
+      thread_id: "@facet:selection.work.thread"
+
+sections:
+  - title: Candidate
+    source_channel: detail
+    collection: candidates
+    projection:
+      primary: candidate_snapshot_hash
+      meta: candidate_disposition
+      expand:
+        fields:
+          - chain_root_id
+          - placement_thread_id
+          - base_snapshot_hash
+          - candidate_validation_hash
+          - candidate_evaluation_hash
+          - evaluation_accepted
+          - evaluator_item_ref
+          - evaluator_definition_digest
+          - evaluator_result_digest
+          - publication_result
+          - terminal_reason
+          - completion
+      tone:
+        field: evaluation_accepted
+        map: { "true": good, "false": danger }
+        default: neutral
+  - title: Change inventory
+    source_channel: detail
+    collection: change_summary
+    projection:
+      primary: state
+      meta: total
+      expand:
+        fields: [reason, truncated]
+      tone:
+        field: state
+        map: { available: good, unavailable: warn }
+        default: neutral
+  - title: Changed files
+    source_channel: detail
+    collection: changes
+    projection:
+      primary: path
+      meta: change
+      expand:
+        fields: [base_file_hash, candidate_file_hash]
+      tone:
+        field: change
+        map: { added: good, modified: warn, deleted: danger }
+        default: neutral
+
+refresh:
+  on_facet: selection
+  on_hint: [thread, activity]

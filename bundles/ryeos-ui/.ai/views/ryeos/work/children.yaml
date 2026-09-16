@@ -1,0 +1,31 @@
+# ryeos:signed:2026-09-15T01:11:43Z:c3a27725b50c128d93bfa3532d566a4706903d775f89e493555c48508c99b9eb:ZQOwRF48pMmDLJYkcMR9pyv1qpTpBP3+pfwAn9UL89M7167lgyX+8A3F0Xi9eCYr8tFe47wvyc4lhJVr4VNbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: assistant-work-children
+title: Children
+version: "1.0.0"
+description: Exact execution-tree closure for the selected work placement
+
+widget: table
+sources:
+  default:
+    ref: service:ui/ryeos-ui/thread/tree
+    params:
+      thread_id: "@facet:selection.work.thread"
+      max_depth: 16
+      limit: 500
+    collection: items
+
+projections:
+  columns:
+    - { label: status, field: status, present: words }
+    - { label: work, field: item_ref, present: leaf }
+    - { label: relation, field: relation, present: words }
+  expand:
+    fields: [thread_id, chain_root_id, item_ref, kind, status, relation, depth, current_site_id, origin_site_id]
+  tone:
+    field: status
+    map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
+    default: neutral
+
+refresh:
+  on_facet: selection
+  on_hint: [thread, activity]

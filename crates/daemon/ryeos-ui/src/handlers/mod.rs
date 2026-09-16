@@ -12,7 +12,6 @@ pub mod ui_field_runs;
 pub mod ui_files;
 pub mod ui_gc;
 pub mod ui_graph_topology;
-pub mod ui_intents_apply;
 pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
@@ -25,12 +24,12 @@ pub mod ui_seat;
 pub mod ui_session_current;
 pub mod ui_thread_tree;
 pub mod ui_threads;
+pub mod ui_work;
 
 pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
-    ui_intents_apply::DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,
@@ -43,6 +42,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_items::ITEM_INSPECT_DESCRIPTOR,
     ui_threads::DESCRIPTOR,
     ui_threads::INSPECT_DESCRIPTOR,
+    ui_work::DESCRIPTOR,
+    ui_work::ATTENTION_DESCRIPTOR,
+    ui_work::APPROVAL_HISTORY_DESCRIPTOR,
+    ui_work::CANDIDATE_DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
     ui_schedules::DESCRIPTOR,

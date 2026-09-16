@@ -1,7 +1,9 @@
-# ryeos:signed:2026-06-11T22:51:46Z:871fd8d08da4ae94419beba206bc5d9d0707516ca82ce48c613f770da72a1730:fNkZsK+uJ3sy6EZ64uCzmJ3kqxXTo480R1zIBIr/lPm70XgiU7A/ocSEQjrZzVBh766mlAHnRLcRbpFj5wvECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:d5354212b07863b483106f6c01bf6cf4b6a43692481f006d8f99dd827d076c08:LcSGpbjigZJyLVw+4leobVPQQ+GKO58KXafUbSY0m/qfcXeSTWFS9lg5hhrA41GjUwdKrhmHjt4jVBTIdJ5EBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: launch-mint
 version: "1.0.0"
 description: Mints a launch token bound to a browser session. Requires a verified signed caller.
 endpoint: ui.launch.mint
 availability: daemon_only
+required_caps:
+  - ryeos.execute.service.ui/launch/mint

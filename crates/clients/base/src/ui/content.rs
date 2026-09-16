@@ -119,6 +119,119 @@ pub struct ViewBinding {
     pub degraded: Option<String>,
 }
 
+/// Renderer-neutral presentation eligibility for one signed affordance.
+/// This can hide or disable a control; it never grants execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffordanceEligibility {
+    pub visible: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
+}
+
+/// Validate the deliberately small condition language used by affordances.
+/// Conditions may compare a record field with a JSON scalar, or conjoin a
+/// bounded list of those comparisons. Product semantics stay in signed data.
+pub fn validate_affordance_eligibility(affordance: &Value) -> Result<(), String> {
+    for key in ["visible_when", "enabled_when"] {
+        if let Some(condition) = affordance.get(key) {
+            validate_affordance_condition(condition, 0)?;
+        }
+    }
+    if let Some(reason) = affordance.get("disabled_reason") {
+        let reason = reason
+            .as_str()
+            .ok_or_else(|| "affordance disabled_reason must be a string".to_string())?;
+        if reason.is_empty()
+            || reason.len() > 256
+            || reason.trim() != reason
+            || reason.chars().any(char::is_control)
+        {
+            return Err("affordance disabled_reason must be canonical and bounded".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_affordance_condition(condition: &Value, depth: usize) -> Result<(), String> {
+    if depth > 1 {
+        return Err("affordance eligibility exceeds maximum condition depth".to_string());
+    }
+    let fields = condition
+        .as_object()
+        .ok_or_else(|| "affordance eligibility condition must be a mapping".to_string())?;
+    if fields.len() == 2 && fields.contains_key("field") && fields.contains_key("equals") {
+        let field = fields["field"]
+            .as_str()
+            .ok_or_else(|| "affordance eligibility field must be a string".to_string())?;
+        if field.is_empty()
+            || field.len() > 256
+            || field.trim() != field
+            || field.chars().any(char::is_control)
+        {
+            return Err("affordance eligibility field must be canonical and bounded".to_string());
+        }
+        if !matches!(
+            fields["equals"],
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+        ) {
+            return Err("affordance eligibility equals value must be a JSON scalar".to_string());
+        }
+        return Ok(());
+    }
+    if fields.len() == 1 && fields.contains_key("all") {
+        let terms = fields["all"]
+            .as_array()
+            .ok_or_else(|| "affordance eligibility all must be an array".to_string())?;
+        if terms.is_empty() || terms.len() > 8 {
+            return Err("affordance eligibility all must contain 1..=8 terms".to_string());
+        }
+        for term in terms {
+            validate_affordance_condition(term, depth + 1)?;
+        }
+        return Ok(());
+    }
+    Err("affordance eligibility condition has unsupported fields".to_string())
+}
+
+pub fn affordance_eligibility(affordance: &Value, record: &Value) -> AffordanceEligibility {
+    let visible = affordance
+        .get("visible_when")
+        .is_none_or(|condition| evaluate_affordance_condition(condition, record));
+    let enabled = visible
+        && affordance
+            .get("enabled_when")
+            .is_none_or(|condition| evaluate_affordance_condition(condition, record));
+    AffordanceEligibility {
+        visible,
+        enabled,
+        disabled_reason: (!enabled)
+            .then(|| affordance.get("disabled_reason").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string),
+    }
+}
+
+fn evaluate_affordance_condition(condition: &Value, record: &Value) -> bool {
+    let Some(fields) = condition.as_object() else {
+        return false;
+    };
+    if let (Some(field), Some(expected)) = (
+        fields.get("field").and_then(Value::as_str),
+        fields.get("equals"),
+    ) {
+        return field_path(record, field) == Some(expected);
+    }
+    fields
+        .get("all")
+        .and_then(Value::as_array)
+        .is_some_and(|terms| {
+            !terms.is_empty()
+                && terms
+                    .iter()
+                    .all(|term| evaluate_affordance_condition(term, record))
+        })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewPresentation {
     #[serde(default)]
@@ -238,6 +351,7 @@ impl FieldCursorScopeBinding {
 /// A singular transient input buffer declared on a view binding. Not a
 /// facet, not a widget — a place keystrokes accumulate, view-local.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputBlock {
     /// Unique within the view (instance keying).
     pub id: String,
@@ -261,6 +375,16 @@ pub struct InputBlock {
     /// Enter behaviour: an affordance id, or the reserved `route` value.
     #[serde(default)]
     pub submit: Option<String>,
+    /// Signed affordance that receives parsed slash-command tokens. The
+    /// renderer discovers this role from the input binding; it never embeds a
+    /// product ref or privileged endpoint for command execution.
+    #[serde(default)]
+    pub command_submit: Option<String>,
+    /// Signed affordance that receives `{thread_id, command_type}` for the
+    /// currently routed thread. As with every affordance, the view owns its
+    /// exact execution target and parameter template.
+    #[serde(default)]
+    pub thread_control: Option<String>,
     /// Optional targeting capability: the input can retarget where its
     /// route-submit lands. Declares the *semantic capability* only — no
     /// physical keys (the central keymap owns those). Valid only on
@@ -435,7 +559,11 @@ impl InputBlock {
 pub struct SourceBinding {
     #[serde(rename = "ref")]
     pub item_ref: String,
+    /// Optional renderer projection role. This selects how inert response
+    /// data is presented; it never selects the executable source.
     #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default = "empty_object")]
     pub params: Value,
     /// Path to the record array inside the source response (rows /
     /// timeline). Absent = the whole response is the record (key_value /
@@ -446,6 +574,26 @@ pub struct SourceBinding {
     /// view's refresh rule for this source only.
     #[serde(default)]
     pub refresh: Value,
+    /// Parameters whose values may be supplied by renderer state at fetch
+    /// time. The signed source still owns the target and all other params.
+    #[serde(default)]
+    pub dynamic_parameters: Vec<String>,
+    #[serde(default)]
+    pub activation: SourceActivation,
+    #[serde(default)]
+    pub requires_project: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceActivation {
+    #[default]
+    Initial,
+    OnDemand,
+}
+
+fn empty_object() -> Value {
+    Value::Object(Default::default())
 }
 
 /// One section of a `sections` view: a titled projection over one named source
@@ -863,8 +1011,11 @@ pub fn table_hierarchy_rows(
 /// vocabulary is content-owned (`projections.expand.fields`), while Rust only
 /// knows "field label/value lines".
 pub fn expand_fields(binding: &ViewBinding) -> Vec<String> {
-    binding
-        .projections
+    expand_fields_from_projection(&binding.projections)
+}
+
+pub fn expand_fields_from_projection(projection: &Value) -> Vec<String> {
+    projection
         .get("expand")
         .and_then(|expand| expand.get("fields"))
         .and_then(Value::as_array)
@@ -988,6 +1139,16 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// record — one row — so a sections view can carry a singular status line
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    source_collection_for_section(section, response)
+        .iter()
+        .map(|record| project_record(record, &section.projection))
+        .collect()
+}
+
+pub fn source_collection_for_section<'a>(
+    section: &SectionBinding,
+    response: &'a Value,
+) -> Vec<&'a Value> {
     match section.collection.as_deref() {
         // A `collection` path selects a sub-value of the response. An array is a
         // list source (one row per element); a single object is a detail source
@@ -997,14 +1158,11 @@ pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<Projec
         // raw-JSON dump — which is what projecting the whole response through a
         // missing path would otherwise produce.
         Some(path) => match field_path(response, path) {
-            Some(Value::Array(records)) => records
-                .iter()
-                .map(|record| project_record(record, &section.projection))
-                .collect(),
-            Some(value @ Value::Object(_)) => vec![project_record(value, &section.projection)],
+            Some(Value::Array(records)) => records.iter().collect(),
+            Some(value @ Value::Object(_)) => vec![value],
             _ => Vec::new(),
         },
-        None => vec![project_record(response, &section.projection)],
+        None => vec![response],
     }
 }
 
@@ -1124,6 +1282,10 @@ pub enum Producer {
     Selection,
     /// An input buffer submit — supplies `{value}` (the buffer text).
     Input,
+    /// Parsed command grammar tokens supplied by the shared shell. This is a
+    /// producer namespace, not permission to select an execution target: the
+    /// signed surface affordance still owns the exact target and template.
+    Tokens,
 }
 
 impl Producer {
@@ -1131,6 +1293,7 @@ impl Producer {
         match self {
             Producer::Selection => "record",
             Producer::Input => "value",
+            Producer::Tokens => "tokens",
         }
     }
 
@@ -1142,6 +1305,7 @@ impl Producer {
                 .strip_prefix("record.")
                 .is_some_and(|rest| !rest.is_empty()),
             Producer::Input => placeholder == "value",
+            Producer::Tokens => matches!(placeholder, "tokens" | "arguments"),
         }
     }
 }
@@ -1153,6 +1317,10 @@ impl Producer {
 pub enum Payload<'a> {
     Selection(&'a Value),
     Input(&'a str),
+    Tokens {
+        tokens: &'a [String],
+        arguments: &'a Value,
+    },
 }
 
 impl Payload<'_> {
@@ -1171,6 +1339,11 @@ impl Payload<'_> {
                     Value::Null
                 }
             }
+            Payload::Tokens { tokens, arguments } => match placeholder {
+                "tokens" => serde_json::to_value(tokens).unwrap_or(Value::Null),
+                "arguments" => (*arguments).clone(),
+                _ => Value::Null,
+            },
         }
     }
 }
@@ -1298,6 +1471,34 @@ fn source_contract_error(binding: &ViewBinding) -> Option<String> {
                 "field cursor scope requires a source cursor parameter bound to @field:cursor"
                     .to_string(),
             );
+        }
+    }
+    if let Some(input) = &binding.input {
+        for (field, expected_producer, affordance_id) in [
+            ("command_submit", "tokens", input.command_submit.as_deref()),
+            (
+                "thread_control",
+                "selection",
+                input.thread_control.as_deref(),
+            ),
+        ] {
+            let Some(affordance_id) = affordance_id else {
+                continue;
+            };
+            let Some(affordance) = binding
+                .affordances
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(affordance_id))
+            else {
+                return Some(format!(
+                    "input {field} references unknown affordance '{affordance_id}'"
+                ));
+            };
+            if affordance.get("producer").and_then(Value::as_str) != Some(expected_producer) {
+                return Some(format!(
+                    "input {field} affordance '{affordance_id}' must declare producer: {expected_producer}"
+                ));
+            }
         }
     }
     None
@@ -1429,11 +1630,10 @@ pub enum AffordanceInvoke {
         /// affordance's `notice:` and surfaced when the invocation succeeds.
         notice: Option<String>,
     },
-    /// Invoke a service by ref with args through the daemon `/execute` path (as
-    /// the foot input does). Args reach the daemon as `parameters` — unlike the
-    /// token dispatch path. Row management (cancel / kill / continue on a
-    /// specific row) uses this so `{record.thread_id}` actually reaches the
-    /// service, targeting that row rather than the route head.
+    /// Signed service affordance with bound arguments. The effective content
+    /// is useful for local validation and presentation, but the renderer sends
+    /// only the affordance coordinate and produced record; the daemon resolves
+    /// this target again from the compiled session binding.
     Service {
         item_ref: String,
         args: Value,
@@ -1490,8 +1690,9 @@ pub fn resolve_affordance_invoke(
             })
         }
         "rye" => {
-            // A `ref:` selects the service-invocation form (args → `/execute`
-            // parameters); otherwise it's grammar-token dispatch.
+            // A `ref:` selects the signed service-affordance form; otherwise
+            // this is grammar-token dispatch. Neither executable target is
+            // serialized in a renderer request.
             // The success-notice template is rendered later against the result
             // outcome (`{result.<field>}`), so it is carried raw, not
             // payload-substituted here.
@@ -2539,6 +2740,47 @@ mod tests {
     }
 
     #[test]
+    fn affordance_eligibility_is_closed_bounded_and_record_driven() {
+        let affordance = json!({
+            "visible_when": {"field": "state", "equals": "pending"},
+            "enabled_when": {"field": "requested.accept_allowed", "equals": true},
+            "disabled_reason": "This request cannot be accepted."
+        });
+        validate_affordance_eligibility(&affordance).unwrap();
+
+        let disabled = affordance_eligibility(
+            &affordance,
+            &json!({"state": "pending", "requested": {"accept_allowed": false}}),
+        );
+        assert!(disabled.visible);
+        assert!(!disabled.enabled);
+        assert_eq!(
+            disabled.disabled_reason.as_deref(),
+            Some("This request cannot be accepted.")
+        );
+
+        let enabled = affordance_eligibility(
+            &affordance,
+            &json!({"state": "pending", "requested": {"accept_allowed": true}}),
+        );
+        assert!(enabled.visible && enabled.enabled);
+        assert!(enabled.disabled_reason.is_none());
+
+        let hidden = affordance_eligibility(
+            &affordance,
+            &json!({"state": "settled", "requested": {"accept_allowed": true}}),
+        );
+        assert!(!hidden.visible && !hidden.enabled);
+
+        assert!(
+            validate_affordance_eligibility(&json!({
+                "enabled_when": {"field": "state", "not_equals": "settled"}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn missing_runtime_placeholder_value_refuses_the_invoke() {
         let affordance = json!({
             "invoke": {
@@ -2657,6 +2899,36 @@ mod tests {
             AffordanceInvoke::Rye {
                 tokens: vec!["thread".into(), "input".into()],
                 args: json!({ "line": "hello world" }),
+                notice: None,
+            }
+        );
+    }
+
+    #[test]
+    fn token_substitution_preserves_typed_command_payload() {
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:commands/dispatch",
+                "args": { "tokens": "{tokens}", "arguments": "{arguments}" }
+            }
+        });
+        let tokens = vec!["thread".to_string(), "list".to_string()];
+        let arguments = json!({"limit": 4});
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Tokens,
+            &Payload::Tokens {
+                tokens: &tokens,
+                arguments: &arguments,
+            },
+        )
+        .expect("token producer satisfies only the signed token template");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:commands/dispatch".into(),
+                args: json!({"tokens":["thread","list"],"arguments":{"limit":4}}),
                 notice: None,
             }
         );

@@ -14,6 +14,7 @@ lillux = { workspace = true }
 rand = { workspace = true }
 ryeos-api = { workspace = true }
 ryeos-app = { workspace = true }
+ryeos-client-base = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-runtime = { workspace = true }

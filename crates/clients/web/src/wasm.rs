@@ -193,12 +193,12 @@ pub fn ryeos_replay_seat_events(events_json: JsValue) -> Result<JsValue, JsValue
         let core = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        for event in events {
-            if let Some(seat_event) = seat_event_from_replay(&event) {
-                core.seat.append_replayed(seat_event);
-            }
-        }
-        ryeos_envelope(core, Vec::new())
+        let replayed = events
+            .iter()
+            .filter_map(seat_event_from_replay)
+            .collect::<Vec<_>>();
+        let effects = core.replay_seat_events(replayed);
+        ryeos_envelope(core, effects)
     })
 }
 

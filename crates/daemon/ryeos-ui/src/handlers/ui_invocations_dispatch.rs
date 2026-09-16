@@ -1,58 +1,36 @@
 //! `ui/invocations/dispatch` — browser-session invocation transport.
 //!
-//! This endpoint accepts already-lowered executable refs from an authenticated
-//! UI session. UI-local session changes belong to `ui/intents/apply`; this
-//! transport does not accept arbitrary event names or command tokens.
+//! The browser names only an entry in the exact binding compiled when its
+//! session was minted. Executable refs, command tokens and capability claims
+//! remain server-side signed data. Renderer-local navigation, focus and
+//! overlay changes reduce in the shared client core and never cross this
+//! execution transport.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_app::service_registry::{
-    UiDispatchMode, extract_required_caps, extract_ui_dispatch, extract_ui_read_only,
-};
+use ryeos_app::service_registry::UiDispatchMode;
 use ryeos_app::state::AppState;
+use ryeos_client_base::ui::{UiBindingCoordinate, UiBindingPayload, UiBindingRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use crate::browser_session::BrowserSession;
+use crate::compiled_binding::{
+    CompiledUiAffordance, CompiledUiProducer, CompiledUiResultEffect, CompiledUiSource,
+    CompiledUiTarget,
+};
 use crate::state::get_ui_state;
+use crate::{seat_auth::SeatCaller, thread_authorization::authorize_exact_thread_subjects};
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub target: InvocationTarget,
-    #[serde(default)]
-    pub ref_bindings: std::collections::BTreeMap<String, String>,
-    /// Source refreshes set this bit so the daemon, rather than the client,
-    /// proves the resolved descriptor is safe for the read-only lane.
-    #[serde(default)]
-    pub read_only: bool,
-    #[serde(default)]
-    pub params: Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum InvocationTarget {
-    Ref {
-        #[serde(rename = "ref")]
-        item_ref: String,
-    },
-}
-
-impl Request {
-    fn item_ref(&self) -> &str {
-        match &self.target {
-            InvocationTarget::Ref { item_ref } => item_ref,
-        }
-    }
+struct BoundInvocation {
+    target: CompiledUiTarget,
+    params: Value,
 }
 
 /// Extract session_id from the handler context's fingerprint.
@@ -60,34 +38,23 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
-fn invocation_context_for_session(
-    ctx: &HandlerContext,
-    session: &BrowserSession,
-) -> HandlerContext {
-    if let Some(user_principal_id) = session.user_principal_id.clone() {
-        HandlerContext::new(user_principal_id, session.granted_caps.clone(), true)
-    } else {
-        ctx.clone()
-    }
+fn invocation_context_for_session(session: &BrowserSession) -> HandlerContext {
+    HandlerContext::new(
+        session.compiled_binding.binding.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    )
 }
 
-struct PreparedInvocation {
-    project: ryeos_executor::execution::project_source::ResolvedProjectContext,
-    exec_ctx: ryeos_executor::executor::ExecutionContext,
-}
-
-#[derive(Debug, Clone)]
-struct UiInvocationPolicy {
-    read_only: bool,
-    required_caps: Vec<String>,
-    dispatch_mode: UiDispatchMode,
+pub(crate) struct PreparedInvocation {
+    pub(crate) project: ryeos_executor::execution::project_source::ResolvedProjectContext,
+    pub(crate) exec_ctx: ryeos_executor::executor::ExecutionContext,
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let req: Request = serde_json::from_value(input).map_err(|e| {
+    let req: UiBindingRequest = serde_json::from_value(input.clone()).map_err(|e| {
         HandlerError::BadRequest(format!("invalid ui.invocations.dispatch request: {e}"))
     })?;
-    let item_ref = req.item_ref().to_string();
 
     // Require browser session.
     let session_id = session_id_from_context(&ctx).ok_or_else(|| {
@@ -100,16 +67,67 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .browser_sessions
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    CanonicalRef::parse(&item_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
-    let project_path = session
-        .project_root
-        .as_deref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state.config.app_root.clone());
-    let invocation_ctx = invocation_context_for_session(&ctx, &session);
+    if req.binding_digest != session.compiled_binding.binding_digest {
+        return Err(binding_stale("the browser binding digest is not current"));
+    }
+    if session
+        .compiled_binding
+        .binding
+        .node_policy_generation_digest
+        != state.node_policy.generation_digest()
+    {
+        return Err(binding_stale(
+            "the node policy generation changed after session mint",
+        ));
+    }
+    enforce_request_bounds(&state, &req, &input)?;
+    authorize_route_context(&ctx, &state, &session, &req)?;
+    let project_path = match session.project_authority.as_deref() {
+        Some(authority) => {
+            authority.ensure_path_binding().map_err(|_| {
+                binding_stale("the selected project path no longer names its retained authority")
+            })?;
+            authority.descriptor_path()?
+        }
+        None => state.config.app_root.clone(),
+    };
+    let project_marker = session
+        .project_authority
+        .as_ref()
+        .map(|_| project_path.to_string_lossy().into_owned());
+    let bound = resolve_binding_request(&session, &req, project_marker.as_deref())?;
+    let item_ref = bound.target.identity.canonical_ref.clone();
+    let invocation_ctx = invocation_context_for_session(&session);
     let prepared = prepare_item_ref(&invocation_ctx, &state, &project_path)?;
+    let current = prepared
+        .exec_ctx
+        .engine
+        .with_checked_bundle_generation(|generation| {
+            if generation.request_engine_generation_identity()
+                != session
+                    .compiled_binding
+                    .binding
+                    .request_engine_generation_identity
+            {
+                return Err(binding_stale(
+                    "the engine generation changed after session mint",
+                ));
+            }
+            super::ui_launch_mint::revalidate_binding_authority(
+                generation,
+                session.compiled_binding.as_ref(),
+                session
+                    .project_authority
+                    .as_ref()
+                    .map(|_| project_path.as_path()),
+            )?;
+            super::ui_launch_mint::compile_target(generation, &prepared, &item_ref)
+        })?;
+    if current != bound.target {
+        return Err(binding_stale(
+            "a signed binding target changed after session mint",
+        ));
+    }
     let verified = ryeos_executor::executor::resolve_and_verify(
         &prepared.exec_ctx.engine,
         &prepared.exec_ctx.plan_ctx,
@@ -117,62 +135,40 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         None,
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let metadata = &verified.resolved.metadata.extra;
-    let policy = UiInvocationPolicy {
-        read_only: extract_ui_read_only(metadata)?,
-        required_caps: extract_required_caps(metadata),
-        dispatch_mode: extract_ui_dispatch(metadata)?,
-    };
-
-    let required_cap_refs = policy
-        .required_caps
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    if state
-        .authorizer
-        .authorize(
-            &invocation_ctx.scopes,
-            &AuthorizationPolicy::require_all(&required_cap_refs),
-        )
-        .is_err()
-    {
-        return Err(HandlerError::Forbidden(
-            "browser session lacks a capability required by the invocation".into(),
-        )
-        .into());
-    }
-
-    if session.read_only && !policy.read_only {
-        return Err(HandlerError::Forbidden(
-            "read-only session cannot dispatch protected invocations".into(),
-        )
-        .into());
-    }
-    if req.read_only && !policy.read_only {
-        return Err(HandlerError::Forbidden(
-            "source fetch target is not declared ui_read_only".into(),
-        )
-        .into());
-    }
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
-    let trusted_handler_context =
-        select_trusted_handler_context(policy.dispatch_mode, &ctx, &invocation_ctx);
+    let trusted_handler_context = select_trusted_handler_context(
+        dispatch_mode(bound.target.dispatch_class),
+        &ctx,
+        &invocation_ctx,
+    );
 
-    let result = if policy.read_only {
-        execute_read_only_service(&req, &state, prepared, verified, trusted_handler_context).await?
-    } else {
-        execute_prepared_item_ref(
-            &req,
-            &state,
-            prepared,
-            verified,
-            &invocation_ctx.scopes,
-            trusted_handler_context,
-        )
-        .await?
-    };
+    let mut result = crate::seat_auth::with_compiled_ui_session(session.clone(), async {
+        if bound.target.source_safe {
+            execute_read_only_service(
+                &item_ref,
+                bound.params,
+                &state,
+                prepared,
+                verified,
+                trusted_handler_context,
+            )
+            .await
+        } else {
+            execute_prepared_item_ref(
+                &item_ref,
+                bound.params,
+                &state,
+                prepared,
+                verified,
+                &invocation_ctx.scopes,
+                trusted_handler_context,
+            )
+            .await
+        }
+    })
+    .await?;
+    retain_declared_result_effect(&bound.target, &mut result)?;
 
     ui.session_bus.publish(
         &session_id,
@@ -192,6 +188,515 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     }))
 }
 
+fn retain_declared_result_effect(target: &CompiledUiTarget, result: &mut Value) -> Result<()> {
+    let Some(fields) = result.as_object_mut() else {
+        if target.result_effect.is_some() {
+            return Err(HandlerError::Internal(
+                "service declared a UI result effect but returned a non-object".into(),
+            )
+            .into());
+        }
+        return Ok(());
+    };
+    let authored = fields.remove("ui_transition");
+    match target.result_effect {
+        None => Ok(()),
+        Some(CompiledUiResultEffect::ReplaceSession) => {
+            let transition = authored
+                .and_then(|value| value.as_object().cloned())
+                .ok_or_else(|| {
+                    HandlerError::Internal(
+                        "replace-session service returned no typed UI transition".into(),
+                    )
+                })?;
+            if transition.get("kind").and_then(Value::as_str) != Some("replace_session")
+                || transition
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                || transition
+                    .get("launch_url")
+                    .and_then(Value::as_str)
+                    .is_none_or(|url| !is_local_launch_path(url))
+            {
+                return Err(HandlerError::Internal(
+                    "replace-session service returned an invalid typed UI transition".into(),
+                )
+                .into());
+            }
+            fields.insert("ui_transition".to_string(), Value::Object(transition));
+            Ok(())
+        }
+    }
+}
+
+fn is_local_launch_path(path: &str) -> bool {
+    let Some(token) = path.strip_prefix("/ui/launch/") else {
+        return false;
+    };
+    !token.is_empty()
+        && token.len() <= 128
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn authorize_route_context(
+    ctx: &HandlerContext,
+    state: &AppState,
+    session: &BrowserSession,
+    req: &UiBindingRequest,
+) -> Result<()> {
+    let (
+        UiBindingCoordinate::SurfaceRoute,
+        UiBindingPayload::Input {
+            route: Some(route), ..
+        },
+    ) = (&req.coordinate, &req.payload)
+    else {
+        return Ok(());
+    };
+    let Some(thread_id) = route.thread_id.as_deref() else {
+        return Ok(());
+    };
+    let subjects = authorize_exact_thread_subjects(
+        ctx,
+        state,
+        &SeatCaller::Session(session.clone()),
+        &[thread_id],
+    )?;
+    if route.chain_root_id.as_deref() != Some(subjects[0].chain_root_id.as_str()) {
+        return Err(HandlerError::NotFound.into());
+    }
+    Ok(())
+}
+
+fn dispatch_mode(class: crate::compiled_binding::CompiledUiDispatchClass) -> UiDispatchMode {
+    match class {
+        crate::compiled_binding::CompiledUiDispatchClass::Verified => UiDispatchMode::Verified,
+        crate::compiled_binding::CompiledUiDispatchClass::SessionLocal => {
+            UiDispatchMode::SessionLocal
+        }
+    }
+}
+
+fn binding_stale(message: &str) -> anyhow::Error {
+    HandlerError::Structured {
+        code: "ui_binding_stale".to_string(),
+        status: 409,
+        body: json!({"code":"ui_binding_stale","error":message,"retryable":false,"remediation":"mint a new UI session"}),
+    }.into()
+}
+
+fn enforce_request_bounds(state: &AppState, req: &UiBindingRequest, input: &Value) -> Result<()> {
+    let maximum = state
+        .node_config
+        .routes
+        .iter()
+        .find(|route| route.response.source.as_deref() == Some(DESCRIPTOR.service_ref))
+        .map(|route| route.limits.body_bytes_max)
+        .ok_or_else(|| HandlerError::Internal("UI binding dispatch route is absent".into()))?;
+    let actual = serde_json::to_vec(input)?.len() as u64;
+    if actual > maximum {
+        return Err(HandlerError::BadRequest(format!(
+            "UI binding request is {actual} bytes; maximum is {maximum}"
+        ))
+        .into());
+    }
+    req.validate_bounds(ryeos_client_base::ui::UiBindingRequestBounds {
+        max_request_bytes: maximum,
+        max_input_bytes: maximum,
+    })
+    .map_err(|error| HandlerError::BadRequest(error.to_string()).into())
+}
+
+fn resolve_binding_request(
+    session: &BrowserSession,
+    req: &UiBindingRequest,
+    project_root: Option<&str>,
+) -> Result<BoundInvocation> {
+    match (&req.coordinate, &req.payload) {
+        (UiBindingCoordinate::SurfaceRoute, UiBindingPayload::Input { value, route }) => {
+            let surface_route = session
+                .compiled_binding
+                .binding
+                .surface_route
+                .as_ref()
+                .ok_or_else(|| {
+                    HandlerError::Forbidden(
+                        "surface route is absent from the compiled binding".into(),
+                    )
+                })?;
+            let mut params = resolve_session_markers(&surface_route.parameters, project_root)?;
+            let params = params.as_object_mut().ok_or_else(|| {
+                HandlerError::Internal("compiled surface route parameters are not an object".into())
+            })?;
+            params.insert(
+                surface_route.bindings.input_parameter.clone(),
+                Value::String(value.clone()),
+            );
+            if let Some(route) = route {
+                validate_route_context(route)?;
+                if let Some(thread_id) = &route.thread_id {
+                    let parameter = surface_route
+                        .bindings
+                        .thread_target_parameter
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HandlerError::BadRequest(
+                                "the signed surface route does not accept a thread target".into(),
+                            )
+                        })?;
+                    params.insert(
+                        parameter.clone(),
+                        json!({"kind":"thread","thread_id":thread_id}),
+                    );
+                }
+                if route.interrupt {
+                    let parameter = surface_route
+                        .bindings
+                        .interrupt_intent_parameter
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HandlerError::BadRequest(
+                                "the signed surface route does not accept interrupt delivery"
+                                    .into(),
+                            )
+                        })?;
+                    params.insert(parameter.clone(), Value::String("interrupt".to_string()));
+                }
+            }
+            Ok(BoundInvocation {
+                target: surface_route.target.clone(),
+                params: Value::Object(params.clone()),
+            })
+        }
+        (
+            UiBindingCoordinate::Source { view_ref, channel },
+            UiBindingPayload::SourceParameters { params },
+        ) => {
+            let source = session
+                .compiled_binding
+                .binding
+                .sources
+                .get(view_ref)
+                .and_then(|entries| entries.get(channel))
+                .ok_or_else(|| {
+                    HandlerError::Forbidden(
+                        "source coordinate is absent from the compiled binding".into(),
+                    )
+                })?;
+            Ok(BoundInvocation {
+                target: source.target.clone(),
+                params: bind_source_parameters(source, params, project_root)?,
+            })
+        }
+        (
+            UiBindingCoordinate::Affordance {
+                view_ref,
+                affordance_id,
+            },
+            payload,
+        ) => {
+            let entry = session
+                .compiled_binding
+                .binding
+                .affordances
+                .get(view_ref)
+                .and_then(|entries| entries.get(affordance_id))
+                .ok_or_else(|| {
+                    HandlerError::Forbidden(
+                        "affordance coordinate is absent from the compiled binding".into(),
+                    )
+                })?;
+            let CompiledUiAffordance::Execution {
+                producer,
+                invoke,
+                target,
+            } = entry
+            else {
+                return Err(HandlerError::BadRequest(
+                    "UI-local affordances do not use execution dispatch".into(),
+                )
+                .into());
+            };
+            let (actual_producer, payload) = match payload {
+                UiBindingPayload::Selection { record } => (
+                    CompiledUiProducer::Selection,
+                    ryeos_client_base::ui::content::Payload::Selection(record),
+                ),
+                UiBindingPayload::Input { value, route } if route.is_none() => (
+                    CompiledUiProducer::Input,
+                    ryeos_client_base::ui::content::Payload::Input(value),
+                ),
+                UiBindingPayload::Tokens { tokens, arguments } => (
+                    CompiledUiProducer::Tokens,
+                    ryeos_client_base::ui::content::Payload::Tokens { tokens, arguments },
+                ),
+                UiBindingPayload::Input { .. } => {
+                    return Err(HandlerError::BadRequest(
+                        "affordance input cannot carry surface-route context".into(),
+                    )
+                    .into());
+                }
+                UiBindingPayload::SourceParameters { .. } => {
+                    return Err(HandlerError::BadRequest(
+                        "source payload cannot invoke an affordance".into(),
+                    )
+                    .into());
+                }
+            };
+            if *producer != actual_producer {
+                return Err(HandlerError::BadRequest(
+                    "payload producer does not match the signed affordance".into(),
+                )
+                .into());
+            }
+            let authored = json!({"invoke": invoke});
+            let resolved = ryeos_client_base::ui::content::resolve_affordance_invoke(
+                &authored,
+                match actual_producer {
+                    CompiledUiProducer::Selection => {
+                        ryeos_client_base::ui::content::Producer::Selection
+                    }
+                    CompiledUiProducer::Input => ryeos_client_base::ui::content::Producer::Input,
+                    CompiledUiProducer::Tokens => ryeos_client_base::ui::content::Producer::Tokens,
+                },
+                &payload,
+            )
+            .ok_or_else(|| {
+                HandlerError::BadRequest(
+                    "affordance payload does not satisfy the signed template".into(),
+                )
+            })?;
+            let params = match resolved {
+                ryeos_client_base::ui::content::AffordanceInvoke::Service {
+                    item_ref,
+                    args,
+                    ..
+                } => {
+                    if item_ref != target.identity.canonical_ref {
+                        return Err(binding_stale(
+                            "resolved affordance target differs from its compiled target",
+                        ));
+                    }
+                    args
+                }
+                ryeos_client_base::ui::content::AffordanceInvoke::Rye { tokens, args, .. } => {
+                    json!({"project_path": project_root, "tokens": tokens, "arguments": args})
+                }
+                ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. } => {
+                    return Err(HandlerError::BadRequest(
+                        "UI-local affordance crossed execution dispatch".into(),
+                    )
+                    .into());
+                }
+            };
+            let params = resolve_session_markers(&params, project_root)?;
+            Ok(BoundInvocation {
+                target: target.clone(),
+                params,
+            })
+        }
+        _ => Err(HandlerError::BadRequest(
+            "binding coordinate and payload kind do not match".into(),
+        )
+        .into()),
+    }
+}
+
+fn validate_route_context(route: &ryeos_client_base::ui::UiBindingRouteContext) -> Result<()> {
+    for (name, value) in [
+        ("thread_id", route.thread_id.as_deref()),
+        ("chain_root_id", route.chain_root_id.as_deref()),
+    ] {
+        if value.is_some_and(|value| {
+            value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+        }) {
+            return Err(HandlerError::BadRequest(format!(
+                "surface route `{name}` is not a bounded identifier"
+            ))
+            .into());
+        }
+    }
+    if route.thread_id.is_some() != route.chain_root_id.is_some() {
+        return Err(HandlerError::BadRequest(
+            "surface route thread_id and chain_root_id must be supplied together".into(),
+        )
+        .into());
+    }
+    if route.interrupt && route.thread_id.is_none() {
+        return Err(HandlerError::BadRequest(
+            "surface route interrupt requires an exact thread_id".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn bind_source_parameters(
+    source: &CompiledUiSource,
+    supplied: &Value,
+    project_root: Option<&str>,
+) -> Result<Value> {
+    let supplied = supplied
+        .as_object()
+        .ok_or_else(|| HandlerError::BadRequest("source parameters must be an object".into()))?;
+    let template = source.parameters.as_object().ok_or_else(|| {
+        HandlerError::Internal("compiled source parameters are not an object".into())
+    })?;
+    if supplied
+        .keys()
+        .any(|key| !template.contains_key(key) && !source.dynamic_parameters.contains(key))
+    {
+        return Err(HandlerError::BadRequest(
+            "source parameters contain a key absent from the signed binding".into(),
+        )
+        .into());
+    }
+    let mut bound = serde_json::Map::new();
+    for (key, authored) in template {
+        let supplied = supplied.get(key);
+        let value = if source.dynamic_parameters.contains(key) {
+            supplied
+                .map(|value| bind_dynamic_source_parameter(key, value))
+                .transpose()?
+                .unwrap_or_else(|| authored.clone())
+        } else {
+            bind_authored_parameter(authored, supplied, key)?
+        };
+        bound.insert(key.clone(), value);
+    }
+    for key in &source.dynamic_parameters {
+        if template.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = supplied.get(key) {
+            bound.insert(key.clone(), bind_dynamic_source_parameter(key, value)?);
+        }
+    }
+    let value = Value::Object(bound);
+    resolve_session_markers(&value, project_root)
+}
+
+fn bind_dynamic_source_parameter(key: &str, value: &Value) -> Result<Value> {
+    if !value.is_string() {
+        return Err(HandlerError::BadRequest(format!(
+            "dynamic source parameter `{key}` must be a string"
+        ))
+        .into());
+    }
+    Ok(value.clone())
+}
+
+fn bind_authored_parameter(
+    authored: &Value,
+    supplied: Option<&Value>,
+    path: &str,
+) -> Result<Value> {
+    match authored {
+        Value::String(marker) if marker.starts_with("@facet:") => {
+            supplied.cloned().ok_or_else(|| {
+                HandlerError::BadRequest(format!(
+                    "source parameter `{path}` requires its signed facet value"
+                ))
+                .into()
+            })
+        }
+        Value::String(marker) if marker.starts_with("@session:") => {
+            Ok(Value::String(marker.clone()))
+        }
+        Value::Object(authored_fields) => {
+            let supplied_fields = supplied.and_then(Value::as_object).ok_or_else(|| {
+                HandlerError::BadRequest(format!(
+                    "source parameter `{path}` must preserve its signed object shape"
+                ))
+            })?;
+            if supplied_fields
+                .keys()
+                .any(|key| !authored_fields.contains_key(key))
+            {
+                return Err(HandlerError::BadRequest(format!(
+                    "source parameter `{path}` contains an unsigned field"
+                ))
+                .into());
+            }
+            Ok(Value::Object(
+                authored_fields
+                    .iter()
+                    .map(|(key, value)| {
+                        let child = format!("{path}.{key}");
+                        Ok((
+                            key.clone(),
+                            bind_authored_parameter(value, supplied_fields.get(key), &child)?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?,
+            ))
+        }
+        Value::Array(authored_values) => {
+            let supplied_values = supplied.and_then(Value::as_array).ok_or_else(|| {
+                HandlerError::BadRequest(format!(
+                    "source parameter `{path}` must preserve its signed array shape"
+                ))
+            })?;
+            if authored_values.len() != supplied_values.len() {
+                return Err(HandlerError::BadRequest(format!(
+                    "source parameter `{path}` changed its signed array length"
+                ))
+                .into());
+            }
+            Ok(Value::Array(
+                authored_values
+                    .iter()
+                    .zip(supplied_values)
+                    .enumerate()
+                    .map(|(index, (value, supplied))| {
+                        bind_authored_parameter(value, Some(supplied), &format!("{path}[{index}]"))
+                    })
+                    .collect::<Result<_>>()?,
+            ))
+        }
+        _ if supplied.is_none() || supplied == Some(authored) => Ok(authored.clone()),
+        _ => Err(HandlerError::BadRequest(format!(
+            "source parameter `{path}` attempts to replace signed data"
+        ))
+        .into()),
+    }
+}
+
+fn resolve_session_markers(value: &Value, project_root: Option<&str>) -> Result<Value> {
+    match value {
+        Value::String(marker) if marker == "@session:project_root" => {
+            project_root.map(Value::from).ok_or_else(|| {
+                HandlerError::BadRequest(
+                    "this signed binding entry requires a project-scoped UI session".into(),
+                )
+                .into()
+            })
+        }
+        Value::String(marker) if marker.starts_with("@session:") => Err(HandlerError::Internal(
+            format!("unsupported compiled session marker `{marker}`"),
+        )
+        .into()),
+        Value::Array(values) => Ok(Value::Array(
+            values
+                .iter()
+                .map(|value| resolve_session_markers(value, project_root))
+                .collect::<Result<_>>()?,
+        )),
+        Value::Object(values) => Ok(Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok((key.clone(), resolve_session_markers(value, project_root)?))
+                })
+                .collect::<Result<_>>()?,
+        )),
+        value => Ok(value.clone()),
+    }
+}
+
 fn select_trusted_handler_context(
     dispatch_mode: UiDispatchMode,
     browser_context: &HandlerContext,
@@ -208,7 +713,7 @@ fn select_trusted_handler_context(
     }
 }
 
-fn prepare_item_ref(
+pub(crate) fn prepare_item_ref(
     ctx: &HandlerContext,
     state: &AppState,
     project_path: &std::path::Path,
@@ -216,7 +721,7 @@ fn prepare_item_ref(
     // Resolution is not project execution. The verified descriptor decides
     // whether this request belongs to the daemon-local read lane or the
     // ordinary live-project execution lane, so requiring write authority here
-    // makes every `ui_read_only` service unsatisfiable by construction.
+    // makes every source-safe service unsatisfiable by construction.
     let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
     let checkout_id = format!(
         "ui-{}-{:08x}",
@@ -266,13 +771,13 @@ fn prepare_item_ref(
 }
 
 async fn execute_read_only_service(
-    req: &Request,
+    item_ref: &str,
+    params: Value,
     state: &AppState,
     prepared: PreparedInvocation,
     verified: ryeos_engine::contracts::VerifiedItem,
     local_handler_context: HandlerContext,
 ) -> Result<Value> {
-    let item_ref = req.item_ref();
     let schema_is_daemon_service = prepared
         .exec_ctx
         .engine
@@ -291,13 +796,7 @@ async fn execute_read_only_service(
         });
     if !schema_is_daemon_service {
         return Err(HandlerError::Forbidden(
-            "ui_read_only dispatch is restricted to verified daemon services".into(),
-        )
-        .into());
-    }
-    if !req.ref_bindings.is_empty() {
-        return Err(HandlerError::BadRequest(
-            "ui_read_only service dispatch does not accept ref bindings".into(),
+            "source-safe dispatch is restricted to verified daemon services".into(),
         )
         .into());
     }
@@ -325,7 +824,7 @@ async fn execute_read_only_service(
     let result = ryeos_executor::executor::execute_service_verified(
         verified,
         item_ref,
-        req.params.clone(),
+        params,
         ryeos_executor::executor::ExecutionMode::Live,
         &prepared.exec_ctx,
         state,
@@ -357,14 +856,14 @@ async fn execute_read_only_service(
 }
 
 async fn execute_prepared_item_ref(
-    req: &Request,
+    item_ref: &str,
+    params: Value,
     state: &AppState,
     prepared: PreparedInvocation,
     verified: ryeos_engine::contracts::VerifiedItem,
     authority_scopes: &[String],
     local_handler_context: HandlerContext,
 ) -> Result<Value> {
-    let item_ref = req.item_ref();
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
@@ -385,8 +884,8 @@ async fn execute_prepared_item_ref(
         launch_mode: "wait",
         target_site_id: None,
         validate_only: false,
-        params: req.params.clone(),
-        ref_bindings: req.ref_bindings.clone(),
+        params,
+        ref_bindings: Default::default(),
         product_selections: Vec::new(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
         project_path: &prepared.project.effective_path,
@@ -445,76 +944,171 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
+    fn target(result_effect: Option<CompiledUiResultEffect>) -> CompiledUiTarget {
+        use ryeos_api::surface_views::EffectiveUiItemIdentity;
+        use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
+
+        CompiledUiTarget {
+            identity: EffectiveUiItemIdentity {
+                canonical_ref: "service:test/result".to_string(),
+                effective_definition_digest: EffectiveDefinitionDigest::parse("44".repeat(32))
+                    .expect("fixture digest"),
+                effective_trust_class: TrustClass::TrustedBundle,
+            },
+            required_caps: Vec::new(),
+            source_safe: false,
+            dispatch_class: crate::compiled_binding::CompiledUiDispatchClass::Verified,
+            result_effect,
+            parameter_schema: BTreeMap::new(),
+        }
+    }
+
     fn session(user_principal_id: Option<String>) -> BrowserSession {
+        use ryeos_api::surface_views::EffectiveUiItemIdentity;
+        use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
+
         let now = Instant::now();
         BrowserSession {
             session_id: "session-1".to_string(),
             created_at: now,
             expires_at: now + Duration::from_secs(60),
+            compiled_binding: Arc::new(crate::compiled_binding::SessionCompiledUiBinding {
+                binding_digest: "11".repeat(32),
+                posture: crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
+                binding: crate::compiled_binding::CompiledUiBinding {
+                    contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
+                    principal_id: "fp:test".to_string(),
+                    project_root: None,
+                    request_engine_generation_identity: "generation:test".to_string(),
+                    node_policy_generation_digest: "22".repeat(32),
+                    surface: EffectiveUiItemIdentity {
+                        canonical_ref: "surface:ryeos/ui/base-observe".to_string(),
+                        effective_definition_digest: EffectiveDefinitionDigest::parse(
+                            "33".repeat(32),
+                        )
+                        .expect("fixture digest"),
+                        effective_trust_class: TrustClass::TrustedBundle,
+                    },
+                    views: BTreeMap::new(),
+                    sources: BTreeMap::new(),
+                    affordances: BTreeMap::new(),
+                    surface_route: None,
+                    attenuated: Vec::new(),
+                },
+            }),
+            effective_surface: json!({"kind":"Surface"}),
             granted_caps: vec!["ui.read".to_string()],
             project_root: None,
-            surface_ref: "surface:ryeos/ui/base".to_string(),
-            read_only: false,
+            surface_ref: "surface:ryeos/ui/base-observe".to_string(),
             user_principal_id,
+            project_authority: None,
         }
     }
 
     #[test]
-    fn invocation_context_uses_durable_session_principal_when_present() {
-        let browser_ctx = HandlerContext::new("session:session-1".to_string(), vec![], false);
-        let invocation_ctx = invocation_context_for_session(
-            &browser_ctx,
-            &session(Some(
-                "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            )),
-        );
+    fn invocation_context_uses_compiled_binding_principal() {
+        let invocation_ctx = invocation_context_for_session(&session(Some(
+            "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )));
 
-        assert_eq!(
-            invocation_ctx.fingerprint,
-            "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
+        assert_eq!(invocation_ctx.fingerprint, "fp:test");
         assert!(invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 
     #[test]
-    fn invocation_context_falls_back_to_browser_context_without_principal() {
-        let browser_ctx = HandlerContext::new(
-            "session:session-1".to_string(),
-            vec!["ui.read".to_string()],
-            false,
-        );
-        let invocation_ctx = invocation_context_for_session(&browser_ctx, &session(None));
+    fn invocation_context_never_uses_cookie_transport_as_authority() {
+        let invocation_ctx = invocation_context_for_session(&session(None));
 
-        assert_eq!(invocation_ctx.fingerprint, "session:session-1");
-        assert!(!invocation_ctx.verified);
+        assert_eq!(invocation_ctx.fingerprint, "fp:test");
+        assert!(invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 
     #[test]
-    fn source_fetch_request_declares_read_only_lane() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:threads/list" },
-            "read_only": true,
-            "params": { "limit": 20 }
-        }))
-        .unwrap();
+    fn undeclared_service_result_cannot_forge_a_ui_transition() {
+        let mut result = json!({
+            "value": 7,
+            "ui_transition": {
+                "kind": "replace_session",
+                "session_id": "forged",
+                "launch_url": "/ui/launch/forged"
+            }
+        });
 
-        assert!(request.read_only);
-        assert!(request.ref_bindings.is_empty());
+        retain_declared_result_effect(&target(None), &mut result).expect("sanitize result");
+
+        assert_eq!(result, json!({"value": 7}));
     }
 
     #[test]
-    fn ordinary_invocation_does_not_claim_read_only_lane() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:commands/submit" }
-        }))
-        .unwrap();
+    fn declared_replace_session_effect_is_typed_and_retained() {
+        let transition = json!({
+            "kind": "replace_session",
+            "session_id": "successor",
+            "launch_url": "/ui/launch/one-shot-token"
+        });
+        let mut result = json!({"ui_transition": transition.clone()});
 
-        assert!(!request.read_only);
-        assert!(request.ref_bindings.is_empty());
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::ReplaceSession)),
+            &mut result,
+        )
+        .expect("retain signed result effect");
+
+        assert_eq!(result["ui_transition"], transition);
+    }
+
+    #[test]
+    fn declared_replace_session_effect_rejects_external_urls() {
+        let mut result = json!({
+            "ui_transition": {
+                "kind": "replace_session",
+                "session_id": "successor",
+                "launch_url": "https://attacker.invalid/ui/launch/token"
+            }
+        });
+
+        let error = retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::ReplaceSession)),
+            &mut result,
+        )
+        .expect_err("external launch URL must fail closed");
+
+        assert!(error.to_string().contains("invalid typed UI transition"));
+    }
+
+    #[test]
+    fn declared_replace_session_effect_rejects_path_traversal() {
+        let mut result = json!({
+            "ui_transition": {
+                "kind": "replace_session",
+                "session_id": "successor",
+                "launch_url": "/ui/launch/../another-route"
+            }
+        });
+
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ReplaceSession)),
+                &mut result,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn binding_request_cannot_decode_an_arbitrary_target() {
+        let request = serde_json::from_value::<UiBindingRequest>(serde_json::json!({
+            "binding_digest": "11",
+            "coordinate": { "kind": "source", "view_ref": "view:x", "channel": "default" },
+            "payload": { "kind": "source_parameters", "params": {} },
+            "target": { "kind": "ref", "ref": "service:commands/submit" }
+        }));
+        assert!(request.is_err());
     }
 
     #[test]

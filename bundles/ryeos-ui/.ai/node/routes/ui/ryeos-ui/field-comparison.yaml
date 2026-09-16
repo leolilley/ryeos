@@ -1,9 +1,9 @@
-# ryeos:signed:2026-08-10T09:19:02Z:7fac7cd2d056269958896272094e6ac348b8c83e43aa0b9f1f5de82bde810130:oPjpDCA7982Ycs/urXSH9P/SbIVSrZcManfClFXTLlNiEEKvNJ5GZyAGmslMNzjzF085UaGVUcsJAzOp2coSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:f11aee809bf4ebe8b5dad50fa1d4c6b6d175abf9509c3eb2b4a0b970a5dede07:OPH5NKPrUy6M5aMyBSTkRpKNQ86akSM9YvKj2fs/Ss3+u+IxBDGMIJPYlQLN6v4vJf8d2fREXlCdq8JRTvEPDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/ryeos-ui/field/comparison
 path: /ui/api/ryeos-ui/field/comparison
 methods:
   - GET
-auth: browser_session
+auth: ryeos_signed
 limits:
   body_bytes_max: 0
   timeout_ms: 10000

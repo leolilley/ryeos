@@ -1,7 +1,11 @@
-# ryeos:signed:2026-07-15T02:11:39Z:45c958cdf473d2b35d78bf566542a368eb0924e9a96c901e42d78bb288260f39:ZB4FkPLpd/39idZepSVDGbqTJAOWpOeVliprbkkphQw/XUvK0TNoYaCEW0I5OQMehvi3AvfzYYdx8WEkwJJgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:19c9867a3f923d6112042e2afac1f62436a56a06dc6af837c4144183c1db21ad:gtKrfGwikG4Dia8EexhKFl4VbVsqMloMtVW7ZSK+o9OTgGN/TnrCvG7HkznSJdIrlf2d5iS2P8KemNfD3dlaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: ["ryeos.execute.service.*"]
 
 tiling:
   mode: master_stack
@@ -45,14 +49,19 @@ library:
 
 input:
   route:
+    requires_project: true
     invoke:
       type: service
       ref: service:threads/input
+    bindings:
+      input_parameter: input
+      thread_target_parameter: target
+      interrupt_intent_parameter: intent
     params:
       target:
         kind: fresh
         item_ref: directive:ryeos/ops/base
-        project_path: ""
+        project_path: "@session:project_root"
         ref_bindings:
           model: directive:ryeos/ops/base
 

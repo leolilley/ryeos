@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-11T02:28:23Z:3687d79f2dc67ff99e83423b1a5aace2bf42707a428d260e270c181a04fc2f12:fFlr6RsaNUXtv4vQ2wI731/tFvEd8UHHuBGzzBU8XyoRPgxyYu4gYPK6qVjIuD3PHYh52EIiCvayu70HCYk8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T00:05:35Z:1bfd684d0bfaf8659d9e2085b2ec6fc6fc899429fe3fa42863682c192753470f:RSKqbqmzjEf9gPzRN7R88VFFxSY8V4zPrjwZ0iHS7B5Pl/G38Jw9X2C3SGepf/fUohcAE3ubShw47kyIJYXxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -35,6 +35,9 @@ composer_config:
     - name: input
       strategy: dict_merge_root_last
       expect_value_type: mapping
+    - name: sources
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
     - name: ambient
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -53,6 +56,10 @@ composer_config:
     # (legacy flat form) and the keyed merge silently drops keyless items.
     - name: library
       strategy: replace_root_last
+      expect_value_type: array
+    - name: navigation
+      strategy: keyed_seq_merge_root_last
+      key: id
       expect_value_type: array
     - name: backdrop
       strategy: replace_root_last
@@ -83,6 +90,61 @@ composed_value_contract:
     input:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          route:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                invoke:
+                  type: single
+                  prim: mapping
+                  contract:
+                    root_type: mapping
+                    required:
+                      type: { type: single, prim: string }
+                      ref: { type: single, prim: string }
+                    optional: {}
+                bindings:
+                  type: single
+                  prim: mapping
+                  contract:
+                    root_type: mapping
+                    required:
+                      input_parameter: { type: single, prim: string }
+                    optional:
+                      thread_target_parameter: { type: single, prim: string }
+                      interrupt_intent_parameter: { type: single, prim: string }
+              optional:
+                params: { type: single, prim: mapping }
+                requires_project: { type: single, prim: boolean }
+        optional: {}
+    sources:
+      type: mapping
+      values:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            ref: { type: single, prim: string }
+          optional:
+            role: { type: single, prim: string }
+            params: { type: single, prim: mapping }
+            collection: { type: single, prim: string }
+            refresh: { type: single, prim: mapping }
+            dynamic_parameters:
+              type: single
+              prim: sequence
+              elements: { type: single, prim: string }
+            activation:
+              type: single
+              prim: string
+              enum: [initial, on_demand]
+            requires_project: { type: single, prim: boolean }
     ambient:
       type: single
       prim: mapping
@@ -100,13 +162,46 @@ composed_value_contract:
             label: { type: single, prim: string }
             category: { type: single, prim: string }
             icon: { type: single, prim: string }
-            caps: { type: single, prim: sequence, elements: { type: single, prim: string } }
+            producer:
+              type: single
+              prim: string
+              enum: [selection, input, tokens]
+            requires_project: { type: single, prim: boolean }
+            invoke:
+              type: single
+              prim: mapping
+              contract:
+                root_type: mapping
+                required:
+                  plane:
+                    type: single
+                    prim: string
+                    enum: [ui, rye]
+                optional:
+                  ref: { type: single, prim: string }
+                  args: { type: single, prim: mapping }
+                  tokens:
+                    type: single
+                    prim: sequence
+                    elements: { type: single, prim: string }
+                  facet: { type: single, prim: string }
+                  value: { type: single, prim: any }
+                  merge: { type: single, prim: mapping }
+                  open_view: { type: single, prim: string }
+                  drill: { type: single, prim: boolean }
+                  notice: { type: single, prim: string }
     instruments:
       type: single
       prim: sequence
     capabilities:
       type: single
       prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          sources: { type: single, prim: sequence, elements: { type: single, prim: string } }
+          affordances: { type: single, prim: sequence, elements: { type: single, prim: string } }
+        optional: {}
     # Grouped `{ group, views }` entries are canonical; bare `view:` ref
     # strings remain accepted (the launcher shelves them under their
     # path-derived group).
@@ -116,6 +211,19 @@ composed_value_contract:
       elements:
         type: union
         prims: [string, mapping]
+    navigation:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            id: { type: single, prim: string }
+            label: { type: single, prim: string }
+            view: { type: single, prim: string }
+          optional: {}
     backdrop:
       type: single
       prim: string

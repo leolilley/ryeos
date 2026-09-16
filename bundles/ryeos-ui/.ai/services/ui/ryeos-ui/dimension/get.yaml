@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-15T07:49:29Z:1d509f4ce797a4eff5c064e33b0815cd2ea439ef0378d8eaf45d879519990459:vY63KqtZZr26ehAF7UcaHbACH0Dfi8GOKNC5WhY0yvdYPPz1hyYGISW3qGejCqwzyYhSnyZKSFzOlniLlwm6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:24de5e3f6f5602558bcd2f632e1283630995f3247cea8a834cf499873b7268f6:9W0PT+T+LHEpKllKO2A9WcrsUQSIghmY4TnL+u0bMvQOBNg+e1HRrk9yi8IigYRsgrpS3NFjqbp9KOaE7XAADw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/dimension/get
 version: "1.0.0"
 description: Returns the RyeOS UI Dimension projection — node identity, health, spaces, bundles, remotes, threads, schedules, and GC state.
 endpoint: ui.ryeos.dimension.get
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

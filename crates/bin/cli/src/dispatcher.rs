@@ -3424,6 +3424,7 @@ mod tests {
             r#"remote: qualification
 workflow_ref: config:development/ryeos/remote-worker
 credential_profile_id: personal
+source_snapshot_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 target_product_selections: []
 task:
   goal: fix the focused test
@@ -3452,6 +3453,10 @@ task:
             "config:development/ryeos/remote-worker"
         );
         assert_eq!(resolved.parameters["credential_profile_id"], "personal");
+        assert_eq!(
+            resolved.parameters["source_snapshot_hash"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(
             resolved.parameters["target_product_selections"],
             serde_json::json!([])

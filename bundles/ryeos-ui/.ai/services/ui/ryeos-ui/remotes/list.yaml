@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:1ad762821fe9c2e4e2fc69be58060a3a823ddbf6d8e5fa197b89027477a670a8:XonsL1hVTi9Ew8h6DWQ2etGvmStlrHk4AQcc9KbDoRid0MelbUBK/RluJrtDeYcA2urB+fRtnzhEY/E3xjw0DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:9867873944f5a0648ccf369be699037454cf0584cfdb1a424ef6111125485612:GWEMofk0kqz8w2OcqC59CoyjhrZcFtnQ1eQfBIIkOSdIpE5oO2zE3nR4btYeR18BeHxgkMDHqXTrTAi1xGtfDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/remotes/list
 version: "1.0.0"
 description: List configured remotes for the active RyeOS UI project session.
 endpoint: ui.ryeos.remotes.list
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

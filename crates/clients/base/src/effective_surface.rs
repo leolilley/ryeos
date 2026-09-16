@@ -160,6 +160,31 @@ mod tests {
     }
 
     #[test]
+    fn retains_composed_capability_pattern_ceilings() {
+        let mut resp = minimal_response();
+        resp["composed_value"]["capabilities"] = serde_json::json!({
+            "sources": ["rye.get.*"],
+            "affordances": []
+        });
+
+        let es = EffectiveSurface::from_effective_item(resp).unwrap();
+        let capabilities = es.spec.capabilities.expect("capability ceiling");
+        assert_eq!(capabilities.sources, ["rye.get.*"]);
+        assert!(capabilities.affordances.is_empty());
+    }
+
+    #[test]
+    fn rejects_pre_composer_boolean_capability_shape() {
+        let mut resp = minimal_response();
+        resp["composed_value"]["capabilities"] = serde_json::json!({
+            "allow_execute": false
+        });
+
+        let error = EffectiveSurface::from_effective_item(resp).unwrap_err();
+        assert!(matches!(error, EffectiveSurfaceError::BadSpec(_)));
+    }
+
+    #[test]
     fn rejects_wrong_kind() {
         let mut resp = minimal_response();
         resp["kind"] = serde_json::json!("client");

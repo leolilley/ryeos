@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:56Z:fa334e60b7801664562dddbb3362230c16c8b59664319c175b0258bd8e42d8bd:FZipAzhXrdLdQ/rVemOxNPhJFEZqmVohiExqiIPN1fH6eXLlZc0xQlIJWnI2VDpP7vxyDuNzWj1j6jGbIuXAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:04eb5574d1dd551fcd970763863b263524ee0bdda1e3ff4bb20c9a7dec265de5:Bs40Cvhr/+vRoPgw5UZSfHtgOVRL1AYuAaxaLYriJqCGNVHeXYwJUy34a+gC3b4GqAffVUGvCIMSePQpDAenBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: input
 version: "1.0.0"
 description: The ryeos-ui chat box - an input buffer that dispatches through the engine route-fold
@@ -18,9 +18,37 @@ input:
     collection: threads
     reference: thread_id
     label: item_ref
+  command_submit: command_dispatch
+  thread_control: thread_control
   submit: route
   # Semantic capability only (no physical keys): the central keymap maps
   # Tab/Shift+Tab to cycling the route target over [new conversation] +
   # open chains. Tab still completes slash-commands when one can be accepted.
   target:
     cycle: route_chains
+
+# Shell-wide executable behavior remains ordinary signed view content. The
+# clients submit only these binding coordinates and their typed producer data;
+# they never select either service target or grant themselves its capability.
+affordances:
+  - id: command_dispatch
+    label: Run command
+    producer: tokens
+    requires_project: true
+    invoke:
+      plane: rye
+      ref: service:commands/dispatch
+      args:
+        tokens: "{tokens}"
+        arguments: "{arguments}"
+        ref_bindings: {}
+        project_path: "@session:project_root"
+  - id: thread_control
+    label: Control thread
+    producer: selection
+    invoke:
+      plane: rye
+      ref: service:commands/submit
+      args:
+        thread_id: "{record.thread_id}"
+        command_type: "{record.command_type}"

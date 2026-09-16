@@ -601,16 +601,46 @@ pub(super) fn resolve_current_bundle_qualification_policy(
 /// Retained root selections are application-authenticated before this helper;
 /// this owner rechecks their common current D0, current binding heads and full
 /// manifest closures before deriving D1 and the realized D2 identity.
-pub(super) fn resolve_current_bundle_verifier_identity(
+pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
     context: &HandlerContext,
     verifier_ref: &str,
     verifier_parameters: &serde_json::Value,
-    verifier_root_selections: Option<&ResolvedExternalProductSelections>,
-    logical_project_root: Option<&std::path::Path>,
+    evidence: &ProductQualificationEvidence,
 ) -> anyhow::Result<CurrentBundleVerifierIdentity> {
+    evidence.validate()?;
+    let cas = authority.cas_store()?;
+    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(
+        ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &cas,
+            &evidence.verifier.admitted_launch_capsule_hash,
+            limits.max_object_bytes,
+        )?,
+    )?;
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    let admitted_resolution = sealed.admitted_effective_resolution()?;
+    if sealed.item_ref() != evidence.verifier.canonical_ref
+        || sealed.effective_definition_digest().as_str()
+            != evidence.verifier.effective_definition_digest
+        || sealed.admitted_parameters_digest()? != evidence.verifier.admitted_parameters_digest
+        || capsule.launch_authority_digest()? != evidence.verifier.launch_authority_digest
+        || capsule.artifact_identity != evidence.verifier.artifact_identity
+    {
+        bail!("qualification evidence contradicts its admitted verifier capsule");
+    }
+    let (_, retained_selections) = retained_verifier_root_selections(
+        sealed.product_selections(),
+        &admitted_resolution,
+        &evidence.policy_source.policy.subject_declaration_id,
+    )?;
+    if retained_selections != evidence.verifier_root_selections {
+        bail!("qualification evidence changed its admitted verifier selections");
+    }
     resolve_current_bundle_verifier_identity_against_admitted(
         state,
         authority,
@@ -619,11 +649,11 @@ pub(super) fn resolve_current_bundle_verifier_identity(
         verifier_ref,
         verifier_parameters,
         CurrentVerifierContext {
-            content: CurrentVerifierContent::Root(verifier_root_selections),
-            logical_project_root,
-            binding_subject_authority: None,
+            content: CurrentVerifierContent::Root(retained_selections.as_ref()),
+            logical_project_root: evidence.verifier.admitted_project_root.as_deref(),
+            binding_subject_authority: Some(sealed.resolution_subject_authority()),
         },
-        None,
+        Some(&admitted_resolution),
     )
 }
 

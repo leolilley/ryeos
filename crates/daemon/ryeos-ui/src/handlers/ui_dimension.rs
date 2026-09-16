@@ -47,9 +47,8 @@ pub struct SessionInfo {
     pub surface_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_principal_id: Option<String>,
-    pub read_only: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub granted_caps: Vec<String>,
+    pub binding_digest: String,
+    pub posture: crate::compiled_binding::EffectiveUiPosture,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,17 +151,27 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
 }
 
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx).ok_or_else(|| {
-        HandlerError::Forbidden("browser session required for ryeos-ui dimension".into())
-    })?;
+    let session = crate::seat_auth::compiled_ui_session()
+        .or_else(|| {
+            session_id_from_context(&ctx).and_then(|session_id| {
+                get_ui_state(&state)
+                    .expect("UiState not set")
+                    .browser_sessions
+                    .get_session(&session_id)
+            })
+        })
+        .ok_or_else(|| {
+            HandlerError::Forbidden("compiled UI session required for ryeos-ui dimension".into())
+        })?;
 
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let project_path = session.project_root.clone().map(PathBuf::from);
+    let project_path = session
+        .project_authority
+        .as_ref()
+        .map(|authority| {
+            authority.ensure_path_binding()?;
+            authority.descriptor_path()
+        })
+        .transpose()?;
 
     let projection = build_dimension_projection(&state, &session, project_path.as_ref())?;
 
@@ -263,10 +272,9 @@ fn build_dimension_projection(
         .collect();
 
     // ── Project ──
-    let project = session
-        .project_root
-        .as_ref()
-        .map(|p| ProjectInfo { path: p.clone() });
+    let project = project_path.map(|path| ProjectInfo {
+        path: path.to_string_lossy().into_owned(),
+    });
 
     // ── Remotes (configured only, no probes) ──
     let remotes = load_remotes(state, project_path);
@@ -287,8 +295,8 @@ fn build_dimension_projection(
             session_id: session.session_id.clone(),
             surface_ref: session.surface_ref.clone(),
             user_principal_id: session.user_principal_id.clone(),
-            read_only: session.read_only,
-            granted_caps: session.granted_caps.clone(),
+            binding_digest: session.compiled_binding.binding_digest.clone(),
+            posture: session.compiled_binding.posture,
         },
         local_node: LocalNode {
             identity,

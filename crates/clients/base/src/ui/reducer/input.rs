@@ -77,8 +77,7 @@ impl RyeOsCore {
 
         if let Some(affordance_id) = input.submit_affordance() {
             // Mode 2: Enter fires a content affordance with `{value}`.
-            if self.is_read_only() {
-                self.notice("This session is read-only.", RyeOsTone::Warn);
+            if self.refuse_blocked_mutation() {
                 return Vec::new();
             }
             return self.invoke_input_affordance(&view_ref, affordance_id, &text);
@@ -352,8 +351,7 @@ impl RyeOsCore {
     /// unchanged; it is now reached through the `input` grammar instead of
     /// the deleted Input dock special-case.
     pub(crate) fn submit_route(&mut self, text: &str, interrupt: bool) -> Vec<RyeOsEffect> {
-        if self.is_read_only() {
-            self.notice("This session is read-only.", RyeOsTone::Warn);
+        if self.refuse_blocked_mutation() {
             return Vec::new();
         }
         let line = match super::tokenize::classify_line(text) {
@@ -373,12 +371,26 @@ impl RyeOsCore {
             }
             super::tokenize::InputLine::Slash(tokens) => {
                 // Explicit grammar: tokens resolve + bind daemon-side (one
-                // invocation path for all clients). Slash bypasses the
-                // pinned route — explicit tokens win; no implicit
-                // thread/site.
-                vec![self.emit(RyeOsEffectKind::Invoke {
-                    target: super::effect::InvokeRef::Tokens { tokens },
-                    params: serde_json::json!({}),
+                // invocation path for all clients). The interactive surface
+                // signs the command-dispatch affordance; an observation child
+                // erases it with `affordances: []`.
+                let Some(coordinate) = self.focused_command_submit_coordinate() else {
+                    self.notice(
+                        "The focused input declares no command affordance.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                };
+                let (request, request_bounds) = self.compiled_binding_operation(
+                    coordinate,
+                    crate::ui::binding::UiBindingPayload::Tokens {
+                        tokens,
+                        arguments: serde_json::json!({}),
+                    },
+                );
+                vec![self.emit(RyeOsEffectKind::InvokeBinding {
+                    request,
+                    request_bounds,
                     intent: super::effect::InvokeIntent::Launch,
                     success_notice: None,
                     route_seq: None,
@@ -403,41 +415,26 @@ impl RyeOsCore {
                     return Vec::new();
                 };
                 match invoke {
-                    super::seat::InvokeTemplate::Service { item_ref } => {
-                        // Ground verb: text bound whole to the service's
-                        // declared input, never split.
-                        let mut params = if route.params.is_object() {
-                            route.params.clone()
-                        } else {
-                            serde_json::json!({})
-                        };
-                        params["input"] = serde_json::Value::String(plain);
-                        if let Some(thread) = &route.thread {
-                            params["target"] = serde_json::json!({
-                                "kind": "thread",
-                                "thread_id": thread,
-                            });
-                        }
-                        // Live-delivery intent for a running-thread target. Only
-                        // set for interrupt; omission means cooperative steer.
-                        // Ignored by the daemon on non-running targets.
-                        if interrupt {
-                            params["intent"] = serde_json::Value::String("interrupt".to_string());
-                        }
-                        vec![self.emit(RyeOsEffectKind::Invoke {
-                            target: super::effect::InvokeRef::Ref { item_ref },
-                            params,
-                            intent: super::effect::InvokeIntent::Launch,
-                            success_notice: None,
-                            route_seq,
-                            ratchet_on_thread_id,
-                        })]
-                    }
-                    super::seat::InvokeTemplate::Command { mut tokens } => {
-                        tokens.push(plain);
-                        vec![self.emit(RyeOsEffectKind::Invoke {
-                            target: super::effect::InvokeRef::Tokens { tokens },
-                            params: serde_json::json!({}),
+                    super::seat::InvokeTemplate::Service { .. }
+                    | super::seat::InvokeTemplate::Command { .. } => {
+                        // The effective surface owns the executable route. The
+                        // client supplies only input plus the current seat
+                        // continuation coordinate; the daemon lowers both
+                        // against the session's compiled SurfaceRoute entry.
+                        let (request, request_bounds) = self.compiled_binding_operation(
+                            crate::ui::binding::UiBindingCoordinate::SurfaceRoute,
+                            crate::ui::binding::UiBindingPayload::Input {
+                                value: plain,
+                                route: Some(crate::ui::binding::UiBindingRouteContext {
+                                    thread_id: route.thread.clone(),
+                                    chain_root_id: route.chain_root.clone(),
+                                    interrupt,
+                                }),
+                            },
+                        );
+                        vec![self.emit(RyeOsEffectKind::InvokeBinding {
+                            request,
+                            request_bounds,
                             intent: super::effect::InvokeIntent::Launch,
                             success_notice: None,
                             route_seq,
@@ -492,28 +489,24 @@ impl RyeOsCore {
                 self.clear_focused_input();
                 effects
             }
-            Some(super::content::AffordanceInvoke::Rye {
-                tokens,
-                args,
-                notice,
-            }) => {
-                vec![self.emit(RyeOsEffectKind::Invoke {
-                    target: super::effect::InvokeRef::Tokens { tokens },
-                    params: args,
-                    intent: super::effect::InvokeIntent::Service,
-                    success_notice: notice,
-                    route_seq: None,
-                    ratchet_on_thread_id: false,
-                })]
-            }
-            Some(super::content::AffordanceInvoke::Service {
-                item_ref,
-                args,
-                notice,
-            }) => {
-                vec![self.emit(RyeOsEffectKind::Invoke {
-                    target: super::effect::InvokeRef::Ref { item_ref },
-                    params: args,
+            Some(super::content::AffordanceInvoke::Rye { notice, .. })
+            | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
+                if self.refuse_blocked_mutation() {
+                    return Vec::new();
+                }
+                let (request, request_bounds) = self.compiled_binding_operation(
+                    crate::ui::binding::UiBindingCoordinate::Affordance {
+                        view_ref: view_ref.to_string(),
+                        affordance_id: affordance_id.to_string(),
+                    },
+                    crate::ui::binding::UiBindingPayload::Input {
+                        value: value.to_string(),
+                        route: None,
+                    },
+                );
+                vec![self.emit(RyeOsEffectKind::InvokeBinding {
+                    request,
+                    request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
                     route_seq: None,
@@ -583,6 +576,30 @@ mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
 
+    fn source_request(effect: &RyeOsEffect) -> Option<(&str, &str, &str, &serde_json::Value)> {
+        let RyeOsEffectKind::FetchSource {
+            tile_id, request, ..
+        } = &effect.kind
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+            &request.coordinate
+        else {
+            return None;
+        };
+        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &request.payload
+        else {
+            return None;
+        };
+        Some((
+            tile_id.as_str(),
+            view_ref.as_str(),
+            channel.as_str(),
+            params,
+        ))
+    }
+
     #[test]
     fn cycling_the_filter_field_switches_the_fed_param_and_clears_text() {
         let session = BrowserSession {
@@ -598,7 +615,7 @@ mod tests {
                     ] } }
                 }}
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -622,9 +639,11 @@ mod tests {
             "switching field clears the prior field's text"
         );
         assert!(
-            effects.iter().any(|e| matches!(&e.kind,
-                RyeOsEffectKind::FetchSource { params, .. }
-                    if params.get("requested_by").is_some() && params.get("status").is_none())),
+            effects
+                .iter()
+                .filter_map(source_request)
+                .any(|(_, _, _, params)| params.get("requested_by").is_some()
+                    && params.get("status").is_none()),
             "cycled fetch feeds requested_by, not status; got {effects:?}"
         );
     }
@@ -651,7 +670,7 @@ mod tests {
                     }
                 }
             })),
-            read_only: false,
+            posture: crate::ui::binding::UiEffectivePosture::Interactive,
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
@@ -1032,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn writable_input_submit_emits_invoke_with_text_bound_whole() {
+    fn writable_input_submit_emits_surface_route_coordinate() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
         set_focused_input(&mut core, "  run this  ");
@@ -1044,15 +1063,15 @@ mod tests {
         assert_eq!(effects.len(), 1);
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::Invoke {
-                target: crate::ui::effect::InvokeRef::Ref { item_ref },
-                params,
+            Some(RyeOsEffectKind::InvokeBinding {
+                request: crate::ui::binding::UiBindingRequest {
+                    coordinate: crate::ui::binding::UiBindingCoordinate::SurfaceRoute,
+                    payload: crate::ui::binding::UiBindingPayload::Input { value, route },
+                    ..
+                },
                 route_seq: Some(_),
                 ..
-            }) if item_ref == "service:threads/input"
-                && params["input"] == "run this"
-                && params["target"]["kind"] == "fresh"
-                && params["target"]["item_ref"] == "directive:demo/base"
+            }) if value == "run this" && route.as_ref().is_some_and(|route| route.thread_id.is_none())
         ));
         // Buffer survives until delivery succeeds.
         assert_eq!(focused_input_text(&core), "  run this  ");
@@ -1068,11 +1087,15 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SubmitInput,
         });
-        let Some(RyeOsEffectKind::Invoke { params, .. }) = effects.first().map(|e| &e.kind) else {
-            panic!("expected an Invoke effect");
+        let Some(RyeOsEffectKind::InvokeBinding { request, .. }) = effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected a bound invocation effect");
         };
-        assert_eq!(params["input"], "steer me");
-        assert!(params.get("intent").is_none(), "steer must not set intent");
+        let crate::ui::binding::UiBindingPayload::Input { value, route } = &request.payload else {
+            panic!("expected input payload");
+        };
+        assert_eq!(value, "steer me");
+        assert!(!route.as_ref().is_some_and(|route| route.interrupt));
     }
 
     #[test]
@@ -1086,11 +1109,15 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SubmitInputInterrupt,
         });
-        let Some(RyeOsEffectKind::Invoke { params, .. }) = effects.first().map(|e| &e.kind) else {
-            panic!("expected an Invoke effect");
+        let Some(RyeOsEffectKind::InvokeBinding { request, .. }) = effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected a bound invocation effect");
         };
-        assert_eq!(params["input"], "stop, do X");
-        assert_eq!(params["intent"], "interrupt");
+        let crate::ui::binding::UiBindingPayload::Input { value, route } = &request.payload else {
+            panic!("expected input payload");
+        };
+        assert_eq!(value, "stop, do X");
+        assert!(route.as_ref().is_some_and(|route| route.interrupt));
     }
 
     #[test]
@@ -1108,46 +1135,6 @@ mod tests {
                 .last()
                 .is_some_and(|notice| notice.message.contains("no target"))
         );
-    }
-
-    #[test]
-    fn input_submit_launched_clears_buffer_and_ratchets_route() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        seed_service_route(&mut core);
-        set_focused_input(&mut core, "run this");
-        let effect = core
-            .dispatch(RyeOsEvent::Ui {
-                event: RyeOsUiEvent::SubmitInput,
-            })
-            .pop()
-            .expect("submit effect");
-
-        let followups = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: effect.id,
-                ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
-                data: Some(serde_json::json!({
-                    "thread_id": "T-9",
-                    "delivery": "launched"
-                })),
-                error: None,
-            },
-        });
-
-        assert!(
-            followups
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 }))
-        );
-        assert!(focused_input_text(&core).is_empty());
-        let route = core.seat.fold().input_route();
-        assert_eq!(route.thread.as_deref(), Some("T-9"));
-        // First turn of a conversation: the launched thread is the chain root
-        // (root == head), so the feed (which follows chain_root) shows it.
-        assert_eq!(route.chain_root.as_deref(), Some("T-9"));
-        // Pinned invocation survives the ratchet.
-        assert!(route.has_target());
     }
 
     #[test]
@@ -1176,7 +1163,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
                 error: None,
             },
@@ -1220,7 +1207,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: effect.id,
                 ok: true,
-                kind: RyeOsEffectResultKind::Invoked,
+                kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
                 error: None,
             },
@@ -1250,24 +1237,18 @@ mod tests {
 
         // Editing a feeds buffer refetches the source with the buffer text
         // injected into the named param.
-        let fetch = effects.iter().find_map(|effect| match &effect.kind {
-            RyeOsEffectKind::FetchSource {
-                tile_id: fetched,
-                source_ref,
-                params,
-            } => Some((fetched.clone(), source_ref.clone(), params.clone())),
-            _ => None,
-        });
-        let (fetched, source_ref, params) = fetch.expect("feeds edit refetches source");
+        let fetch = effects.iter().find_map(source_request);
+        let (fetched, view_ref, channel, params) = fetch.expect("feeds edit refetches source");
         assert_eq!(fetched, tile_id);
-        assert_eq!(source_ref, "service:test/items");
+        assert_eq!(view_ref, "view:test/items");
+        assert_eq!(channel, "default");
         assert_eq!(params["query"], "wid");
         assert_eq!(params["limit"], 50);
     }
 
     #[test]
     fn feeds_input_has_no_submit_and_allows_read_only() {
-        // `feeds` works in a read-only session (no durable write); Enter
+        // `feeds` works in an observation-only binding (no durable write); Enter
         // does nothing.
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         seed_filter_tile(&mut core);
@@ -1318,19 +1299,23 @@ mod tests {
 
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::Invoke {
-                target: super::super::effect::InvokeRef::Tokens { tokens },
-                params,
+            Some(RyeOsEffectKind::InvokeBinding {
+                request: crate::ui::binding::UiBindingRequest {
+                    coordinate: crate::ui::binding::UiBindingCoordinate::Affordance { affordance_id, .. },
+                    payload: crate::ui::binding::UiBindingPayload::Input { value, route: None },
+                    ..
+                },
                 route_seq: None,
                 ..
-            }) if tokens == &vec!["thread".to_string(), "input".to_string()]
-                && params["line"] == "do the thing"
+            }) if affordance_id == "run" && value == "do the thing"
         ));
     }
 
     #[test]
-    fn submit_affordance_blocked_when_read_only() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+    fn submit_affordance_blocked_without_compiled_binding() {
+        let mut unbound = session();
+        unbound.binding_digest.clear();
+        let mut core = RyeOsCore::new(unbound, BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
             "view:test/palette",
@@ -1356,7 +1341,7 @@ mod tests {
             core.ui
                 .notices
                 .last()
-                .is_some_and(|notice| notice.message.contains("read-only"))
+                .is_some_and(|notice| notice.message.contains("compiled operation binding"))
         );
     }
 

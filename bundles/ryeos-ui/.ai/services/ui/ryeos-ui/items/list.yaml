@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:37a2b2e4b2f89caa27aeb02fa3e9d530edcfe95b90fd6c3a59e4e40d6d9ed8e0:LpQkqivoyxnscr9IBxSLNUlY3UmrplTR8SqT9ommW0ihc//XMPCx/JjQni6TVfUmPTXmv2pGyWguhKSyLUz3Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:c81a81bc4a31ed24f8c9f77d74d93c90e5eea7f114456aefb1f4b53e56375303:yDeHRqh4PztFcMsDPFYVRAOp9L/h6GMXNmyi6APDEl1jVZaFPFflW2heZq6YMdcWbPcsgIyfu1+v8eEqJ+ZUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/items/list
 version: "1.0.0"
 description: Enumerate real schema-backed RyeOS items across active spaces with filtering by kind, space, and query substring.
 endpoint: ui.ryeos.items.list
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

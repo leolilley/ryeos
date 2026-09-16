@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-04T10:21:25Z:20ab1c523870d01a448be73dd5d90acd2ca9b9d7b9c918eaaf38344723cb7186:NVS33JuceTyVyxGJH2Z1fKnDBBVhpwnomYHly7eCnj4WrW0jki9Od0sB0CAS9Pvg3PLcXhQHKXRHisjevV7nBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:f5ad69fa0f3739c6c87add86ae28c06dd52e8f0d3f3f07575b4f5df7d0f8394c:ul0joxNP6Vtzev+HAHIRyZQC2xvb+2bQ5xOxP0zDYL5n5m5xvUMHRqAvTVHQmsTXqMUFl1d49rBxr1UAdxACDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-files
 title: Files
 version: "1.0.0"
@@ -8,11 +8,23 @@ widget: rows
 sources:
   default:
     ref: service:ui/ryeos-ui/files/list
+    role: files
     params:
       root: project
-      project_path: ""
+      project_path: "@session:project_root"
       path: ""
     collection: entries
+    requires_project: true
+  read:
+    ref: service:ui/ryeos-ui/files/read
+    role: file_read
+    params:
+      root: project
+      project_path: "@session:project_root"
+      path: ""
+    dynamic_parameters: [root, path]
+    activation: on_demand
+    requires_project: true
 projections:
   primary: name
   meta: kind

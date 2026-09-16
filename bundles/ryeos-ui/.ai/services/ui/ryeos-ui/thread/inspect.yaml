@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:42492e58a229d5c39bfa3db9cb478048bfab8475210b0c7c5c164d585cd3561f:mfFOGK5qk4ZjGrya2uEjpzzs7YUADURXJKRySUhTOg19cmMx7DxUN3vhOc70q9BxlXp/h8zM39Vv5SUkDkZdBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-14T10:03:09Z:3837ed96fe23ea4b2dce9300f50672395eef539543cae7cfa7ae688fc5e92c05:asYf+0p1yynKcg4/mH5mvh6G/AAQT8u6uIVtijG6AfXw1XcSd0sktb4RVfUQUa6VF5/dmHwY08aigSp70225CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/thread/inspect
 version: "1.0.0"
 description: Inspect one thread for RyeOS UI — returns detail, result, artifacts, children, facets, and recent events.
 endpoint: ui.ryeos.thread.inspect
 ui_read_only: true
+state_access: read_only_existing
 record_thread: false
 availability: daemon_only

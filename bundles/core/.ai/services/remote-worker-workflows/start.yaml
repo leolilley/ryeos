@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-13T04:38:33Z:bda7d7ff2381b5073f2094d0b2d9557f672639d17f78bd3b3861902b41ecc29b:iSZ8qnByCNDeua0fSClYp/frrKqUq7NaJyVAIwsRg+CES9UHMP9e8ryGnIP6n1W6PR5qMKEBm515d5qb7I2LCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-15T06:24:45Z:da39da64bec8664e642cc2114dc0550946ade4733b5af0cd8f3eca9e0cfe98d6:kc7pe/Xw+RwrIzNOZLApW3l3f3gUqfd32e3JyHmQtqc3Kg6ibALKvuFAX5AMCrKHYkEw0m1oPv9/oYZPG2slBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote-worker-workflows.start
 availability: daemon_only
@@ -10,5 +10,6 @@ schema:
   workflow_ref: string
   credential_profile_id: string
   task: object
+  source_snapshot_hash: string?
   target_product_selections: array
-description: "Start one source-owned bounded remote-worker workflow through target launch acceptance using an explicit canonical destination-local product-selection batch. Returns source_work_id and allowed_next_action=resume; it does not discover products, infer target completion, or pull a candidate."
+description: "Start one source-owned bounded remote-worker workflow through target launch acceptance using an optional already-pushed source snapshot that must exactly match the project tree and policy independently captured at admission, plus an explicit canonical destination-local product-selection batch. Returns source_work_id and allowed_next_action=resume; it does not discover products, infer target completion, or pull a candidate."

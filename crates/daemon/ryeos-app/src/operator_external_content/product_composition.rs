@@ -583,15 +583,15 @@ fn admit_selected_qualification(
     }
     let current_policy =
         qualification::resolve_current_bundle_qualification_policy(state, policy_ref)?;
-    let current_verifier = qualification::resolve_current_bundle_verifier_identity(
+    let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
         state,
         authority,
         guard,
+        limits,
         context,
         &current_policy.policy.verifier_ref,
         &current_policy.policy.verifier_parameters,
-        proof.evidence.verifier_root_selections.as_ref(),
-        proof.evidence.verifier.admitted_project_root.as_deref(),
+        &proof.evidence,
     )?;
     proof.evidence.validate_current_policy(
         &current_policy,

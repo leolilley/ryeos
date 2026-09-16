@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-14T10:03:09Z:7dbd5ae62fad6bdce6303efdc2f4225be8436edc9da6af224d826828b6c8f3b6:99hK6qlHK/oUF9dXijX8TcIH+LBhdJmsvXhYo//5A/GgA9GfzvOblXJ0iMUtkiqyci8b1R/5hbsY1Tix8k7VCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: ryeos-ui-lens-observe
+version: "1.0.0"
+description: Observation-only single-lens surface for the default terminal launch
+extends: surface:ryeos/ui/lens
+
+capabilities:
+  sources: ["ryeos.execute.service.*"]
+  affordances: []
