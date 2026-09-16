@@ -1,9 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:7260115eb01a3b44cfb56cd0b791aa9c62233257722ba0eae5bae1d6240dc131:2PH4odzfrNbFAzaJt1gixssvcjxtYiwOzHJgewUNBjKFSusxoE8A7DDeMzj0mpxwSpz3zfpLohg9g4iFkreUAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T02:16:20Z:ae075df07774356cc76601e154a608c85525702e6a90dbf0d16f00fc2d50a805:KmxsyXQovL6OxJ9/icpczPyfTPj6fohDlmFeYrxtO+8neg3BC+HFbuNVz75Uot3zeg1kfawLzPQrYuPxKIjlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-append
 version: "1.0.0"
 description: Append seat.* events to the session's running seat braid
 endpoint: ui.seat.append
-ui_dispatch: session_local
+# Lifecycle routes preserve the authenticated browser context directly.
+# session_local is reserved for invocation through a compiled UI binding.
+ui_dispatch: verified
 record_thread: false
 availability: daemon_only

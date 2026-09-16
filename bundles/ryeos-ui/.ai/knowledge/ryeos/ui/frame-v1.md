@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-14T22:49:51Z:779edc08bc6c116cb5552c34e8b3d080129bf44bddff62d00ec8558f1cbdeec8:kp4jQAqeh1dqzbt09ak3SoVG+MEmnHsW8kn0MRmZMOjre4f+01X1/uGg7anwI6DetagCf9Q5oOpU7wkU4+qUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T02:18:00Z:d587cbeb9c21913af3681e2c23e467ae67002ae2ecc80ba44cf13aef549428ae:XIyJTuFFCCtI0VkcukIsz9sUpfHwCLwyeSE5odbynp/e1wUX1G/PULlsZR098cvVXlwUcRJsXg5ZyCjhKI9gAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -250,5 +250,12 @@ renderer steps generation-keyed motion (v1: the backdrop particles
   Executable UI data is reached only by signed binding coordinates through
   `ui/invocations/dispatch`; direct cookie routes are limited to transport and
   session/seat lifecycle.
+- Seat lifecycle services use `ui_dispatch: verified`, preserving the
+  authenticated route context just like `session/current`. Their handlers
+  resolve the live browser session and enforce ownership of its seat. This
+  dispatch class verifies the service definition; it does not turn a browser
+  cookie into a signing principal. `ui_dispatch: session_local` is reserved
+  for targets invoked through a compiled binding, such as project actions;
+  generic routes refuse those targets.
 - The grammar shown is the grammar held: affordances and completion are
   capability-filtered daemon-side.

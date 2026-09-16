@@ -1,9 +1,11 @@
-# ryeos:signed:2026-09-14T10:03:09Z:ab9b1e1be0c305fe38b05def3f510b3f9764ea14ecb52c6d5795bc9b0b2149af:z4PnKqMiNz5I/E0085pg37H+tTYHc8wG7hPc5+mjwntfq7CsGByYZurtiT7fqBdH8t1sgJIMhZUji3BdkPOHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T02:16:20Z:3be18521d996e8b5d658996dddb7107245548e95e7587f6ab9d92b34e891c7bd:TmN4uRcnOiktMnX5vvcyIiDgKy325kmJ3i4zoU+dHsIEbsJvHzSGZvoiOnDVtSQIUN6IALcGq4j4lU5NW8bEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-close
 version: "1.0.0"
 description: Finalize the session's seat thread; closed seats refuse further events
 endpoint: ui.seat.close
-ui_dispatch: session_local
+# Lifecycle routes preserve the authenticated browser context directly.
+# session_local is reserved for invocation through a compiled UI binding.
+ui_dispatch: verified
 record_thread: false
 availability: daemon_only
