@@ -30,6 +30,10 @@ variable "CENTRAL_HOST_TAG" {
   default = "ryeos-central-host:release-candidate"
 }
 
+variable "LOCAL_INFERENCE_TAG" {
+  default = "ryeos-local-inference:release-candidate"
+}
+
 variable "HOSTED_WORKFLOW_TAG" {
   default = "ryeos-hosted-workflow:release-candidate"
 }
@@ -80,6 +84,17 @@ target "central-host" {
   inherits = ["_release"]
   target   = "ryeos-central-host"
   tags     = [CENTRAL_HOST_TAG]
+  output   = ["type=registry"]
+  attest = [
+    "type=provenance,mode=max",
+    "type=sbom",
+  ]
+}
+
+target "local-inference" {
+  inherits = ["_release"]
+  target   = "ryeos-local-inference"
+  tags     = [LOCAL_INFERENCE_TAG]
   output   = ["type=registry"]
   attest = [
     "type=provenance,mode=max",

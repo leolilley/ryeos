@@ -7,6 +7,7 @@ source "$ROOT/scripts/pkg/bundle-sets.sh"
 
 mapfile -t full < <(ryeos_bundle_set_names full)
 mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
+mapfile -t local_inference < <(ryeos_bundle_set_names local-inference)
 mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
 
@@ -57,13 +58,17 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard hosted-node hosted-workflow" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard local-inference hosted-node hosted-workflow" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
 done
 
 [[ "${hosted_workflow[*]}" == "core central-auth standard hosted-node codex opencode" ]]
+[[ "${local_inference[*]}" == "core central-auth standard local-inference" ]]
+for forbidden in hosted-node codex opencode web browser ryeos-ui; do
+  ! contains "$forbidden" "${local_inference[@]}"
+done
 [[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
@@ -112,6 +117,8 @@ done
 
 contains local-inference "${full[@]}"
 ! contains local-inference "${full_bin_managed[@]}"
+mapfile -t local_inference_bin_managed < <(ryeos_bundle_set_bin_managed_names local-inference)
+[[ "${local_inference_bin_managed[*]}" == "core standard" ]]
 
 # Activation is a signed RyeOS service contract. Installed bundle sources do
 # not carry workload-specific operator assemblers or a packaging escape hatch

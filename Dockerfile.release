@@ -124,6 +124,36 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["ryeos", "node", "status"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
+FROM workflow-runtime AS ryeos-local-inference
+COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=published /build/bundles/.ai             /opt/ryeos/.ai
+COPY --from=published /build/bundles/core            /opt/ryeos/core
+COPY --from=published /build/bundles/central-auth    /opt/ryeos/central-auth
+COPY --from=published /build/bundles/standard        /opt/ryeos/standard
+COPY --from=published /build/bundles/local-inference /opt/ryeos/local-inference
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=local-inference
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="local-inference"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
 FROM workflow-runtime AS ryeos-central-host
 COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos

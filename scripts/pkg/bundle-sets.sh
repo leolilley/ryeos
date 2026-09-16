@@ -21,7 +21,7 @@
 # populate-bundles.sh).
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard hosted-node hosted-workflow
+  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow
 }
 
 ryeos_bundle_set_names() {
@@ -29,6 +29,7 @@ ryeos_bundle_set_names() {
     full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference ;;
     central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
+    local-inference) printf '%s\n' core central-auth standard local-inference ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
     hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex opencode ;;
     # Internal publication superset. This is not an installable bundle set and
@@ -46,7 +47,7 @@ ryeos_bundle_set_names() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard hosted-node hosted-workflow development
+  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow development
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -54,7 +55,7 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|hosted-node|hosted-workflow) printf '%s\n' "$1" ;;
+    full|central-host|standard|local-inference|hosted-node|hosted-workflow) printf '%s\n' "$1" ;;
     development) printf '%s\n' full ;;
     *) return 1 ;;
   esac
@@ -156,7 +157,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|hosted-node|hosted-workflow)
+    full|central-host|standard|local-inference|hosted-node|hosted-workflow)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
