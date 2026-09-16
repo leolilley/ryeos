@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ryeos_runtime::{
-    CommandDef, CommandDispatch, CommandParameterBindingMode, CommandProjectDefault,
-    CommandProjectResolution, CommandRegistry, InvocationInputContract,
+    CommandDef, CommandDispatch, CommandParameterBindingMode, CommandProjectResolution,
+    CommandRegistry, InvocationInputContract,
 };
 use serde_json::Value;
 
@@ -797,21 +797,7 @@ struct CliResolvedExecute {
 /// Outcome of stripping a command's declared control flags from its tail.
 /// Each field is a routing destination from the generic `ControlFlagBinding`
 /// vocabulary; the dispatcher applies these to the request body / display.
-#[derive(Default)]
-struct ResolvedControlFlags {
-    async_launch: bool,
-    pin_project_at_admission: bool,
-    pin_current_head_at_admission: bool,
-    retain_child_results: bool,
-    exclude_operator_vault: bool,
-    stream: Option<bool>,
-    debug_raw: bool,
-    call_method: Option<String>,
-    call_args: Option<Value>,
-    state_root: Option<String>,
-    ref_bindings: BTreeMap<String, String>,
-    product_selections: Option<Value>,
-}
+type ResolvedControlFlags = ryeos_app::command_invocation::CommandInvocationControls;
 
 fn resolve_command_for_daemon(
     rest: &[String],
@@ -1094,180 +1080,8 @@ fn strip_declared_control_flags(
     tail: &mut Vec<String>,
     declared: &[ryeos_runtime::CommandControlFlag],
 ) -> Result<ResolvedControlFlags, CliError> {
-    use ryeos_runtime::ControlFlagBinding as Bind;
-    let mut routes: std::collections::HashMap<&str, &ryeos_runtime::CommandControlFlag> =
-        std::collections::HashMap::new();
-    for cf in declared {
-        routes.insert(cf.flag.as_str(), cf);
-        for alias in &cf.aliases {
-            routes.insert(alias.as_str(), cf);
-        }
-    }
-
-    let mut flags = ResolvedControlFlags::default();
-    let mut out: Vec<String> = Vec::with_capacity(tail.len());
-    let mut iter = std::mem::take(tail).into_iter();
-    while let Some(token) = iter.next() {
-        let Some(rest) = token.strip_prefix("--") else {
-            out.push(token);
-            continue;
-        };
-        let (name, inline) = match rest.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_string())),
-            None => (rest, None),
-        };
-        let Some(&control_flag) = routes.get(name) else {
-            out.push(token);
-            continue;
-        };
-        let binding = control_flag.binding;
-        if binding.takes_value() {
-            let value = match inline {
-                Some(value) => value,
-                None => iter.next().ok_or_else(|| CliError::Local {
-                    detail: format!("flag --{name} requires a value"),
-                })?,
-            };
-            match binding {
-                Bind::CallMethod => flags.call_method = Some(value),
-                Bind::CallArgs => {
-                    flags.call_args =
-                        Some(serde_json::from_str(&value).map_err(|e| CliError::Local {
-                            detail: format!("--{name} must be a JSON value: {e}"),
-                        })?);
-                }
-                Bind::StateRoot => flags.state_root = Some(value),
-                Bind::ProductSelections => {
-                    if flags.product_selections.is_some() {
-                        return Err(CliError::Local {
-                            detail: format!("duplicate --{name} flag"),
-                        });
-                    }
-                    let maximum_bytes = ryeos_state::external_content::products::composition::MAX_PRODUCT_SELECTION_INPUTS_BYTES;
-                    if value.len() > maximum_bytes {
-                        return Err(CliError::Local {
-                            detail: format!("--{name} JSON exceeds {maximum_bytes} bytes"),
-                        });
-                    }
-                    let parsed: ryeos_state::external_content::products::composition::ProductSelectionInputs =
-                        serde_json::from_str(&value).map_err(|e| CliError::Local {
-                            detail: format!("--{name} must be a typed product-selection list: {e}"),
-                        })?;
-                    let canonical = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(parsed)
-                        .map_err(|e| CliError::Local { detail: format!("--{name}: {e}") })?;
-                    flags.product_selections = Some(serde_json::to_value(canonical).map_err(
-                        |e| CliError::Local {
-                            detail: e.to_string(),
-                        },
-                    )?);
-                }
-                Bind::RefBinding => {
-                    let (binding_name, item_ref) = match control_flag.ref_binding_name.as_deref() {
-                        Some(binding_name) => (binding_name, value.as_str()),
-                        None => value.split_once('=').ok_or_else(|| CliError::Local {
-                            detail: format!("--{name} requires name=canonical-ref, got '{value}'"),
-                        })?,
-                    };
-                    validate_ref_binding_name(binding_name)?;
-                    if item_ref.is_empty() {
-                        return Err(CliError::Local {
-                            detail: format!("--{name} requires a non-empty canonical ref"),
-                        });
-                    }
-                    if item_ref.len() > 2048 {
-                        return Err(CliError::Local {
-                            detail: format!("--{name} canonical ref exceeds 2048 bytes"),
-                        });
-                    }
-                    if flags.ref_bindings.contains_key(binding_name) {
-                        return Err(CliError::Local {
-                            detail: format!("duplicate --{name} binding name '{binding_name}'"),
-                        });
-                    }
-                    if flags.ref_bindings.len() >= 32 {
-                        return Err(CliError::Local {
-                            detail: format!("--{name} accepts at most 32 bindings"),
-                        });
-                    }
-                    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
-                        .map_err(|error| CliError::Local {
-                            detail: format!(
-                                "invalid --{name} canonical ref for '{binding_name}': {error}"
-                            ),
-                        })?;
-                    flags
-                        .ref_bindings
-                        .insert(binding_name.to_string(), canonical.to_string());
-                }
-                _ => {}
-            }
-        } else {
-            let on = match inline.as_deref() {
-                None | Some("true") => true,
-                Some("false") => false,
-                Some(other) => {
-                    return Err(CliError::Local {
-                        detail: format!("invalid value for --{name}: {other}"),
-                    });
-                }
-            };
-            if !on {
-                continue;
-            }
-            match binding {
-                Bind::LaunchModeAccepted => flags.async_launch = true,
-                Bind::PinProjectAtAdmission => flags.pin_project_at_admission = true,
-                Bind::PinCurrentHeadAtAdmission => flags.pin_current_head_at_admission = true,
-                Bind::RetainChildResults => flags.retain_child_results = true,
-                Bind::ExcludeOperatorVault => flags.exclude_operator_vault = true,
-                Bind::DebugRaw => flags.debug_raw = true,
-                Bind::StreamOn => {
-                    if flags.stream == Some(false) {
-                        return Err(CliError::Local {
-                            detail: "conflicting flags: stream on and off".into(),
-                        });
-                    }
-                    flags.stream = Some(true);
-                }
-                Bind::StreamOff => {
-                    if flags.stream == Some(true) {
-                        return Err(CliError::Local {
-                            detail: "conflicting flags: stream on and off".into(),
-                        });
-                    }
-                    flags.stream = Some(false);
-                }
-                _ => {}
-            }
-        }
-    }
-    *tail = out;
-    Ok(flags)
-}
-
-fn validate_ref_binding_name(name: &str) -> Result<(), CliError> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name.split('_').enumerate().all(|(index, segment)| {
-            !segment.is_empty()
-                && segment.chars().enumerate().all(|(char_index, ch)| {
-                    ch.is_ascii_lowercase() || ch.is_ascii_digit() && (index > 0 || char_index > 0)
-                })
-                && (index > 0
-                    || segment
-                        .chars()
-                        .next()
-                        .is_some_and(|ch| ch.is_ascii_lowercase()))
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(CliError::Local {
-            detail: format!(
-                "invalid ref binding name '{name}'; expected [a-z][a-z0-9]*(?:_[a-z0-9]+)* (max 64 bytes)"
-            ),
-        })
-    }
+    ryeos_app::command_invocation::strip_declared_control_flags(tail, declared)
+        .map_err(|detail| CliError::Local { detail })
 }
 
 fn bind_command_parameters_for_daemon(
@@ -1365,152 +1179,17 @@ pub(crate) fn apply_project_policy(
     parameters: &mut Value,
     default_project: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
-    // This global selector is CLI control even when the command is intrinsically
-    // projectless. Never forward it to the command's closed service payload.
-    // Validate before mutation so malformed controls remain a refusal.
-    let no_project = match parameters.get("no_project") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(CliError::ProjectResolution(
-                "--no-project must be a boolean".into(),
-            ));
-        }
-    };
-    let Some(project) = command.project.as_ref() else {
-        if let Some(obj) = parameters.as_object_mut() {
-            obj.remove("no_project");
-        }
-        return Ok(None);
-    };
-
-    let obj = parameters.as_object_mut().ok_or_else(|| {
-        CliError::ProjectResolution("command parameters must be a JSON object".into())
-    })?;
-    if let Some(bind_parameter) = project.bind_parameter.as_ref()
-        && bind_parameter != "project"
-        && obj.contains_key(bind_parameter)
-    {
-        return Err(CliError::ProjectResolution(format!(
-            "--{} is runtime-bound from the command's project selector; use --project <path> instead",
-            bind_parameter.replace('_', "-")
-        )));
-    }
-    if let Some(field) = &project.bind_no_project_parameter
-        && field != "no_project"
-        && obj.contains_key(field)
-    {
-        return Err(CliError::ProjectResolution(format!(
-            "--{} is runtime-bound from the projectless selector; use --no-project instead",
-            field.replace('_', "-"),
-        )));
-    }
-    // These fields select project authority, not ordinary payload values.
-    // Absence permits the descriptor's default; malformed supplied controls
-    // must never be erased and reinterpreted as that absence. Validate before
-    // canonicalizing/discovering a path, and preserve the input on refusal.
-    if no_project && !project.no_project_flag {
-        return Err(CliError::ProjectRequired(format!(
-            "command '{}' does not accept --no-project",
-            command.name
-        )));
-    }
-
-    let mut project_path = match obj.get("project") {
-        None => None,
-        Some(Value::String(value)) if !value.is_empty() => Some(PathBuf::from(value)),
-        Some(Value::String(_)) => {
-            return Err(CliError::ProjectResolution(
-                "--project must be a non-empty path string".into(),
-            ));
-        }
-        Some(_) => {
-            return Err(CliError::ProjectResolution(
-                "--project must be a path string".into(),
-            ));
-        }
-    };
-    if no_project && project_path.is_some() {
-        return Err(CliError::ProjectResolution(
-            "cannot pass both --no-project and --project: choose one".into(),
-        ));
-    }
-    if project_path.is_none() && !no_project {
-        project_path = default_project.map(PathBuf::from);
-    }
-    if let Some(path) = project_path.take() {
-        project_path = Some(canonicalize_project_path(&path)?);
-    }
-    if project_path.is_none()
-        && !no_project
-        && project.default == CommandProjectDefault::DiscoverUpwardAi
-    {
-        project_path = discover_upward_ai_project()?;
-    }
-
-    if project.resolution == CommandProjectResolution::Required
-        && project_path.is_none()
-        && !no_project
-    {
-        return Err(CliError::ProjectRequired(format!(
-            "command '{}' requires a project",
-            command.name
-        )));
-    }
-
-    obj.remove("no_project");
-    obj.remove("project");
-    if let (Some(bind_parameter), Some(path)) = (&project.bind_parameter, &project_path) {
-        obj.insert(
-            bind_parameter.clone(),
-            Value::String(path.to_string_lossy().into_owned()),
-        );
-    }
-    // Selector support is not permission to invent a service argument.
-    // The signed command declares whether/where its consumer needs this value;
-    // never infer it from a command spelling, item kind, or positive path binding.
-    if no_project && let Some(field) = &project.bind_no_project_parameter {
-        obj.insert(field.clone(), Value::Bool(true));
-    }
-
-    if project.request_project_path {
-        Ok(project_path)
-    } else {
-        Ok(None)
-    }
-}
-
-fn canonicalize_project_path(path: &Path) -> Result<PathBuf, CliError> {
     let cwd =
         std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    abs.canonicalize().map_err(|e| {
-        CliError::ProjectResolution(format!(
-            "cannot canonicalize project path '{}': {e}. \
-             Ensure the path exists and is accessible.",
-            abs.display()
-        ))
-    })
-}
-
-fn discover_upward_ai_project() -> Result<Option<PathBuf>, CliError> {
-    let cwd =
-        std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
-    for ancestor in cwd.ancestors() {
-        if ancestor.join(ryeos_engine::AI_DIR).is_dir() {
-            return ancestor.canonicalize().map(Some).map_err(|e| {
-                CliError::ProjectResolution(format!(
-                    "cannot canonicalize project path '{}': {e}",
-                    ancestor.display()
-                ))
-            });
-        }
-    }
-    Ok(None)
+    ryeos_app::command_invocation::apply_project_policy(command, parameters, default_project, &cwd)
+        .map_err(|error| match error {
+            ryeos_app::command_invocation::CommandProjectPolicyError::Invalid(detail) => {
+                CliError::ProjectResolution(detail)
+            }
+            ryeos_app::command_invocation::CommandProjectPolicyError::ProjectRequired(detail) => {
+                CliError::ProjectRequired(detail)
+            }
+        })
 }
 
 /// Remove `-p`/`--project`/`--project=…`/`-p=…`/`--no-project` (and the value
@@ -1518,23 +1197,7 @@ fn discover_upward_ai_project() -> Result<Option<PathBuf>, CliError> {
 /// commands that take no project, so a project selector placed after the verb
 /// is accepted and dropped rather than leaking to the handler.
 fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(tail.len());
-    let mut i = 0;
-    while i < tail.len() {
-        let tok = &tail[i];
-        if tok == "--no-project" || tok.starts_with("--project=") || tok.starts_with("-p=") {
-            i += 1;
-            continue;
-        }
-        if tok == "--project" || tok == "-p" {
-            // Skip the flag and its value (if a value is present).
-            i += if i + 1 < tail.len() { 2 } else { 1 };
-            continue;
-        }
-        out.push(tok.clone());
-        i += 1;
-    }
-    out
+    ryeos_app::command_invocation::strip_project_control_flags(tail)
 }
 
 fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {

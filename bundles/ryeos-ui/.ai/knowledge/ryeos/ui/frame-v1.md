@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T02:18:00Z:d587cbeb9c21913af3681e2c23e467ae67002ae2ecc80ba44cf13aef549428ae:XIyJTuFFCCtI0VkcukIsz9sUpfHwCLwyeSE5odbynp/e1wUX1G/PULlsZR098cvVXlwUcRJsXg5ZyCjhKI9gAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T07:40:34Z:01e534e6fbf733145f90190675f55bc01403b6fc91939f3d00aeef59b0fe8bb6:M/yXeR9dCLHIHC4y9SzOV78IHIpmlqKcEne/PACXunqH/bK92MO27xXxYqYL8ri94ijc5SkBqSReIKfg1ApJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -157,6 +157,13 @@ Placeholder validation runs at **binding resolution** (`selection.activate
 producer can't supply fails closed before runtime. The prompt's target
 strip is `target_label` if authored, else derived from the bound submit
 target.
+
+Session project markers are explicit about absence. `@session:project_root`
+requires a project-scoped session and refuses otherwise;
+`@session:project_root_or_null` binds the canonical project root when present
+and JSON `null` otherwise. Command dispatch uses the latter so its signed
+descriptor—not the UI session—decides whether a token invocation is
+projectless, project-bound, or binds a selected source path into parameters.
 
 Tones: `neutral | accent | good | warn | danger` (renderers map tone to
 palette; content never names colors). A tone map's optional `missing` tone is

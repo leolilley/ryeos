@@ -14,6 +14,7 @@ pub mod bundle_transaction;
 pub mod callback_token;
 pub mod cascade;
 pub mod command_hub;
+pub mod command_invocation;
 pub mod command_service;
 pub mod config;
 pub mod dedicated_session_service;

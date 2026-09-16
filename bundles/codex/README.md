@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-03T14:48:16Z:91770b389eb77b8da301fb29e41cc9243f713b8fa7c5df93f5f3a40f590782e8:HRcuZSS5rPZT8O58tTLhztrZQwbA6hqxmaf/mfei+S6z+TEHiaUXH8TRWQi7ogscAVPkd9e2tvsFmndvZ3luDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T07:26:16Z:7349c7a29b74cadf83651ba5a085d1f6c6acd18c7b23ae4de2b9294da4c362b8:LBYFXxZ3mRVucoDPf5bQJlpGEgKzTyTtH0c8Ju3UFQbkTabkqN8iW+lsy6dwwnIgAjrjYN+ynGh0iA/eqLQ/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -157,8 +157,14 @@ lack the source-node co-signature. Drive it from the source RyeOS node through
 the provider-neutral `service:remote/run` seam. For example, create the empty
 credential profile with a projectless, wait-mode service execution:
 
+There are three independent authorities in these examples. The leading
+`--no-project` selects the source invocation context, the nested
+`execution_policy` selects the destination execution context, and
+`outbound_principal` selects the authorized identity forwarded by the source
+node. None is inferred from either of the others.
+
 ```sh
-ryeos execute service:remote/run --input - <<'JSON'
+ryeos --no-project execute service:remote/run --input - <<'JSON'
 {
   "remote": "hosted",
   "item_ref": "service:credential-profiles/create",
@@ -183,7 +189,7 @@ launch coordinate and using `accepted` response semantics:
 
 ```sh
 LOGIN_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
-ryeos execute service:remote/run --input - <<JSON
+ryeos --no-project execute service:remote/run --input - <<JSON
 {
   "remote": "hosted",
   "item_ref": "worker_execution:codex/login",

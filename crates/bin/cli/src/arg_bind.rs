@@ -132,85 +132,13 @@ fn merge_project_control_flags(
 pub(crate) fn separate_project_control_flags(
     tail: &[String],
 ) -> Result<(Vec<String>, serde_json::Map<String, Value>), CliDispatchError> {
-    let mut residual = Vec::with_capacity(tail.len());
-    let mut controls = serde_json::Map::new();
-    let mut i = 0;
-    while i < tail.len() {
-        let token = &tail[i];
-        // A structured input source is one opaque argument, even if its file
-        // name happens to spell a selector. Never inspect its contents here.
-        if token == "--input" {
-            residual.push(token.clone());
-            if let Some(source) = tail.get(i + 1) {
-                residual.push(source.clone());
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if token == "--no-project" || token.starts_with("--no-project=") {
-            let value = match token.strip_prefix("--no-project=") {
-                None | Some("true") => Value::Bool(true),
-                Some("false") => Value::Bool(false),
-                Some(value) => Value::String(value.to_owned()),
-            };
-            insert_project_control(&mut controls, "no_project", value)?;
-            i += 1;
-            continue;
-        }
-        if let Some(path) = token
-            .strip_prefix("--project=")
-            .or_else(|| token.strip_prefix("-p="))
-        {
-            insert_project_control(&mut controls, "project", Value::String(path.to_string()))?;
-            i += 1;
-            continue;
-        }
-        if token == "--project" || token == "-p" {
-            let Some(path) = tail.get(i + 1) else {
-                return Err(CliDispatchError::Config(
-                    crate::error::CliConfigError::InvalidExecuteRef {
-                        path: "<cli>".into(),
-                        item_ref: token.clone(),
-                        detail: format!("{token} requires a value (path to the project root)"),
-                    },
-                ));
-            };
-            if path.starts_with('-') {
-                return Err(CliDispatchError::Config(
-                    crate::error::CliConfigError::InvalidExecuteRef {
-                        path: "<cli>".into(),
-                        item_ref: token.clone(),
-                        detail: format!("{token} requires a value (path to the project root)"),
-                    },
-                ));
-            }
-            insert_project_control(&mut controls, "project", Value::String(path.clone()))?;
-            i += 2;
-            continue;
-        }
-        residual.push(token.clone());
-        i += 1;
-    }
-
-    Ok((residual, controls))
-}
-
-fn insert_project_control(
-    controls: &mut serde_json::Map<String, Value>,
-    field: &str,
-    value: Value,
-) -> Result<(), CliDispatchError> {
-    if controls.insert(field.to_owned(), value).is_some() {
-        return Err(CliDispatchError::Config(
-            crate::error::CliConfigError::InvalidExecuteRef {
-                path: "<cli>".into(),
-                item_ref: field.into(),
-                detail: format!("duplicate --{} selector", field.replace('_', "-")),
-            },
-        ));
-    }
-    Ok(())
+    ryeos_app::command_invocation::separate_project_control_flags(tail).map_err(|detail| {
+        CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+            path: "<cli>".into(),
+            item_ref: "project selector".into(),
+            detail,
+        })
+    })
 }
 
 /// - `--input -` — reads stdin as JSON
