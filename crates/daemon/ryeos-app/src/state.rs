@@ -139,10 +139,18 @@ pub struct AppState {
 #[derive(Debug, Serialize)]
 pub struct IsolationStatus {
     pub mode: IsolationMode,
+    /// Filesystem isolation follows the independently admitted isolation mode.
+    pub filesystem_mode: IsolationMode,
+    /// Network policy is reported independently; host networking is not
+    /// described as isolation merely because filesystem isolation is active.
+    pub network_mode: ryeos_engine::isolation::IsolationNetworkMode,
     pub version: u32,
     pub source: Option<String>,
     pub policy_digest: Option<String>,
     pub backend: ryeos_engine::isolation::IsolationBackendInspection,
+    /// Protocol-specific process-control readiness. This is deliberately
+    /// separate from general daemon health and isolation-backend availability.
+    pub process_scopes: ryeos_engine::isolation::ProcessScopeReadiness,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +222,8 @@ impl AppState {
             db_path: self.config.db_path.display().to_string(),
             isolation: IsolationStatus {
                 mode: self.isolation.mode(),
+                filesystem_mode: self.isolation.mode(),
+                network_mode: self.isolation.inspection().network.mode,
                 version: self.isolation.version(),
                 source: self
                     .isolation
@@ -221,6 +231,7 @@ impl AppState {
                     .map(|path| path.display().to_string()),
                 policy_digest: self.isolation.digest().map(str::to_owned),
                 backend: self.isolation.inspection().backend.clone(),
+                process_scopes: self.isolation.inspection().process_scope_readiness.clone(),
             },
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
             thread_projection: self.state_store.projection_health_snapshot(),
