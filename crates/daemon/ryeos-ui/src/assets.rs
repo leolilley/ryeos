@@ -49,6 +49,8 @@ static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html")
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
 static RYEOS_UI_COMPONENTS_CHROME_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_components_chrome.js");
+static RYEOS_UI_COMPONENTS_FIELD_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_field.js");
 static RYEOS_UI_COMPONENTS_HOME_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_components_home.js");
 static RYEOS_UI_COMPONENTS_NAVIGATION_JS: &[u8] =
@@ -62,6 +64,15 @@ static RYEOS_UI_DOM_ADAPTER_JS: &[u8] =
 static RYEOS_UI_AMBIENT_SCENE_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_ambient_scene.js");
 static RYEOS_UI_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_effects.js");
+static RYEOS_UI_FIELD_ACCESSIBILITY_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_field_accessibility.js");
+static RYEOS_UI_FIELD_CANVAS_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_field_canvas.js");
+static RYEOS_UI_FIELD_LAYOUT_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_field_layout.js");
+static RYEOS_UI_GRID_CANVAS_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_grid_canvas.js");
+static RYEOS_UI_KEYBOARD_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_keyboard.js");
 static RYEOS_UI_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_motion.js");
 static RYEOS_UI_PRESENTATION_STATE_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_presentation_state.js");
@@ -85,6 +96,9 @@ impl StaticAssetProvider for WebAssetProvider {
             "ryeos_components_chrome.js" | "ui/assets/ryeos_components_chrome.js" => {
                 (RYEOS_UI_COMPONENTS_CHROME_JS, "no-cache")
             }
+            "ryeos_components_field.js" | "ui/assets/ryeos_components_field.js" => {
+                (RYEOS_UI_COMPONENTS_FIELD_JS, "no-cache")
+            }
             "ryeos_components_home.js" | "ui/assets/ryeos_components_home.js" => {
                 (RYEOS_UI_COMPONENTS_HOME_JS, "no-cache")
             }
@@ -104,6 +118,21 @@ impl StaticAssetProvider for WebAssetProvider {
                 (RYEOS_UI_AMBIENT_SCENE_JS, "no-cache")
             }
             "ryeos_effects.js" | "ui/assets/ryeos_effects.js" => (RYEOS_UI_EFFECTS_JS, "no-cache"),
+            "ryeos_field_accessibility.js" | "ui/assets/ryeos_field_accessibility.js" => {
+                (RYEOS_UI_FIELD_ACCESSIBILITY_JS, "no-cache")
+            }
+            "ryeos_field_canvas.js" | "ui/assets/ryeos_field_canvas.js" => {
+                (RYEOS_UI_FIELD_CANVAS_JS, "no-cache")
+            }
+            "ryeos_field_layout.js" | "ui/assets/ryeos_field_layout.js" => {
+                (RYEOS_UI_FIELD_LAYOUT_JS, "no-cache")
+            }
+            "ryeos_grid_canvas.js" | "ui/assets/ryeos_grid_canvas.js" => {
+                (RYEOS_UI_GRID_CANVAS_JS, "no-cache")
+            }
+            "ryeos_keyboard.js" | "ui/assets/ryeos_keyboard.js" => {
+                (RYEOS_UI_KEYBOARD_JS, "no-cache")
+            }
             "ryeos_motion.js" | "ui/assets/ryeos_motion.js" => (RYEOS_UI_MOTION_JS, "no-cache"),
             "ryeos_presentation_state.js" | "ui/assets/ryeos_presentation_state.js" => {
                 (RYEOS_UI_PRESENTATION_STATE_JS, "no-cache")
@@ -222,6 +251,34 @@ mod tests {
             .expect("ryeos_web_bg.wasm must be embedded");
         assert!(!wasm.bytes.is_empty());
         assert!(wasm.content_type.contains("wasm"));
+    }
+
+    #[test]
+    fn every_authored_browser_module_is_embedded() {
+        // The browser resolves the complete ES-module graph before executing
+        // bootstrap.js. A missing transitive module therefore used to leave
+        // the static loading document on screen without reaching its error
+        // handler. Keep the compiled asset closure equal to the authored JS
+        // closure so additions fail here instead of in an installed browser.
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/pkg");
+        let provider = WebAssetProvider;
+        let mut modules = std::fs::read_dir(package)
+            .expect("read authored web package")
+            .map(|entry| entry.expect("read authored web package entry").path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("js"))
+            .collect::<Vec<_>>();
+        modules.sort();
+
+        for module in modules {
+            let name = module
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("browser module filename must be UTF-8");
+            assert!(
+                provider.get(&format!("ui/assets/{name}")).is_some(),
+                "authored browser module `{name}` is absent from the embedded asset closure"
+            );
+        }
     }
 
     #[test]

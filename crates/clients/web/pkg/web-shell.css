@@ -45,10 +45,134 @@ body {
   min-height: 100vh;
 }
 
-.status {
-  color: var(--fg4);
-  display: inline-block;
-  padding: 1rem;
+.ryeos-boot {
+  align-items: center;
+  background:
+    linear-gradient(90deg, rgba(var(--ryeos-accent-rgb), 0.045) 1px, transparent 1px),
+    linear-gradient(rgba(var(--ryeos-accent-rgb), 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 31% 47%, rgba(var(--ryeos-accent-rgb), 0.12), transparent 26rem),
+    var(--ryeos-bg);
+  background-size: 2.25rem 2.25rem, 2.25rem 2.25rem, auto, auto;
+  display: grid;
+  gap: clamp(2rem, 7vw, 6rem);
+  grid-template-columns: auto minmax(16rem, 34rem);
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+}
+
+.ryeos-boot-mark {
+  height: clamp(7rem, 17vw, 11rem);
+  position: relative;
+  width: clamp(7rem, 17vw, 11rem);
+}
+
+.ryeos-boot-mark-core,
+.ryeos-boot-mark-orbit {
+  border: 2px solid var(--ryeos-accent);
+  display: block;
+  inset: 24%;
+  position: absolute;
+  transform: rotate(45deg);
+}
+
+.ryeos-boot-mark-core {
+  background: rgba(var(--ryeos-accent-rgb), 0.14);
+  box-shadow: 0 0 2.5rem rgba(var(--ryeos-accent-rgb), 0.24);
+}
+
+.ryeos-boot-mark-orbit {
+  animation: ryeos-boot-orbit 3.2s steps(8, end) infinite;
+  border-color: var(--ryeos-warn);
+  inset: 7%;
+}
+
+.ryeos-boot-copy { min-width: 0; }
+.ryeos-boot-kicker {
+  color: var(--ryeos-accent);
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  margin: 0 0 0.75rem;
+  text-transform: uppercase;
+}
+.ryeos-boot h1 {
+  color: var(--ryeos-fg);
+  font-size: clamp(1.65rem, 4vw, 3rem);
+  font-weight: 600;
+  letter-spacing: -0.045em;
+  margin: 0;
+}
+.ryeos-boot-rail {
+  background: var(--ryeos-shadow);
+  height: 2px;
+  margin: 1.75rem 0 1.25rem;
+  overflow: hidden;
+  width: 100%;
+}
+.ryeos-boot-rail span {
+  animation: ryeos-boot-progress 1.6s ease-in-out infinite;
+  background: var(--ryeos-accent);
+  display: block;
+  height: 100%;
+  width: 34%;
+}
+.ryeos-boot-stage { color: var(--ryeos-warn); margin: 0; }
+.ryeos-boot-detail {
+  color: var(--ryeos-muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  margin: 0.55rem 0 0;
+}
+.ryeos-boot-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  margin: 0;
+  padding-inline: max(2rem, calc((100vw - 48rem) / 2));
+}
+.ryeos-boot-failed h1 { color: var(--ryeos-danger); }
+.ryeos-boot-error-detail {
+  border-left: 2px solid var(--ryeos-danger);
+  color: var(--ryeos-fg-soft);
+  line-height: 1.5;
+  margin: 1.5rem 0 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 0.65rem 1rem;
+  white-space: pre-wrap;
+}
+.ryeos-boot-retry {
+  background: var(--ryeos-panel-2);
+  border: 2px solid var(--ryeos-accent);
+  color: var(--ryeos-fg);
+  cursor: pointer;
+  font: inherit;
+  margin-top: 1.5rem;
+  padding: 0.65rem 1rem;
+}
+.ryeos-boot-retry:hover,
+.ryeos-boot-retry:focus-visible { background: rgba(var(--ryeos-accent-rgb), 0.2); outline: none; }
+
+@keyframes ryeos-boot-orbit {
+  to { transform: rotate(405deg); }
+}
+
+@keyframes ryeos-boot-progress {
+  0% { transform: translateX(-105%); }
+  55% { transform: translateX(105%); }
+  100% { transform: translateX(300%); }
+}
+
+@media (max-width: 620px) {
+  .ryeos-boot { grid-template-columns: 1fr; justify-items: start; }
+  .ryeos-boot-mark { height: 5rem; width: 5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ryeos-boot-mark-orbit,
+  .ryeos-boot-rail span { animation: none; }
+  .ryeos-boot-rail span { width: 66%; }
 }
 
 .rye-frame {
