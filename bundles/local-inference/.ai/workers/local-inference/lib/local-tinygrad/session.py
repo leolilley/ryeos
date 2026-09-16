@@ -292,7 +292,12 @@ class OutputRouter:
             self.buffer = "<tool_call>" + self.buffer
 
 
-def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float, int]:
+def _validate_request(
+    outer: dict[str, Any],
+    *,
+    expected_model: str = MODEL_ID,
+    output_ceiling: int = MAX_OUTPUT_TOKENS,
+) -> tuple[dict[str, Any], int, float, int]:
     if set(outer) != {"request_body", "request_body_sha256", "requested_output_ceiling"}:
         raise ValueError("local worker envelope shape is not canonical")
     request_body, body_digest, ceiling = (
@@ -329,7 +334,7 @@ def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float
     unknown = sorted(set(request) - allowed)
     if unknown:
         raise ValueError(f"local Qwen request contains unsupported fields: {unknown}")
-    if request.get("model") != MODEL_ID or request.get("stream") is not True:
+    if request.get("model") != expected_model or request.get("stream") is not True:
         raise ValueError("local Qwen request names the wrong model or is not streaming")
     if request.get("stream_options") not in (None, {"include_usage": True}):
         raise ValueError("local Qwen stream options changed")
@@ -352,7 +357,7 @@ def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float
         or isinstance(output_limit, bool)
         or output_limit <= 0
         or output_limit > ceiling
-        or output_limit > MAX_OUTPUT_TOKENS
+        or output_limit > output_ceiling
     ):
         raise ValueError("local Qwen output limit exceeds its admitted ceiling")
     temperature = request.get("temperature", 0.0)
@@ -378,8 +383,8 @@ def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
     consumed: list[tuple[int, int]] = []
     for match in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL):
         try:
-            value = json.loads(match.group(1))
-        except json.JSONDecodeError:
+            value = _strict_json_loads(match.group(1))
+        except ValueError:
             continue
         if (
             not isinstance(value, dict)
@@ -409,6 +414,8 @@ def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
 class Worker:
     def __init__(self, *, load_model: bool = False):
         self.model_root = Path("model")
+        # Tokenizer/template/generation bytes are device-independent preflight.
+        # Validate them before model construction may touch Device.DEFAULT.
         self.tokenizer = QwenTokenizer(self.model_root) if load_model else None
         self.model = QwenModel(self.model_root) if load_model else None
 
@@ -421,14 +428,21 @@ class Worker:
     ) -> dict[str, Any]:
         if self.tokenizer is None or self.model is None:
             raise RuntimeError("local Qwen model state is not resident")
-        request, output_limit, temperature, seed = _validate_request(outer)
+        request, output_limit, temperature, seed = _validate_request(
+            outer,
+            expected_model=self.model.model_id,
+            output_ceiling=self.model.output_ceiling,
+        )
         rendered = render_chat(
             request["messages"],
             request.get("tools") or [],
             request.get("enable_thinking", True),
         )
         prompt_tokens = self.tokenizer.encode(rendered)
-        if len(prompt_tokens) >= MAX_CONTEXT or len(prompt_tokens) + output_limit > MAX_CONTEXT:
+        if (
+            len(prompt_tokens) >= self.model.context_ceiling
+            or len(prompt_tokens) + output_limit > self.model.context_ceiling
+        ):
             raise ValueError("local Qwen prompt plus output exceeds the admitted context")
         decoder = self.tokenizer.stream_decoder()
         router = OutputRouter()

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T22:32:47Z:b37ea3bdd5137ab7b27362b1c939379e4d2ae65a9c2c35c662639246da700225:ZzSkKFQkOz2rHnGzqjAjDfKfFzALuqEpEF3lKHHE5dTC9Wx7Y83gbCgTz4z8H3ieD/XoYa9ezqpbneHDAb+UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T23:21:32Z:baadf9e2630a925cccb0cded4239cfaff8b463d84c9dcbda9aafbfe2b33b5836:o1NVw0u/+k8l3i+p1LWpK4oK3JDhCG038EHg+SaAK55XpyMOSALVHO3YndH1QxRTQ76IHxSP37oRYwr+C5r+Bg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -19,7 +19,7 @@ session_resources:
 source:
   root: "lib/local-tinygrad"
   entry: "bootstrap.py"
-  digest: "4d814b3f959b6037ff9e3a4ee3cce9268a7e216b002d85baa70e00a76b96a3ec"
+  digest: "e1860ca80b6c3bc6c29e59518e0267a972416fff95b660c8fab352ada9ddf71c"
 
 external_content:
   - id: runtime

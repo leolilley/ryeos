@@ -11,12 +11,17 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
+from model_contract import canonical_json, identify_model_contract, strict_json_file
+
 
 EXPECTED_SPLIT_PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| "
     r"?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 )
-EXPECTED_CHAT_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+EXPECTED_CHAT_TEMPLATE_SHA256 = {
+    "qwen3-0.6b": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+    "qwen3-4b": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+}
 EXPECTED_GENERATION_CONFIG = {
     "bos_token_id": 151_643,
     "do_sample": True,
@@ -27,6 +32,10 @@ EXPECTED_GENERATION_CONFIG = {
     "top_p": 0.95,
     "transformers_version": "4.51.0",
 }
+# These bytes are pinned artifact metadata, not the worker's sampler defaults.
+# Execution uses the contract's pinned tinygrad full-vocabulary Gumbel-max
+# sampler with explicit request temperature and seed; top-k/top-p are not
+# silently inherited from this Transformers configuration.
 
 
 def _category_ranges(prefix: str) -> str:
@@ -47,22 +56,30 @@ def _category_ranges(prefix: str) -> str:
 
 class QwenTokenizer:
     def __init__(self, model_root: Path):
-        tokenizer_config = json.loads(
-            (model_root / "tokenizer_config.json").read_text(encoding="utf-8")
+        contract = identify_model_contract(model_root)
+        self.model_id = contract.model_id
+        tokenizer_config = strict_json_file(
+            model_root / "tokenizer_config.json", maximum_bytes=64 * 1024
         )
+        if not isinstance(tokenizer_config, dict):
+            raise ValueError("Qwen tokenizer configuration is not an object")
         template = tokenizer_config.get("chat_template")
         if (
             not isinstance(template, str)
             or hashlib.sha256(template.encode("utf-8")).hexdigest()
-            != EXPECTED_CHAT_TEMPLATE_SHA256
+            != EXPECTED_CHAT_TEMPLATE_SHA256[self.model_id]
         ):
             raise ValueError("Qwen chat template changed")
-        generation_config = json.loads(
-            (model_root / "generation_config.json").read_text(encoding="utf-8")
+        generation_config = strict_json_file(
+            model_root / "generation_config.json", maximum_bytes=64 * 1024
         )
-        if generation_config != EXPECTED_GENERATION_CONFIG:
+        if canonical_json(generation_config) != canonical_json(EXPECTED_GENERATION_CONFIG):
             raise ValueError("Qwen generation configuration changed")
-        raw = json.loads((model_root / "tokenizer.json").read_text(encoding="utf-8"))
+        raw = strict_json_file(
+            model_root / "tokenizer.json", maximum_bytes=16 * 1024 * 1024
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("Qwen tokenizer is not an object")
         if raw.get("normalizer") != {"type": "NFC"}:
             raise ValueError("Qwen tokenizer normalization behavior changed")
         model = raw.get("model")
@@ -71,7 +88,15 @@ class QwenTokenizer:
         if model.get("dropout") is not None or model.get("byte_fallback") is not False:
             raise ValueError("Qwen tokenizer BPE behavior changed")
         self._vocab: dict[str, int] = model["vocab"]
-        if len(self._vocab) != 151_643 or len(set(self._vocab.values())) != len(self._vocab):
+        if (
+            not isinstance(self._vocab, dict)
+            or len(self._vocab) != 151_643
+            or any(
+                not isinstance(token, str) or type(token_id) is not int
+                for token, token_id in self._vocab.items()
+            )
+            or set(self._vocab.values()) != set(range(151_643))
+        ):
             raise ValueError("Qwen tokenizer vocabulary changed")
         merges = model["merges"]
         if len(merges) != 151_387:
@@ -123,8 +148,10 @@ class QwenTokenizer:
             ):
                 raise ValueError("Qwen tokenizer added-token behavior changed")
             content, token_id = token.get("content"), token.get("id")
-            if not isinstance(content, str) or not isinstance(token_id, int):
+            if not isinstance(content, str) or type(token_id) is not int:
                 raise ValueError("Qwen tokenizer added token is malformed")
+            if content in self.added_tokens or token_id in self.added_tokens.values():
+                raise ValueError("Qwen tokenizer repeats an added token")
             self.added_tokens[content] = token_id
             if token["special"]:
                 self.special_tokens[content] = token_id
@@ -249,14 +276,45 @@ def _content(message: dict[str, Any]) -> str:
     return content
 
 
-def _tool_call_payload(call: dict[str, Any]) -> tuple[str, Any]:
+def _tool_call_payload(call: dict[str, Any]) -> tuple[str, Any, bool]:
     function = call.get("function", call)
-    if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+    if (
+        not isinstance(function, dict)
+        or not isinstance(function.get("name"), str)
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", function["name"]) is None
+    ):
         raise ValueError("Qwen chat history contains a malformed tool call")
     arguments = function.get("arguments", {})
     if isinstance(arguments, str):
-        arguments = json.loads(arguments)
-    return function["name"], arguments
+        # The exact upstream template emits string arguments verbatim. Validate
+        # their meaning strictly, but retain the original bytes for rendering.
+        try:
+            parsed = json.loads(
+                arguments,
+                object_pairs_hook=lambda pairs: _strict_json_object(pairs),
+                parse_constant=lambda value: _reject_json_constant(value),
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ValueError("Qwen tool-call arguments are not strict JSON") from error
+        if not isinstance(parsed, dict):
+            raise ValueError("Qwen tool-call arguments must encode an object")
+        return function["name"], arguments, True
+    if not isinstance(arguments, dict):
+        raise ValueError("Qwen tool-call arguments must be an object")
+    return function["name"], arguments, False
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON object member: {key}")
+        value[key] = member
+    return value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON number is forbidden: {value}")
 
 
 def render_chat(
@@ -324,14 +382,18 @@ def render_chat(
             else:
                 output += content
             for call_index, call in enumerate(message.get("tool_calls") or []):
-                name, arguments = _tool_call_payload(call)
+                name, arguments, arguments_are_json = _tool_call_payload(call)
                 if content or call_index:
                     output += "\n"
                 output += (
                     '<tool_call>\n{"name": '
                     + json.dumps(name, ensure_ascii=False)
                     + ', "arguments": '
-                    + json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                    + (
+                        arguments
+                        if arguments_are_json
+                        else json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                    )
                     + "}\n</tool_call>"
                 )
             output += "<|im_end|>\n"
