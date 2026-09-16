@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-15T01:10:03Z:4cfb6b4e0ce0e9848a9bb11453a37891197063763b58f2411086be7f71305d18:MiJNhgW3Lu7VfCpYkAeAvcJb4PbU4wzZmVnmkjT14EVdq951Q1XpPKNK6gajm+2eBKlD0u7WS62tH11w5SfSCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T03:00:17Z:18540baf27873273410336ae1a32a88142f3ea354294ab748db5048ecd545e81:76W3PImxZtETs3B/96GilHApfk6nEJAeTh8jPP5qB+ylSzWJAj4uXavWdJWgac+5fAJkE9opelsFXKBQ+YgUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
@@ -25,9 +25,11 @@ This recipe binds the retained manifest to the installed native-authoring
 verifier named by the recipe. Before launching a project production Graph, the
 target's local operator must use `external-content import-binding` and
 `external-content bind` to bind that same retained manifest to each exact Tool
-and project snapshot that consumes it. Managed activation and general binding
-remain local-operator authority; a configured remote operator does not acquire
-those capabilities merely because it owns the later producer products.
+and project snapshot that consumes it. Managed activation admits either the
+configured local operator or an origin-bound remote operator. If activation is
+remote-owned, the target-local import must explicitly name that admitted owner
+with `binding_owner_principal`; the new stage and general bind remain local-
+operator authority. Naming the source owner never delegates those operations.
 
 Do not copy a realization directory from another node or add an ad hoc locator:
 activation verifies the signed archive recipe, the node's acquisition policy,
@@ -81,13 +83,17 @@ must have the same owner; target-local products do not become interchangeable
 with another operator's products. No private signing key moves between nodes.
 
 The target's local operator provisions the literal bootstrap input bindings.
-An admitted remote operator can then execute the finite producer operations and
+An admitted remote operator may own managed activation and can then execute the finite producer operations and
 capture, qualify and compose its own retained products under separately granted
 service scopes. These are operator operations, not additional worker grants.
-Named-root filesystem import, general binding and managed activation remain
+Named-root filesystem import, retained-binding import and general binding remain
 local-operator operations. Current binding authorizer grant digests remain
 revocable; changing a grant invalidates bindings signed against its old digest.
 Establish the complete finite operator grant before production and binding.
+When a retained source binding belongs to a remote operator, its import request
+names the exact canonical `binding_owner_principal`. The target revalidates that
+operator's current origin-bound grant and the binding's original grant digest,
+then creates a fresh stage owned by the configured local operator.
 When a literal dependency is bound to an exact selected D1, the local binding
 request also names the canonical `product_owner_principal`. The target verifies
 that current admitted operator grant and checks every selected witness against
@@ -128,10 +134,11 @@ consumers **at that same source snapshot** before launch.
 Project consumer bindings include the snapshot hash: existing content manifests
 can be reused, but bindings to an older source generation cannot authorize the
 new one. Use `ryeos external-content import-binding <exact-active-binding-hash>
-<maximum-bytes>` for a fresh receipt, then bind that receipt to the new exact
-Tool/snapshot. The source binding must still be active under the local
-operator's current authority; a completed receipt cannot simply be reused for
-another consumer. Product slots instead use `external-content compose-product`
+<maximum-bytes> [binding-owner-principal]` for a fresh receipt, then bind that
+receipt to the new exact Tool/snapshot. Omit the owner only for a binding owned
+by the configured local operator. The source binding must still be active under
+its exact owner's current authority; a completed receipt cannot simply be
+reused for another consumer. Product slots instead use `external-content compose-product`
 with an explicit consumer context and complete selection list. A Graph declares
 only inputs it owns; it does not guess or redeclare every child's environment.
 
