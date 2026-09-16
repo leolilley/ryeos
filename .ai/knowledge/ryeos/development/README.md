@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-01T21:21:33Z:fe8cf363e0d6716fe435faf4847bedd1a35254e7eea3f61e0627a5770057c52a:H9kGHVMne2ipv7s/qMQomi4bhW/c8PIE1Gq4lrzrfCUw1sNhDsj1WmkPZM0nSE/4/WvlilHFAbN41ugbPgwBDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T03:44:59Z:6cb7a01e08396ca6d46a1277f694e2f9a5bb2f2bbf948affcc5f77f203f8f0cf:FQOB5GGuPXLYM6Aemsru8+0VDC+VyM9r5o2588OzYh8oaMyq6aNaBr38OEL4Jn2axhQ+gpJKybRCxnaJIbmuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.1"
+version: "1.0.2"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -47,6 +47,10 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
+- `ui-design-system`: the governing UI visual language, component anatomy,
+  contextual-input rules, renderer/content ownership and visual review criteria.
+  Read it before implementing or restyling web or terminal UI. It supersedes
+  the older temporary HUD/monospace-everywhere style instructions.
 
 The installed worker-hosted execution contract lives at
 `knowledge:ryeos/core/execution/worker-hosted-execution` in Standard.
