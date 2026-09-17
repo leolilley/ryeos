@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T00:51:29Z:e8337d9543bbf3e42c120edfa1026e5042bf2468e66761d37063cb34fe423595:KxvsePYawd3fapuGvuu+hLUtxruEUc+qUauvK/R5SoejaPkQfk4AsPQ4pTF7JkYCZPe1l6MeB7q8xcbOPxgLBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:51:04Z:e97e981e8fd5836dd1689b52b5055f31070dc78bd02177ebda5c94aa90a9d771:EJXJCVFiCzxoIh7Px5THU2gJzv++9iwhvkbX4eD4gHa5SQhHNXKJCVjCP9TIAhGaDzTP4xMXuS2afNBax0I9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -158,13 +158,16 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 6
+      version: 7
       process_scopes:
         # The protected host-runtime binding supplies the opaque qualified
         # Lillux provider. Policy never contains native cgroup coordinates.
         mode: required
         control_timeout_ms: 5000
         nested_sandbox: true
+      # This profile requires qualified Lillux scopes. It must never select the
+      # weaker trusted direct-process-group worker lifecycle.
+      trusted_process_group_sessions: false
       mode: enforce
       backend:
         bundle: core

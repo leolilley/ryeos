@@ -62,6 +62,9 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         self.assertRegex(profile, r"(?m)^\s+mode: enforce$")
         self.assertIn("implementation: linux-lillux", profile)
         self.assertIn("proc_filesystem: pid_namespace_nested", profile)
+        self.assertIn("version: 7", profile)
+        self.assertIn("trusted_process_group_sessions: false", profile)
+        self.assertNotIn("trusted_process_group_sessions: true", profile)
         self.assertNotIn("mode: unconfigured", profile)
         self.assertNotIn("mode: disabled", profile)
 
