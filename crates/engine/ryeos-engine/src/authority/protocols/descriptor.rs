@@ -95,6 +95,11 @@ pub enum PersistentSessionCleanupAuthority {
     NotRequired,
     /// Lillux owns a qualified, recoverable process scope on this node.
     LocalProcessScope,
+    /// The signed node policy explicitly admits a trusted worker whose direct
+    /// process group is the cleanup boundary. This is an operational lane for
+    /// disposable, single-tenant placements; it is not containment and does
+    /// not imply descendant-death proof against a hostile worker.
+    TrustedProcessGroup,
     /// A protected external supervisor owns one exact deployment occurrence.
     /// This does not claim authority over the provider's physical host.
     ExternalPlacementIncarnation,
@@ -236,6 +241,9 @@ pub fn validate_persistent_session_protocol(
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::LocalProcessScope
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::ExternalPlacementIncarnation
@@ -396,6 +404,7 @@ mod tests {
     fn persistent_session_cleanup_authority_matches_process_ownership() {
         for cleanup in [
             PersistentSessionCleanupAuthority::LocalProcessScope,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
             PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ] {
             assert!(

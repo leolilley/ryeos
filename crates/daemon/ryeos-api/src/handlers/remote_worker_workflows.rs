@@ -450,6 +450,10 @@ fn validate_target_runtime_requirements(requirements: &TargetRuntimeRequirements
         | (
             TargetProcessControl::ExclusiveSession,
             PersistentSessionCleanupAuthority::LocalProcessScope,
+        )
+        | (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
         ) => Ok(()),
         (
             TargetProcessControl::ExclusiveSession,
@@ -1216,9 +1220,21 @@ fn target_readiness_evidence(
         | (
             TargetProcessControl::ExclusiveSession,
             PersistentSessionCleanupAuthority::LocalProcessScope,
+        )
+        | (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
         ) => {
             let selected = process_scopes
-                .get(requirements.process_control.status_field())
+                .get(
+                    if requirements.cleanup_authority
+                        == PersistentSessionCleanupAuthority::TrustedProcessGroup
+                    {
+                        "trusted_exclusive_session"
+                    } else {
+                        requirements.process_control.status_field()
+                    },
+                )
                 .and_then(Value::as_object)
                 .context("target node status omitted selected process-control mode")?;
             if requirements.cleanup_authority
@@ -1910,6 +1926,12 @@ fn validate_receipt(receipt: &Receipt, operation: &Operation) -> Result<()> {
 
 fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Result<()> {
     let expected_reason = match evidence.requirements.process_control {
+        TargetProcessControl::ExclusiveSession
+            if evidence.requirements.cleanup_authority
+                == PersistentSessionCleanupAuthority::TrustedProcessGroup =>
+        {
+            "trusted_process_group"
+        }
         TargetProcessControl::ExclusiveSession => "ready",
         TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests => {
             "not_required"
@@ -1932,6 +1954,10 @@ fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Res
             TargetProcessControl::ExclusiveSession,
             PersistentSessionCleanupAuthority::LocalProcessScope,
         ) => evidence.process_scope_authority_digest.is_some(),
+        (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        ) => evidence.process_scope_authority_digest.is_none(),
         _ => false,
     };
     if evidence.daemon_revision.is_empty()
@@ -3153,6 +3179,13 @@ mod tests {
             ))
             .is_ok()
         );
+        assert!(
+            validate_target_runtime_requirements(&requirement(
+                TargetProcessControl::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            ))
+            .is_ok()
+        );
         for cleanup_authority in [
             PersistentSessionCleanupAuthority::NotRequired,
             PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
@@ -3366,6 +3399,10 @@ mod tests {
                         "ready": process_ready,
                         "reason": process_reason,
                     },
+                    "trusted_exclusive_session": {
+                        "ready": false,
+                        "reason": "policy_unconfigured",
+                    },
                 },
             },
         });
@@ -3456,6 +3493,25 @@ mod tests {
     }
 
     #[test]
+    fn trusted_process_group_readiness_requires_the_signed_target_opt_in() {
+        let requirements = TargetRuntimeRequirements {
+            process_control: TargetProcessControl::ExclusiveSession,
+            cleanup_authority: PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
+            network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+        };
+        let mut status = target_status(false, "policy_unconfigured", "disabled", "host");
+        let error = target_readiness_evidence(&status, &requirements).unwrap_err();
+        assert!(format!("{error:#}").contains("policy_unconfigured"));
+
+        status["isolation"]["process_scopes"]["trusted_exclusive_session"] =
+            serde_json::json!({"ready": true, "reason": "trusted_process_group"});
+        let evidence = target_readiness_evidence(&status, &requirements).unwrap();
+        assert_eq!(evidence.process_control_reason, "trusted_process_group");
+        assert!(evidence.process_scope_authority_digest.is_none());
+    }
+
+    #[test]
     fn ryeos_project_workflow_uses_the_exact_signed_driver_and_environment() {
         let root = ryeos_engine::test_support::workspace_root();
         let config_value: Value = serde_yaml::from_str(
@@ -3471,6 +3527,24 @@ mod tests {
             TargetProcessControl::ExclusiveSession
         );
         assert!(config.ref_bindings.is_empty());
+
+        let trusted_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/config/development/ryeos/trusted-remote-worker.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let trusted: WorkflowConfig = serde_json::from_value(trusted_value).unwrap();
+        assert_eq!(
+            trusted.target_requirements.cleanup_authority,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup
+        );
+        assert!(trusted.ref_bindings.is_empty());
+        assert_eq!(
+            trusted.driver,
+            "graph:ryeos/development/trusted-remote-worker"
+        );
 
         let graph_value: Value = serde_yaml::from_str(
             &std::fs::read_to_string(root.join(".ai/graphs/ryeos/development/remote-worker.yaml"))
@@ -3510,6 +3584,23 @@ mod tests {
         assert_eq!(
             graph_value.pointer("/config/nodes/run/assign/candidate_terminal_thread_id"),
             Some(&Value::String("${dispatch.child_thread_id}".to_owned()))
+        );
+
+        let trusted_graph_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/graphs/ryeos/development/trusted-remote-worker.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let trusted_graph: ryeos_graph_definition::GraphFile =
+            serde_json::from_value(trusted_graph_value.clone()).unwrap();
+        ryeos_graph_definition::validate_graph_file(&trusted_graph).unwrap();
+        assert_eq!(
+            trusted_graph_value.pointer("/config/nodes/run/action/ref_bindings/environment"),
+            Some(&Value::String(
+                "config:development/ryeos/trusted-worker-environment".to_owned()
+            ))
         );
     }
 

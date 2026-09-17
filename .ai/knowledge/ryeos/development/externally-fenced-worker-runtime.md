@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T02:55:59Z:b455a2a829bb29dcc7836abb6b3b7ceb38abe324adb38b14f8dae22407c43041:J7aZYxPJExBakBWTGDHLUZ2A4GgyNTfob3f2NX9/EEDFOi+I3Le90Qi0D/5SkY9tNj1kKT9iTFDAqY2oBSSgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T03:41:16Z:4f3a67ebf116c154b067574a1185b41f5c72207076ea3c35aa8742902ff256bf:hy6HqzRs1baZLsFUoWFX5qpWYKZ3nXj6lnpQgkYeMmILjdccTm63mOK2uEcvTsRmTUwTvo74uyYS4r6ZN2QyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -46,6 +46,24 @@ route. Project-owned admitted RyeOS operations may then provide bounded editing
 and verification. A feature flag, prompt instruction, self-reported tool list,
 or failed shell command is not qualification evidence. Until this gate is met,
 launch must refuse before model-provider turn contact.
+
+A trusted disposable authoring placement is a fourth, deliberately weaker
+product. Its signed node policy may enable `trusted_process_group_sessions`,
+and its worker selects `cleanup_authority: trusted_process_group`. RyeOS then
+owns the exact direct process-group lifecycle, retained candidate, completion
+fence, and independent evaluation, but does not claim hard containment or
+hostile descendant-death proof. This lane exists for single-tenant managed
+containers such as a dedicated Railway service while the lifecycle-adapter
+product remains under qualification. It must not use
+`external_placement_incarnation`, satisfy that product's acceptance claims, or
+silently fall back from a missing local process scope.
+
+The trusted lane is selected explicitly by all three authorities: the signed
+node policy, the distinct trusted session protocol, and the selected trusted
+worker item. Ordinary and hardened workers remain fail-closed. One placement
+should run one worker campaign at a time; import and freeze the candidate
+before recycling it. Deployment, signing, competition submission, and
+publication credentials stay outside the worker service.
 
 ## Authority split
 

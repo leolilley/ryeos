@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T23:37:07Z:640b91c488ea6384446d06d2127c7689a8f3b92f38e44166a2a80fb7231c793f:mc4HUCXPCRRhWifScpM5azveKQL+jsOGq30Z6+O1x5/zU/7wKw1LaoddnpZ8ub3jyWT7heOtvC0rnjBTyMMpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T03:41:16Z:1111f8162b7d04f554996d26b712c86e0db8b4213a9f26c4bc0bc93b7a08e76f:v/FxgaFKA0MRX7iy3RJppHPaOdWjir+YXwIK8752LsPl4obt2po2NmfdspjT8xmk8AIJVfB9ISZts+mOqg0JAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -47,6 +47,16 @@ select RyeOS's isolation backend, install or discover a host `bwrap`, or
 provide BusyBox.
 There is no custom credential bridge, token injection, local-LLM route, worker
 pool, or cross-session process reuse.
+
+`worker:codex/hosted-authoring` and
+`worker:codex/trusted-hosted-authoring` share one exact unattended authoring
+profile with ordinary Codex shell/edit tools and `approval_policy=never`.
+The former requires a qualified local process scope. The latter can run only
+when signed node policy explicitly enables trusted process-group sessions. It
+is intended for a single-tenant disposable placement and makes no filesystem,
+kernel, or hostile-descendant containment claim. The worker never receives
+project signing, publication, submission, or deployment-control authority;
+candidate acceptance remains an independent RyeOS operation.
 
 The exact Codex executable, same-version code-mode host, packaged command-
 sandbox companion, and the package's `zsh` and `rg` runtime resources are

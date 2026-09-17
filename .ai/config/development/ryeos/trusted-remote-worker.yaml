@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-17T03:46:06Z:2e5bdc205d5bf2dc8633cf5ab5223f4bc101ce52d20c14eb9bef58407cb3b9da:ec6HkBhzGfWMC+EzB4aIxnvl3RLwC70JEX14IV+2ctAMACGwM71zwZ2qF4Bh1SV9+obyY285oZIQuZHB5i8iBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+schema: ryeos.remote_worker_workflow.v3
+driver: graph:ryeos/development/trusted-remote-worker
+target_requirements:
+  process_control: exclusive_session
+  cleanup_authority: trusted_process_group
+  filesystem_mode: disabled
+  network_mode: host
+ref_bindings: {}
+parameters:
+  goal: "${inputs.task}"
+  credential_profile_id: "${inputs.credential_profile_id}"
+  target_product_selections: "${inputs.target_product_selections}"
