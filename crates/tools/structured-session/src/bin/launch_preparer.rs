@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 const DEPENDENCY_NAME: &str = "session_worker";
 const ENVIRONMENT_BINDING: &str = "environment";
+const LARGE_CONTENT_MAX_TOTAL_BYTES: u64 = 17_179_869_184;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkerSelection {
@@ -295,7 +296,8 @@ fn validate(request: ValidateLaunchPreparerConfigRequest) -> ValidateLaunchPrepa
             .as_ref()
             .is_some_and(|external| {
                 external.max_declarations == 8
-                    && external.large_content_max_total_bytes == Some(4_294_967_296)
+                    && external.large_content_max_total_bytes
+                        == Some(LARGE_CONTENT_MAX_TOTAL_BYTES)
             })
         && request.evidence_attachments.max_attachments == 16
         && request.evidence_attachments.max_total_bytes == 536_870_912
@@ -974,6 +976,94 @@ fn validate_worker_environment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_launch_contract_accepts_large_local_inference_closures() {
+        let mut request = ValidateLaunchPreparerConfigRequest {
+            handler_config: serde_json::json!({}),
+            primary_allowed_kinds: vec!["worker_execution".to_owned()],
+            primary_allowed_spaces: vec![ItemSpaceWire::Bundle],
+            primary_allowed_trust: vec![TrustClassWire::TrustedBundle],
+            ref_bindings: BTreeMap::from([(
+                ENVIRONMENT_BINDING.to_owned(),
+                ryeos_handler_protocol::RefBindingDeclWire {
+                    required: false,
+                    source: RefBindingSourceWire::Caller,
+                    project_result_requirement:
+                        ryeos_handler_protocol::ProjectResultRequirement::None,
+                    allowed_kinds: vec!["config".to_owned()],
+                    allowed_spaces: vec![ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+                    allowed_trust: vec![
+                        TrustClassWire::TrustedBundle,
+                        TrustClassWire::TrustedProject,
+                    ],
+                },
+            )]),
+            config_inputs: BTreeMap::new(),
+            secret_policy: ryeos_handler_protocol::LaunchSecretPolicyDeclWire {
+                max_requirements: 0,
+                allowed_names: Vec::new(),
+            },
+            required_runtime_data: vec!["worker_execution".to_owned()],
+            runtime_facts: BTreeMap::from([(
+                ryeos_runtime::workload_client::WORKLOAD_CLIENT_REQUEST_FACT.to_owned(),
+                ryeos_handler_protocol::RuntimeFactDeclWire {
+                    required: false,
+                    kind: ryeos_handler_protocol::RuntimeFactKindWire::Json,
+                    max_bytes:
+                        ryeos_runtime::workload_client::MAX_WORKLOAD_CLIENT_REQUEST_CONTRACT_BYTES,
+                },
+            )]),
+            execution_dependencies: ryeos_handler_protocol::LaunchExecutionDependencyPolicyWire {
+                max_dependencies: 1,
+                allowed_kinds: vec!["worker".to_owned()],
+                allowed_spaces: vec![ItemSpaceWire::Bundle],
+                allowed_trust: vec![TrustClassWire::TrustedBundle],
+            },
+            content_dependencies: ryeos_handler_protocol::LaunchContentDependencyPolicyWire {
+                max_dependencies: 1,
+                allowed_bindings: vec![ENVIRONMENT_BINDING.to_owned()],
+                max_targets_per_dependency: 1,
+                max_executable_search_entries: 16,
+                external_content: Some(ryeos_handler_protocol::LaunchContentExternalPolicyWire {
+                    max_declarations: 8,
+                    large_content_max_total_bytes: Some(LARGE_CONTENT_MAX_TOTAL_BYTES),
+                }),
+            },
+            evidence_attachments: ryeos_handler_protocol::LaunchEvidenceAttachmentPolicyWire {
+                max_attachments: 16,
+                max_total_bytes: 536_870_912,
+                target: Some(DEPENDENCY_NAME.to_owned()),
+                destination_prefix: Some("evidence".to_owned()),
+                allowed_access: vec![
+                    ryeos_handler_protocol::EvidenceAttachmentAccessWire::ReadOnly,
+                ],
+            },
+            environment_contributions:
+                ryeos_handler_protocol::LaunchEnvironmentContributionPolicyWire {
+                    max_contributions: 1,
+                    max_targets_per_contribution: 1,
+                    max_variables_per_contribution: 32,
+                },
+            financial_authority: FinancialAuthorityDeclWire::None,
+            external_effect_authority: ExternalEffectAuthorityDeclWire::External,
+        };
+
+        assert!(matches!(
+            validate(request.clone()),
+            ValidateLaunchPreparerConfigResponse::Valid { .. }
+        ));
+        request
+            .content_dependencies
+            .external_content
+            .as_mut()
+            .unwrap()
+            .large_content_max_total_bytes = Some(4_294_967_296);
+        assert!(matches!(
+            validate(request),
+            ValidateLaunchPreparerConfigResponse::Invalid { .. }
+        ));
+    }
 
     fn pending_product_environment() -> LaunchPreparedItemWire {
         LaunchPreparedItemWire {
