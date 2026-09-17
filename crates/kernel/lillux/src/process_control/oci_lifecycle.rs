@@ -143,6 +143,10 @@ impl OciLifecycleGeneration {
     pub fn digest(&self) -> &str {
         &self.generation
     }
+
+    pub(crate) fn controller_scope(&self) -> crate::PinnedDirectoryIdentity {
+        self.controller_scope
+    }
 }
 
 #[cfg(test)]

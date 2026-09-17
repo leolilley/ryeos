@@ -25,6 +25,8 @@ pub struct HostRuntimeBinding {
     pub node_fingerprint: String,
     pub account: lillux::ControllerAccount,
     pub process_scopes: lillux::ProcessScopeConfiguration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_lifecycle: Option<lillux::OciLifecycleGeneration>,
 }
 
 impl HostRuntimeBinding {
@@ -41,6 +43,7 @@ impl HostRuntimeBinding {
             node_fingerprint,
             account,
             process_scopes,
+            oci_lifecycle: None,
         };
         binding.validate(app_root.path())?;
         Ok(binding)
@@ -58,6 +61,11 @@ impl HostRuntimeBinding {
         }
         self.account.validate().map_err(anyhow::Error::msg)?;
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            self.process_scopes
+                .require_oci_generation(lifecycle)
+                .map_err(anyhow::Error::msg)?;
+        }
         if !lillux::valid_hash(&self.node_fingerprint) {
             bail!("host runtime has an invalid node public identity");
         }
@@ -80,6 +88,19 @@ impl HostRuntimeBinding {
             bail!("host-runtime node identity changed");
         }
         Ok(app_root)
+    }
+
+    pub fn capture_oci(
+        app_root: &PinnedDirectory,
+        node_fingerprint: String,
+        account: lillux::ControllerAccount,
+        process_scopes: lillux::ProcessScopeConfiguration,
+        oci_lifecycle: lillux::OciLifecycleGeneration,
+    ) -> Result<Self> {
+        let mut binding = Self::capture(app_root, node_fingerprint, account, process_scopes)?;
+        binding.oci_lifecycle = Some(oci_lifecycle);
+        binding.validate(app_root.path())?;
+        Ok(binding)
     }
 
     pub fn verify_loaded_node_identity(

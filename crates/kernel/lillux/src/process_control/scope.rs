@@ -540,6 +540,78 @@ enum QuiescedBackend {
 }
 
 impl ProcessScopeConfiguration {
+    /// OCI prestart hook operation. Lillux derives C from the exact init PID,
+    /// creates R directly beneath it, and installs the R-rooted mount in the
+    /// container namespace before returning an opaque provider configuration.
+    pub fn prepare_oci_hook(
+        state: &super::OciHookState,
+    ) -> Result<(Self, super::OciLifecycleGeneration), String> {
+        state.validate_prestart()?;
+        super::require_administrator().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "linux")]
+        {
+            let prepared = super::cgroup::prepare_oci_controller_root(state.pid)?;
+            super::cgroup::install_oci_controller_mount(&prepared, state.pid)?;
+            let host_lifetime = super::ProcessHostLifetime::capture_current()?;
+            let generation_payload = serde_json::json!({
+                "container_id": &state.id,
+                "host_lifetime": &host_lifetime,
+                "init_process": &prepared.init_process,
+                "lifecycle_scope": &prepared.lifecycle_scope,
+                "controller_scope": &prepared.controller_scope,
+                "nonce": crate::sha256_hex(&crate::crypto::generate_random_bytes::<32>()),
+            });
+            let generation = format!(
+                "sha256:{}",
+                crate::sha256_hex(
+                    crate::canonical_json(&generation_payload)
+                        .map_err(|error| error.to_string())?
+                        .as_bytes()
+                )
+            );
+            let lifecycle = super::OciLifecycleGeneration::new(
+                state.id.clone(),
+                host_lifetime,
+                prepared.init_process,
+                prepared.lifecycle_scope,
+                prepared.controller_scope,
+                generation,
+            )?;
+            let configuration = Self {
+                version: SCOPE_CONFIGURATION_VERSION,
+                backend: BackendConfiguration::LinuxCgroupV2 {
+                    parent: "/sys/fs/cgroup".into(),
+                },
+            };
+            configuration.validate()?;
+            Ok((configuration, lifecycle))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("OCI lifecycle preparation is unavailable on this OS".to_owned())
+    }
+
+    pub fn require_oci_generation(
+        &self,
+        lifecycle: &super::OciLifecycleGeneration,
+    ) -> Result<(), String> {
+        lifecycle.validate()?;
+        let provider = ProcessScopeProvider::open(self)?;
+        match &provider.backend {
+            #[cfg(target_os = "linux")]
+            ProviderBackend::LinuxCgroupV2(parent)
+                if parent.identity()? == lifecycle.controller_scope() =>
+            {
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            ProviderBackend::LinuxCgroupV2(_) => {
+                Err("OCI controller-root generation has been replaced".to_owned())
+            }
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("OCI lifecycle validation is unavailable on this OS".to_owned()),
+        }
+    }
+
     /// Provision one administrator-owned host-service delegation and compile
     /// the current platform's opaque scope contract. Applications supply only
     /// their already-determined native service label; they never choose a

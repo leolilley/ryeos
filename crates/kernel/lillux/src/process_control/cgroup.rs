@@ -24,6 +24,174 @@ const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
 const HOST_SERVICE_DELEGATIONS: &str = "lillux-host-services";
 // Bounded kernel interface records, not workload output or acquisition policy.
 const MAX_CONTROL_RECORD_BYTES: usize = 4096;
+const OCI_CONTROLLER_ROOT: &str = "ryeos-controller-root";
+
+pub(crate) struct PreparedOciCgroup {
+    pub(crate) init_process: super::ExactProcessIdentity,
+    pub(crate) lifecycle_scope: PinnedDirectoryIdentity,
+    pub(crate) controller_scope: PinnedDirectoryIdentity,
+    controller: PinnedDirectory,
+}
+
+/// OCI prestart operation. The runtime has already created and placed the
+/// exact init process, but has not released it. Derive C from that pinned
+/// process, then create R directly beneath the opened C descriptor. No path or
+/// container identifier supplied by an application participates in authority.
+pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCgroup, String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("OCI lifecycle preparation requires administrator authority".to_owned());
+    }
+    let init_process = super::capture_exact_process_identity(init_pid, None)?;
+    let relative = unified_process_cgroup(init_pid)?;
+    let root = Path::new("/sys/fs/cgroup");
+    let lifecycle_path = relative
+        .strip_prefix("/")
+        .map_or_else(|_| root.to_path_buf(), |relative| root.join(relative));
+    let lifecycle = PinnedDirectory::open(&lifecycle_path)
+        .map_err(display)?
+        .ok_or("OCI lifecycle cgroup is absent")?;
+    let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&lifecycle_fd)?;
+    require_domain(&lifecycle_fd)?;
+    let metadata = lifecycle_fd.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err("OCI lifecycle cgroup is not administrator-owned and protected".to_owned());
+    }
+    let placement = open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?;
+    let members = read_control(&placement)?;
+    if !members.lines().any(|member| member == init_pid.to_string()) {
+        return Err("OCI init process is not a direct member of its observed lifetime".to_owned());
+    }
+    let name = child_name(OCI_CONTROLLER_ROOT)?;
+    if unsafe { libc::mkdirat(lifecycle_fd.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+        return Err(format!(
+            "create OCI controller root: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let controller = lifecycle
+        .open_child_directory(OCI_CONTROLLER_ROOT.as_ref())
+        .map_err(display)?
+        .ok_or("OCI controller root disappeared after creation")?;
+    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&controller_fd)?;
+    require_domain(&controller_fd)?;
+    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+    let observed = parse_events(&read_control(&events)?)?;
+    if observed.populated || observed.frozen {
+        return Err("new OCI controller root is unexpectedly occupied or frozen".to_owned());
+    }
+    if unified_process_cgroup(init_pid)? != relative
+        || super::capture_exact_process_identity(init_pid, None)? != init_process
+    {
+        return Err(
+            "OCI init identity or lifecycle placement changed during preparation".to_owned(),
+        );
+    }
+    Ok(PreparedOciCgroup {
+        init_process,
+        lifecycle_scope: lifecycle.identity().map_err(display)?,
+        controller_scope: controller.identity().map_err(display)?,
+        controller,
+    })
+}
+
+/// Replace the container's read-only view of C with a bind view rooted at R.
+/// The mount mutation occurs in a short-lived child after joining only the
+/// exact init mount namespace; the host adapter never changes its own mount
+/// namespace. R was created directly below pinned C above, so this exposes no
+/// sibling or lifecycle-parent control to the container.
+pub(crate) fn install_oci_controller_mount(
+    prepared: &PreparedOciCgroup,
+    init_pid: u32,
+) -> Result<(), String> {
+    let namespace = File::open(format!("/proc/{init_pid}/ns/mnt"))
+        .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+    let source = prepared
+        .controller
+        .try_clone_descriptor()
+        .map_err(display)?;
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(format!(
+            "fork OCI mount installer: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if child == 0 {
+        let result = (|| -> Result<(), io::Error> {
+            if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))
+                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+            if unsafe {
+                libc::mount(
+                    source_path.as_ptr(),
+                    c"/sys/fs/cgroup".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    c"/sys/fs/cgroup".as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RW,
+                    std::ptr::null(),
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        })();
+        unsafe { libc::_exit(if result.is_ok() { 0 } else { 125 }) };
+    }
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+        if waited == child {
+            break;
+        }
+        if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(format!(
+            "wait for OCI mount installer: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+        return Err("install writable OCI controller-root mount failed".to_owned());
+    }
+    Ok(())
+}
+
+fn unified_process_cgroup(pid: u32) -> Result<std::path::PathBuf, String> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .map_err(|error| format!("read OCI init cgroup membership: {error}"))?;
+    if raw.len() > MAX_CONTROL_RECORD_BYTES {
+        return Err("OCI init cgroup membership exceeds the bounded record".to_owned());
+    }
+    let mut unified = raw.lines().filter_map(|line| line.strip_prefix("0::"));
+    let value = unified
+        .next()
+        .ok_or("OCI init has no unified cgroup-v2 membership")?;
+    if unified.next().is_some()
+        || !value.starts_with('/')
+        || value.contains("//")
+        || value.split('/').any(|part| part == "." || part == "..")
+    {
+        return Err("OCI init cgroup-v2 membership is not canonical".to_owned());
+    }
+    Ok(value.into())
+}
 
 /// Root-only selection of the native delegation parent for one installed host
 /// service. The path is deliberately owned by Lillux rather than supplied by

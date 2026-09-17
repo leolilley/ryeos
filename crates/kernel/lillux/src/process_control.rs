@@ -17,12 +17,12 @@ mod oci_lifecycle;
 #[cfg(all(test, target_os = "linux"))]
 mod pid_namespace;
 mod scope;
+pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration};
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
     ProcessScopeProvider, ProcessScopeRecovery, QuiescedProcessScope, require_administrator,
 };
-pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration};
 
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
