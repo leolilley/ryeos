@@ -1,164 +1,208 @@
-# Web ryeos-ui parity ledger
+# Web and terminal UI parity ledger
 
-The browser renderer (`crates/clients/web`) and the terminal renderer
-(`crates/clients/terminal`) are two transport+render skins over the SAME shared
-core in `crates/clients/base` (`RyeOsCore`: state, reducer, effects, semantic
-view model, scene model, keymap). Parity means: neither skin re-implements
-product logic, both consume the same view model and scene model, both drive the
-same reducer through the same events, and both use the shared keymap. This doc
-is the standing ledger so parity is a checked fact, not a vibe.
+The browser and terminal are transport and rendering adapters over the same
+`RyeOsCore`. Rust owns state, reduction, effects, layout, semantic view models,
+scene projection and key commands. A checked row means both adapters were
+audited; it does not claim byte-identical presentation.
 
-Baseline sweep: 2026-07-03. Kept in sync when either renderer changes.
+`tests/parity_matrix.test.js` compares these checked inventories with the Rust
+enums, rejects duplicates and unchecked rows, and requires a web and TUI
+decision. Adding or removing a variant therefore requires an explicit parity
+decision here.
 
-## Effects — `RyeOsEffectKind` (18 variants, both sides covered)
+Legend: `native` means adapter-owned mechanics; `shared` means behavior reached
+through the shared core/keymap; `presentation` means a platform rendering of
+the same projection; `neutral` means a documented no-op result; `gap` is
+shared-core behavior the adapter cannot currently originate.
 
-Every effect the core emits is executed by an adapter on each renderer. Browser
-adapter: `pkg/ryeos_effects.js`. Terminal adapter:
-`crates/clients/terminal/src/app/effects.rs`. Browser-native effects degrade to
-a null result on the terminal by design (there is no clipboard / URL bar / hash
-in a TTY); the core still receives a well-formed effect result.
+## Effects
 
-| Effect kind | Web (`ryeos_effects.js`) | Terminal (`effects.rs`) |
-| --- | --- | --- |
-| `fetch_dimension` | fetch | daemon fetch |
-| `fetch_projects` | fetch | daemon fetch |
-| `fetch_topology` | fetch | daemon fetch |
-| `add_project` | fetch | daemon fetch |
-| `open_project` | fetch | daemon fetch |
-| `fetch_threads` | fetch | daemon fetch |
-| `fetch_items` | fetch | daemon fetch |
-| `fetch_source` | fetch | daemon fetch |
-| `fetch_commands` | fetch | daemon fetch |
-| `list_files` | fetch | daemon fetch |
-| `fetch_file_space` | fetch | daemon fetch |
-| `read_file` | fetch | daemon fetch |
-| `dispatch_invocation` | fetch | daemon fetch |
-| `cancel_thread` | fetch | daemon fetch |
-| `invoke` | fetch | daemon fetch |
-| `set_location_hash` | `location.hash` (browser-only) | null result (no hash in TTY) |
-| `copy_to_clipboard` | Clipboard API (browser-only) | null result (no clipboard) |
-| `open_url` | `window.open` (browser-only) | null result (no URL bar) |
+<!-- parity:RyeOsEffectKind:start -->
+| Checked Rust variant | Web | TUI | Contract |
+| --- | --- | --- | --- |
+| [x] `FetchSource` | native | native | Same closed binding request. |
+| [x] `InvokeBinding` | native | native | Same bounded compiled binding. |
+| [x] `SetLocationHash` | native | neutral | No terminal location hash. |
+| [x] `CopyToClipboard` | native | neutral | No terminal clipboard owner. |
+| [x] `OpenUrl` | native | neutral | No terminal browser navigation. |
+| [x] `ReplaceSession` | native | native | Both redeem the one-shot successor session. |
+<!-- parity:RyeOsEffectKind:end -->
 
-No reducer logic is re-implemented in JavaScript: every state transition is a
-`RyeOsEvent` dispatched into `RyeOsCore`; JS only translates transport and DOM.
+## Root events
 
-## Widgets — `RyeOsViewVm` variants
+<!-- parity:RyeOsEvent:start -->
+| Checked Rust variant | Web | TUI | Contract |
+| --- | --- | --- | --- |
+| [x] `Start` | native | native | Initialize the same core. |
+| [x] `Ui` | native | native | Translate native input to shared UI events. |
+| [x] `EffectResult` | native | native | Return every effect to the reducer. |
+| [x] `DaemonEvent` | native | native | Forward observation payloads unchanged. |
+| [x] `HintReceived` | native | native | Forward lossy hints unchanged. |
+| [x] `HintFlushBatch` | native | native | Reconcile coalesced dirty kinds. |
+| [x] `TransportStateChanged` | native | gap | TUI reconnects but does not report explicit channel freshness. |
+| [x] `ThreadTail` | native | native | Forward SSE type and payload unchanged. |
+| [x] `Tick` | native | native | Advance presentation time. |
+| [x] `Resize` | native | native | Project native viewport dimensions. |
+| [x] `RouteChanged` | native | gap | Browser hash is wired; TUI has no route adapter. |
+<!-- parity:RyeOsEvent:end -->
 
-The core projects each bound view into a `RyeOsViewVm` variant; each renderer
-draws it. Terminal reference renderers live in
-`crates/clients/terminal/src/render/widgets/`.
+Those two `gap` rows are the only recorded root-event gaps. Svelte migration
+must not hide or widen them.
 
-| Widget (`type`) | Web (`ryeos_components_workspace.js`) | Terminal reference |
-| --- | --- | --- |
-| `rows` | `rows()` | `widgets/rows.rs` |
-| `table` | `tableView()` | `widgets/table.rs` |
-| `sections` | `sectionsView()` | `widgets/sections.rs` |
-| `timeline` | `timeline()` | `widgets/timeline.rs` |
-| `map` | `sceneMap()` | scene widget |
-| `atlas` | `atlasTile()` / `atlasMap()` | scene widget |
-| `placeholder` | inline title/message | placeholder |
+## UI intents
 
-`table` and `sections` were the two closed gaps (see below). A view whose `type`
-is none of the above still degrades to a soft "Unknown view" paragraph rather
-than a hard failure — the intended fallback, kept.
+All intents are reducer-owned. Browser buttons and pointer gestures are native
+producers of the same intents, not a second command vocabulary.
 
-## Scene divergence (intended)
+<!-- parity:RyeOsUiIntent:start -->
+| Checked Rust variant | Web | TUI | Reachability |
+| --- | --- | --- | --- |
+| [x] `Refresh` | shared | shared | shared command |
+| [x] `InvokeAffordance` | shared | shared | content-declared affordance |
+| [x] `OpenView` | shared | shared | compiled view activation |
+| [x] `OpenNewView` | shared | shared | compiled view activation |
+| [x] `OpenOverlay` | shared | shared | shared overlay command |
+| [x] `ToggleOverlayGroup` | shared | shared | presentation state |
+| [x] `CloseFocused` | shared | shared | shared close command |
+| [x] `CloseTile` | shared | shared | exact tile close |
+| [x] `ToggleFocusedMaster` | shared | shared | layout edit |
+| [x] `MoveFocusedTile` | shared | shared | layout edit |
+| [x] `MoveTileBeside` | shared | shared | guarded layout edit |
+| [x] `CycleTab` | shared | shared | group tab command |
+| [x] `MoveTileToGroup` | shared | shared | guarded layout edit |
+| [x] `CycleViewTab` | shared | shared | view-tab command |
+| [x] `SwitchTab` | shared | shared | exact tab selection |
+| [x] `NewWorkspace` | shared | shared | workspace edit |
+| [x] `SelectWorkspace` | shared | shared | workspace edit |
+| [x] `RenameWorkspace` | shared | shared | workspace edit |
+| [x] `CloseWorkspace` | shared | shared | workspace edit |
+| [x] `MoveTileToWorkspace` | shared | shared | guarded workspace edit |
+| [x] `ResizeSplit` | shared | shared | guarded ratio edit |
+| [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
+| [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |
+| [x] `ToggleBackdropBreak` | shared | shared | surface presentation |
+| [x] `ToggleDock` | shared | shared | surface presentation |
+| [x] `ResizeFocused` | shared | shared | keyboard layout edit |
+| [x] `SelectDimension` | shared | shared | semantic selection |
+| [x] `InspectItem` | shared | shared | derived inspector |
+| [x] `InspectThread` | shared | shared | derived inspector |
+| [x] `InspectSummary` | shared | shared | inert summary |
+| [x] `ReadFile` | shared | shared | bound file read |
+| [x] `CopyText` | shared | shared | platform effect |
+| [x] `OpenExternal` | shared | shared | platform effect |
+| [x] `SubmitThreadCommand` | shared | shared | bound command service |
+| [x] `AimThread` | shared | shared | route shared lens |
+| [x] `DrillThread` | shared | shared | push drill stack |
+| [x] `PrefillRetryTurn` | shared | shared | stage text for review |
+<!-- parity:RyeOsUiIntent:end -->
 
-The center scene is deliberately NOT byte-identical between renderers: the
-terminal draws the shared `RyeOsSceneModel` as a cell grid; the browser draws
-the same model with DOM/CSS (and Three.js where a 3D scene is bound). Both
-consume the SAME `RyeOsSceneModel` — the divergence is presentation only, not
-data or logic. The empty-center backdrop is likewise scene content (not an
-`ambient` enum) drawn through the generic scene path on both sides.
+## UI events and exact input actions
 
-## Keymap
+`shared` means native controls or shared key commands can originate the event
+without duplicating its reducer transition. Browser native text and IME use
+exact `InputAt` addresses; character-level events remain shared keymap paths.
 
-The binding table is the shared `ryeos_key_command` in
-`crates/clients/base/src/ryeos-ui/keymap.rs`. Both renderers translate a native
-key event into a neutral `RyeOsKeyEvent` and route it through that function
-against the shared `key_context()`:
+<!-- parity:RyeOsUiEvent:start -->
+| Checked Rust variant | Web | TUI | Reachability |
+| --- | --- | --- | --- |
+| [x] `InputAt` | native | gap | TUI uses the focused-input key path, not addressed native input |
+| [x] `Activate` | native | shared | generic intent |
+| [x] `SetFilter` | gap | gap | retained reducer event; current live filters use addressed input |
+| [x] `SetFilesRoot` | gap | gap | retained reducer event with no current producer |
+| [x] `SetFilesPath` | gap | gap | retained reducer event with no current producer |
+| [x] `SetAtlasLayerVisible` | native | gap | browser scene control only |
+| [x] `SetAtlasLens` | native | gap | browser scene control only |
+| [x] `SetAtlasProjection` | gap | gap | retained reducer event with no current producer |
+| [x] `SetAtlasFileSpacePath` | native | gap | browser scene/file control only |
+| [x] `SetFieldSelection` | native | shared | field state |
+| [x] `MoveFieldSelection` | native | shared | field state |
+| [x] `SetFieldGroupCollapsed` | native | shared | field state |
+| [x] `SetFieldLayerVisible` | native | gap | browser field control only |
+| [x] `SetFieldCursor` | native | gap | browser direct cursor control only |
+| [x] `StepFieldCursor` | native | shared | field state |
+| [x] `SetFieldPlayback` | native | shared | field state |
+| [x] `SetFieldQuery` | native | shared | field search |
+| [x] `MoveFieldSearchMatch` | native | shared | field search |
+| [x] `ToggleFieldCompare` | native | shared | field compare |
+| [x] `RequestFieldExpansion` | native | shared | shared effect path |
+| [x] `ContinueFieldExpansion` | native | shared | shared effect path |
+| [x] `ClearFieldExpansion` | native | gap | browser expansion control only |
+| [x] `FocusChanged` | native | gap | TUI reaches focus through directional shared commands |
+| [x] `FocusDock` | native | shared | dock focus |
+| [x] `FocusDirection` | native | shared | directional focus |
+| [x] `OpenOverlay` | native | shared | exact overlay |
+| [x] `CloseOverlay` | native | shared | close overlay |
+| [x] `SetOverlayQuery` | native | shared | native/key input |
+| [x] `FocusInput` | native | shared | input focus |
+| [x] `BlurInput` | native | shared | input blur |
+| [x] `InsertInputChar` | shared | native | character key path |
+| [x] `DeleteInputChar` | shared | native | character key path |
+| [x] `SetInputText` | shared | gap | web reaches it through addressed `SetText` conversion |
+| [x] `CompleteInput` | shared | native | completion |
+| [x] `CycleInputTarget` | shared | shared | shared keymap |
+| [x] `CycleFilterField` | shared | shared | shared keymap |
+| [x] `InterruptHead` | shared | shared | shared keymap |
+| [x] `SubmitInput` | shared | shared | shared keymap |
+| [x] `SubmitInputInterrupt` | shared | shared | shared keymap |
+| [x] `MoveOverlaySelection` | shared | shared | shared keymap |
+| [x] `ChooseOverlay` | shared | shared | shared keymap |
+| [x] `FoldOverlayGroup` | shared | shared | shared keymap |
+| [x] `SetTileCursor` | native | shared | pointer/key selection |
+| [x] `SetFold` | native | native | click/point fold |
+| [x] `ExpandSelectedRow` | shared | shared | shared keymap |
+| [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
+| [x] `ActivateFocused` | shared | shared | shared keymap |
+| [x] `PopLens` | shared | shared | drill return |
+<!-- parity:RyeOsUiEvent:end -->
 
-- Terminal: `crates/clients/terminal/src/app/keys.rs` (crossterm adapter).
-- Web: `pkg/ryeos_shell.js` (DOM `KeyboardEvent` → `RyeOsKeyEvent`) →
-  `wasm.rs::ryeos_key` → `ryeos_key_command`. The command-resolution
-  fallbacks (row-cursor move vs directional focus, launcher-query edit) are
-  mirrored from the terminal adapter in `wasm.rs`.
+<!-- parity:RyeOsInputAction:start -->
+| Checked Rust variant | Web | TUI | Reachability |
+| --- | --- | --- | --- |
+| [x] `Focus` | native | gap | TUI uses focused-input events |
+| [x] `SetText` | native | gap | Rust validates browser byte cursor |
+| [x] `Complete` | native | gap | TUI uses `CompleteInput` |
+| [x] `Submit` | native | gap | TUI uses shared submit events |
+<!-- parity:RyeOsInputAction:end -->
 
-Genuinely-web bindings that stay in JavaScript (not divergence — they are
-platform affordances with no terminal analogue):
+## Layout and views
 
-- Native text entry: the input-dock `<textarea>` and the launcher `<input>`
-  own their own typing/submit/completion WHILE FOCUSED (native `input`/`keydown`
-  listeners in `ryeos_components_workspace.js` / `ryeos_components_chrome.js`).
-  The window-level shared keymap defers to them via the `isTypingTarget` guard.
-- Native activation: plain Enter on a focused `<button>`/`<a>` triggers the
-  native click.
-- Pointer: tile focus on mousedown, atlas pan/zoom (wheel + pointer drag),
-  notice/launcher click affordances.
+<!-- parity:RyeOsLayoutNodeVm:start -->
+| Checked Rust variant | Web | TUI | Contract |
+| --- | --- | --- | --- |
+| [x] `Split` | presentation | presentation | Rust-owned axis, ratio and children. |
+| [x] `Tile` | presentation | presentation | Same group, tabs, view, input and chrome facts. |
+<!-- parity:RyeOsLayoutNodeVm:end -->
 
-### Fold-key asymmetry (intended, recorded)
+<!-- parity:RyeOsViewVm:start -->
+| Checked Rust variant | Web | TUI | Contract |
+| --- | --- | --- | --- |
+| [x] `Field` | presentation | presentation | Same field model. |
+| [x] `Text` | presentation | presentation | Same lines, tones and position. |
+| [x] `Rows` | presentation | presentation | Same rows and affordances. |
+| [x] `Timeline` | presentation | presentation | Same entries, folds and details. |
+| [x] `Map` | presentation | presentation | Same scene model. |
+| [x] `Atlas` | presentation | presentation | Same scene model. |
+| [x] `Sections` | presentation | presentation | Same foldable sections. |
+| [x] `Table` | presentation | presentation | Same columns, rows and affordances. |
+| [x] `Placeholder` | presentation | presentation | Same title and message. |
+<!-- parity:RyeOsViewVm:end -->
 
-Plain `←`/`→` fold/unfold the turn/section under the point on the terminal feed
-(`keys.rs::focused_fold_section`, a terminal-local binding applied BEFORE
-`ryeos_key_command`), because the feed is a cell-grid lens. The shared keymap
-itself maps plain `←`/`→` to directional tile focus, which is what the web uses.
-This is intended: the browser has pointer + click-to-fold section headers and no
-cell-grid feed cursor, so it keeps `←`/`→` for focus. Folding on web is reached
-through section-header/turn interaction, not arrow keys. If a future change wants
-web arrow-folding, the unification point is the shared keymap plus a
-`SetFold`-capable context field — not a second hand-rolled web binding.
+## Explicit platform exceptions
 
-## Closed gaps (this branch, `web-parity`)
+1. Browser hash, clipboard, URL navigation, native selection, IME, pointer,
+   drag and WebGL have no byte-identical TUI equivalent. They translate
+   mechanics into the shared variants above.
+2. Terminal fold keys use the cell-grid point before shared directional focus;
+   web folding is click/activation based. Both emit `SetFold`.
+3. Scenes use different drawing primitives but the exact same scene model.
+4. `TransportStateChanged` and `RouteChanged` are root-event TUI gaps. Exact
+   addressed input, direct scene/field controls and several retained reducer
+   setters have additional row-level gaps above. They stay visible until
+   implemented or explicitly retired from the contract.
 
-1. `table` and `sections` widgets were default-cased to "Unknown view" on web,
-   so the watch console (threads-list table, thread-detail/magit sections) could
-   not render in the browser. Now implemented in
-   `ryeos_components_workspace.js` (`tableView` / `sectionsView`), mirroring the
-   terminal reference semantics: table shares column origins between header and
-   rows with a leading tone-glyph gutter (first cell foreground, later cells
-   muted unless selected); sections show `▾/▸ Title (count)` headers with
-   indented rows (collapsed → header only, count still reflects hidden rows),
-   rows reusing the rows-widget renderer. CSS in `pkg/web-shell.css`.
-2. The web reimplemented the global keymap by hand in `ryeos_shell.js`
-   (hardcoded `keydown` branches). Replaced with a single route through the
-   shared `ryeos_key_command` via `wasm.rs::ryeos_key`. This also picked up
-   bindings the hand-rolled table lacked: `Ctrl+K` launcher (the advertised,
-   tmux-safe binding), `Esc` interrupting a running head thread (was always
-   close-focused on web), plain-Enter submit when the foot input has text, and
-   row-cursor movement across table/timeline/sections lenses (was rows-only).
+## Migration rule
 
-## Automated browser-adapter checks
-
-The pure DOM-key translation and native-target deferral layer is covered by the
-Node test harness in `tests/keyboard.test.js`. It imports no WASM or browser
-globals and verifies that JavaScript remains an adapter into the shared Rust
-keymap rather than a second binding table.
-
-Run it with `npm test` from `crates/clients/web`.
-
-## Launcher authority boundary
-
-The browser launcher selects a signed surface and optional project context. It
-does not select or transmit an authority posture. The daemon compiles the
-effective signed surface/view closure and derives the session's exact source
-and affordance binding by intersecting it with the authenticated caller,
-project and node policy.
-
-This is a clean wire cut. `read_only`, intent-enablement and mode flags or mint
-fields are not accepted as compatibility aliases. Renderer-local intents do
-not need an authority switch, while protected invocations exist only when the
-compiled binding contains the exact eligible affordance.
-
-Project selection is an immutable authority transition. A successful signed
-`projects/open` affordance returns a generic `replace_session` effect with a
-same-origin replay-safe activation path. The browser redeems it in the current tab so
-the node replaces the HttpOnly cookie before loading the successor's compiled
-surface. JavaScript never rewrites the project path, carries the predecessor's
-grant forward, or treats the node listen address as browser routing authority.
-
-## Notes for the next sweep
-
-- DOM structure and focus behavior still need a real-browser harness. The
-  highest-value next cases are table/sections rendering against
-  `RyeOsTableRowVm` / `RyeOsSectionVm`, overlay focus trapping/restoration, and
-  an automated accessibility scan.
+Svelte may replace browser presentation only. It must retain every checked row,
+keep effects/events FIFO through WASM/core, and preserve the exceptions above.
+A browser-only store, command model, authority mode or product-specific route
+is a competing application model and fails this gate.
