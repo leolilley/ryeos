@@ -540,6 +540,28 @@ enum QuiescedBackend {
 }
 
 impl ProcessScopeConfiguration {
+    /// Enter the exact OCI init mount namespace after preparation. Intended
+    /// only for the short-lived hook process, which exits after publishing the
+    /// protected binding and therefore never needs to recover its host view.
+    pub fn enter_oci_mount_namespace(state: &super::OciHookState) -> Result<(), String> {
+        state.validate_prestart()?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let namespace = std::fs::File::open(format!("/proc/{}/ns/mnt", state.pid))
+                .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+            if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
+                return Err(format!(
+                    "enter OCI init mount namespace: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("OCI mount namespace entry is unavailable on this OS".to_owned())
+    }
+
     /// OCI prestart hook operation. Lillux derives C from the exact init PID,
     /// creates R directly beneath it, and installs the R-rooted mount in the
     /// container namespace before returning an opaque provider configuration.

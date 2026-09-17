@@ -27,6 +27,18 @@ pub struct OciHookState {
 }
 
 impl OciHookState {
+    pub const MAX_DOCUMENT_BYTES: usize = 65_536;
+
+    pub fn parse_bounded(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.is_empty() || bytes.len() > Self::MAX_DOCUMENT_BYTES {
+            return Err("OCI hook state is absent or exceeds the bound".to_owned());
+        }
+        let state: Self = serde_json::from_slice(bytes)
+            .map_err(|error| format!("parse OCI hook state: {error}"))?;
+        state.validate_prestart()?;
+        Ok(state)
+    }
+
     pub fn validate_prestart(&self) -> Result<(), String> {
         if !matches!(
             self.oci_version.as_str(),

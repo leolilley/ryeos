@@ -33,6 +33,7 @@ members = [
     "crates/tools/structured-session",
     "crates/tools/workload-client",
     "crates/tools/lillux-isolation-adapter",
+    "crates/tools/lillux-oci-hook",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",
@@ -87,6 +88,7 @@ ryeos-state = { path = "crates/state/ryeos-state" }
 ryeos-core-tools = { path = "crates/tools/core-tools" }
 ryeos-structured-session = { path = "crates/tools/structured-session" }
 ryeos-lillux-isolation-adapter = { path = "crates/tools/lillux-isolation-adapter" }
+ryeos-lillux-oci-hook = { path = "crates/tools/lillux-oci-hook" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }

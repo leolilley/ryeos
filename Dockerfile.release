@@ -49,7 +49,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --build-profile "$BUNDLE_BUILD_PROFILE" \
       --all && \
     CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked -p lillux && \
+    cargo build --release --locked -p lillux -p ryeos-lillux-oci-hook && \
     RYEOS_EXACT_BUILD_PROVENANCE=1 \
     RYEOS_BUILD_VERSION="$VERSION" \
     RYEOS_VCS_REF="$VCS_REF" \
@@ -175,6 +175,7 @@ COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeo
 COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
 COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=published /build/target-cache/release/lillux     /usr/local/bin/lillux
+COPY --from=published /build/target-cache/release/ryeos-lillux-oci-hook /usr/local/bin/ryeos-lillux-oci-hook
 COPY --from=published /build/bundles/.ai          /opt/ryeos/.ai
 COPY --from=published /build/bundles/core         /opt/ryeos/core
 COPY --from=published /build/bundles/central-auth /opt/ryeos/central-auth
@@ -185,7 +186,9 @@ COPY --from=published /build/bundles/opencode     /opt/ryeos/opencode
 COPY images/contained-workflow/entrypoint.sh /usr/local/bin/contained-workflow-entrypoint
 RUN chmod 0555 /usr/local/bin/contained-workflow-entrypoint && \
     test -x /usr/local/bin/lillux && \
+    test -x /usr/local/bin/ryeos-lillux-oci-hook && \
     test -f /opt/ryeos/.ai/node/init/profiles/contained-workflow.yaml
+RUN install -d -o root -g root -m 0700 /run/ryeos
 ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 EXPOSE 8000

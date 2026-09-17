@@ -29,6 +29,7 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         release = (ROOT / "Dockerfile.release").read_text()
         stage = docker_stage(release, "ryeos-contained-workflow")
         self.assertIn("/build/target-cache/release/lillux", stage)
+        self.assertIn("/build/target-cache/release/ryeos-lillux-oci-hook", stage)
         self.assertIn("io.ryeos.image=\"contained-workflow\"", stage)
         self.assertIn("io.ryeos.required-node-profile=\"contained-workflow\"", stage)
         self.assertIn("io.ryeos.controller-uid=\"10001\"", stage)

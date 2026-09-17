@@ -1,0 +1,15 @@
+[package]
+name = "ryeos-lillux-oci-hook"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "ryeos-lillux-oci-hook"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+ryeos-node = { workspace = true }
+serde_json = { workspace = true }
