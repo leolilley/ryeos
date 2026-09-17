@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T01:07:32Z:fe9de49a9a196231f39ddb4868fd5cceca352c218a5109a7bcdbd6d76717086d:XvRhFV8rt9XmVT3qa3T6wGyVRBI14QJU/HCF+eYoLPFgAZm7a7qWBjW98DI6YFBc5B51YhGYLrySnzM2ESsxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T02:55:59Z:f2c6bbdaadea7868dd059d368afd67cfdd674a9cb370f0271c1e59cba87c8fc1:qF1cgK/j8pDGOO3rQfo0DItN2u2VhjtB1KGiqLZTOkR+aCthbl+ZpFXyj67/eS3bWG++gYEojGM99yShg4SJBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.5.0"
+version: "1.6.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -147,6 +147,25 @@ worker credentials or a provider can be contacted. `pooled_requests` requires
 the pool readiness reported by the node but deliberately does not claim an
 exclusive-session controller; `exclusive_session` requires the protected
 authority digest and a ready controller.
+
+The current start operation uses
+`ryeos.remote_worker_workflow_operation.v6`. Predecessor v5 operations remain
+readable and recoverable under exactly one retained evidence family. The
+pre-cleanup-field family consists of signed v2 workflow Config, v4 progress and
+receipt, and v2 launch acceptance; ordinary and pooled work map to
+`not_required`, while exclusive work maps to `local_process_scope`. The brief
+explicit-local bridge family consists of v3 Config, v5 progress and receipt,
+and v3 launch acceptance and requires its authored cleanup field. The retained
+job projection selects the family; missing later-phase evidence is allowed,
+but mixed-family evidence is contradictory. New v6 operations accept only the
+current family. Historical decoding therefore cannot manufacture external
+placement authority or silently become new work.
+
+Retained signed session protocol documents authored before the cleanup field
+existed are likewise interpreted only after their original signature and
+content hash verify. Their historical process mode supplies the same narrow
+mapping. Current protocol authoring still requires an explicit field and has
+no omission default.
 
 Recovery preserves the ambiguity boundary: once a launch contact may have
 occurred, RyeOS first reconciles the exact retained launch ID. An already
@@ -293,13 +312,15 @@ container metadata to reconstruct it. Recovery may settle an old execution
 only from Lillux's authoritative scope recovery or lifetime-death proof.
 
 Externally supervised single-tenant destinations are a separate execution
-lane. They may reuse generic host-incarnation readiness, refusal, cleanup, and
+lane. They may reuse generic placement-incarnation readiness, refusal, cleanup, and
 receipt vocabulary, but provider metadata is not an OCI/kernel witness and the
 target node cannot attest to its own future death. A source-side provider
 adapter may observe and control preconfigured sites without exposing lifecycle
 credentials to workers; that observation remains distinct from Lillux
-authority and from the target-signed candidate result. Provider-specific site
-bindings belong to the consuming project or installed provider bundle. The
+authority and from the target-signed candidate result. A project may select or
+narrow a named lifecycle profile. The protected provider account, service/slot
+ceiling, image/configuration, credential handle, and mutation operations belong
+to the source-node operator installation, not project content. The
 generic source contract is
 `config:development/ryeos/externally-fenced-worker-runtime`; its staged runbook
 is `knowledge:ryeos/development/externally-fenced-worker-runtime`.

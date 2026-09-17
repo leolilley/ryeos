@@ -2342,9 +2342,9 @@ fn validate_session_process_control(
         }
         (
             PersistentSessionProcessMode::ExclusiveSession,
-            PersistentSessionCleanupAuthority::ExternalHostIncarnation,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ) => {
-            bail!("exclusive session requires protected external host-incarnation authority");
+            bail!("exclusive session requires protected external placement-incarnation authority");
         }
         (PersistentSessionProcessMode::PooledRequests, _) => {
             bail!("pooled persistent session cannot select dedicated cleanup authority");
@@ -2382,14 +2382,13 @@ fn retained_session_protocol(
     };
     // The current trust store may revoke the retained signer. It must never
     // replace admitted behavior with a newer descriptor at the same ref.
-    let body = super::launch::verify_admitted_signed_descriptor_document(
+    let descriptor = verify_and_decode_retained_protocol_document(
         protocol_descriptor_document,
         protocol_content_hash,
         protocol_signer_fingerprint,
         &engine.node_trust_store,
     )
     .map_err(|error| anyhow!("verify retained session protocol: {error}"))?;
-    let descriptor: ryeos_engine::protocols::ProtocolDescriptor = serde_yaml::from_str(&body)?;
     ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)?;
     let session =
         validate_persistent_session_protocol(&descriptor).map_err(|error| anyhow!(error))?;
@@ -2407,6 +2406,51 @@ fn retained_session_protocol(
         bail!("persistent-session plan widens its retained protocol ceilings");
     }
     Ok(session.clone())
+}
+
+fn verify_and_decode_retained_protocol_document(
+    document: &str,
+    expected_content_hash: &str,
+    expected_signer: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
+    let body = super::launch::verify_admitted_signed_descriptor_document(
+        document,
+        expected_content_hash,
+        expected_signer,
+        trust_store,
+    )?;
+    decode_retained_protocol_descriptor(&body)
+}
+
+/// Decode already-admitted predecessor protocol bytes without weakening
+/// current authoring. Before cleanup authority became explicit, pooled
+/// sessions had no dedicated cleanup owner and exclusive sessions always
+/// required the local Lillux process scope. The signed original bytes are
+/// verified before this narrow historical interpretation is applied.
+fn decode_retained_protocol_descriptor(
+    body: &str,
+) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
+    let mut value: serde_json::Value = serde_yaml::from_str(body)?;
+    if let Some(session) = value
+        .get_mut("session")
+        .and_then(serde_json::Value::as_object_mut)
+        && !session.contains_key("cleanup_authority")
+    {
+        let historical = match session
+            .get("process_mode")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("pooled_requests") => "not_required",
+            Some("exclusive_session") => "local_process_scope",
+            _ => bail!("retained session protocol has no interpretable cleanup authority"),
+        };
+        session.insert(
+            "cleanup_authority".to_owned(),
+            serde_json::Value::String(historical.to_owned()),
+        );
+    }
+    serde_json::from_value(value).context("decode retained session protocol descriptor")
 }
 
 fn start_capsule_process(
@@ -3401,6 +3445,143 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_predecessor_protocol_gets_only_its_historical_cleanup_meaning() {
+        let exclusive = r#"
+kind: protocol
+name: structured_session
+category: ryeos/core
+abi_version: v1
+stdin: { shape: opaque }
+stdout: { shape: opaque_bytes, mode: terminal }
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle: { mode: managed }
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist: []
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: fixture.session
+  wire_version: 1
+  max_frame_bytes: 4096
+"#;
+        let descriptor = decode_retained_protocol_descriptor(exclusive).unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+
+        let pooled = exclusive
+            .replace("exclusive_session", "pooled_requests")
+            .replace("runtime_workspace", "ephemeral_scratch")
+            .replace("node_policy", "isolated")
+            .replace(
+                "  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY\n",
+                "",
+            );
+        let descriptor = decode_retained_protocol_descriptor(&pooled).unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::NotRequired
+        );
+
+        // Current authoring never receives the retained-document bridge.
+        assert!(
+            serde_yaml::from_str::<ryeos_engine::protocols::ProtocolDescriptor>(exclusive).is_err()
+        );
+    }
+
+    #[test]
+    fn retained_predecessor_protocol_is_verified_before_historical_interpretation() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[91u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let body = r#"kind: protocol
+name: structured_session
+category: ryeos/core
+abi_version: v1
+stdin: { shape: opaque }
+stdout: { shape: opaque_bytes, mode: terminal }
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle: { mode: managed }
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist: []
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: fixture.session
+  wire_version: 1
+  max_frame_bytes: 4096
+"#;
+        let document = lillux::signature::sign_content(body, &key, "#", None);
+        let content_hash = lillux::signature::content_hash(body);
+        let descriptor = verify_and_decode_retained_protocol_document(
+            &document,
+            &content_hash,
+            &fingerprint,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+
+        let tampered = document.replace("exclusive_session", "pooled_requests");
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &tampered,
+                &content_hash,
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &document,
+                &"0".repeat(64),
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
+        let revoked = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &document,
+                &content_hash,
+                &fingerprint,
+                &revoked,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn session_capsule_verification_stages_have_closed_stable_labels() {

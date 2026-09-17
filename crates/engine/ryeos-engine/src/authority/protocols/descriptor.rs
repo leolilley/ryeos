@@ -86,7 +86,7 @@ pub enum PersistentSessionProcessMode {
 /// Termination and recovery authority for a dedicated session process.
 ///
 /// This is independent of session ownership. In particular, an externally
-/// fenced host incarnation must never be represented as a qualified local
+/// fenced placement incarnation must never be represented as a qualified local
 /// process scope merely because both mechanisms serve one exclusive session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -95,8 +95,9 @@ pub enum PersistentSessionCleanupAuthority {
     NotRequired,
     /// Lillux owns a qualified, recoverable process scope on this node.
     LocalProcessScope,
-    /// A protected external supervisor owns the complete host incarnation.
-    ExternalHostIncarnation,
+    /// A protected external supervisor owns one exact deployment occurrence.
+    /// This does not claim authority over the provider's physical host.
+    ExternalPlacementIncarnation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +238,7 @@ pub fn validate_persistent_session_protocol(
                 PersistentSessionCleanupAuthority::LocalProcessScope
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
-                PersistentSessionCleanupAuthority::ExternalHostIncarnation
+                PersistentSessionCleanupAuthority::ExternalPlacementIncarnation
             )
         )
         || session.channel_env.is_empty()
@@ -395,7 +396,7 @@ mod tests {
     fn persistent_session_cleanup_authority_matches_process_ownership() {
         for cleanup in [
             PersistentSessionCleanupAuthority::LocalProcessScope,
-            PersistentSessionCleanupAuthority::ExternalHostIncarnation,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ] {
             assert!(
                 validate_persistent_session_protocol(&persistent_protocol(

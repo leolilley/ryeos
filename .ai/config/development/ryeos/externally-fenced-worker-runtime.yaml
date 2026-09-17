@@ -1,26 +1,34 @@
-# ryeos:signed:2026-09-17T01:07:32Z:6bd92a21861a029dec0699aa27b6b035bbf5821d5ab473b15266bd5898e423ec:uH01y7gSNTNNMCCA86mS6cQJUlXqsGKSBKotnBwNp1+S6TdIIDutXzmA3bfpEub3ixRoqMCopIOE2Ff4KITBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T02:55:59Z:0a83e659a3776fa4a93b1885112daf36e9b6b3415a292688533524f94829ce11:64VcD4lTNhZH/7hshwcIEJiV3h5B9VboCmVw35zvlGFmIgKQrrXM4m3hIXFfHyThawtKGNIA2qphCQ9NpJdaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 name: externally-fenced-worker-runtime
-version: "1.0.0"
+version: "1.1.0"
 schema: ryeos.development.externally-fenced-worker-runtime.v1
 description: Fail-closed contract for restricted single-tenant externally supervised worker sites
 topology:
   site_kind: configured_remote
-  allocation: one_exclusive_worker_site_per_external_incarnation
+  allocation: one_exclusive_worker_site_per_external_placement_incarnation
   app_root: private_persistent_site_state
   credential_profile: independently_enrolled_target_local
 execution:
   workflow: service:remote-worker-workflows/start
   candidate_result: service:worker-executions/candidate-result
-  cleanup_authority: external_host_incarnation
+  cleanup_authority: external_placement_incarnation
   tool_authority: independently_admitted_closed_inventory
 authorities:
-  source_controller:
+  project_configuration:
+    - select_preconfigured_lifecycle_profile
+    - narrow_budget_and_slot_requirements
+  source_workflow:
     - configured_remote_selection
     - exact_workflow_intent
     - aggregate_concurrency_policy
-    - source_side_lifecycle_adapter
     - recovery_and_quarantine
+    - compose_and_issue_admission_grant
+  installed_lifecycle_adapter:
+    - provider_mutation_and_observation
+    - protected_binding_realization
+    - source_vault_credential_use
+    - placement_and_release_evidence
   target_site:
     - node_identity
     - credential_profile_home
@@ -29,14 +37,20 @@ authorities:
     - private_candidate
     - candidate_testimony
   deployment_operator:
-    - site_configuration
-    - incarnation_mutation
-    - provider_credentials
-    - provider_observation
-required_separate_receipts:
-  - provider_turn_completion
-  - frozen_candidate_result
-  - external_incarnation_release
+    - provision_or_revoke_protected_binding
+    - explicit_break_glass_recovery
+receipt_contract:
+  launch_admission:
+    - external_lifecycle_admission_grant
+  terminal_common:
+    - external_placement_release
+  terminal_outcome_one_of:
+    candidate_retained:
+      - provider_turn_completion
+      - frozen_candidate_result
+      - source_candidate_import
+    candidate_absent:
+      - typed_candidate_absent_disposition
 required_refusals:
   - target_self_attested_external_cleanup
   - missing_independent_lifecycle_receipt
@@ -44,25 +58,32 @@ required_refusals:
   - worker_visible_lifecycle_credentials
   - worker_visible_node_or_signing_authority
   - ambiguous_provider_mutation
-  - stale_or_overlapping_incarnation
+  - stale_or_overlapping_placement_incarnation
   - unreconciled_launch_contact
-  - release_before_candidate_freeze
-  - release_before_old_incarnation_fence
+  - successful_release_before_candidate_freeze
+  - successful_release_before_source_candidate_import
+  - failed_release_without_typed_candidate_absent_disposition
+  - release_before_old_placement_fence
+  - stale_expired_replayed_or_boot_mismatched_grant
 qualification:
   current_class: source_contract
   installed_activation: blocked
   blockers:
     - closed_tool_inventory_not_proven
     - independent_source_lifecycle_adapter_not_installed
-    - external_incarnation_receipt_not_implemented
+    - lifecycle_admission_grant_not_implemented
+    - source_candidate_import_not_implemented
+    - external_placement_release_receipt_not_implemented
   structural_claims_do_not_imply_installed_qualification: true
 adapter_contract:
-  provider_specific_binding_owner: consuming_project_or_installed_bundle
+  requirement_or_profile_selection_owner: consuming_project_or_signed_workflow
+  binding_declaration_and_realization_owner: source_node_protected_operator_installation
+  project_fields_are_requirements_not_authority: true
   credentials: source_node_private
   required_operations:
-    - observe_exact_incarnation
+    - observe_exact_placement_incarnation
     - reconcile_mutation_intent
-    - fence_old_incarnation
+    - fence_old_placement_incarnation
     - prove_release_or_quarantine
   forbidden_operations:
     - expose_provider_credentials_to_target
