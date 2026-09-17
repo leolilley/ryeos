@@ -1,8 +1,9 @@
 # RyeOS remote development completion plan and live ledger
 
 Updated: 2026-09-17, Pacific/Auckland. Owner: this execution thread.
-Status: EXECUTING — G0a complete; G3a source correction is focused-tested.
-Canonical-node lifecycle reconciliation and G0b are next. No E2E pass claimed.
+Status: EXECUTING — G0a and G3a implementation are complete; matching v0.5.88
+artifacts are installed. Source host-service provisioning is the exact G0 blocker.
+No E2E pass claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -17,11 +18,12 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: commit the focused-tested G3a correction, then G0 lifecycle/G0b freeze
-of the accepted test generation. G1/G2 must follow that source review. G0a found and
-stopped obsolete `/tmp` daemons/restart loops without deleting retained evidence.
-No worker launch, node replacement, release or canonical-node lifecycle mutation
-until the G3a correction has focused coverage.
+Current gate: invoke `ryeos node host setup --confirm` as the ordinary `leo`
+controller for the retained source app root, allowing RyeOS to elevate only its
+internal administrator provisioning step. Then start both nodes normally and finish
+the daemon-backed G0 inventory/G0b freeze. Do not use a custom runner or run the
+whole CLI as root. G1/G2 follow that freeze. G0a found and stopped obsolete `/tmp`
+daemons/restart loops without deleting retained evidence.
 
 Latest committed fix: `7c4854045 Make installed native verifier projectless`.
 Preceding fix: `e829e913f Package native verifier product relationships`.
@@ -93,9 +95,9 @@ These are last-known coordinates; G0 must confirm them without mutation.
 | Target vault identity | `dc60a9fba7956d4ac2bdaf6056b4da9f3b7f0220e08c07e0957d3340c447fdec` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
 | Last pushed snapshot, NOT yet reconciled | `baf02426e1bd15c095ab92ea614b8e5d6b32fa013bfe1994e4847b15ed31a19d` |
-| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.87, sha256 `811ef769…`; `/usr/bin/ryeosd` v0.5.87 revision `9f60c4bbeb28`, sha256 `a2100ac8…` |
-| Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` v0.5.87 revision `3a43ed50ee3e` |
-| Target daemon last known | canonical runit service `ryeos-08df80…`, currently down; installed bundles newer than daemon |
+| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.88, sha256 `e8f5ae94194a6788016d87e40717867343bcaf20079b66eb1b799f9987f04118`; `/usr/bin/ryeosd` v0.5.88 revision `8c0d738d5bf1`, sha256 `e512aa7d7386210804d7495539ba37318543048617b41a7dd21b8a13eafda444` |
+| Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` remains v0.5.87 revision `3a43ed50ee3e`, sha256 `263b937620543e2a72ef7e8d4d19225c48a4e40921c8c6b9a1af56e5080aa28b`; it is not the canonical target service image |
+| Target daemon last known | canonical runit service `ryeos-08df80…`, healthy on 7445 with v0.5.88 at 2026-09-17T12:23 NZST |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
 
 G0 must fill source/target binary revisions and digests, bundle identities, runtime
@@ -367,6 +369,8 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 17 | G0 audit | host read-only check | 7445 unavailable; v059 sudo authentication error | resume after plan reviews |
 | Sept 17 11:26 NZST | G0a | host process/service/config inventory | stopped obsolete 7444 and Sep-10 descriptor daemons plus four failed `want up` loops; canonical source/target remain stopped; `.tmp/remote-development-evidence-20260917/g0a-host-inventory.md` | retain fixture data; finish daemon-backed inventory after G3a |
 | Sept 17 11:36 NZST | G3a | recovery-qualified bounded-turn source correction | 12 preparer + 7 runtime + 17 bundle tests and focused API graph test passed; signed profile/graph/config | commit; reconcile supported target lifecycle, then freeze G0b |
+| Sept 17 12:26 NZST | G0 lifecycle | supported source `ryeos start` after repairing two exact artifacts left root-owned by the earlier sudo runner | source reached ready on 7423 with v0.5.88, then the unsupervised child was reaped when the host command session ended; target is healthy on 7445 | provision source with `ryeos node host setup --confirm` as `leo`; CLI-internal sudo needs an interactive password/cache refresh |
+| Sept 17 12:30 NZST | G0 lifecycle | attempted host setup first as root, then correctly as `leo` | root invocation refused the invalid root controller; ordinary invocation reached only the expected expired-sudo boundary | user runs `sudo -v`, then repeat ordinary host setup; no custom runner or node reset |
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,
