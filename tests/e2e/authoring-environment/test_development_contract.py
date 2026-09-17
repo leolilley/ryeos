@@ -89,6 +89,25 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         })
         self.assertNotIn("expected_manifest_hash", str(verifier) + str(worker))
 
+    def test_installed_native_verifier_ships_its_product_relationships(self):
+        """Projectless verification must resolve both selected slots from Standard."""
+        for name in ("authoring-environment-products", "authoring-prepared-input-products"):
+            source = load(f".ai/config/development/ryeos/{name}.yaml")
+            installed = load(
+                f"bundles/standard/.ai/config/development/ryeos/{name}.yaml")
+            self.assertEqual(installed, source)
+
+    def test_installed_native_verifier_runtime_is_projectless(self):
+        """Qualification consumes sealed products and must not require a project."""
+        runtime = load(
+            "bundles/standard/.ai/tools/ryeos/environments/qualification/"
+            "native-authoring/runtime.yaml")
+        self.assertNotIn("${project_path}", runtime["config"]["args"])
+        source = next(arg["literal"] for arg in runtime["config"]["args"]
+                      if isinstance(arg, dict) and "literal" in arg)
+        self.assertEqual(source.count("sys.argv = [str(logical)]"), 1)
+        self.assertNotIn("--project-path", source)
+
     def test_child_grants_match_exact_existing_signed_operations(self):
         routes = self.environment["workload_client"]["executions"]
         refs = [route["item_ref"] for route in routes]

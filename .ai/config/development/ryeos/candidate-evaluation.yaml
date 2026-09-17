@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T10:07:29Z:e42f47ad8c97fd4555f0e401e27f20b7c7088b482b3f8edd5b449fb55e279843:nIiHFk5hdlVcSxomuNSSP5t5xQTTmJBJhaxajDFt2MlNVAXCM7T1BmMjbYU+fzd7CtrRwwXne/p0qxPBfaU/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T00:21:54Z:58005c61b4919f19e23a0be407eb060e267cd71092b974ada6765f89031496b9:8ZAivL2eipYHlBdCJDkwfaXi+3LqRyxsGM57CqYh0egEPT56H+X7kEW0wYHsnOI0vG8LdXyMVs/162viVuCHCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 {
   "category": "development/ryeos",
   "name": "candidate-evaluation",
@@ -18,11 +18,11 @@
         },
         {
           "path": "Cargo.toml",
-          "sha256": "8408289d00d9fdf412845b603504bb1355858aad64fb68e18698998b2aa078d6"
+          "sha256": "23345c9b05b741a149f482ec0cdc5284f019f4ddc3ad5b46c29e25d4285c79d0"
         },
         {
           "path": "Cargo.lock",
-          "sha256": "a3fe1868b6954f7ecd9690e93b71ba07de4482c413f0b102e8b33d5b9d5a92df"
+          "sha256": "2bb33708a9c268e3178ba312fc82d0981b0ae27e8e7aad3518f6a06226ff1fee"
         },
         {
           "path": "crates/engine/ryeos-isolation-protocol/Cargo.toml",

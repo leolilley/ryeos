@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-03T14:48:16Z:91770b389eb77b8da301fb29e41cc9243f713b8fa7c5df93f5f3a40f590782e8:HRcuZSS5rPZT8O58tTLhztrZQwbA6hqxmaf/mfei+S6z+TEHiaUXH8TRWQi7ogscAVPkd9e2tvsFmndvZ3luDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-16T23:37:07Z:640b91c488ea6384446d06d2127c7689a8f3b92f38e44166a2a80fb7231c793f:mc4HUCXPCRRhWifScpM5azveKQL+jsOGq30Z6+O1x5/zU/7wKw1LaoddnpZ8ub3jyWT7heOtvC0rnjBTyMMpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -101,13 +101,19 @@ incumbent grant for that source key is being reclassified or rebound, use
 transition:
 
 ```sh
-HOSTED_SCOPES='ryeos.runtime.dedicated_session.start,ryeos.runtime.dedicated_session.command,ryeos.runtime.dedicated_session.terminate,ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.worker_execution.codex/bounded-turn,ryeos.execute.service.node/status,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/list,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/command-observation,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/start-candidate-evaluation,ryeos.execute.service.worker-executions/qualify-candidate,ryeos.execute.service.worker-executions/start-candidate-integration,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
+HOSTED_SCOPES='ryeos.runtime.dedicated_session.start,ryeos.runtime.dedicated_session.command,ryeos.runtime.dedicated_session.terminate,ryeos.execute.config.codex/environments/default,ryeos.execute.worker_execution.codex/login,ryeos.execute.worker_execution.codex/session,ryeos.execute.worker_execution.codex/bounded-turn,ryeos.execute.worker_execution.codex/bounded-turn-recovery,ryeos.execute.service.node/status,ryeos.execute.service.events/chain_replay,ryeos.execute.service.launch/status,ryeos.execute.service.launch/cancel,ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.system/push-head,ryeos.execute.service.threads/tail,ryeos.execute.service.credential-profiles/create,ryeos.execute.service.credential-profiles/get,ryeos.execute.service.credential-profiles/list,ryeos.execute.service.credential-profiles/revoke,ryeos.execute.service.credential-profiles/confirm,ryeos.execute.service.credential-profiles/delete,ryeos.execute.service.worker-executions/status,ryeos.execute.service.worker-executions/command,ryeos.execute.service.worker-executions/command-observation,ryeos.execute.service.worker-executions/approvals,ryeos.execute.service.worker-executions/resolve-approval,ryeos.execute.service.worker-executions/terminate,ryeos.execute.service.worker-executions/checkpoint,ryeos.execute.service.worker-executions/resume,ryeos.execute.service.worker-executions/handoff-preflight,ryeos.execute.service.worker-executions/handoff,ryeos.execute.service.worker-executions/start-candidate-evaluation,ryeos.execute.service.worker-executions/qualify-candidate,ryeos.execute.service.worker-executions/start-candidate-integration,ryeos.execute.service.worker-executions/publish,ryeos.execute.service.worker-executions/validate-candidate-closure-and-base,ryeos.execute.service.worker-executions/discard,ryeos.write.project.live'
 RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --public-key "<configured_operator_raw_ed25519_base64>" \
   --label "hosted operator forwarded from source" \
   --origin-site-id "site:<source>" \
   --scopes "$HOSTED_SCOPES"
 ```
+
+`worker_execution:codex/bounded-turn-recovery` is the explicit recovery-
+qualification variant. After the exact turn completion fence it waits for the
+same placement and admitted capsule to attach at a strictly newer worker boot
+epoch before candidate termination. Ordinary remote work continues to use
+`worker_execution:codex/bounded-turn` and never requires a daemon restart.
 
 Use the exact `site_id` from the source node's identity. The operator grant is
 an allowed-source constraint, not source proof by itself. Each forwarded
@@ -157,8 +163,14 @@ lack the source-node co-signature. Drive it from the source RyeOS node through
 the provider-neutral `service:remote/run` seam. For example, create the empty
 credential profile with a projectless, wait-mode service execution:
 
+There are three independent authorities in these examples. The leading
+`--no-project` selects the source invocation context, the nested
+`execution_policy` selects the destination execution context, and
+`outbound_principal` selects the authorized identity forwarded by the source
+node. None is inferred from either of the others.
+
 ```sh
-ryeos execute service:remote/run --input - <<'JSON'
+ryeos --no-project execute service:remote/run --input - <<'JSON'
 {
   "remote": "hosted",
   "item_ref": "service:credential-profiles/create",
@@ -183,7 +195,7 @@ launch coordinate and using `accepted` response semantics:
 
 ```sh
 LOGIN_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
-ryeos execute service:remote/run --input - <<JSON
+ryeos --no-project execute service:remote/run --input - <<JSON
 {
   "remote": "hosted",
   "item_ref": "worker_execution:codex/login",

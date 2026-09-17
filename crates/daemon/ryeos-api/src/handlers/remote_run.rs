@@ -256,6 +256,16 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::Request;
 
+    fn signed_remote_run_command() -> ryeos_runtime::CommandDef {
+        let path = ryeos_engine::test_support::workspace_root()
+            .join("bundles/core/.ai/node/commands/remote-run.yaml");
+        let mut command: ryeos_runtime::CommandDef =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        command.name = "remote run".into();
+        command.source_file = path;
+        command
+    }
+
     fn retained_request() -> serde_json::Value {
         serde_json::json!({
             "remote": "hosted",
@@ -352,6 +362,82 @@ mod tests {
             serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(service["schema"]["product_selections"], "array?");
         assert_eq!(service["result_retention"], "digest_only");
+    }
+
+    #[test]
+    fn signed_remote_run_default_is_a_valid_typed_live_policy() {
+        let project = tempfile::tempdir().unwrap();
+        let command = signed_remote_run_command();
+        let tail = vec!["hosted".to_string(), "service:node/status".to_string()];
+        let mut parameters =
+            ryeos_runtime::arg_binder::bind_argv_with_command(&tail, Some(&command)).unwrap();
+        let outer = ryeos_app::command_invocation::apply_project_policy(
+            &command,
+            &mut parameters,
+            Some(project.path()),
+            project.path(),
+        )
+        .unwrap();
+        assert!(outer.is_none());
+        let request: Request = serde_json::from_value(parameters).unwrap();
+        request.execution_policy.validate().unwrap();
+        assert!(matches!(
+            request.execution_policy.project,
+            ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
+        ));
+        assert_eq!(request.project.as_deref(), Some(project.path()));
+    }
+
+    #[test]
+    fn signed_remote_run_preserves_explicit_destination_policies() {
+        let command = signed_remote_run_command();
+        for policy in [
+            serde_json::json!({
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "wait",
+                "target": {"kind": "here"},
+                "environment": {"kind": "none"},
+                "project": {"kind": "projectless"}
+            }),
+            serde_json::json!({
+                "schema_version": 2,
+                "ownership": "daemon_owned",
+                "recovery": "restart_recoverable",
+                "response": "wait",
+                "target": {"kind": "here"},
+                "environment": {
+                    "kind": "project_overlay",
+                    "include_operator_vault": false,
+                    "name_policy": {"kind": "declared_required"}
+                },
+                "project": {
+                    "kind": "live_direct",
+                    "access": "read_only",
+                    "child_policy": {"kind": "inherit"}
+                }
+            }),
+            retained_request()["execution_policy"].clone(),
+        ] {
+            let expected = policy.clone();
+            let mut parameters = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
+                &["service:node/status".into(), "--no-project".into()],
+                Some(&command),
+                &serde_json::json!({"execution_policy": policy}),
+            )
+            .unwrap();
+            ryeos_app::command_invocation::apply_project_policy(
+                &command,
+                &mut parameters,
+                None,
+                ryeos_engine::test_support::workspace_root().as_path(),
+            )
+            .unwrap();
+            assert_eq!(parameters["execution_policy"], expected);
+            let request: Request = serde_json::from_value(parameters).unwrap();
+            request.execution_policy.validate().unwrap();
+        }
     }
 
     #[test]

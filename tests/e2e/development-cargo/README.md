@@ -1,5 +1,10 @@
 # Installed Cargo operation qualification
 
+The active remote-development completion plan and resumption ledger is
+[REMOTE-DEVELOPMENT-COMPLETION.md](REMOTE-DEVELOPMENT-COMPLETION.md).
+Read it before resuming the retained two-node qualification. It records pending
+acceptance gates and historical coordinates, not completed qualification or authority.
+
 `qualification.json` records observed normal CLI executions against the
 disposable target's exact pinned source generations. Thread/capsule identities
 refer to that node's retained evidence; this file grants no execution, binding,

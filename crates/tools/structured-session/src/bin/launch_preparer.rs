@@ -570,7 +570,11 @@ fn validate_execution_mode(
     match object.get("kind").and_then(serde_json::Value::as_str) {
         Some("session") if object.len() == 1 => Ok(WorkerExecutionMode::Session),
         Some("bounded_turn")
-            if object.len() == 4
+            if (object.len() == 4
+                || (object.len() == 5
+                    && object
+                        .get("require_post_completion_recovery")
+                        .is_some_and(serde_json::Value::is_boolean)))
                 && object.contains_key("session_start_route")
                 && object.contains_key("turn_start_route")
                 && object
@@ -1435,6 +1439,20 @@ mod tests {
         assert_eq!(
             validate_execution_config(&config).unwrap(),
             WorkerSelection::Direct("worker:fixture/hosted".to_owned())
+        );
+
+        let mut recovery_qualified = config.clone();
+        recovery_qualified["mode"]["require_post_completion_recovery"] = serde_json::json!(true);
+        assert_eq!(
+            validate_execution_config(&recovery_qualified).unwrap(),
+            WorkerSelection::Direct("worker:fixture/hosted".to_owned())
+        );
+        recovery_qualified["mode"]["require_post_completion_recovery"] = serde_json::json!("true");
+        assert_eq!(
+            validate_execution_config(&recovery_qualified)
+                .unwrap_err()
+                .code,
+            "worker_execution_mode_invalid"
         );
 
         for required_field in [

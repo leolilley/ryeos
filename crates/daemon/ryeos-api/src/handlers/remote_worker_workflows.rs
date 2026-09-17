@@ -1008,13 +1008,18 @@ fn target_readiness_evidence(
     {
         bail!("exclusive target readiness omitted protected process-scope authority identity");
     }
-    Ok(TargetReadinessEvidence {
+    let evidence = TargetReadinessEvidence {
         requirements: requirements.clone(),
         daemon_revision: revision.to_owned(),
         isolation_policy_digest: policy_digest.to_owned(),
         process_scope_authority_digest: authority_digest,
         process_control_reason: reason.to_owned(),
-    })
+    };
+    // The status observation is the pre-contact admission boundary. Apply the
+    // same closed evidence contract used by durable receipt validation here,
+    // before project transfer or worker launch can occur.
+    validate_target_readiness_evidence(&evidence)?;
+    Ok(evidence)
 }
 
 /// Resolve an interrupted target contact without replaying an accepted launch.
@@ -2783,6 +2788,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{error:#}").contains("filesystem mode"));
+
+        let error = target_readiness_evidence(
+            &target_status(true, "unexpected", "enforce", "host"),
+            &requirements,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("readiness evidence is invalid"));
     }
 
     #[test]
@@ -2799,6 +2811,12 @@ mod tests {
         .unwrap();
         assert_eq!(evidence.process_control_reason, "not_required");
         assert!(evidence.process_scope_authority_digest.is_none());
+
+        let mut malformed = target_status(false, "policy_unconfigured", "disabled", "host");
+        malformed["isolation"]["process_scopes"]["pooled_requests"]["reason"] =
+            Value::String("ready".to_string());
+        let error = target_readiness_evidence(&malformed, &requirements).unwrap_err();
+        assert!(format!("{error:#}").contains("readiness evidence is invalid"));
     }
 
     #[test]
@@ -2838,6 +2856,17 @@ mod tests {
                 "config:development/ryeos/worker-environment".to_owned()
             ))
         );
+        let declared = graph_value
+            .pointer("/requires/capabilities/declared")
+            .and_then(Value::as_array)
+            .unwrap();
+        for capability in [
+            "ryeos.runtime.dedicated_session.start",
+            "ryeos.runtime.dedicated_session.command",
+            "ryeos.runtime.dedicated_session.terminate",
+        ] {
+            assert!(declared.contains(&Value::String(capability.to_owned())));
+        }
         assert_eq!(
             graph_value.pointer("/config/nodes/done/output/schema"),
             Some(&Value::String(WORKFLOW_GRAPH_RESULT_SCHEMA.to_owned()))
@@ -2845,6 +2874,51 @@ mod tests {
         assert_eq!(
             graph_value.pointer("/config/nodes/run/assign/candidate_terminal_thread_id"),
             Some(&Value::String("${dispatch.child_thread_id}".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ryeos_recovery_qualification_workflow_selects_only_the_recovery_profile() {
+        let root = ryeos_engine::test_support::workspace_root();
+        let config_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/config/development/ryeos/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let config: WorkflowConfig = serde_json::from_value(config_value).unwrap();
+        assert_eq!(config.schema, WORKFLOW_SCHEMA);
+        assert_eq!(
+            config.driver,
+            "graph:ryeos/development/remote-worker-recovery"
+        );
+        assert_eq!(
+            config.target_requirements.process_control,
+            TargetProcessControl::ExclusiveSession
+        );
+
+        let graph_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/graphs/ryeos/development/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let graph: ryeos_graph_definition::GraphFile =
+            serde_json::from_value(graph_value.clone()).unwrap();
+        ryeos_graph_definition::validate_graph_file(&graph).unwrap();
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/item_id"),
+            Some(&Value::String(
+                "worker_execution:codex/bounded-turn-recovery".to_owned()
+            ))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/ref_bindings/environment"),
+            Some(&Value::String(
+                "config:development/ryeos/worker-environment".to_owned()
+            ))
         );
     }
 

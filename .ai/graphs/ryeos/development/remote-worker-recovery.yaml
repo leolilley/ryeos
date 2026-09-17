@@ -1,13 +1,13 @@
-# ryeos:signed:2026-09-16T05:30:16Z:35906601bcf03e293feb46cb30b4ff7475b05a22d01e1ac382571303056c881c:RTzVs/86T4Dsvo6QCbyRniQHSPgzJswCCktAWQDZPtf/I0ho0JmQzxIznv3dqyeUpuQonH9l2vpuMcHb9HTgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T23:32:50Z:a0fa42374dc801f096267d8297d5f8ade9ec1989967038781eb5ade6be030b86:V92DTvbFh9wat1N98LKs6CYu60O28HGSm/UgA8CmY5n8tgJ962vcexuN1EQzh/grh2ow1NL/ZdGLhJyVrnGdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/development
-description: Run one bounded Codex development turn and return its exact terminal candidate coordinate
+description: Run one bounded Codex development turn across a required recovery boundary and return its exact terminal candidate coordinate
 effects: live
 requires:
   capabilities:
     declared:
       - ryeos.execute.config.development/ryeos/worker-environment
-      - ryeos.execute.worker_execution.codex/bounded-turn
+      - ryeos.execute.worker_execution.codex/bounded-turn-recovery
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
       - ryeos.runtime.dedicated_session.terminate
@@ -30,7 +30,7 @@ config:
       cache_result: false
       follow: true
       action:
-        item_id: worker_execution:codex/bounded-turn
+        item_id: worker_execution:codex/bounded-turn-recovery
         ref_bindings:
           environment: config:development/ryeos/worker-environment
         product_selections: "${inputs.target_product_selections}"
