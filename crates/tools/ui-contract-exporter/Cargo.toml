@@ -1,0 +1,11 @@
+[package]
+name = "ryeos-ui-contract-exporter"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Build-time exporter for the Rust-owned RyeOS browser contract"
+
+[dependencies]
+prettyplease = "=0.3.0"
+syn = { version = "=3.0.3", features = ["full", "parsing", "visit"] }
+ts-typegen-build = "=1.2.0"

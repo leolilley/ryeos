@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T22:32:47Z:68b40b43eebe5d5b6d00fd7dc1579c451c2c91af266ac8861eb3b9c2d8621ec0:wZAxtQZS916y/BHsOwOgb9gjzB4Av5yDaN08JCGatLiTJ5JGnmlXEtHLi0Dcu3WcEQJG7A+7ZQXjxpHbpoKLBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:24:33Z:2acbf6965243329b90d9727625a92f8806402539e343ec19f0a5f088ed04190c:EcjhvG+2awKa5taiFp/mo4PXcji3GFIirKJC/jx2v4EcDbqa8C34Oxh7slIB2KOKYWvp8BY8s2f7LnvaVqi7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -159,9 +159,12 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 6
+      version: 7
       process_scopes:
         mode: unconfigured
+      # Transitional trusted/disposable authoring lane. This admits direct
+      # process-group cleanup but makes no hard-containment claim.
+      trusted_process_group_sessions: true
       mode: disabled
       backend: null
       filesystem:

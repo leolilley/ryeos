@@ -49,11 +49,49 @@ pub enum RyeOsUiIntent {
     MoveFocusedTile {
         direction: RyeOsStackMoveDirection,
     },
+    /// Pure placement edit between already mounted instances. No view ref,
+    /// binding or executable authority is introduced by this operation.
+    MoveTileBeside {
+        layout_guard: String,
+        tile_id: String,
+        target_tile_id: String,
+        edge: FocusDirection,
+    },
     CycleTab {
+        direction: RyeOsStackMoveDirection,
+    },
+    MoveTileToGroup {
+        layout_guard: String,
+        tile_id: String,
+        target_tile_id: String,
+        index: usize,
+    },
+    CycleViewTab {
         direction: RyeOsStackMoveDirection,
     },
     SwitchTab {
         index: usize,
+    },
+    NewWorkspace,
+    SelectWorkspace {
+        workspace_id: crate::ids::WorkspaceId,
+    },
+    RenameWorkspace {
+        workspace_id: crate::ids::WorkspaceId,
+        title: String,
+    },
+    CloseWorkspace {
+        workspace_id: crate::ids::WorkspaceId,
+    },
+    MoveTileToWorkspace {
+        layout_guard: String,
+        tile_id: String,
+        workspace_id: crate::ids::WorkspaceId,
+    },
+    ResizeSplit {
+        layout_guard: String,
+        path: Vec<crate::layout::SplitBranch>,
+        ratio: f32,
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
@@ -131,6 +169,12 @@ pub enum RyeOsUiIntent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiEvent {
+    /// Pointer-originated input names its exact mounted input; it must never
+    /// silently edit whichever other input currently owns keyboard focus.
+    InputAt {
+        address: super::model::RyeOsInputAddress,
+        action: RyeOsInputAction,
+    },
     Activate {
         intent: RyeOsUiIntent,
     },
@@ -323,6 +367,15 @@ pub enum RyeOsUiEvent {
     /// and the facet context it read. The "return" half of the debugger drill;
     /// no-op at the top of the tree.
     PopLens,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RyeOsInputAction {
+    Focus,
+    SetText { text: String, cursor: usize },
+    Complete,
+    Submit { interrupt: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

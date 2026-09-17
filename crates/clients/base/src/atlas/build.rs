@@ -48,6 +48,7 @@ pub struct AtlasFileInput {
 }
 
 pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
+    let file_space_root = input.ui.file_space_root.clone();
     let mut stack_items: BTreeMap<String, Vec<AtlasStackItemVm>> = BTreeMap::new();
     let mut ref_to_namespace: BTreeMap<String, String> = BTreeMap::new();
     let mut paths = BTreeSet::new();
@@ -145,7 +146,7 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
                 dimmed,
             },
             Some(AtlasInteractionVm::FocusFolder {
-                root: None,
+                root: file_space_root.clone(),
                 path: namespace_key,
             }),
         ));
@@ -238,7 +239,7 @@ pub fn build_file_space_atlas(input: AtlasFileSpaceInput) -> NamespaceAtlasVm {
                 dimmed: false,
             },
             Some(AtlasInteractionVm::FocusFolder {
-                root: Some(input.root.clone()),
+                root: input.root.clone(),
                 path: namespace_key,
             }),
         ));

@@ -24,6 +24,10 @@ GNU_ACTIVATION = ROOT / "bundles/standard/.ai/config/development/ryeos/gnu-pytho
 GNU_VERIFIER = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/gnu-python-archives.py"
 SOURCE_ACTIVATION = ROOT / "bundles/standard/.ai/config/development/ryeos/authoring-source-inputs-activation.yaml"
 SOURCE_VERIFIER = ROOT / "bundles/standard/.ai/tools/ryeos/environments/qualification/authoring-source-inputs.py"
+RELEASE_BASE = (
+    "https://github.com/leolilley/ryeos/releases/download/"
+    "ryeos-development-runtime-inputs-v1"
+)
 spec = importlib.util.spec_from_file_location("author_tree", AUTHOR_PATH)
 author_tree = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -125,6 +129,15 @@ class DevelopmentRuntimeArtifactTests(unittest.TestCase):
             activation["consumer_ref"],
             "tool:ryeos/environments/qualification/gnu-python-archives",
         )
+        self.assertEqual(activation["sources"], [{
+            "id": "gnu-python-archives-release",
+            "url": f"{RELEASE_BASE}/ryeos-gnu-python-archives-v1.tar.gz",
+            "sha256": "40fb63279e7698a12099ecf3987f770add103d1321df65227721a1f6fb8fc79a",
+            "maximum_compressed_bytes": 164987716,
+            "maximum_expanded_bytes": 166123520,
+            "maximum_entries": 5,
+            "archive_format": "tar_gzip",
+        }])
         self.assertEqual(activation["components"], [{
             "id": "gnu-python-archives",
             "storage": "large_content",
@@ -153,6 +166,15 @@ class DevelopmentRuntimeArtifactTests(unittest.TestCase):
             activation["consumer_ref"],
             "tool:ryeos/environments/qualification/authoring-source-inputs",
         )
+        self.assertEqual(activation["sources"], [{
+            "id": "authoring-source-inputs-release",
+            "url": f"{RELEASE_BASE}/ryeos-authoring-source-inputs-v2.tar.gz",
+            "sha256": "5d96c864bc93a40168976c3d814b1d6a6850c7edfa03071f482034610560df2d",
+            "maximum_compressed_bytes": 242451026,
+            "maximum_expanded_bytes": 247900160,
+            "maximum_entries": 56,
+            "archive_format": "tar_gzip",
+        }])
         component = activation["components"][0]
         self.assertEqual(component["id"], "authoring-source-inputs")
         self.assertEqual(component["storage"], "large_content")

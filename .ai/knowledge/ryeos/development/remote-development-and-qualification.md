@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-16T03:58:59Z:e458533cc644716c4b241cf62bf9d3f7d9ddf430dfd39c23c497318eca575655:n8uDo8I1X78LdA78CqBlHWiFfV7knMsFm7CIV0YP94sDd+qggniw3OcujQlKxwATOy+3jgLO4LkRh6KTqbzKBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-17T02:55:59Z:f2c6bbdaadea7868dd059d368afd67cfdd674a9cb370f0271c1e59cba87c8fc1:qF1cgK/j8pDGOO3rQfo0DItN2u2VhjtB1KGiqLZTOkR+aCthbl+ZpFXyj67/eS3bWG++gYEojGM99yShg4SJBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.4.0"
+version: "1.6.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -130,13 +130,14 @@ binding and any `workload_execution` selections needed by admitted child
 operations. Nothing inherits selections from the Graph parent.
 
 The signed workflow Config uses the current
-`ryeos.remote_worker_workflow.v2` schema and declares its exact target runtime
+`ryeos.remote_worker_workflow.v3` schema and declares its exact target runtime
 requirements. For example, the RyeOS development workflow requires
-`process_control: exclusive_session`, `filesystem_mode: enforce`, and
-`network_mode: host`. Before any new project push or launch contact, the
-source calls the authenticated `service:node/status` action and verifies those
-three dimensions. The configured source-operator grant on the destination
-therefore needs the exact `ryeos.execute.service.node/status` capability.
+`process_control: exclusive_session`, `cleanup_authority:
+local_process_scope`, `filesystem_mode: enforce`, and `network_mode: host`.
+Before any new project push or launch contact, the source calls the
+authenticated `service:node/status` action and verifies those dimensions. The
+configured source-operator grant on the destination therefore needs the exact
+`ryeos.execute.service.node/status` capability.
 
 The source retains the observed daemon revision, isolation-policy digest,
 selected process-readiness reason, and protected process-scope authority
@@ -146,6 +147,25 @@ worker credentials or a provider can be contacted. `pooled_requests` requires
 the pool readiness reported by the node but deliberately does not claim an
 exclusive-session controller; `exclusive_session` requires the protected
 authority digest and a ready controller.
+
+The current start operation uses
+`ryeos.remote_worker_workflow_operation.v6`. Predecessor v5 operations remain
+readable and recoverable under exactly one retained evidence family. The
+pre-cleanup-field family consists of signed v2 workflow Config, v4 progress and
+receipt, and v2 launch acceptance; ordinary and pooled work map to
+`not_required`, while exclusive work maps to `local_process_scope`. The brief
+explicit-local bridge family consists of v3 Config, v5 progress and receipt,
+and v3 launch acceptance and requires its authored cleanup field. The retained
+job projection selects the family; missing later-phase evidence is allowed,
+but mixed-family evidence is contradictory. New v6 operations accept only the
+current family. Historical decoding therefore cannot manufacture external
+placement authority or silently become new work.
+
+Retained signed session protocol documents authored before the cleanup field
+existed are likewise interpreted only after their original signature and
+content hash verify. Their historical process mode supplies the same narrow
+mapping. Current protocol authoring still requires an explicit field and has
+no omission default.
 
 Recovery preserves the ambiguity boundary: once a launch contact may have
 occurred, RyeOS first reconciles the exact retained launch ID. An already
@@ -261,6 +281,65 @@ fingerprint, controller account, and inherited descriptor authority. Replacing
 the container, app-root filesystem identity, host lifetime, UID mapping, or
 binding requires explicit administrator reprovisioning; surviving volume bytes
 do not transfer host authority.
+
+## Hosted-runtime ownership
+
+An externally supervised runtime does not move host provisioning into the
+RyeOS daemon or into an image entrypoint. Keep the ownership layers exact:
+
+- source-local signed `.ai/config`, `.ai/tools`, and `.ai/graphs` objects own
+  development inputs, requested products, qualification policy, and evidence;
+- an installed Lillux adapter owns OS, OCI, namespace, mount, account, cgroup,
+  and enclosing-lifetime mechanics;
+- RyeOS retains only the generic protected binding, semantic capabilities,
+  execution journals, and fail-closed admission;
+- an image owns immutable packaging only; and
+- `tests/e2e` owns qualification fixtures, never deployment authority.
+
+In particular, do not add a security-bearing contract below a top-level
+`deploy/` directory, teach `ryeosd` to interpret Docker or provider topology,
+or construct protected authority from mutable environment variables. A tiny
+image shim may invoke the generic protected entrypoint with an
+administrator-prepared descriptor. It cannot discover, create, weaken, or
+repair that authority.
+
+Lillux's host adapter must return an opaque enclosing-lifetime witness in
+addition to process-scope configuration. That witness distinguishes a daemon
+restart within one still-authoritative host lifetime from replacement of the
+enclosing container or host. RyeOS may retain and report its digest, but must
+not parse provider IDs, cgroup paths, systemd units, namespace layouts, or
+container metadata to reconstruct it. Recovery may settle an old execution
+only from Lillux's authoritative scope recovery or lifetime-death proof.
+
+Externally supervised single-tenant destinations are a separate execution
+lane. They may reuse generic placement-incarnation readiness, refusal, cleanup, and
+receipt vocabulary, but provider metadata is not an OCI/kernel witness and the
+target node cannot attest to its own future death. A source-side provider
+adapter may observe and control preconfigured sites without exposing lifecycle
+credentials to workers; that observation remains distinct from Lillux
+authority and from the target-signed candidate result. A project may select or
+narrow a named lifecycle profile. The protected provider account, service/slot
+ceiling, image/configuration, credential handle, and mutation operations belong
+to the source-node operator installation, not project content. The
+generic source contract is
+`config:development/ryeos/externally-fenced-worker-runtime`; its staged runbook
+is `knowledge:ryeos/development/externally-fenced-worker-runtime`.
+
+An externally fenced destination that supplies neither delegated process
+control nor a usable namespace sandbox cannot run the ordinary hosted Codex
+authoring profile. It must refuse before provider contact unless an
+independently qualified closed-tool profile proves that shell, file mutation,
+browser, plugin, MCP, and other ambient command routes are absent. A feature
+flag or self-reported tool list is not that proof. Hard-contained hosts
+continue to use the ordinary authoring profile; do not weaken it to accommodate
+a more limited destination.
+
+Structural qualification and installed qualification are different products.
+Image shape, signed inventory, node identity, and refusal behavior can pass a
+structural smoke while installed process containment, writer exclusion,
+restart recovery, container replacement, and old-lifetime death proof remain
+unqualified. Promotion requires every installed claim from the signed
+development workflow; a partial smoke must never enable the hosted profile.
 
 On an already-provisioned stronger host, use an ordinary checkout outside the
 target app root and pin the source commit:

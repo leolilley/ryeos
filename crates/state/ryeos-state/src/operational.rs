@@ -3462,6 +3462,45 @@ impl OperationalDb {
     }
 
     pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> Result<()> {
+        self.update_sync_job_inner(job_id, update, false)
+    }
+
+    /// Reconcile an exhausted failed attempt ledger only after its operation
+    /// owner has independently proved an authoritative completion. Cancellation
+    /// remains terminal, the exact retained operation is fenced here, and the
+    /// ordinary update path cannot opt into this exception by choosing a phase.
+    pub fn complete_exhausted_sync_job_from_authority(
+        &self,
+        job_id: &str,
+        expected_operation: &serde_json::Value,
+        update: &SyncJobUpdate,
+    ) -> Result<()> {
+        let current = self
+            .get_sync_job(job_id)?
+            .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
+        if current.state != SyncJobState::Failed
+            || !current.attempts_exhausted()
+            || !matches!(current.phase.as_str(), "failed" | "attempts_exhausted")
+            || current.operation != *expected_operation
+            || update.state != SyncJobState::Completed
+            || !matches!(
+                update.phase.as_str(),
+                "completed_from_authoritative_receipt" | "completed_from_current_bindings"
+            )
+            || update.result.is_none()
+            || update.roots.as_ref().is_none_or(Vec::is_empty)
+        {
+            anyhow::bail!("sync job is not an exact exhausted authoritative-completion candidate");
+        }
+        self.update_sync_job_inner(job_id, update, true)
+    }
+
+    fn update_sync_job_inner(
+        &self,
+        job_id: &str,
+        update: &SyncJobUpdate,
+        reconcile_exhausted_completion: bool,
+    ) -> Result<()> {
         validate_sync_job_id(job_id)?;
         validate_non_empty_label("phase", &update.phase)?;
         let current_state = self
@@ -3475,7 +3514,9 @@ impl OperationalDb {
             .context("failed to load sync job state")?
             .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
         let current_state = SyncJobState::from_str(&current_state)?;
-        validate_sync_job_transition(current_state, update.state)?;
+        if !reconcile_exhausted_completion {
+            validate_sync_job_transition(current_state, update.state)?;
+        }
         if matches!(
             update.state,
             SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled
@@ -6766,6 +6807,83 @@ mod tests {
             err.to_string()
                 .contains("invalid sync job state transition")
         );
+    }
+
+    #[test]
+    fn exhausted_failed_sync_job_requires_exact_authoritative_completion() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("operational.sqlite3");
+        let db = OperationalDb::open(&path).unwrap();
+        let operation = serde_json::json!({
+            "schema":"fixture.v1",
+            "operation_type":"external_content_activation"
+        });
+        db.create_sync_job(&NewSyncJob {
+            job_id: "job:activation".to_owned(),
+            operation_type: "external_content_activation".to_owned(),
+            operation: operation.clone(),
+            peer: None,
+            roots: vec![],
+            heads: vec![],
+            max_attempts: 1,
+        })
+        .unwrap();
+        let attempt = db
+            .create_sync_job_attempt(&NewSyncJobAttempt {
+                attempt_id: "attempt:activation".to_owned(),
+                job_id: "job:activation".to_owned(),
+                worker_id: Some("fixture".to_owned()),
+                phase: "publishing".to_owned(),
+            })
+            .unwrap();
+        db.finish_sync_job_attempt_and_update_job(
+            &attempt.attempt_id,
+            &FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "failed".to_owned(),
+                error: Some("publication interrupted".to_owned()),
+                result: None,
+            },
+            "job:activation",
+            &SyncJobUpdate {
+                state: SyncJobState::Failed,
+                phase: "failed".to_owned(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![],
+                fetched_hashes: vec![],
+                last_error: Some("publication interrupted".to_owned()),
+                result: None,
+            },
+        )
+        .unwrap();
+        let receipt = "a".repeat(64);
+        let completion = SyncJobUpdate {
+            state: SyncJobState::Completed,
+            phase: "completed_from_current_bindings".to_owned(),
+            roots: Some(vec![receipt.clone()]),
+            heads: None,
+            uploaded_hashes: vec![],
+            fetched_hashes: vec![],
+            last_error: None,
+            result: Some(serde_json::json!({"receipt_hash":receipt})),
+        };
+
+        assert!(db.update_sync_job("job:activation", &completion).is_err());
+        assert!(
+            db.complete_exhausted_sync_job_from_authority(
+                "job:activation",
+                &serde_json::json!({"wrong":true}),
+                &completion,
+            )
+            .is_err()
+        );
+        db.complete_exhausted_sync_job_from_authority("job:activation", &operation, &completion)
+            .unwrap();
+        let completed = db.get_sync_job("job:activation").unwrap().unwrap();
+        assert_eq!(completed.state, SyncJobState::Completed);
+        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(completed.roots, vec!["a".repeat(64)]);
     }
 
     #[test]

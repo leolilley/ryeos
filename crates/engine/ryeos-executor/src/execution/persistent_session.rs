@@ -22,7 +22,9 @@ use ryeos_engine::contracts::{
     SubjectResolutionAuthority,
 };
 use ryeos_engine::kind_registry::{PersistentSessionDecl, TerminatorDecl};
-use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
+use ryeos_engine::protocols::descriptor::{
+    PersistentSessionCleanupAuthority, PersistentSessionProcessMode,
+};
 use ryeos_engine::protocols::{VerifiedProtocol, validate_persistent_session_protocol};
 use ryeos_state::objects::{
     AdmittedPersistentSessionCapsule, ExecutableSearchPathEntry, PERSISTENT_SESSION_CAPSULE_KIND,
@@ -2520,24 +2522,64 @@ fn validate_session_process_control(
     state: &AppState,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<()> {
-    if session.process_mode == PersistentSessionProcessMode::ExclusiveSession {
-        let readiness = &state
-            .isolation
-            .inspection()
-            .process_scope_readiness
-            .exclusive_session;
-        if !readiness.ready {
-            bail!(
-                "exclusive session requires qualified node process-scope support ({})",
-                readiness.reason.as_str()
-            );
+    match (session.process_mode, session.cleanup_authority) {
+        (
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        ) => {}
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+        ) => {
+            let readiness = &state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .exclusive_session;
+            if !readiness.ready {
+                bail!(
+                    "exclusive session requires qualified node process-scope support ({})",
+                    readiness.reason.as_str()
+                );
+            }
+            // Readiness is an inspection aid, not launch authority. Recheck the
+            // retained generation and exact qualified capability set at admission.
+            state
+                .isolation
+                .process_scope_control_timeout()
+                .context("exclusive session requires qualified node process-scope support")?;
         }
-        // Readiness is an inspection aid, not launch authority. Recheck the
-        // retained generation and exact qualified capability set at admission.
-        state
-            .isolation
-            .process_scope_control_timeout()
-            .context("exclusive session requires qualified node process-scope support")?;
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+        ) => {
+            bail!("exclusive session requires protected external placement-incarnation authority");
+        }
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        ) => {
+            let readiness = &state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .trusted_exclusive_session;
+            if !readiness.ready {
+                bail!(
+                    "trusted process-group session is disabled by node policy ({})",
+                    readiness.reason.as_str()
+                );
+            }
+        }
+        (PersistentSessionProcessMode::PooledRequests, _) => {
+            bail!("pooled persistent session cannot select dedicated cleanup authority");
+        }
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::NotRequired,
+        ) => {
+            bail!("exclusive persistent session requires dedicated cleanup authority");
+        }
     }
     Ok(())
 }
@@ -2565,14 +2607,13 @@ fn retained_session_protocol(
     };
     // The current trust store may revoke the retained signer. It must never
     // replace admitted behavior with a newer descriptor at the same ref.
-    let body = super::launch::verify_admitted_signed_descriptor_document(
+    let descriptor = verify_and_decode_retained_protocol_document(
         protocol_descriptor_document,
         protocol_content_hash,
         protocol_signer_fingerprint,
         &engine.node_trust_store,
     )
     .map_err(|error| anyhow!("verify retained session protocol: {error}"))?;
-    let descriptor: ryeos_engine::protocols::ProtocolDescriptor = serde_yaml::from_str(&body)?;
     ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)?;
     let session =
         validate_persistent_session_protocol(&descriptor).map_err(|error| anyhow!(error))?;
@@ -2590,6 +2631,51 @@ fn retained_session_protocol(
         bail!("persistent-session plan widens its retained protocol ceilings");
     }
     Ok(session.clone())
+}
+
+fn verify_and_decode_retained_protocol_document(
+    document: &str,
+    expected_content_hash: &str,
+    expected_signer: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
+    let body = super::launch::verify_admitted_signed_descriptor_document(
+        document,
+        expected_content_hash,
+        expected_signer,
+        trust_store,
+    )?;
+    decode_retained_protocol_descriptor(&body)
+}
+
+/// Decode already-admitted predecessor protocol bytes without weakening
+/// current authoring. Before cleanup authority became explicit, pooled
+/// sessions had no dedicated cleanup owner and exclusive sessions always
+/// required the local Lillux process scope. The signed original bytes are
+/// verified before this narrow historical interpretation is applied.
+fn decode_retained_protocol_descriptor(
+    body: &str,
+) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
+    let mut value: serde_json::Value = serde_yaml::from_str(body)?;
+    if let Some(session) = value
+        .get_mut("session")
+        .and_then(serde_json::Value::as_object_mut)
+        && !session.contains_key("cleanup_authority")
+    {
+        let historical = match session
+            .get("process_mode")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("pooled_requests") => "not_required",
+            Some("exclusive_session") => "local_process_scope",
+            _ => bail!("retained session protocol has no interpretable cleanup authority"),
+        };
+        session.insert(
+            "cleanup_authority".to_owned(),
+            serde_json::Value::String(historical.to_owned()),
+        );
+    }
+    serde_json::from_value(value).context("decode retained session protocol descriptor")
 }
 
 fn start_capsule_process(
@@ -3211,6 +3297,11 @@ pub fn start_exclusive_capsule(
     let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
     if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
+        || !matches!(
+            session_protocol.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+                | PersistentSessionCleanupAuthority::TrustedProcessGroup
+        )
         || session_protocol.workspace_authority
             != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
     {
@@ -3254,47 +3345,57 @@ pub fn start_exclusive_capsule(
         bail!("exclusive persistent-session protocol requires a readiness identity slot");
     }
     // Reserve against the admitted attempt before possible process contact.
-    // This owner (not a provider/kind switch) requires whole-execution control.
-    // Pooled request workers retain their separately admitted strict-group
-    // contract; an unavailable scope here must never select that other path.
-    let control_timeout = state.isolation.process_scope_control_timeout()?;
-    let allocation = state
-        .isolation
-        .plan_process_scope(&identity.worker_instance_id)?;
-    state.state_store.reserve_dedicated_worker_scope(
-        &identity.placement_thread_id,
-        &identity.worker_instance_id,
-        identity.boot_epoch,
-        &allocation,
-    )?;
-    // A restart may discard this unused allocation, but may not retry it to
-    // launch. A concrete result must be bound before possible process contact.
-    let scope = state
-        .isolation
-        .allocate_process_scope(&allocation)
-        .map_err(|error| {
-            let error = anyhow::Error::from(error);
-            match allocation.discard_unlaunched() {
+    // This owner (not a provider/kind switch) requires a dedicated execution.
+    // Qualified hosts allocate a protected local scope. An explicitly trusted
+    // disposable host instead retains the direct process-group lifecycle and
+    // makes no containment claim. Neither path may fall back to pooled work.
+    let (scope, scope_cleanup, scope_allocation) = if session_protocol.cleanup_authority
+        == PersistentSessionCleanupAuthority::LocalProcessScope
+    {
+        let control_timeout = state.isolation.process_scope_control_timeout()?;
+        let allocation = state
+            .isolation
+            .plan_process_scope(&identity.worker_instance_id)?;
+        state.state_store.reserve_dedicated_worker_scope(
+            &identity.placement_thread_id,
+            &identity.worker_instance_id,
+            identity.boot_epoch,
+            &allocation,
+        )?;
+        let scope = state
+            .isolation
+            .allocate_process_scope(&allocation)
+            .map_err(|error| {
+                let error = anyhow::Error::from(error);
+                match allocation.discard_unlaunched() {
+                    Ok(()) => error,
+                    Err(cleanup) => error
+                        .context(format!("unlaunched allocation cleanup unproved: {cleanup}"))
+                        .context(ExclusiveWorkerCleanupUnproved),
+                }
+            })?;
+        let scope_recovery = scope.recovery().clone();
+        if let Err(error) = state.state_store.bind_dedicated_worker_scope(
+            &identity.placement_thread_id,
+            &identity.worker_instance_id,
+            identity.boot_epoch,
+            &scope_recovery,
+        ) {
+            return Err(match scope.retire_unlaunched(control_timeout) {
                 Ok(()) => error,
-                Err(cleanup) => error
-                    .context(format!("unlaunched allocation cleanup unproved: {cleanup}"))
-                    .context(ExclusiveWorkerCleanupUnproved),
-            }
-        })?;
-    let scope_recovery = scope.recovery().clone();
-    if let Err(error) = state.state_store.bind_dedicated_worker_scope(
-        &identity.placement_thread_id,
-        &identity.worker_instance_id,
-        identity.boot_epoch,
-        &scope_recovery,
-    ) {
-        return Err(match scope.retire_unlaunched(control_timeout) {
-            Ok(()) => error,
-            Err(retirement) => error.context(format!(
-                "unlaunched scope retirement failed: {retirement}; retained evidence: {scope_recovery:?}"
-            )).context(ExclusiveWorkerCleanupUnproved),
-        });
-    }
+                Err(retirement) => error.context(format!(
+                    "unlaunched scope retirement failed: {retirement}; retained evidence: {scope_recovery:?}"
+                )).context(ExclusiveWorkerCleanupUnproved),
+            });
+        }
+        (
+            Some(scope),
+            Some((scope_recovery, control_timeout)),
+            Some(allocation),
+        )
+    } else {
+        (None, None, None)
+    };
     let mut held = spawn_capsule_process_held(
         state,
         capsule_hash,
@@ -3310,22 +3411,26 @@ pub fn start_exclusive_capsule(
         &identity.boot_identity_hash,
         "dedicated_worker",
         &identity.worker_instance_id,
-        Some(&allocation),
-        Some(scope),
+        scope_allocation.as_ref(),
+        scope,
     )
     .map_err(|error| {
         // Preparation itself can fail after reservation but before spawn.
         // Settle the recorded scope even on that path. An empty scope does
         // not erase an independent unproved wrapper/reap obligation.
-        let error = match scope_recovery.terminate_and_wait(control_timeout) {
-            Ok(()) => error,
-            Err(cleanup) => {
-                return error
-                    .context(format!(
-                        "reserved process scope cleanup remains unproved: {cleanup}"
-                    ))
-                    .context(ExclusiveWorkerCleanupUnproved);
+        let error = if let Some((scope_recovery, control_timeout)) = scope_cleanup.as_ref() {
+            match scope_recovery.terminate_and_wait(*control_timeout) {
+                Ok(()) => error,
+                Err(cleanup) => {
+                    return error
+                        .context(format!(
+                            "reserved process scope cleanup remains unproved: {cleanup}"
+                        ))
+                        .context(ExclusiveWorkerCleanupUnproved);
+                }
             }
+        } else {
+            error
         };
         if error
             .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
@@ -3840,6 +3945,143 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_predecessor_protocol_gets_only_its_historical_cleanup_meaning() {
+        let exclusive = r#"
+kind: protocol
+name: structured_session
+category: ryeos/core
+abi_version: v1
+stdin: { shape: opaque }
+stdout: { shape: opaque_bytes, mode: terminal }
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle: { mode: managed }
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist: []
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: fixture.session
+  wire_version: 1
+  max_frame_bytes: 4096
+"#;
+        let descriptor = decode_retained_protocol_descriptor(exclusive).unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+
+        let pooled = exclusive
+            .replace("exclusive_session", "pooled_requests")
+            .replace("runtime_workspace", "ephemeral_scratch")
+            .replace("node_policy", "isolated")
+            .replace(
+                "  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY\n",
+                "",
+            );
+        let descriptor = decode_retained_protocol_descriptor(&pooled).unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::NotRequired
+        );
+
+        // Current authoring never receives the retained-document bridge.
+        assert!(
+            serde_yaml::from_str::<ryeos_engine::protocols::ProtocolDescriptor>(exclusive).is_err()
+        );
+    }
+
+    #[test]
+    fn retained_predecessor_protocol_is_verified_before_historical_interpretation() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[91u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let body = r#"kind: protocol
+name: structured_session
+category: ryeos/core
+abi_version: v1
+stdin: { shape: opaque }
+stdout: { shape: opaque_bytes, mode: terminal }
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle: { mode: managed }
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist: []
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: fixture.session
+  wire_version: 1
+  max_frame_bytes: 4096
+"#;
+        let document = lillux::signature::sign_content(body, &key, "#", None);
+        let content_hash = lillux::signature::content_hash(body);
+        let descriptor = verify_and_decode_retained_protocol_document(
+            &document,
+            &content_hash,
+            &fingerprint,
+            &trust,
+        )
+        .unwrap();
+        assert_eq!(
+            descriptor.session.unwrap().cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+
+        let tampered = document.replace("exclusive_session", "pooled_requests");
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &tampered,
+                &content_hash,
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &document,
+                &"0".repeat(64),
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
+        let revoked = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
+        assert!(
+            verify_and_decode_retained_protocol_document(
+                &document,
+                &content_hash,
+                &fingerprint,
+                &revoked,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn session_capsule_verification_stages_have_closed_stable_labels() {

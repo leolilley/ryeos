@@ -105,6 +105,11 @@ for profile_name in "${node_init_profiles[@]}"; do
   node_init_profile="$node_init_profile_dir/$profile_name.yaml"
   ryeos_validate_node_init_profile "$profile_name" "$node_init_profile"
   verify_dev_signed_profile "$node_init_profile"
+  if [[ "$profile_name" == hosted-workflow ]]; then
+    grep -Eq '^      trusted_process_group_sessions: true$' "$node_init_profile"
+  else
+    grep -Eq '^      trusted_process_group_sessions: false$' "$node_init_profile"
+  fi
   profile_bundle_set="$(ryeos_node_init_profile_bundle_set "$profile_name")"
   expected_exact_bundles="$(ryeos_bundle_set_names "$profile_bundle_set" | sort)"
   actual_exact_bundles="$(

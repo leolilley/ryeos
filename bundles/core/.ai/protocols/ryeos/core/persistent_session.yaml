@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T23:03:51Z:93be4efbd879259f2be2caa6b8da6907c98c625953d23d916a477e0bc144517d:rm0Q0zt5uoeQtHzvWMlNhum3FXu02i9j3EN09yxCUoCS/T7kc5tIl9yfH3nhlFzNYAp7kdmfV47uvpR0lE/SBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:51:08Z:0e1075a024d866d68f75d84a0befca00fe2ca4be8f4aeaddd2e6d4eaf7852465:HX+5nsAw+RLaFDfNlpf22YKvhnVp97xMrxP5VQjVNlAyrJ6VXeSZekt04TqKEooEO7SJ3/D8bwFUau7hoVhJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: persistent_session
 category: ryeos/core
@@ -19,6 +19,7 @@ lifecycle:
 callback_channel: none
 session:
   process_mode: pooled_requests
+  cleanup_authority: not_required
   workspace_authority: ephemeral_scratch
   network_authority: isolated
   runtime_env_allowlist: []

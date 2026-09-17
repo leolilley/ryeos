@@ -132,10 +132,11 @@ pub(crate) fn seed_service_route(core: &mut RyeOsCore) {
 /// pointer and the explicit UI target move. Tests that poke
 /// `workspace.focused_tile` alone leave the initial dock focus standing.
 pub(crate) fn focus_tile(core: &mut RyeOsCore, tile_id: crate::ids::TileId) {
-    core.workspace.focused_tile = tile_id;
-    core.ui.focus_target = Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
-        tile_id: tile_id.0.to_string(),
-    });
+    core.workspaces[core.active_workspace].focused_tile = tile_id;
+    core.workspaces[core.active_workspace].focus_target =
+        Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
+            tile_id: tile_id.0.to_string(),
+        });
 }
 
 /// Seed a filtered-list view (`feeds` -> source param) into a focused
@@ -150,9 +151,11 @@ pub(crate) fn seed_filter_tile(core: &mut RyeOsCore) -> String {
             "input": { "id": "q", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
         }),
     );
-    let tile_id = core.workspace.add_tile(ViewSpec {
-        view_ref: "view:test/filter".to_string(),
-    });
+    let tile_id = core.workspaces[core.active_workspace]
+        .add_tile(ViewSpec {
+            view_ref: "view:test/filter".to_string(),
+        })
+        .expect("fixture layout accepts view");
     focus_tile(core, tile_id);
     tile_id.0.to_string()
 }

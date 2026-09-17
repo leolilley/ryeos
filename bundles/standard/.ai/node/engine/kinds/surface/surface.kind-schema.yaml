@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:05:35Z:1bfd684d0bfaf8659d9e2085b2ec6fc6fc899429fe3fa42863682c192753470f:RSKqbqmzjEf9gPzRN7R88VFFxSY8V4zPrjwZ0iHS7B5Pl/G38Jw9X2C3SGepf/fUohcAE3ubShw47kyIJYXxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T00:05:36Z:07af8e2ab18c241ba8828c58fdd58cce76b1d4c144a3e069acbd354516fecc37:+xhtcHl/AYvYcOJavzj74+JGPgPyMNXJX8Jid5NAqm19HwusFpNQabShF0+lLyN05zy70ySnbt7izzbAstDAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -24,6 +24,9 @@ composer_config:
       strategy: dict_merge_root_last
       expect_value_type: mapping
     - name: tiles
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: workspaces
       strategy: replace_root_last
       expect_value_type: sequence
     - name: slots
@@ -76,6 +79,9 @@ composed_value_contract:
       type: single
       prim: mapping
     tiles:
+      type: single
+      prim: sequence
+    workspaces:
       type: single
       prim: sequence
     slots:

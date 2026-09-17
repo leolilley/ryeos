@@ -1,22 +1,60 @@
-# ryeos:signed:2026-09-15T01:11:43Z:3782f23ff87bc440d03aa9715b93bb144bf5df13255c8196aea312a0fb912a7b:MSN4ndqOAV8D17aSuLcp5sOC1iTWmtH6rsmdXB4cBqa+pjTTFlwBV2rHEF3LD9a7Izq3L6PNJt6zxqhjZSCaCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T00:05:36Z:bd23e4510ce6f3f42e19bee49ff0210d952a3c8919670fffcec44e2122118fe2:FFXKbPiSr0kJQErKKIweBiG+ntFk5uYEJXEPx80ePkhVxfpz+QoyKcEv0pWk9yCOf0eSAMhAQ7FUMyqEDLr3AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
-version: "1.0.0"
-description: Assistant-oriented RyeOS surface with signed, data-driven navigation
+version: "2.0.0"
+description: Named tiled RyeOS workspaces with contextual views and optional supporting slots
 
 extends: surface:ryeos/ui/lens
 
 tiling:
-  mode: single_lens
+  mode: master_stack
 
-tiles:
-  - view:ryeos/home/overview
+tiles: []
+# Explicitly remove the inherited single-lens slots. Workspace seeds below
+# own their placements; the overview has no global command/input strip.
+slots: { top: null, bottom: null, left: null, right: null }
 
-navigation:
-  - { id: home, label: Home, view: "view:ryeos/home/overview" }
-  - { id: work, label: Work, view: "view:ryeos/work/list" }
-  - { id: review, label: Review, view: "view:ryeos/review/pending" }
-  - { id: sites, label: Sites, view: "view:ryeos/sites/list" }
-  - { id: programs, label: Programs, view: "view:ryeos/programs/list" }
+navigation: []
+style:
+  border: thin
+  workspace_tabs: true
+
+workspaces:
+  - id: overview
+    title: Overview
+    root:
+      type: group
+      views: ["view:ryeos/home/overview", "view:ryeos/sites/list", "view:ryeos/programs/list"]
+      active: 0
+  - id: work
+    title: Work
+    slots:
+      left: { content: "view:ryeos/work/list", open: true, size: 30 }
+    root:
+      type: split
+      axis: horizontal
+      ratio: 0.68
+      first:
+        type: group
+        views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence"]
+        active: 0
+      second:
+        type: split
+        axis: vertical
+        ratio: 0.55
+        first:
+          type: group
+          views: ["view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+          active: 0
+        second:
+          type: group
+          views: ["view:ryeos/work/children", "view:ryeos/work/overview"]
+          active: 0
+  - id: review
+    title: Review
+    root:
+      type: group
+      views: ["view:ryeos/review/pending", "view:ryeos/review/history"]
+      active: 0
 
 library:
   - group: Assistant
@@ -24,6 +62,7 @@ library:
       - view:ryeos/home/overview
       - view:ryeos/work/list
       - view:ryeos/work/overview
+      - view:ryeos/thread/conversation
       - view:ryeos/thread/transcript
       - view:ryeos/thread/tree
       - view:ryeos/work/children

@@ -68,22 +68,47 @@ fn print_help(console: &Console) {
 /// solely client-side, so its views must still be fetched here. A
 /// daemon-resolved surface arrives with views already embedded.
 fn collect_view_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    collect_view_refs_at(value, out, true);
+}
+
+fn collect_view_refs_at(value: &serde_json::Value, out: &mut Vec<String>, at_root: bool) {
     match value {
         serde_json::Value::String(s) if s.starts_with("view:") => out.push(s.clone()),
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_view_refs(item, out);
+                collect_view_refs_at(item, out, false);
             }
         }
         serde_json::Value::Object(map) => {
             for (key, v) in map {
-                if key == "views" {
+                // Only the root map is already-resolved definitions. Nested
+                // group `views` are ordinary refs, including inactive tabs.
+                if at_root && key == "views" {
                     continue;
                 }
-                collect_view_refs(v, out);
+                collect_view_refs_at(v, out, false);
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod view_reference_tests {
+    #[test]
+    fn preview_resolves_inactive_nested_tabs_but_not_embedded_definitions() {
+        let mut refs = Vec::new();
+        super::collect_view_refs(
+            &serde_json::json!({
+                "workspaces": [{"root": {
+                    "type": "group", "active": 0,
+                    "views": ["view:test/active", "view:test/inactive"]
+                }}],
+                "views": {"view:test/embedded": {"body": "view:not-a-dependency"}}
+            }),
+            &mut refs,
+        );
+        assert_eq!(refs, ["view:test/active", "view:test/inactive"]);
     }
 }
 

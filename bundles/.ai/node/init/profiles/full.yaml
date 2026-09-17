@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T22:32:47Z:983feaaf5249dc0321e7645659f3647240b9f54bac2b685097210deb3cc334e7:VZqb68J5o/Mvbznvjzr44xAwi8LKZv1qUnL4RKe5okTw7SH+LSKeX/H4rtsygFjlJR/HcvSw99Waa3zHcL6jDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:24:33Z:96a02db0727ef0448f6dc7a2d58ecb09cac9b974d7e7aa36a60dac18596ec68c:idc6r0HqAwYWH4tdSQ0C6btornWC15ZaCgTQVgN1ft8BVGlQLe2tHOg8/TuTlnNbrJ+O6KmXCdhI2dP4Y3evAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -176,13 +176,14 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 6
+      version: 7
       process_scopes:
         # Resource-bearing launches require a Lillux-owned durable scope even
         # when filesystem/network isolation is disabled.
         mode: required
         control_timeout_ms: 5000
         nested_sandbox: false
+      trusted_process_group_sessions: false
       mode: disabled
       backend: null
       filesystem:

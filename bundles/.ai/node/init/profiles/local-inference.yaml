@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T22:32:47Z:539215e8afdb4e336dfcd11f3f476015739809acbeee5876aadcbb120cb92fde:IJOuBFo2uE6gfOyw4qbteBj2TzHgrwK9RTktp/2mj78WuDmjADTKD1R/SryTAIRAmt89B4HPLa02pZdnlsgfDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:24:52Z:165921bbfcff903764ae74e9b309af8d2dc06f08e6cc7f855975cb4eeece32c1:Bl/OLI172TA1K+QYR4sSCf5D/rgy4gxgEtTGxrP8meh5UFUDHZ0889upMj6Cjk5vzDShDOpNJQtAMnVHJwzaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -158,13 +158,14 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 6
+      version: 7
       process_scopes:
         # Device allocation and bounded occupancy are released only after
         # Lillux proves this exact process scope empty.
         mode: required
         control_timeout_ms: 5000
         nested_sandbox: false
+      trusted_process_group_sessions: false
       mode: disabled
       backend: null
       filesystem:

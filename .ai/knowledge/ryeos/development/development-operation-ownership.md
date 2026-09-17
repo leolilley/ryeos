@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-17T06:37:30Z:10c2eca430c610432feb9317180134421ec6424bbbe4e8cb422ccc963fe5a634:SfDwgxnaEuiaHWtR4nfI4e+aU3/X8bRqkl7OOHmVpTimpXO8FCR4XocidrEOaOiPT7TMcpCQHFacFCoahIe2Dw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-17T07:24:33Z:b878b26d16d268ef23b607f8f5c3194a4ae8dd760a88f211c614ed8c7ab57f4e:KwWxLabqJ5sAasuihS0Ut5T12CjetbV89hmTgV3Yx8YROTXvqTAHsPrgLZXL0AqjcoAPWGxUoEHiKberx+XBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.1.0"
+version: "1.2.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -50,7 +50,7 @@ by moving source into a different directory.
 | `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | Pre-install CI acquisition/orchestration entry; exact actionlint/ShellCheck are reusable validation Tool inputs, not ambient worker dependencies. | Preserve checksum-pinned acquisition; signed validation operation must bind exact binaries and complete child PATH before replacing CI behavior. |
 | `ci/test-daemon-image-init-policy.sh`, `ci/test-publisher-trust-policy.sh` | Focused tests of genuinely external Docker/init/install/publisher integration; remain with that owner. | Run relevant contract tests when those scripts change; no automatic live node mutation. |
 | `gate.sh` | Explicit broad CI/maintainer test orchestration, not default worker operation. Runtime test behaviors remain Cargo/project-owned Tools. | Keep full test/rebuild opt-in and crash-feature isolation; do not hide unrelated tests in release packaging. |
-| `check-ui-wasm-fresh.sh`, `dev-ui-assets.sh`, `dev-tui.sh` | UI asset production/checking becomes signed project operations/Graphs; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | Exact wasm target, wasm-bindgen, JS dependencies and output ownership; separate watching/process lifecycle from production. No host PATH inside worker children. |
+| `browser-assets-production/publish.sh`, `check-ui-wasm-fresh.sh`, `dev-ui-assets.sh`, `dev-tui.sh` | Complete contract/WASM/Svelte assembly and atomic publication has one canonical signed source under `.ai/tools/ryeos/development/browser-assets-production/`. The historical checker is a thin check-only entry; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | The operation builds one closed six-file generation, rejects stale bytes and atomically replaces `pkg/`; exact Node/npm/wasm-bindgen and offline package authority must come from the admitted development environment. Watching/process lifecycle remains separate. No host PATH inside worker children. |
 | `dev/sign-dev.sh` | Existing RyeOS/Lillux signing is canonical; the public development fixture selects a key, not another signature algorithm. Only the necessary explicit pre-install key-selection entry may remain. | Expose/reuse safe per-item publisher signing without whole-checkout exchange or node identity impersonation; remove duplicate envelope/hash/signature implementation after canonical entry qualification. Current script remains an open consolidation item. |
 | `dev/revert-sig-churn.sh` | Maintainer-only Git working-tree operation; Git remains the authority for local review/commits. Reusable filtering should live beside its signed maintainer Tool if retained. | Exact path selection, dry-run, reject mixed edits, never staged-change loss; no blanket worker Git/signing grant. |
 | `dev/free-build-space.py` | Host build-cache housekeeping, not project production or node GC. Existing Cargo cache and RyeOS GC owners must remain separate. | Remove personal default path and silent deletion errors, require exact exclusively owned target and explicit destructive intent. Do not run it against active builds or add node/host mounts to a Tool. |
