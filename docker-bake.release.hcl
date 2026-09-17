@@ -22,6 +22,10 @@ variable "WORKLOAD_CLIENT_ARTIFACT_DIR" {
   default = "./workload-client-release-artifacts"
 }
 
+variable "CONTAINED_OCI_HOOK_ARTIFACT_DIR" {
+  default = "./contained-oci-hook-release-artifacts"
+}
+
 variable "STANDARD_TAG" {
   default = "ryeos-standard:release-candidate"
 }
@@ -36,6 +40,10 @@ variable "LOCAL_INFERENCE_TAG" {
 
 variable "HOSTED_WORKFLOW_TAG" {
   default = "ryeos-hosted-workflow:release-candidate"
+}
+
+variable "CONTAINED_WORKFLOW_TAG" {
+  default = "ryeos-contained-workflow:qualification-candidate"
 }
 
 target "_release" {
@@ -67,6 +75,14 @@ target "workload-client-artifact" {
   inherits = ["_release"]
   target   = "workload-client-artifact"
   output   = ["type=local,dest=${WORKLOAD_CLIENT_ARTIFACT_DIR}"]
+}
+
+# Qualification-only until installed host evidence has passed. This target is
+# deliberately absent from the official promotion workflow.
+target "contained-oci-hook-artifact" {
+  inherits = ["_release"]
+  target   = "contained-oci-hook-artifact"
+  output   = ["type=local,dest=${CONTAINED_OCI_HOOK_ARTIFACT_DIR}"]
 }
 
 target "standard" {
@@ -111,4 +127,12 @@ target "hosted-workflow" {
     "type=provenance,mode=max",
     "type=sbom",
   ]
+}
+
+# Qualification-only until the selected adapter/host evidence is accepted.
+target "contained-workflow" {
+  inherits = ["_release"]
+  target   = "ryeos-contained-workflow"
+  tags     = [CONTAINED_WORKFLOW_TAG]
+  output   = ["type=docker"]
 }

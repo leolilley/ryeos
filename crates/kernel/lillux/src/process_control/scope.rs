@@ -540,6 +540,147 @@ enum QuiescedBackend {
 }
 
 impl ProcessScopeConfiguration {
+    /// Enter the exact OCI init mount namespace after preparation. Intended
+    /// only for the short-lived hook process, which exits after publishing the
+    /// protected binding and therefore never needs to recover its host view.
+    pub fn enter_oci_mount_namespace(
+        state: &super::OciHookState,
+        intent: &super::OciLifecycleIntent,
+    ) -> Result<(), String> {
+        state.validate_prestart()?;
+        intent.require_live()?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let membership = super::cgroup::open_oci_membership(state.init_pid()?)?;
+            let namespace = std::fs::File::open(format!("/proc/{}/ns/mnt", state.init_pid()?))
+                .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+            intent.require_live()?;
+            super::cgroup::require_oci_membership(
+                intent.init_process().target_pid,
+                intent.lifecycle_path(),
+            )?;
+            if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
+                return Err(format!(
+                    "enter OCI init mount namespace: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            super::cgroup::require_oci_membership_file(&membership, intent.lifecycle_path())?;
+            // The namespace and proc-membership descriptors pin the exact
+            // objects selected between exact-process checks. The post-setns
+            // check uses the retained proc descriptor rather than assuming
+            // the container procfs exposes the host PID.
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("OCI mount namespace entry is unavailable on this OS".to_owned())
+    }
+
+    /// OCI prestart hook operation. Lillux derives C from the exact init PID,
+    /// creates R directly beneath it, and installs the R-rooted mount in the
+    /// container namespace before returning an opaque provider configuration.
+    pub fn prepare_oci_hook(
+        state: &super::OciHookState,
+        account: &ControllerAccount,
+        intent: &super::OciLifecycleIntent,
+    ) -> Result<(Self, super::OciLifecycleGeneration), String> {
+        state.validate_prestart()?;
+        super::require_administrator().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "linux")]
+        {
+            account.validate()?;
+            intent.validate()?;
+            if intent.container_id() != state.id {
+                return Err("OCI state differs from the durable lifecycle intent".to_owned());
+            }
+            let AccountBackend::Unix { uid, gid } = account.0;
+            let init_pid = state.init_pid()?;
+            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid)?;
+            let lifecycle = (|| {
+                let host_lifetime = intent.host_lifetime().clone();
+                let generation_payload = serde_json::json!({
+                    "container_id": &state.id,
+                    "host_lifetime": &host_lifetime,
+                    "init_process": &prepared.init_process,
+                    "lifecycle_scope": &prepared.lifecycle_scope,
+                    "controller_scope": &prepared.controller_scope,
+                    "nonce": intent.nonce(),
+                });
+                let generation = format!(
+                    "sha256:{}",
+                    crate::sha256_hex(
+                        crate::canonical_json(&generation_payload)
+                            .map_err(|error| error.to_string())?
+                            .as_bytes()
+                    )
+                );
+                super::OciLifecycleGeneration::new(
+                    state.id.clone(),
+                    host_lifetime,
+                    prepared.init_process.clone(),
+                    prepared.lifecycle_scope,
+                    prepared.controller_scope,
+                    prepared.lifecycle_path.clone(),
+                    prepared.controller_path.clone(),
+                    generation,
+                )
+            })();
+            let lifecycle = match lifecycle {
+                Ok(lifecycle) => lifecycle,
+                Err(error) => {
+                    let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                    return Err(format!(
+                        "{error}; OCI controller-root rollback: {rollback:?}"
+                    ));
+                }
+            };
+            let configuration = Self {
+                version: SCOPE_CONFIGURATION_VERSION,
+                backend: BackendConfiguration::LinuxCgroupV2 {
+                    parent: "/sys/fs/cgroup".into(),
+                },
+            };
+            if let Err(error) = configuration.validate() {
+                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                return Err(format!(
+                    "{error}; OCI controller-root rollback: {rollback:?}"
+                ));
+            }
+            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, init_pid) {
+                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                return Err(format!(
+                    "{error}; OCI controller-root rollback: {rollback:?}"
+                ));
+            }
+            Ok((configuration, lifecycle))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("OCI lifecycle preparation is unavailable on this OS".to_owned())
+    }
+
+    pub fn require_oci_generation(
+        &self,
+        lifecycle: &super::OciLifecycleGeneration,
+    ) -> Result<(), String> {
+        lifecycle.validate()?;
+        let provider = ProcessScopeProvider::open(self)?;
+        match &provider.backend {
+            #[cfg(target_os = "linux")]
+            ProviderBackend::LinuxCgroupV2(parent)
+                if parent.identity()? == lifecycle.controller_scope() =>
+            {
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            ProviderBackend::LinuxCgroupV2(_) => {
+                Err("OCI controller-root generation has been replaced".to_owned())
+            }
+            #[cfg(not(target_os = "linux"))]
+            _ => Err("OCI lifecycle validation is unavailable on this OS".to_owned()),
+        }
+    }
+
     /// Provision one administrator-owned host-service delegation and compile
     /// the current platform's opaque scope contract. Applications supply only
     /// their already-determined native service label; they never choose a

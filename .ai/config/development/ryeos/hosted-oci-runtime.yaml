@@ -1,0 +1,65 @@
+# ryeos:signed:2026-09-17T02:38:37Z:c82443513d03c5a71b16251eb0299b83ea432774673d44fb951a5020bd5c5b08:UqssNslZOvjDOufFHc9BowhUnVrCUgs/jy+GKDjKLwjPl1ICLxSttUqWwdhTq7QNyo0393K2CCDFlWzkiwWvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: hosted-oci-runtime
+version: "1.0.0"
+schema: ryeos.development.hosted-oci-runtime.v1
+description: Qualification contract for administrator-installed hard-contained OCI workers
+runtime_product:
+  image_target: ryeos-contained-workflow
+  node_profile: contained-workflow
+  controller_account: {implementation: unix, uid: 10001, gid: 10001}
+# Installed claims remain disabled in source. Qualification may enable them
+# only in an administrator-signed replacement config naming one exact attestor
+# and verification key; a checklist supplied alongside evidence is never an
+# attestation.
+installed_attestor: null
+topology:
+  lifecycle_scope: C
+  controller_scope: R
+  invariant: R is a strict descendant of C for the same observed kernel incarnation
+lifecycle:
+  daemon_restart: preserves C, R, protected binding, node identity, and lifetime generation
+  container_replacement: ends C and invalidates R, the protected binding, and lifetime generation
+  volume_reuse: requires host-side proof that the preceding C is dead and has no live descendants
+required_capabilities:
+  - exact_lifecycle_identity
+  - strict_controller_descendant
+  - non_root_controller_transition
+  - scope_quiescence
+  - scope_termination
+  - scope_recovery
+  - detached_descendant_control
+  - nested_descendant_control
+  - host_observed_cleanup_before_reuse
+required_refusals:
+  - missing_delegation
+  - read_only_delegation
+  - wrong_delegation_owner
+  - replaced_delegation
+  - wrong_node_identity
+  - replaced_app_root
+  - wrong_controller_account
+  - stale_binding
+required_observations:
+  - exact_runtime_coordinates
+  - physical_c_to_r_containment
+  - non_root_controller
+  - real_scoped_worker
+  - detached_descendant_containment
+  - nested_descendant_containment
+  - freeze_excludes_writers
+  - cancellation_recovery
+  - daemon_crash_recovery
+  - daemon_restart_preserves_generation
+  - container_replacement_changes_generation
+  - old_lifetime_dead
+  - volume_reuse_after_death_only
+  - unrelated_process_untouched
+  - authenticated_candidate_return
+claim_classes:
+  - structural_smoke
+  - source_contract
+  - installed_qualification
+limits:
+  max_observations: 256
+  max_evidence_bytes: 262144

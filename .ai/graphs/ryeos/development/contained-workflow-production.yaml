@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-17T01:47:05Z:47c257468824f979a29d2d3300f0dc466dd740aff829be9c0489cf2cea08fde5:ky5nMS6ZPf0b0pE0L/s/nwgjo3hIoDzDdRhazm46crLbdZTBXEbiJEQh6Y34QE4mSg6e+MsVkAq9QtvCH0RdDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Record exact contained-workflow image, host-hook, and signed-profile products
+effects: recorded
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/development/hosted-oci-runtime/validate-products
+config:
+  start: validate
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      evidence: {type: object}
+    required: [evidence]
+    additionalProperties: false
+  nodes:
+    validate:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/hosted-oci-runtime/validate-products
+        ref_bindings: {}
+        params:
+          evidence: "${config.evidence}"
+        thread: inline
+      assign:
+        products: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output:
+        products: "${state.products}"

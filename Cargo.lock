@@ -2917,6 +2917,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-lillux-oci-hook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "libc",
+ "ryeos-node",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-node"
 version = "0.1.0"
 dependencies = [
