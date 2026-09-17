@@ -118,6 +118,17 @@ class NumericOracleComparisonTests(unittest.TestCase):
         self.assertEqual(evidence["consequences"], "none")
         self.assertTrue(evidence["passed"])
         self.assertIn("worker_or_provider_activation", evidence["does_not_establish"])
+        self.assertEqual(
+            evidence["candidate"]["execution_boundary"],
+            {
+                "interpreter": "modal_debian_slim_python_3.12",
+                "interpreter_patch_and_binary_identity_retained": False,
+                "admitted_runtime_archive_use": (
+                    "musl_loader_and_libraries_for_admitted_compiler_only"
+                ),
+                "worker_runtime_abi_qualification": False,
+            },
+        )
         bound_paths = {
             "model.py": WORKER / "model.py",
             "model_contract.py": WORKER / "model_contract.py",

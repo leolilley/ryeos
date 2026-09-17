@@ -39,6 +39,12 @@
       "driver_version": "580.95.05"
     },
     "network": "blocked_by_modal_function_contract",
+    "execution_boundary": {
+      "interpreter": "modal_debian_slim_python_3.12",
+      "interpreter_patch_and_binary_identity_retained": false,
+      "admitted_runtime_archive_use": "musl_loader_and_libraries_for_admitted_compiler_only",
+      "worker_runtime_abi_qualification": false
+    },
     "runtime_archive_sha256": "7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef",
     "tinygrad_archive_sha256": "accc141e942323c8b865c776b5c1425792e86a1c4981fdf4d711d80db2ac5780",
     "toolchain_archive_sha256": "5ca0c1141b4400505e46305ba3e620d316aecf17d758e3be406c26da914ebb55",
