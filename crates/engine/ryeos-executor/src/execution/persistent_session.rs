@@ -21,7 +21,9 @@ use ryeos_engine::contracts::{
     SubjectResolutionAuthority,
 };
 use ryeos_engine::kind_registry::{PersistentSessionDecl, TerminatorDecl};
-use ryeos_engine::protocols::descriptor::PersistentSessionProcessMode;
+use ryeos_engine::protocols::descriptor::{
+    PersistentSessionCleanupAuthority, PersistentSessionProcessMode,
+};
 use ryeos_engine::protocols::{VerifiedProtocol, validate_persistent_session_protocol};
 use ryeos_state::objects::{
     AdmittedPersistentSessionCapsule, ExecutableSearchPathEntry, PERSISTENT_SESSION_CAPSULE_KIND,
@@ -2311,24 +2313,48 @@ fn validate_session_process_control(
     state: &AppState,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<()> {
-    if session.process_mode == PersistentSessionProcessMode::ExclusiveSession {
-        let readiness = &state
-            .isolation
-            .inspection()
-            .process_scope_readiness
-            .exclusive_session;
-        if !readiness.ready {
-            bail!(
-                "exclusive session requires qualified node process-scope support ({})",
-                readiness.reason.as_str()
-            );
+    match (session.process_mode, session.cleanup_authority) {
+        (
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        ) => {}
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+        ) => {
+            let readiness = &state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .exclusive_session;
+            if !readiness.ready {
+                bail!(
+                    "exclusive session requires qualified node process-scope support ({})",
+                    readiness.reason.as_str()
+                );
+            }
+            // Readiness is an inspection aid, not launch authority. Recheck the
+            // retained generation and exact qualified capability set at admission.
+            state
+                .isolation
+                .process_scope_control_timeout()
+                .context("exclusive session requires qualified node process-scope support")?;
         }
-        // Readiness is an inspection aid, not launch authority. Recheck the
-        // retained generation and exact qualified capability set at admission.
-        state
-            .isolation
-            .process_scope_control_timeout()
-            .context("exclusive session requires qualified node process-scope support")?;
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::ExternalHostIncarnation,
+        ) => {
+            bail!("exclusive session requires protected external host-incarnation authority");
+        }
+        (PersistentSessionProcessMode::PooledRequests, _) => {
+            bail!("pooled persistent session cannot select dedicated cleanup authority");
+        }
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::NotRequired,
+        ) => {
+            bail!("exclusive persistent session requires dedicated cleanup authority");
+        }
     }
     Ok(())
 }
@@ -2856,6 +2882,8 @@ pub fn start_exclusive_capsule(
     let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
     if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
+        || session_protocol.cleanup_authority
+            != PersistentSessionCleanupAuthority::LocalProcessScope
         || session_protocol.workspace_authority
             != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
     {

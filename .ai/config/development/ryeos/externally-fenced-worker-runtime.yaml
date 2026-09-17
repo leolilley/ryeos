@@ -1,0 +1,74 @@
+# ryeos:signed:2026-09-17T01:07:32Z:6bd92a21861a029dec0699aa27b6b035bbf5821d5ab473b15266bd5898e423ec:uH01y7gSNTNNMCCA86mS6cQJUlXqsGKSBKotnBwNp1+S6TdIIDutXzmA3bfpEub3ixRoqMCopIOE2Ff4KITBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: externally-fenced-worker-runtime
+version: "1.0.0"
+schema: ryeos.development.externally-fenced-worker-runtime.v1
+description: Fail-closed contract for restricted single-tenant externally supervised worker sites
+topology:
+  site_kind: configured_remote
+  allocation: one_exclusive_worker_site_per_external_incarnation
+  app_root: private_persistent_site_state
+  credential_profile: independently_enrolled_target_local
+execution:
+  workflow: service:remote-worker-workflows/start
+  candidate_result: service:worker-executions/candidate-result
+  cleanup_authority: external_host_incarnation
+  tool_authority: independently_admitted_closed_inventory
+authorities:
+  source_controller:
+    - configured_remote_selection
+    - exact_workflow_intent
+    - aggregate_concurrency_policy
+    - source_side_lifecycle_adapter
+    - recovery_and_quarantine
+  target_site:
+    - node_identity
+    - credential_profile_home
+    - provider_session
+    - target_launch
+    - private_candidate
+    - candidate_testimony
+  deployment_operator:
+    - site_configuration
+    - incarnation_mutation
+    - provider_credentials
+    - provider_observation
+required_separate_receipts:
+  - provider_turn_completion
+  - frozen_candidate_result
+  - external_incarnation_release
+required_refusals:
+  - target_self_attested_external_cleanup
+  - missing_independent_lifecycle_receipt
+  - unclosed_model_tool_inventory
+  - worker_visible_lifecycle_credentials
+  - worker_visible_node_or_signing_authority
+  - ambiguous_provider_mutation
+  - stale_or_overlapping_incarnation
+  - unreconciled_launch_contact
+  - release_before_candidate_freeze
+  - release_before_old_incarnation_fence
+qualification:
+  current_class: source_contract
+  installed_activation: blocked
+  blockers:
+    - closed_tool_inventory_not_proven
+    - independent_source_lifecycle_adapter_not_installed
+    - external_incarnation_receipt_not_implemented
+  structural_claims_do_not_imply_installed_qualification: true
+adapter_contract:
+  provider_specific_binding_owner: consuming_project_or_installed_bundle
+  credentials: source_node_private
+  required_operations:
+    - observe_exact_incarnation
+    - reconcile_mutation_intent
+    - fence_old_incarnation
+    - prove_release_or_quarantine
+  forbidden_operations:
+    - expose_provider_credentials_to_target
+    - accept_target_self_report_as_release_proof
+    - reconstruct_candidate_or_workflow_authority
+limits:
+  max_sites_per_pool: 32
+  max_lifecycle_observations_per_operation: 128
+  max_lifecycle_receipt_bytes: 262144

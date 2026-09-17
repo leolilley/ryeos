@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-16T03:58:59Z:e458533cc644716c4b241cf62bf9d3f7d9ddf430dfd39c23c497318eca575655:n8uDo8I1X78LdA78CqBlHWiFfV7knMsFm7CIV0YP94sDd+qggniw3OcujQlKxwATOy+3jgLO4LkRh6KTqbzKBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-17T01:07:32Z:fe9de49a9a196231f39ddb4868fd5cceca352c218a5109a7bcdbd6d76717086d:XvRhFV8rt9XmVT3qa3T6wGyVRBI14QJU/HCF+eYoLPFgAZm7a7qWBjW98DI6YFBc5B51YhGYLrySnzM2ESsxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.4.0"
+version: "1.5.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -130,13 +130,14 @@ binding and any `workload_execution` selections needed by admitted child
 operations. Nothing inherits selections from the Graph parent.
 
 The signed workflow Config uses the current
-`ryeos.remote_worker_workflow.v2` schema and declares its exact target runtime
+`ryeos.remote_worker_workflow.v3` schema and declares its exact target runtime
 requirements. For example, the RyeOS development workflow requires
-`process_control: exclusive_session`, `filesystem_mode: enforce`, and
-`network_mode: host`. Before any new project push or launch contact, the
-source calls the authenticated `service:node/status` action and verifies those
-three dimensions. The configured source-operator grant on the destination
-therefore needs the exact `ryeos.execute.service.node/status` capability.
+`process_control: exclusive_session`, `cleanup_authority:
+local_process_scope`, `filesystem_mode: enforce`, and `network_mode: host`.
+Before any new project push or launch contact, the source calls the
+authenticated `service:node/status` action and verifies those dimensions. The
+configured source-operator grant on the destination therefore needs the exact
+`ryeos.execute.service.node/status` capability.
 
 The source retains the observed daemon revision, isolation-policy digest,
 selected process-readiness reason, and protected process-scope authority
@@ -261,6 +262,63 @@ fingerprint, controller account, and inherited descriptor authority. Replacing
 the container, app-root filesystem identity, host lifetime, UID mapping, or
 binding requires explicit administrator reprovisioning; surviving volume bytes
 do not transfer host authority.
+
+## Hosted-runtime ownership
+
+An externally supervised runtime does not move host provisioning into the
+RyeOS daemon or into an image entrypoint. Keep the ownership layers exact:
+
+- source-local signed `.ai/config`, `.ai/tools`, and `.ai/graphs` objects own
+  development inputs, requested products, qualification policy, and evidence;
+- an installed Lillux adapter owns OS, OCI, namespace, mount, account, cgroup,
+  and enclosing-lifetime mechanics;
+- RyeOS retains only the generic protected binding, semantic capabilities,
+  execution journals, and fail-closed admission;
+- an image owns immutable packaging only; and
+- `tests/e2e` owns qualification fixtures, never deployment authority.
+
+In particular, do not add a security-bearing contract below a top-level
+`deploy/` directory, teach `ryeosd` to interpret Docker or provider topology,
+or construct protected authority from mutable environment variables. A tiny
+image shim may invoke the generic protected entrypoint with an
+administrator-prepared descriptor. It cannot discover, create, weaken, or
+repair that authority.
+
+Lillux's host adapter must return an opaque enclosing-lifetime witness in
+addition to process-scope configuration. That witness distinguishes a daemon
+restart within one still-authoritative host lifetime from replacement of the
+enclosing container or host. RyeOS may retain and report its digest, but must
+not parse provider IDs, cgroup paths, systemd units, namespace layouts, or
+container metadata to reconstruct it. Recovery may settle an old execution
+only from Lillux's authoritative scope recovery or lifetime-death proof.
+
+Externally supervised single-tenant destinations are a separate execution
+lane. They may reuse generic host-incarnation readiness, refusal, cleanup, and
+receipt vocabulary, but provider metadata is not an OCI/kernel witness and the
+target node cannot attest to its own future death. A source-side provider
+adapter may observe and control preconfigured sites without exposing lifecycle
+credentials to workers; that observation remains distinct from Lillux
+authority and from the target-signed candidate result. Provider-specific site
+bindings belong to the consuming project or installed provider bundle. The
+generic source contract is
+`config:development/ryeos/externally-fenced-worker-runtime`; its staged runbook
+is `knowledge:ryeos/development/externally-fenced-worker-runtime`.
+
+An externally fenced destination that supplies neither delegated process
+control nor a usable namespace sandbox cannot run the ordinary hosted Codex
+authoring profile. It must refuse before provider contact unless an
+independently qualified closed-tool profile proves that shell, file mutation,
+browser, plugin, MCP, and other ambient command routes are absent. A feature
+flag or self-reported tool list is not that proof. Hard-contained hosts
+continue to use the ordinary authoring profile; do not weaken it to accommodate
+a more limited destination.
+
+Structural qualification and installed qualification are different products.
+Image shape, signed inventory, node identity, and refusal behavior can pass a
+structural smoke while installed process containment, writer exclusion,
+restart recovery, container replacement, and old-lifetime death proof remain
+unqualified. Promotion requires every installed claim from the signed
+development workflow; a partial smoke must never enable the hosted profile.
 
 On an already-provisioned stronger host, use an ordinary checkout outside the
 target app root and pin the source commit:

@@ -33,14 +33,14 @@ use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
 const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v5";
-const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v4";
-const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v4";
-const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v2";
+const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v5";
+const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v5";
+const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v3";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
 const LAUNCH_ACCEPTED_EVENT: &str = "remote_worker_workflow.launch_accepted";
 const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
-const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v2";
+const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v3";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
@@ -225,6 +225,7 @@ struct CompiledWorkflow {
 #[serde(deny_unknown_fields)]
 struct TargetRuntimeRequirements {
     process_control: TargetProcessControl,
+    cleanup_authority: TargetCleanupAuthority,
     filesystem_mode: ryeos_engine::isolation::IsolationMode,
     network_mode: ryeos_engine::isolation::IsolationNetworkMode,
 }
@@ -235,6 +236,14 @@ enum TargetProcessControl {
     OrdinarySubprocess,
     PooledRequests,
     ExclusiveSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetCleanupAuthority {
+    NotRequired,
+    LocalProcessScope,
+    ExternalHostIncarnation,
 }
 
 impl TargetProcessControl {
@@ -969,50 +978,68 @@ fn target_readiness_evidence(
         .get("process_scopes")
         .and_then(Value::as_object)
         .context("target node status omitted process-control readiness")?;
-    let selected = process_scopes
-        .get(requirements.process_control.status_field())
-        .and_then(Value::as_object)
-        .context("target node status omitted selected process-control mode")?;
-    let ready = selected
-        .get("ready")
-        .and_then(Value::as_bool)
-        .context("target node status omitted selected process-control readiness")?;
-    let reason = selected
-        .get("reason")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("target node status omitted process-control reason")?;
-    if !ready {
-        bail!(
-            "target process-control mode {} is not workflow-ready: {reason}",
-            requirements.process_control.status_field()
-        );
-    }
     let policy_digest = isolation
         .get("policy_digest")
         .and_then(Value::as_str)
         .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
         .context("target node status omitted a valid isolation policy identity")?;
-    let authority_digest = process_scopes
-        .get("authority_digest")
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
-                .map(str::to_owned)
-                .context("target node status has an invalid process-scope authority identity")
-        })
-        .transpose()?;
-    if requirements.process_control == TargetProcessControl::ExclusiveSession
-        && authority_digest.is_none()
-    {
-        bail!("exclusive target readiness omitted protected process-scope authority identity");
+    let mut process_scope_authority_digest = None;
+    let (ready, reason) = match (requirements.process_control, requirements.cleanup_authority) {
+        (
+            TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests,
+            TargetCleanupAuthority::NotRequired,
+        )
+        | (TargetProcessControl::ExclusiveSession, TargetCleanupAuthority::LocalProcessScope) => {
+            let selected = process_scopes
+                .get(requirements.process_control.status_field())
+                .and_then(Value::as_object)
+                .context("target node status omitted selected process-control mode")?;
+            if requirements.cleanup_authority == TargetCleanupAuthority::LocalProcessScope {
+                process_scope_authority_digest = read_optional_digest(
+                    process_scopes.get("authority_digest"),
+                    "process-scope authority",
+                )?;
+                if process_scope_authority_digest.is_none() {
+                    bail!(
+                        "exclusive target readiness omitted protected process-scope authority identity"
+                    );
+                }
+            }
+            (
+                selected
+                    .get("ready")
+                    .and_then(Value::as_bool)
+                    .context("target node status omitted selected process-control readiness")?,
+                selected
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .context("target node status omitted process-control reason")?,
+            )
+        }
+        (
+            TargetProcessControl::ExclusiveSession,
+            TargetCleanupAuthority::ExternalHostIncarnation,
+        ) => {
+            // A target cannot attest its own future death, enclosing-service
+            // replacement, or safe slot reuse. Accept this mode only after a
+            // source-side lifecycle adapter can contribute an independently
+            // protected placement receipt; node/status is intentionally not
+            // such an authority.
+            bail!(
+                "external host-incarnation cleanup requires an independent source-side lifecycle receipt"
+            )
+        }
+        _ => bail!("target runtime requirements pair incompatible process and cleanup authority"),
+    };
+    if !ready {
+        bail!("target process cleanup is not workflow-ready: {reason}");
     }
     let evidence = TargetReadinessEvidence {
         requirements: requirements.clone(),
         daemon_revision: revision.to_owned(),
         isolation_policy_digest: policy_digest.to_owned(),
-        process_scope_authority_digest: authority_digest,
+        process_scope_authority_digest,
         process_control_reason: reason.to_owned(),
     };
     // The status observation is the pre-contact admission boundary. Apply the
@@ -1020,6 +1047,18 @@ fn target_readiness_evidence(
     // before project transfer or worker launch can occur.
     validate_target_readiness_evidence(&evidence)?;
     Ok(evidence)
+}
+
+fn read_optional_digest(value: Option<&Value>, label: &str) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
+                .map(str::to_owned)
+                .with_context(|| format!("target node status has an invalid {label} identity"))
+        })
+        .transpose()
 }
 
 /// Resolve an interrupted target contact without replaying an accepted launch.
@@ -1642,6 +1681,24 @@ fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Res
             "not_required"
         }
     };
+    let valid_optional_digest = |digest: Option<&str>| {
+        digest.is_none_or(|digest| {
+            lillux::valid_hash(digest.strip_prefix("sha256:").unwrap_or(digest))
+        })
+    };
+    let authority_shape_valid = match (
+        evidence.requirements.process_control,
+        evidence.requirements.cleanup_authority,
+    ) {
+        (
+            TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests,
+            TargetCleanupAuthority::NotRequired,
+        ) => evidence.process_scope_authority_digest.is_none(),
+        (TargetProcessControl::ExclusiveSession, TargetCleanupAuthority::LocalProcessScope) => {
+            evidence.process_scope_authority_digest.is_some()
+        }
+        _ => false,
+    };
     if evidence.daemon_revision.is_empty()
         || !lillux::valid_hash(
             evidence
@@ -1650,14 +1707,8 @@ fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Res
                 .unwrap_or(&evidence.isolation_policy_digest),
         )
         || evidence.process_control_reason != expected_reason
-        || evidence
-            .process_scope_authority_digest
-            .as_deref()
-            .is_some_and(|digest| {
-                !lillux::valid_hash(digest.strip_prefix("sha256:").unwrap_or(digest))
-            })
-        || (evidence.requirements.process_control == TargetProcessControl::ExclusiveSession
-            && evidence.process_scope_authority_digest.is_none())
+        || !authority_shape_valid
+        || !valid_optional_digest(evidence.process_scope_authority_digest.as_deref())
     {
         bail!("remote-worker target readiness evidence is invalid");
     }
@@ -2695,6 +2746,7 @@ mod tests {
             "driver": "graph:provider/bounded-task",
             "target_requirements": {
                 "process_control": "exclusive_session",
+                "cleanup_authority": "local_process_scope",
                 "filesystem_mode": "enforce",
                 "network_mode": "host",
             },
@@ -2720,11 +2772,26 @@ mod tests {
                 "driver": "graph:provider/bounded-task",
                 "target_requirements": {
                     "process_control": "exclusive_session",
+                    "cleanup_authority": "local_process_scope",
                     "filesystem_mode": "enforce",
                     "network_mode": "host",
                 },
                 "parameters": {},
                 "target_project_path": "/wrong-owner",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WorkflowConfig>(serde_json::json!({
+                "category": "provider",
+                "schema": WORKFLOW_SCHEMA,
+                "driver": "graph:provider/bounded-task",
+                "target_requirements": {
+                    "process_control": "pooled_requests",
+                    "filesystem_mode": "disabled",
+                    "network_mode": "host",
+                },
+                "parameters": {},
             }))
             .is_err()
         );
@@ -2801,6 +2868,7 @@ mod tests {
     fn pooled_request_readiness_does_not_claim_exclusive_scope_authority() {
         let requirements = TargetRuntimeRequirements {
             process_control: TargetProcessControl::PooledRequests,
+            cleanup_authority: TargetCleanupAuthority::NotRequired,
             filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
             network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
         };
@@ -2817,6 +2885,26 @@ mod tests {
             Value::String("ready".to_string());
         let error = target_readiness_evidence(&malformed, &requirements).unwrap_err();
         assert!(format!("{error:#}").contains("readiness evidence is invalid"));
+    }
+
+    #[test]
+    fn target_cannot_self_attest_external_host_cleanup() {
+        let requirements = TargetRuntimeRequirements {
+            process_control: TargetProcessControl::ExclusiveSession,
+            cleanup_authority: TargetCleanupAuthority::ExternalHostIncarnation,
+            filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
+            network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+        };
+        let mut status = target_status(false, "policy_unconfigured", "disabled", "host");
+        status["external_host_incarnation"] = serde_json::json!({
+            "ready": true,
+            "reason": "ready",
+            "authority_digest": format!("sha256:{}", "c".repeat(64)),
+            "incarnation_digest": format!("sha256:{}", "d".repeat(64)),
+            "controller_authority_digest": format!("sha256:{}", "e".repeat(64)),
+        });
+        let error = target_readiness_evidence(&status, &requirements).unwrap_err();
+        assert!(format!("{error:#}").contains("independent source-side lifecycle receipt"));
     }
 
     #[test]
@@ -3339,6 +3427,7 @@ mod tests {
         TargetReadinessEvidence {
             requirements: TargetRuntimeRequirements {
                 process_control: TargetProcessControl::ExclusiveSession,
+                cleanup_authority: TargetCleanupAuthority::LocalProcessScope,
                 filesystem_mode: ryeos_engine::isolation::IsolationMode::Enforce,
                 network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
             },

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T03:59:20Z:15971247496e006c3ad1fab887e444a5decc909d9e41f4c5eeff83bf7281c2e1:64a35fKjsU87QtmW2dKXE/tBrmdnAw3slcLxARtnv3FVE/Efz7kiAZr2x53XPANmuWrFAl1ys3wawFBN9XSgBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:51:09Z:402a9c06f347a0c397890208e22cd8f076fea625ecacacdc09e92aa78d9cd20a:4OitD1egwlOgGQ+qSJdRMY7psa4NXjml8whCfww9QVfCgmBXdwz4aRktGCsHd8Z3WtxtMolSIYXOytmEEfOlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: structured_session
 category: ryeos/core
@@ -19,6 +19,7 @@ lifecycle:
 callback_channel: none
 session:
   process_mode: exclusive_session
+  cleanup_authority: local_process_scope
   workspace_authority: runtime_workspace
   network_authority: node_policy
   runtime_env_allowlist:
