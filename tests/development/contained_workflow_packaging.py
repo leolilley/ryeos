@@ -56,6 +56,19 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         self.assertNotIn("mode: unconfigured", profile)
         self.assertNotIn("mode: disabled", profile)
 
+    def test_bake_targets_are_qualification_only(self):
+        bake = (ROOT / "docker-bake.release.hcl").read_text()
+        self.assertIn('target "contained-workflow"', bake)
+        self.assertIn('target "contained-oci-hook-artifact"', bake)
+        publish = (ROOT / ".github/workflows/publish-ryeosd.yml").read_text()
+        self.assertNotIn("ryeos-contained-workflow", publish)
+
+    def test_hook_is_a_locked_workspace_product(self):
+        workspace = (ROOT / "Cargo.toml").read_text()
+        lockfile = (ROOT / "Cargo.lock").read_text()
+        self.assertIn('"crates/tools/lillux-oci-hook"', workspace)
+        self.assertIn('name = "ryeos-lillux-oci-hook"', lockfile)
+
 
 if __name__ == "__main__":
     unittest.main()

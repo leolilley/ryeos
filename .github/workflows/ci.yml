@@ -87,6 +87,13 @@ jobs:
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
 
+      - name: Check contained OCI product boundaries
+        run: |
+          python3 tests/development/contained_workflow_packaging.py
+          python3 tests/development/hosted_oci_runtime_verifier.py
+          python3 tests/development/oci_hook_contract.py
+          python3 tests/development/contained_workflow_products.py
+
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 

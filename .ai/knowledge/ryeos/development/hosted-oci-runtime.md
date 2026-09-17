@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T00:51:29Z:c9b7bf489b54a0328c692789c493a485f2407f2e0105a9a19496b746c363e8f3:5fVGOa96bKbic4l/YDC3g7/yTfghC9S2GybgfbrdJxfzKpChl+VOoKpLwWGaLVgsTWfbqZULToIQd/c7GlJPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T01:43:46Z:46d9c31322b240516d9f047b3e40a0d123317c1cb939aee1fb93aa7d1624bcd4:o8vvFzKFPbNxEUf8FkzILMBd4D5JTJlg4HFIfyYQBkVS0CaFqpPoQxpZh2oaJhrOR2VrKRK0jT7Z9BSY+SJYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: hosted-oci-runtime
@@ -68,6 +68,32 @@ binding rather than reinterpret it.
 
 No generic hosted image globally requires this authority. A deployment opts
 into the hard-contained profile only when its host adapter supplies it.
+
+### OCI hook installation contract
+
+The release target `contained-oci-hook-artifact` contains the host-installed
+`ryeos-lillux-oci-hook`. Its executable and every parent directory must remain
+root-owned and non-writable by the controller account. The OCI runtime invokes
+the same pinned executable as `prestart` and `poststop`, supplies standard OCI
+state on standard input, applies a finite hook timeout, and treats either hook
+failure as a failed lifecycle operation. The host creates
+`/var/lib/ryeos/contained-oci` as `0700 root:root`; it is not mounted into the
+worker.
+
+After installing the immutable hook artifact at a root-owned executable path,
+the administrator runs `ryeos-lillux-oci-hook install-host-state` once. Each
+OCI bundle then uses the exact installed path for both hooks, with argument
+`prestart` or `poststop` respectively. Recovery after an interrupted runtime
+callback uses `ryeos-lillux-oci-hook recover <container-id>`; it performs the
+same death and empty-tree proof and cannot force release.
+
+Prestart keys the reuse lease by the pinned `/data/app` directory identity,
+not the container ID. It records `prepared` before entering the container mount
+namespace, publishes the protected binding, then records `active`. Poststop
+requires exact init death and empty `C`/`R`, retires `R`, and records
+`released`. Any interrupted or ambiguous phase remains non-reusable. An
+operator must rerun poststop recovery against its retained record; deleting or
+editing the record is not recovery evidence.
 
 ## Evidence classes
 

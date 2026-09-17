@@ -30,6 +30,9 @@ pub(crate) struct PreparedOciCgroup {
     pub(crate) init_process: super::ExactProcessIdentity,
     pub(crate) lifecycle_scope: PinnedDirectoryIdentity,
     pub(crate) controller_scope: PinnedDirectoryIdentity,
+    pub(crate) lifecycle_path: std::path::PathBuf,
+    pub(crate) controller_path: std::path::PathBuf,
+    lifecycle: PinnedDirectory,
     controller: PinnedDirectory,
 }
 
@@ -73,27 +76,108 @@ pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCg
         .open_child_directory(OCI_CONTROLLER_ROOT.as_ref())
         .map_err(display)?
         .ok_or("OCI controller root disappeared after creation")?;
-    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
-    require_cgroup2(&controller_fd)?;
-    require_domain(&controller_fd)?;
-    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
-    let observed = parse_events(&read_control(&events)?)?;
-    if observed.populated || observed.frozen {
-        return Err("new OCI controller root is unexpectedly occupied or frozen".to_owned());
-    }
-    if unified_process_cgroup(init_pid)? != relative
-        || super::capture_exact_process_identity(init_pid, None)? != init_process
-    {
-        return Err(
-            "OCI init identity or lifecycle placement changed during preparation".to_owned(),
-        );
-    }
-    Ok(PreparedOciCgroup {
+    let prepared = PreparedOciCgroup {
         init_process,
         lifecycle_scope: lifecycle.identity().map_err(display)?,
         controller_scope: controller.identity().map_err(display)?,
+        lifecycle_path: lifecycle_path.clone(),
+        controller_path: lifecycle_path.join(OCI_CONTROLLER_ROOT),
+        lifecycle,
         controller,
-    })
+    };
+    let validation = (|| {
+        let controller_fd = prepared
+            .controller
+            .try_clone_descriptor()
+            .map_err(display)?;
+        require_cgroup2(&controller_fd)?;
+        require_domain(&controller_fd)?;
+        let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+        let observed = parse_events(&read_control(&events)?)?;
+        if observed.populated || observed.frozen {
+            return Err("new OCI controller root is unexpectedly occupied or frozen".to_owned());
+        }
+        if unified_process_cgroup(init_pid)? != relative
+            || super::capture_exact_process_identity(init_pid, None)? != prepared.init_process
+        {
+            return Err(
+                "OCI init identity or lifecycle placement changed during preparation".to_owned(),
+            );
+        }
+        Ok(())
+    })();
+    if let Err(error) = validation {
+        let rollback = rollback_empty_oci_controller(&prepared);
+        return Err(format!(
+            "{error}; OCI controller-root rollback: {rollback:?}"
+        ));
+    }
+    Ok(prepared)
+}
+
+pub(crate) fn rollback_empty_oci_controller(prepared: &PreparedOciCgroup) -> Result<(), String> {
+    let controller_fd = prepared
+        .controller
+        .try_clone_descriptor()
+        .map_err(display)?;
+    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("cannot roll back a populated OCI controller root".to_owned());
+    }
+    let lifecycle_fd = prepared.lifecycle.try_clone_descriptor().map_err(display)?;
+    let name = child_name(OCI_CONTROLLER_ROOT)?;
+    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(format!(
+            "roll back OCI controller root: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn retire_ended_oci_controller(
+    lifecycle_path: &Path,
+    lifecycle_identity: PinnedDirectoryIdentity,
+    controller_path: &Path,
+    controller_identity: PinnedDirectoryIdentity,
+) -> Result<(), String> {
+    let Some(lifecycle) = PinnedDirectory::open(lifecycle_path).map_err(display)? else {
+        return Ok(());
+    };
+    if lifecycle.identity().map_err(display)? != lifecycle_identity {
+        return Ok(());
+    }
+    let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&lifecycle_fd)?;
+    let events = open_control(&lifecycle_fd, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("OCI lifetime still has live descendants".to_owned());
+    }
+    let name = controller_path
+        .file_name()
+        .ok_or("OCI controller path has no child name")?;
+    let Some(controller) = lifecycle.open_child_directory(name).map_err(display)? else {
+        return Ok(());
+    };
+    if controller.identity().map_err(display)? != controller_identity {
+        return Err("OCI controller path was replaced before retirement".to_owned());
+    }
+    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("OCI controller still has live descendants".to_owned());
+    }
+    let name = child_name(
+        name.to_str()
+            .ok_or("OCI controller child name is not UTF-8")?,
+    )?;
+    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(format!(
+            "retire ended OCI controller root: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// Replace the container's read-only view of C with a bind view rooted at R.
@@ -142,12 +226,21 @@ pub(crate) fn install_oci_controller_mount(
                     std::ptr::null(),
                     c"/sys/fs/cgroup".as_ptr(),
                     std::ptr::null(),
-                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RW,
+                    libc::MS_BIND
+                        | libc::MS_REMOUNT
+                        | libc::MS_RW
+                        | libc::MS_NOSUID
+                        | libc::MS_NODEV
+                        | libc::MS_NOEXEC,
                     std::ptr::null(),
                 )
             } != 0
             {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::umount2(c"/sys/fs/cgroup".as_ptr(), libc::MNT_DETACH);
+                }
+                return Err(error);
             }
             Ok(())
         })();

@@ -573,39 +573,62 @@ impl ProcessScopeConfiguration {
         #[cfg(target_os = "linux")]
         {
             let prepared = super::cgroup::prepare_oci_controller_root(state.pid)?;
-            super::cgroup::install_oci_controller_mount(&prepared, state.pid)?;
-            let host_lifetime = super::ProcessHostLifetime::capture_current()?;
-            let generation_payload = serde_json::json!({
-                "container_id": &state.id,
-                "host_lifetime": &host_lifetime,
-                "init_process": &prepared.init_process,
-                "lifecycle_scope": &prepared.lifecycle_scope,
-                "controller_scope": &prepared.controller_scope,
-                "nonce": crate::sha256_hex(&crate::crypto::generate_random_bytes::<32>()),
-            });
-            let generation = format!(
-                "sha256:{}",
-                crate::sha256_hex(
-                    crate::canonical_json(&generation_payload)
-                        .map_err(|error| error.to_string())?
-                        .as_bytes()
+            let lifecycle = (|| {
+                let host_lifetime = super::ProcessHostLifetime::capture_current()?;
+                let generation_payload = serde_json::json!({
+                    "container_id": &state.id,
+                    "host_lifetime": &host_lifetime,
+                    "init_process": &prepared.init_process,
+                    "lifecycle_scope": &prepared.lifecycle_scope,
+                    "controller_scope": &prepared.controller_scope,
+                    "nonce": crate::sha256_hex(&crate::crypto::generate_random_bytes::<32>()),
+                });
+                let generation = format!(
+                    "sha256:{}",
+                    crate::sha256_hex(
+                        crate::canonical_json(&generation_payload)
+                            .map_err(|error| error.to_string())?
+                            .as_bytes()
+                    )
+                );
+                super::OciLifecycleGeneration::new(
+                    state.id.clone(),
+                    host_lifetime,
+                    prepared.init_process.clone(),
+                    prepared.lifecycle_scope,
+                    prepared.controller_scope,
+                    prepared.lifecycle_path.clone(),
+                    prepared.controller_path.clone(),
+                    generation,
                 )
-            );
-            let lifecycle = super::OciLifecycleGeneration::new(
-                state.id.clone(),
-                host_lifetime,
-                prepared.init_process,
-                prepared.lifecycle_scope,
-                prepared.controller_scope,
-                generation,
-            )?;
+            })();
+            let lifecycle = match lifecycle {
+                Ok(lifecycle) => lifecycle,
+                Err(error) => {
+                    let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                    return Err(format!(
+                        "{error}; OCI controller-root rollback: {rollback:?}"
+                    ));
+                }
+            };
             let configuration = Self {
                 version: SCOPE_CONFIGURATION_VERSION,
                 backend: BackendConfiguration::LinuxCgroupV2 {
                     parent: "/sys/fs/cgroup".into(),
                 },
             };
-            configuration.validate()?;
+            if let Err(error) = configuration.validate() {
+                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                return Err(format!(
+                    "{error}; OCI controller-root rollback: {rollback:?}"
+                ));
+            }
+            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, state.pid) {
+                let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
+                return Err(format!(
+                    "{error}; OCI controller-root rollback: {rollback:?}"
+                ));
+            }
             Ok((configuration, lifecycle))
         }
         #[cfg(not(target_os = "linux"))]

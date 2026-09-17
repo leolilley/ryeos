@@ -1,0 +1,23 @@
+# ryeos:signed:2026-09-17T01:47:05Z:ff765a4cc0368950c871d1b90161085ca46f049e3891a9d197d0d97ae339ae38:EETXul9r6ElxL9IzZJBdUKl4N7AsKSJ4EH2S0NuCdcJ/ocIkbdhu79ujoI5epzUlyNHTKM8cSEngpi0m8ma+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: contained-workflow-products
+version: "1.0.0"
+schema: ryeos.development.contained-workflow-products.v1
+description: Exact immutable product coordinates for the hard-contained OCI worker
+source_inputs:
+  - Dockerfile.release
+  - docker-bake.release.hcl
+  - bundles/.ai/node/init/profiles/contained-workflow.yaml
+  - images/contained-workflow/entrypoint.sh
+  - crates/tools/lillux-oci-hook
+products:
+  image:
+    bake_target: contained-workflow
+    docker_target: ryeos-contained-workflow
+  host_hook:
+    bake_target: contained-oci-hook-artifact
+    executable: ryeos-lillux-oci-hook
+  node_profile: contained-workflow
+claims:
+  product_evidence: exact source, image, hook, and signed profile digests
+  excluded: installed containment and host qualification
