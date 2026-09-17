@@ -43,6 +43,16 @@ the independent reference procedure and comparison policy only; it contains no
 observations and grants no activation, publication, qualification, or ARC
 acceptance authority. Focused authoring tests live in `tests/authoring/`.
 
+The independent CPU oracle and the pinned tinygrad `CUDA:PTX` candidate have
+now been compared through the consequence-free authoring utility
+`authoring/compare_numeric_oracle.py`. The compact retained evidence is
+`authoring/evidence/qwen3-4b-bf16-numeric-conformance-v1.json`; it binds the
+exact request, model manifest, reference environment, candidate source and
+runtime artifacts. All three cases matched their greedy tokens and complete
+top-16 sets within the predeclared error bounds. This establishes numeric
+conformance only. It is not a target, hardware, isolation, worker/provider,
+publication, or ARC acceptance decision.
+
 An executable local-model profile is the signed worker composition, not a
 model name selected by Python code. It binds exact immutable products for the
 Python runtime, tinygrad source, compiler/toolchain and model/tokenizer, plus

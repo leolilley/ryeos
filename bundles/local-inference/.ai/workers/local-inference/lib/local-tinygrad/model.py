@@ -216,6 +216,13 @@ class QwenModel:
         self._state = state
         nn.state.load_state_dict(self._model, state, strict=True, verbose=False, realize=False)
 
+    def _fresh_model(self) -> Transformer:
+        model = Transformer(self._model_config)
+        nn.state.load_state_dict(
+            model, self._state, strict=True, verbose=False, realize=False
+        )
+        return model
+
     @property
     def model_id(self) -> str:
         return self.contract.model_id
@@ -227,6 +234,25 @@ class QwenModel:
     @property
     def output_ceiling(self) -> int:
         return self.contract.output_ceiling
+
+    def full_prefix_logits(self, prompt_tokens: list[int]) -> Tensor:
+        """Project exact next-token logits without cache or sampling.
+
+        This is the numeric-conformance surface for an admitted model. It uses a
+        fresh instance of the same pinned tinygrad Transformer and the same
+        admitted state as generation, then performs the upstream forward path
+        through the output projection. Keeping this projection here avoids an
+        authoring-time model fork while making no activation or qualification
+        decision itself.
+        """
+        if not prompt_tokens or len(prompt_tokens) >= self.context_ceiling:
+            raise ValueError("Qwen prompt is empty or exceeds the admitted context")
+        model = self._fresh_model()
+        tokens = Tensor([prompt_tokens], dtype="int32")
+        hidden = model.token_embd(tokens).float()
+        for block in model.blk:
+            hidden = block(hidden, 0)
+        return model.output(model.output_norm(hidden))[:, -1, :].realize()
 
     def generate(
         self,
@@ -245,10 +271,7 @@ class QwenModel:
             raise ValueError("Qwen temperature is outside the admitted range")
         if seed < 0 or seed > (1 << 63) - 1:
             raise ValueError("Qwen seed is outside the admitted range")
-        request_model = Transformer(self._model_config)
-        nn.state.load_state_dict(
-            request_model, self._state, strict=True, verbose=False, realize=False
-        )
+        request_model = self._fresh_model()
         Tensor.manual_seed(seed)
         next_input = list(prompt_tokens)
         start_pos = 0

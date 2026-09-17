@@ -330,7 +330,10 @@ def render_chat(
             "You are provided with function signatures within <tools></tools> XML tags:\n<tools>"
         )
         for tool in tools:
-            output += "\n" + json.dumps(tool, ensure_ascii=False, separators=(",", ":"))
+            # Match the pinned Qwen tokenizer template's Jinja `tojson`
+            # serialization exactly. Prompt whitespace is model input, not a
+            # transport-canonicalization opportunity.
+            output += "\n" + json.dumps(tool, ensure_ascii=False)
         output += (
             "\n</tools>\n\nFor each function call, return a json object with function name and "
             "arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n"

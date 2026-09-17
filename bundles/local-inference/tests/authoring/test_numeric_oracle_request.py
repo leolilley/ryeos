@@ -326,7 +326,7 @@ class NumericOracleRequestTests(unittest.TestCase):
                 {"role": "user", "content": "Inspect row 2, column 1."},
                 {
                     "role": "assistant",
-                    "content": None,
+                    "content": "",
                     "tool_calls": [
                         {
                             "function": {

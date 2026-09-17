@@ -171,9 +171,9 @@
         }
       ],
       "enable_thinking": true,
-      "rendered_prompt_utf8": "<|im_start|>system\nUse the supplied tool exactly once.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\":\"function\",\"function\":{\"name\":\"inspect_grid\",\"description\":\"Read one grid cell.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"integer\"},\"column\":{\"type\":\"integer\"}},\"required\":[\"row\",\"column\"],\"additionalProperties\":false}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nInspect row 2, column 1.<|im_end|>\n<|im_start|>assistant\n",
-      "rendered_prompt_bytes": 759,
-      "rendered_prompt_sha256": "a1885cf5dbd6488acd71bc98a2d4710a355d2ec6f03fed44f350117e09fba821"
+      "rendered_prompt_utf8": "<|im_start|>system\nUse the supplied tool exactly once.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"inspect_grid\", \"description\": \"Read one grid cell.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"row\": {\"type\": \"integer\"}, \"column\": {\"type\": \"integer\"}}, \"required\": [\"row\", \"column\"], \"additionalProperties\": false}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nInspect row 2, column 1.<|im_end|>\n<|im_start|>assistant\n",
+      "rendered_prompt_bytes": 780,
+      "rendered_prompt_sha256": "68d9d6166817f3fa57dfc856cd1a3d7f0bd1b9bb07ce544c830d0b9742b77d69"
     },
     {
       "id": "tool_response_continuation",
@@ -182,7 +182,7 @@
         {"role": "user", "content": "Inspect row 2, column 1."},
         {
           "role": "assistant",
-          "content": null,
+          "content": "",
           "tool_calls": [
             {"function": {"name": "inspect_grid", "arguments": "{\"row\":2,\"column\":1}"}}
           ]
@@ -208,9 +208,9 @@
         }
       ],
       "enable_thinking": false,
-      "rendered_prompt_utf8": "<|im_start|>system\nUse the supplied tool exactly once.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\":\"function\",\"function\":{\"name\":\"inspect_grid\",\"description\":\"Read one grid cell.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"integer\"},\"column\":{\"type\":\"integer\"}},\"required\":[\"row\",\"column\"],\"additionalProperties\":false}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nInspect row 2, column 1.<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"inspect_grid\", \"arguments\": {\"row\":2,\"column\":1}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nblue\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-      "rendered_prompt_bytes": 960,
-      "rendered_prompt_sha256": "5f0c81dd604ea014906457020ee9da91c0c4528113455380554619dbc021b2c9"
+      "rendered_prompt_utf8": "<|im_start|>system\nUse the supplied tool exactly once.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"inspect_grid\", \"description\": \"Read one grid cell.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"row\": {\"type\": \"integer\"}, \"column\": {\"type\": \"integer\"}}, \"required\": [\"row\", \"column\"], \"additionalProperties\": false}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nInspect row 2, column 1.<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"inspect_grid\", \"arguments\": {\"row\":2,\"column\":1}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nblue\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+      "rendered_prompt_bytes": 981,
+      "rendered_prompt_sha256": "4a16d62e5dd7abb9e89abc11ce017c11f66c70018b34d26501a399492748975f"
     }
   ]
 }

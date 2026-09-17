@@ -35,6 +35,7 @@ from session import (  # noqa: E402
     Worker,
     _parse_tools,
     _read_frame,
+    _validate_tinygrad_device,
     _validate_request as _validate_request_impl,
 )
 from model import (  # noqa: E402
@@ -68,6 +69,14 @@ class WorkerContractTests(unittest.TestCase):
     def test_worker_source_root_is_derived_from_the_admitted_entrypoint(self) -> None:
         self.assertEqual(WORKER_ROOT, Path(__import__("session").__file__).resolve().parent)
         self.assertIn(WORKSPACE, WORKER_ROOT.parents)
+
+    def test_tinygrad_device_is_signed_data_not_a_shared_backend_allowlist(self) -> None:
+        self.assertEqual(_validate_tinygrad_device("CPU"), "CPU")
+        self.assertEqual(_validate_tinygrad_device("CUDA:PTX"), "CUDA:PTX")
+        for malformed in (None, "", "cuda", "CUDA::PTX", "CUDA/PTX", "A" * 65):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(RuntimeError, "device selection"):
+                    _validate_tinygrad_device(malformed)
 
     def test_tokenizer_matches_independent_reference_ids(self) -> None:
         cases = {
@@ -142,7 +151,7 @@ class WorkerContractTests(unittest.TestCase):
             ],
         )
         self.assertIn("# Tools\n", rendered_with_tools)
-        self.assertIn('<tools>\n{"type":"function"', rendered_with_tools)
+        self.assertIn('<tools>\n{"type": "function"', rendered_with_tools)
         self.assertTrue(rendered_with_tools.endswith("<|im_start|>assistant\n"))
 
     def test_tool_history_preserves_strict_string_argument_bytes(self) -> None:

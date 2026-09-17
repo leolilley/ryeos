@@ -26,6 +26,19 @@ MAX_TOOLS = 256
 MAX_TOOL_BYTES = 4 * 1024 * 1024
 
 
+def _validate_tinygrad_device(value: object) -> str:
+    # The signed concrete worker owns tinygrad's backend/interface selection.
+    # This shared adapter validates only a bounded tinygrad coordinate; it does
+    # not duplicate the signed profile as a backend allowlist.
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[A-Z][A-Z0-9]*(?::[A-Z0-9]+)*", value) is None
+        or len(value) > 64
+    ):
+        raise RuntimeError("local worker has no admitted tinygrad device selection")
+    return value
+
+
 def _is_within(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
@@ -45,10 +58,8 @@ def _verify_loaded_module_origins(*roots: Path) -> None:
 
 def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     session_fd = os.environ.get("RYEOS_SESSION_FD")
-    tinygrad_device = os.environ.get("DEV")
+    tinygrad_device = _validate_tinygrad_device(os.environ.get("DEV"))
     model_profile = os.environ.get("RYEOS_LOCAL_MODEL_PROFILE")
-    if tinygrad_device not in {"CPU", "NV"}:
-        raise RuntimeError("local worker has no admitted tinygrad device selection")
     if (
         not isinstance(model_profile, str)
         or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,63}", model_profile)
