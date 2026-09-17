@@ -29,7 +29,7 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         release = (ROOT / "Dockerfile.release").read_text()
         stage = docker_stage(release, "ryeos-contained-workflow")
         self.assertIn("/build/target-cache/release/lillux", stage)
-        self.assertIn("/build/target-cache/release/ryeos-lillux-oci-hook", stage)
+        self.assertNotIn("/usr/local/bin/ryeos-lillux-oci-hook", stage)
         self.assertIn("io.ryeos.image=\"contained-workflow\"", stage)
         self.assertIn("io.ryeos.required-node-profile=\"contained-workflow\"", stage)
         self.assertIn("io.ryeos.controller-uid=\"10001\"", stage)
@@ -45,6 +45,15 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
         self.assertIn('exec /usr/local/bin/ryeosd host-runtime --binding "$BINDING"', entrypoint)
         for forbidden in ("RYEOS_", "cgroup", "docker", "container ID", "ryeos init"):
             self.assertNotIn(forbidden, entrypoint)
+
+    def test_root_bootstrap_only_opens_binding_then_drops_to_fixed_account(self):
+        host_runtime = (ROOT / "crates/daemon/ryeos-node/src/host_runtime.rs").read_text()
+        daemon = (ROOT / "crates/bin/daemon/src/main.rs").read_text()
+        self.assertIn("exec_external_controller", daemon)
+        self.assertIn("InheritedReadonlyDocument::from_administrator_file", host_runtime)
+        self.assertIn("exec_controller_with_inherited_document", host_runtime)
+        self.assertIn("binding.account", host_runtime)
+        self.assertNotIn("provision_host_delegation", host_runtime)
 
     def test_signed_profile_requires_scopes_and_enforcement(self):
         profile = (ROOT / "bundles/.ai/node/init/profiles/contained-workflow.yaml").read_text()

@@ -3,9 +3,10 @@
 
 This driver intentionally performs no deployment or lifecycle mutation. The
 administrator-selected adapter owns those operations and writes one bounded
-evidence document. This driver applies the same signed source verifier used by
-the qualification graph and emits a nonzero status unless the claim is a
-complete installed qualification.
+evidence document. The repository source verifier deliberately refuses every
+installed claim until an administrator-signed replacement verifier names and
+authenticates an exact attestor. This driver therefore remains a fail-closed
+qualification entry point, not a way for a checklist to attest itself.
 """
 
 import argparse

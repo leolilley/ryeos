@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T01:02:27Z:7401cd82d47c156070a4d17637aa61b30bebbee286f5432947f622dea568aaf4:1HqOkzewzvYkXyfnvrj4Sq/u5OlyeAdaTb7itag88T1hUVdZ28RW7cMagnavUvcZr2Or5RV6zGB/DM/UZR/BAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T02:38:37Z:c82443513d03c5a71b16251eb0299b83ea432774673d44fb951a5020bd5c5b08:UqssNslZOvjDOufFHc9BowhUnVrCUgs/jy+GKDjKLwjPl1ICLxSttUqWwdhTq7QNyo0393K2CCDFlWzkiwWvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 name: hosted-oci-runtime
 version: "1.0.0"
@@ -7,13 +7,19 @@ description: Qualification contract for administrator-installed hard-contained O
 runtime_product:
   image_target: ryeos-contained-workflow
   node_profile: contained-workflow
+  controller_account: {implementation: unix, uid: 10001, gid: 10001}
+# Installed claims remain disabled in source. Qualification may enable them
+# only in an administrator-signed replacement config naming one exact attestor
+# and verification key; a checklist supplied alongside evidence is never an
+# attestation.
+installed_attestor: null
 topology:
   lifecycle_scope: C
   controller_scope: R
   invariant: R is a strict descendant of C for the same observed kernel incarnation
 lifecycle:
-  daemon_restart: preserves C, R, protected binding, node identity, and provider generation
-  container_replacement: ends C and invalidates R, the protected binding, and provider generation
+  daemon_restart: preserves C, R, protected binding, node identity, and lifetime generation
+  container_replacement: ends C and invalidates R, the protected binding, and lifetime generation
   volume_reuse: requires host-side proof that the preceding C is dead and has no live descendants
 required_capabilities:
   - exact_lifecycle_identity

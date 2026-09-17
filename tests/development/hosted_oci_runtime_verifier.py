@@ -36,11 +36,19 @@ def request(claim="installed_qualification"):
     ]
     return {
         "resolved_config": {
+            "category": "development/ryeos",
+            "name": "hosted-oci-runtime",
+            "version": "1.0.0",
             "schema": "ryeos.development.hosted-oci-runtime.v1",
+            "description": "fixture",
             "runtime_product": {
                 "image_target": "ryeos-contained-workflow",
                 "node_profile": "contained-workflow",
+                "controller_account": {"implementation": "unix", "uid": 10001, "gid": 10001},
             },
+            "installed_attestor": None,
+            "topology": {},
+            "lifecycle": {},
             "claim_classes": ["structural_smoke", "source_contract", "installed_qualification"],
             "required_capabilities": required_capabilities,
             "required_refusals": required_refusals,
@@ -56,12 +64,14 @@ def request(claim="installed_qualification"):
             "policy_digest": "sha256:" + "c" * 64,
             "node_fingerprint": "d" * 64,
             "binding_digest": "sha256:" + "e" * 64,
-            "controller_account": {"implementation": "unix", "uid": 1000, "gid": 1000},
+            "controller_account": {"implementation": "unix", "uid": 10001, "gid": 10001},
             "lifecycle_identity": {
                 "host_boot_id": "exact-boot", "init_pid": 42,
                 "init_start_time_ticks": 1234, "scope_identity": {"device": 1, "inode": 2},
             },
-            "provider_generation": "sha256:" + "f" * 64,
+            "hook_digest": "sha256:" + "0" * 64,
+            "lifetime_generation": "sha256:" + "f" * 64,
+            "attestation": None,
             "observations": [
                 {"id": name, "passed": True, "detail": "fixture"}
                 for name in required_observations
@@ -73,10 +83,19 @@ def request(claim="installed_qualification"):
 
 
 class HostedOciVerifierTests(unittest.TestCase):
-    def test_complete_installed_record_is_accepted(self):
+    def test_self_authored_installed_record_is_never_accepted(self):
         result = VERIFY.evaluate(request())
-        self.assertTrue(result["accepted"])
+        self.assertFalse(result["accepted"])
         self.assertEqual([], result["missing_capabilities"])
+
+    def test_untrusted_attestation_cannot_enable_installed_claim(self):
+        value = request()
+        value["evidence"]["attestation"] = {
+            "algorithm": "invented",
+            "signature": "self-authored",
+        }
+        with self.assertRaisesRegex(ValueError, "attestation is disabled"):
+            VERIFY.evaluate(value)
 
     def test_installed_record_cannot_omit_physical_containment(self):
         value = request()
@@ -96,6 +115,15 @@ class HostedOciVerifierTests(unittest.TestCase):
         result = VERIFY.evaluate(value)
         self.assertTrue(result["accepted"])
         self.assertEqual("structural_smoke", result["claim_class"])
+
+    def test_self_authored_source_contract_is_not_execution_proof(self):
+        self.assertFalse(VERIFY.evaluate(request("source_contract"))["accepted"])
+
+    def test_wrong_controller_account_refuses(self):
+        value = request("source_contract")
+        value["evidence"]["controller_account"]["uid"] = 1000
+        with self.assertRaisesRegex(ValueError, "controller account"):
+            VERIFY.evaluate(value)
 
     def test_open_or_oversized_records_refuse(self):
         value = request()

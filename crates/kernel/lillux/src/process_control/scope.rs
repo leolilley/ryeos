@@ -543,19 +543,34 @@ impl ProcessScopeConfiguration {
     /// Enter the exact OCI init mount namespace after preparation. Intended
     /// only for the short-lived hook process, which exits after publishing the
     /// protected binding and therefore never needs to recover its host view.
-    pub fn enter_oci_mount_namespace(state: &super::OciHookState) -> Result<(), String> {
+    pub fn enter_oci_mount_namespace(
+        state: &super::OciHookState,
+        intent: &super::OciLifecycleIntent,
+    ) -> Result<(), String> {
         state.validate_prestart()?;
+        intent.require_live()?;
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd as _;
-            let namespace = std::fs::File::open(format!("/proc/{}/ns/mnt", state.pid))
+            let membership = super::cgroup::open_oci_membership(state.init_pid()?)?;
+            let namespace = std::fs::File::open(format!("/proc/{}/ns/mnt", state.init_pid()?))
                 .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+            intent.require_live()?;
+            super::cgroup::require_oci_membership(
+                intent.init_process().target_pid,
+                intent.lifecycle_path(),
+            )?;
             if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
                 return Err(format!(
                     "enter OCI init mount namespace: {}",
                     std::io::Error::last_os_error()
                 ));
             }
+            super::cgroup::require_oci_membership_file(&membership, intent.lifecycle_path())?;
+            // The namespace and proc-membership descriptors pin the exact
+            // objects selected between exact-process checks. The post-setns
+            // check uses the retained proc descriptor rather than assuming
+            // the container procfs exposes the host PID.
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]
@@ -567,21 +582,30 @@ impl ProcessScopeConfiguration {
     /// container namespace before returning an opaque provider configuration.
     pub fn prepare_oci_hook(
         state: &super::OciHookState,
+        account: &ControllerAccount,
+        intent: &super::OciLifecycleIntent,
     ) -> Result<(Self, super::OciLifecycleGeneration), String> {
         state.validate_prestart()?;
         super::require_administrator().map_err(|error| error.to_string())?;
         #[cfg(target_os = "linux")]
         {
-            let prepared = super::cgroup::prepare_oci_controller_root(state.pid)?;
+            account.validate()?;
+            intent.validate()?;
+            if intent.container_id() != state.id {
+                return Err("OCI state differs from the durable lifecycle intent".to_owned());
+            }
+            let AccountBackend::Unix { uid, gid } = account.0;
+            let init_pid = state.init_pid()?;
+            let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid)?;
             let lifecycle = (|| {
-                let host_lifetime = super::ProcessHostLifetime::capture_current()?;
+                let host_lifetime = intent.host_lifetime().clone();
                 let generation_payload = serde_json::json!({
                     "container_id": &state.id,
                     "host_lifetime": &host_lifetime,
                     "init_process": &prepared.init_process,
                     "lifecycle_scope": &prepared.lifecycle_scope,
                     "controller_scope": &prepared.controller_scope,
-                    "nonce": crate::sha256_hex(&crate::crypto::generate_random_bytes::<32>()),
+                    "nonce": intent.nonce(),
                 });
                 let generation = format!(
                     "sha256:{}",
@@ -623,7 +647,7 @@ impl ProcessScopeConfiguration {
                     "{error}; OCI controller-root rollback: {rollback:?}"
                 ));
             }
-            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, state.pid) {
+            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, init_pid) {
                 let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
                 return Err(format!(
                     "{error}; OCI controller-root rollback: {rollback:?}"

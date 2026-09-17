@@ -36,20 +36,32 @@ pub(crate) struct PreparedOciCgroup {
     controller: PinnedDirectory,
 }
 
-/// OCI prestart operation. The runtime has already created and placed the
-/// exact init process, but has not released it. Derive C from that pinned
-/// process, then create R directly beneath the opened C descriptor. No path or
-/// container identifier supplied by an application participates in authority.
-pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCgroup, String> {
+pub(crate) fn observe_oci_lifetime(
+    init_pid: u32,
+) -> Result<
+    (
+        super::ExactProcessIdentity,
+        PinnedDirectoryIdentity,
+        std::path::PathBuf,
+    ),
+    String,
+> {
     if unsafe { libc::geteuid() } != 0 {
-        return Err("OCI lifecycle preparation requires administrator authority".to_owned());
+        return Err("OCI lifecycle observation requires administrator authority".to_owned());
     }
     let init_process = super::capture_exact_process_identity(init_pid, None)?;
     let relative = unified_process_cgroup(init_pid)?;
-    let root = Path::new("/sys/fs/cgroup");
-    let lifecycle_path = relative
-        .strip_prefix("/")
-        .map_or_else(|_| root.to_path_buf(), |relative| root.join(relative));
+    if relative == Path::new("/") {
+        return Err(
+            "OCI init is placed in the host cgroup root, not an enclosing container lifetime"
+                .to_owned(),
+        );
+    }
+    let lifecycle_path = Path::new("/sys/fs/cgroup").join(
+        relative
+            .strip_prefix("/")
+            .map_err(|_| "OCI cgroup membership is not root-relative")?,
+    );
     let lifecycle = PinnedDirectory::open(&lifecycle_path)
         .map_err(display)?
         .ok_or("OCI lifecycle cgroup is absent")?;
@@ -62,7 +74,80 @@ pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCg
     }
     let placement = open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?;
     let members = read_control(&placement)?;
-    if !members.lines().any(|member| member == init_pid.to_string()) {
+    let members: Vec<_> = members.lines().collect();
+    let expected_member = init_pid.to_string();
+    if members.len() != 1 || members[0] != expected_member {
+        return Err("OCI lifetime does not exclusively contain its direct init process".to_owned());
+    }
+    if super::capture_exact_process_identity(init_pid, None)? != init_process {
+        return Err("OCI init identity changed during lifetime observation".to_owned());
+    }
+    Ok((
+        init_process,
+        lifecycle.identity().map_err(display)?,
+        lifecycle_path,
+    ))
+}
+
+pub(crate) fn require_oci_membership(init_pid: u32, lifecycle_path: &Path) -> Result<(), String> {
+    let membership = open_oci_membership(init_pid)?;
+    require_oci_membership_file(&membership, lifecycle_path)
+}
+
+pub(crate) fn open_oci_membership(init_pid: u32) -> Result<File, String> {
+    File::open(format!("/proc/{init_pid}/cgroup"))
+        .map_err(|error| format!("open OCI init cgroup membership: {error}"))
+}
+
+pub(crate) fn require_oci_membership_file(
+    membership: &File,
+    lifecycle_path: &Path,
+) -> Result<(), String> {
+    let relative = unified_cgroup_from_file(membership)?;
+    let observed = Path::new("/sys/fs/cgroup").join(
+        relative
+            .strip_prefix("/")
+            .map_err(|_| "OCI cgroup membership is not root-relative")?,
+    );
+    if observed != lifecycle_path {
+        return Err("OCI init moved out of its observed lifecycle cgroup".to_owned());
+    }
+    Ok(())
+}
+
+/// OCI prestart operation. The runtime has already created and placed the
+/// exact init process, but has not released it. Derive C from that pinned
+/// process, then create R directly beneath the opened C descriptor. No path or
+/// container identifier supplied by an application participates in authority.
+pub(crate) fn prepare_oci_controller_root(
+    intent: &super::OciLifecycleIntent,
+    controller_uid: u32,
+    controller_gid: u32,
+) -> Result<PreparedOciCgroup, String> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("OCI lifecycle preparation requires administrator authority".to_owned());
+    }
+    intent.validate()?;
+    let init_process = intent.init_process().clone();
+    let init_pid = init_process.target_pid;
+    let lifecycle_path = intent.lifecycle_path().to_path_buf();
+    let lifecycle = PinnedDirectory::open(&lifecycle_path)
+        .map_err(display)?
+        .ok_or("OCI lifecycle cgroup is absent")?;
+    if lifecycle.identity().map_err(display)? != intent.lifecycle_scope() {
+        return Err("OCI lifecycle cgroup was replaced after durable intent".to_owned());
+    }
+    let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&lifecycle_fd)?;
+    require_domain(&lifecycle_fd)?;
+    let metadata = lifecycle_fd.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err("OCI lifecycle cgroup is not administrator-owned and protected".to_owned());
+    }
+    let placement = open_control(&lifecycle_fd, c"cgroup.procs", libc::O_RDONLY)?;
+    let members = read_control(&placement)?;
+    let expected_member = init_pid.to_string();
+    if members.lines().any(|member| member != expected_member) || members.lines().count() != 1 {
         return Err("OCI init process is not a direct member of its observed lifetime".to_owned());
     }
     let name = child_name(OCI_CONTROLLER_ROOT)?;
@@ -76,6 +161,16 @@ pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCg
         .open_child_directory(OCI_CONTROLLER_ROOT.as_ref())
         .map_err(display)?
         .ok_or("OCI controller root disappeared after creation")?;
+    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    let placement = open_control(&controller_fd, c"cgroup.procs", libc::O_RDWR)?;
+    for delegated in [&controller_fd, &placement] {
+        if unsafe { libc::fchown(delegated.as_raw_fd(), controller_uid, controller_gid) } != 0 {
+            return Err(format!(
+                "delegate OCI controller root: {}",
+                io::Error::last_os_error()
+            ));
+        }
+    }
     let prepared = PreparedOciCgroup {
         init_process,
         lifecycle_scope: lifecycle.identity().map_err(display)?,
@@ -92,18 +187,23 @@ pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCg
             .map_err(display)?;
         require_cgroup2(&controller_fd)?;
         require_domain(&controller_fd)?;
+        let metadata = controller_fd.metadata().map_err(display)?;
+        if metadata.uid() != controller_uid || metadata.mode() & 0o077 != 0 {
+            return Err(
+                "OCI controller root was not privately delegated to the controller".to_owned(),
+            );
+        }
         let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
         let observed = parse_events(&read_control(&events)?)?;
         if observed.populated || observed.frozen {
             return Err("new OCI controller root is unexpectedly occupied or frozen".to_owned());
         }
-        if unified_process_cgroup(init_pid)? != relative
-            || super::capture_exact_process_identity(init_pid, None)? != prepared.init_process
-        {
+        if super::capture_exact_process_identity(init_pid, None)? != prepared.init_process {
             return Err(
                 "OCI init identity or lifecycle placement changed during preparation".to_owned(),
             );
         }
+        require_oci_membership(init_pid, &prepared.lifecycle_path)?;
         Ok(())
     })();
     if let Err(error) = validation {
@@ -113,6 +213,43 @@ pub(crate) fn prepare_oci_controller_root(init_pid: u32) -> Result<PreparedOciCg
         ));
     }
     Ok(prepared)
+}
+
+pub(crate) fn retire_interrupted_oci_controller(
+    lifecycle_path: &Path,
+    lifecycle_identity: PinnedDirectoryIdentity,
+    controller_path: &Path,
+) -> Result<(), String> {
+    let Some(lifecycle) = PinnedDirectory::open(lifecycle_path).map_err(display)? else {
+        return Ok(());
+    };
+    if lifecycle.identity().map_err(display)? != lifecycle_identity {
+        return Ok(());
+    }
+    let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
+    let events = open_control(&lifecycle_fd, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("interrupted OCI lifetime still has live descendants".to_owned());
+    }
+    let name = controller_path
+        .file_name()
+        .ok_or("OCI controller path has no child name")?;
+    let Some(controller) = lifecycle.open_child_directory(name).map_err(display)? else {
+        return Ok(());
+    };
+    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("interrupted OCI controller still has live descendants".to_owned());
+    }
+    let name = child_name(name.to_str().ok_or("OCI controller name is not UTF-8")?)?;
+    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(format!(
+            "retire interrupted OCI controller: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn rollback_empty_oci_controller(prepared: &PreparedOciCgroup) -> Result<(), String> {
@@ -191,10 +328,38 @@ pub(crate) fn install_oci_controller_mount(
 ) -> Result<(), String> {
     let namespace = File::open(format!("/proc/{init_pid}/ns/mnt"))
         .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+    let membership = open_oci_membership(init_pid)?;
+    let target = PinnedDirectory::open(Path::new(&format!("/proc/{init_pid}/root/sys/fs/cgroup")))
+        .map_err(display)?
+        .ok_or("OCI init cgroup mount target is absent")?;
+    let target = target.try_clone_descriptor().map_err(display)?;
     let source = prepared
         .controller
         .try_clone_descriptor()
         .map_err(display)?;
+    if super::capture_exact_process_identity(init_pid, None)? != prepared.init_process {
+        return Err("OCI init changed before controller mount installation".to_owned());
+    }
+    require_oci_membership(init_pid, &prepared.lifecycle_path)?;
+    const OPEN_TREE_CLONE: libc::c_uint = 1;
+    const AT_EMPTY_PATH: libc::c_uint = 0x1000;
+    const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
+    const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x0000_0040;
+    let mount_fd = unsafe {
+        libc::syscall(
+            libc::SYS_open_tree,
+            source.as_raw_fd(),
+            c"".as_ptr(),
+            OPEN_TREE_CLONE | AT_EMPTY_PATH | libc::O_CLOEXEC as libc::c_uint,
+        )
+    } as i32;
+    if mount_fd < 0 {
+        return Err(format!(
+            "clone exact OCI controller mount: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let mount_tree = unsafe { File::from_raw_fd(mount_fd) };
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
@@ -207,40 +372,20 @@ pub(crate) fn install_oci_controller_mount(
             if unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))
-                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+            require_oci_membership_file(&membership, &prepared.lifecycle_path)
+                .map_err(|_| io::Error::from_raw_os_error(libc::ESTALE))?;
             if unsafe {
-                libc::mount(
-                    source_path.as_ptr(),
-                    c"/sys/fs/cgroup".as_ptr(),
-                    std::ptr::null(),
-                    libc::MS_BIND | libc::MS_REC,
-                    std::ptr::null(),
+                libc::syscall(
+                    libc::SYS_move_mount,
+                    mount_tree.as_raw_fd(),
+                    c"".as_ptr(),
+                    target.as_raw_fd(),
+                    c"".as_ptr(),
+                    MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
                 )
             } != 0
             {
                 return Err(io::Error::last_os_error());
-            }
-            if unsafe {
-                libc::mount(
-                    std::ptr::null(),
-                    c"/sys/fs/cgroup".as_ptr(),
-                    std::ptr::null(),
-                    libc::MS_BIND
-                        | libc::MS_REMOUNT
-                        | libc::MS_RW
-                        | libc::MS_NOSUID
-                        | libc::MS_NODEV
-                        | libc::MS_NOEXEC,
-                    std::ptr::null(),
-                )
-            } != 0
-            {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::umount2(c"/sys/fs/cgroup".as_ptr(), libc::MNT_DETACH);
-                }
-                return Err(error);
             }
             Ok(())
         })();
@@ -267,8 +412,24 @@ pub(crate) fn install_oci_controller_mount(
 }
 
 fn unified_process_cgroup(pid: u32) -> Result<std::path::PathBuf, String> {
-    let raw = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .map_err(|error| format!("read OCI init cgroup membership: {error}"))?;
+    let membership = open_oci_membership(pid)?;
+    unified_cgroup_from_file(&membership)
+}
+
+fn unified_cgroup_from_file(membership: &File) -> Result<std::path::PathBuf, String> {
+    let mut bytes = vec![0_u8; MAX_CONTROL_RECORD_BYTES + 1];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let read = membership
+            .read_at(&mut bytes[offset..], offset as u64)
+            .map_err(|error| format!("read OCI init cgroup membership: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        offset += read;
+    }
+    bytes.truncate(offset);
+    let raw = std::str::from_utf8(&bytes).map_err(|_| "OCI init cgroup membership is not UTF-8")?;
     if raw.len() > MAX_CONTROL_RECORD_BYTES {
         return Err("OCI init cgroup membership exceeds the bounded record".to_owned());
     }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T01:02:27Z:496f435c211dd534ac781c79dd9cf8034b637c9582db24e6a402d005d8cf40ac:diSZhYxrYm3SbwBEz6kl8sS+HZ9tsOHVHypyOf5RFtK/wJ/sICqcIKhHrwTgqZHtIVPnyyMsPv+RPROM+MMrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T02:47:27Z:17205589e7b2720e8e36cce550b051c723e63fba3b9d8b4471b5474261a7bc81:G6LNdC3w/5r2VwhjnhtXDmfcXKV/sJeGRmyFlm0LGfQM8jDZH9Ym5CHurSAuNwo6GfDgRwvSi6mvgddDo6cBAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/hosted-oci-runtime
 #   version: "1.0.0"
@@ -33,7 +33,8 @@ DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
 REQUIRED_FIELDS = {
     "schema", "claim_class", "source_revision", "image_digest", "profile_digest", "policy_digest",
     "node_fingerprint", "binding_digest", "controller_account", "lifecycle_identity",
-    "provider_generation", "observations", "capabilities", "refusals",
+    "hook_digest", "lifetime_generation", "observations", "capabilities", "refusals",
+    "attestation",
 }
 
 
@@ -51,9 +52,17 @@ def evaluate(request):
     config = request["resolved_config"]
     if not isinstance(config, dict) or config.get("schema") != "ryeos.development.hosted-oci-runtime.v1":
         raise ValueError("wrong hosted OCI qualification config")
+    if set(config) != {
+        "category", "name", "version", "schema", "description",
+        "runtime_product", "installed_attestor", "topology", "lifecycle",
+        "required_capabilities", "required_refusals", "required_observations",
+        "claim_classes", "limits",
+    }:
+        raise ValueError("hosted OCI qualification config is not closed")
     if config.get("runtime_product") != {
         "image_target": "ryeos-contained-workflow",
         "node_profile": "contained-workflow",
+        "controller_account": {"implementation": "unix", "uid": 10001, "gid": 10001},
     }:
         raise ValueError("wrong hosted OCI runtime product")
     evidence = request["evidence"]
@@ -61,10 +70,12 @@ def evaluate(request):
         raise ValueError("installed evidence is not a closed current record")
     if evidence["schema"] != "ryeos.hosted-oci-installed-evidence.v1":
         raise ValueError("wrong installed evidence schema")
+    if config["installed_attestor"] is not None or evidence["attestation"] is not None:
+        raise ValueError("installed attestation is disabled in the source contract")
     claim = evidence["claim_class"]
     if claim not in config["claim_classes"]:
         raise ValueError("unknown qualification claim class")
-    for name in ("image_digest", "profile_digest", "policy_digest", "binding_digest", "provider_generation"):
+    for name in ("image_digest", "profile_digest", "policy_digest", "binding_digest", "hook_digest", "lifetime_generation"):
         if not isinstance(evidence[name], str) or not DIGEST.fullmatch(evidence[name]):
             raise ValueError(f"{name} must be an exact digest")
     for name in ("source_revision", "node_fingerprint"):
@@ -80,6 +91,8 @@ def evaluate(request):
         raise ValueError("host boot identity is absent")
     if any(type(lifecycle[name]) is not int or lifecycle[name] <= 1 for name in ("init_pid", "init_start_time_ticks")):
         raise ValueError("lifecycle process identity is invalid")
+    if evidence["controller_account"] != config["runtime_product"]["controller_account"]:
+        raise ValueError("controller account does not match the signed runtime product")
     observations = evidence["observations"]
     maximum = config["limits"]["max_observations"]
     if not isinstance(observations, list) or not 1 <= len(observations) <= maximum:
@@ -98,9 +111,14 @@ def evaluate(request):
     required_observations = set(config["required_observations"])
     passed_observations = {item["id"] for item in observations if item["passed"]}
     installed = claim == "installed_qualification"
-    accepted = (not installed or (required_capabilities <= capabilities
-                                  and required_refusals <= refusals
-                                  and required_observations <= passed_observations))
+    # Shape checking is deliberately insufficient for an installed claim. A
+    # future administrator-signed config and verifier backend must authenticate
+    # the signature over the canonical evidence payload. Until then source can
+    # validate only structural/source records.
+    # Structural acceptance means only that this bounded record is well
+    # formed. Source-contract execution is established by the repository test
+    # runner, not by self-asserted evidence supplied to this tool.
+    accepted = claim == "structural_smoke"
     return {
         "schema_version": 1,
         "claim_class": claim,
@@ -109,6 +127,7 @@ def evaluate(request):
         "missing_capabilities": sorted(required_capabilities - capabilities),
         "missing_refusals": sorted(required_refusals - refusals),
         "missing_observations": sorted(required_observations - passed_observations),
+        "installed_attestation_authenticated": False if installed else None,
         "scope": "bounded evidence validation only; no deployment or kernel authority",
     }
 

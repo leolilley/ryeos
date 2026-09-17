@@ -56,10 +56,10 @@ pub use locks::{
     ExactExclusiveFileLock, ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock,
 };
 pub use process_control::{
-    ControllerAccount, OciHookState, OciLifecycleGeneration, ProcessHostLifetime, ProcessScope,
-    ProcessScopeAllocation, ProcessScopeCapability, ProcessScopeConfiguration,
-    ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery, QuiescedProcessScope,
-    require_administrator,
+    ControllerAccount, OciHookState, OciLifecycleGeneration, OciLifecycleIntent,
+    ProcessHostLifetime, ProcessScope, ProcessScopeAllocation, ProcessScopeCapability,
+    ProcessScopeConfiguration, ProcessScopeLaunchError, ProcessScopeProvider, ProcessScopeRecovery,
+    QuiescedProcessScope, require_administrator,
 };
 pub use process_control::{
     ExactProcessIdentity, QuiescedProcessGroup, QuiescedProcesses, capture_exact_process_identity,

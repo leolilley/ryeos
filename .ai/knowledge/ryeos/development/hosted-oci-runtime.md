@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T01:43:46Z:46d9c31322b240516d9f047b3e40a0d123317c1cb939aee1fb93aa7d1624bcd4:o8vvFzKFPbNxEUf8FkzILMBd4D5JTJlg4HFIfyYQBkVS0CaFqpPoQxpZh2oaJhrOR2VrKRK0jT7Z9BSY+SJYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T02:46:25Z:8ba6275739a5cdfd861fbcb7b4e23dc84177a8fbfc716c2abe0d2075b171f11f:3FbGv93iur8ND2WF3eaOftfyGft6Xu8BankhgJJUjSUnuDcdQ99RJDf4okDWqrCiYW22FrSd8LIS5uNAc+nGCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: hosted-oci-runtime
@@ -42,7 +42,7 @@ descendant of `C` in the same cgroup-v2 mount and host boot. Every controller
 and worker scope is below `R`. A bind-mounted path string, container ID, or
 provider deployment name is not proof of this relationship.
 
-The protected binding is created for this exact node/app-root/account/provider
+The protected binding is created for this exact node/app-root/account/lifetime
 generation. A daemon restart inside the same `C` may retain it. Replacement of
 the OCI init incarnation ends the generation: the administrator must prove the
 old `C` and its descendants dead before the volume is reused, create a fresh
@@ -54,13 +54,17 @@ binding rather than reinterpret it.
 1. The administrator selects an immutable image digest, signed isolation
    policy, exact non-root account, private persistent app root, and required
    namespace/network/filesystem policy.
-2. The OCI supervisor creates `C`, delegates a strict child `R`, and retains
-   host-side lifecycle authority for `C`. Lillux validates physical identity,
-   ownership, writability, controller placement, and child lifecycle controls.
+2. The OCI supervisor creates `C` and retains its lifecycle authority. The
+   installed Lillux adapter observes the exact init and `C`, refuses the host
+   cgroup root or a shared direct membership, creates and delegates strict
+   child `R`, and retains the durable intent needed for interrupted recovery.
 3. Node initialization completes as the selected account. The administrator
-   publishes the protected binding through the existing inherited read-only
-   descriptor path and enters the daemon through `ryeosd host-runtime`.
-4. Readiness is advertised only after the exact provider generation passes
+   has the installed adapter write the protected binding inside the paused
+   container namespace, and the
+   root-only `ryeosd host-runtime` bootstrap opens that file, converts it to an
+   inherited read-only descriptor, places the controller, drops permanently to
+   UID/GID 10001, and execs the ordinary daemon.
+4. Readiness is advertised only after the exact lifetime generation passes
    Lillux's disposable placement/freeze/kill/recovery probe.
 5. Stop and replacement remain supervisor operations. Persistent state is not
    eligible for reassignment until host-side death and descendant cleanup are
@@ -87,9 +91,13 @@ OCI bundle then uses the exact installed path for both hooks, with argument
 callback uses `ryeos-lillux-oci-hook recover <container-id>`; it performs the
 same death and empty-tree proof and cannot force release.
 
-Prestart keys the reuse lease by the pinned `/data/app` directory identity,
-not the container ID. It records `prepared` before entering the container mount
-namespace, publishes the protected binding, then records `active`. Poststop
+Prestart serializes host-state mutation, keys the reuse lease by the pinned
+`/data/app` directory identity rather than the container ID, and records a
+recoverable exact `intent` before kernel mutation. A fixed setup journal is
+written before either the container index or volume lease, so a crash between
+those secondary writes blocks all new setup until exact recovery converges
+them. It records `prepared` before entering the container mount namespace,
+publishes the protected binding, then records `active`. Poststop
 requires exact init death and empty `C`/`R`, retires `R`, and records
 `released`. Any interrupted or ambiguous phase remains non-reusable. An
 operator must rerun poststop recovery against its retained record; deleting or
@@ -100,12 +108,17 @@ editing the record is not recovery evidence.
 Structural smoke proves image wiring and closed inputs. Source-contract tests
 prove parsers, refusal paths, and state-machine behavior. Installed
 qualification alone may claim the selected host actually supplied containment.
-The signed verifier checks a bounded evidence record; it neither contacts nor
-provisions a host and cannot promote structural evidence into installed proof.
+The signed source verifier checks bounded record structure; it neither contacts
+nor provisions a host. It accepts only structural-smoke record shape. The
+repository test runner, rather than self-asserted evidence, establishes the
+source-contract result. Source configuration leaves installed attestation
+disabled. Only an administrator-signed replacement naming an exact attestor and
+a verifier that authenticates its canonical payload may enable an installed
+claim; an evidence checklist alone can never promote itself.
 
 Installed evidence must identify the exact source and image, signed policy,
 node, account, protected binding, host boot, OCI init birth identity, physical
-scope identity, and provider generation. It must cover missing/read-only/
+scope identity, hook digest, and lifetime generation. It must cover missing/read-only/
 wrong-owner/replaced delegation, wrong node/app-root/account, stale binding,
 real scoped execution, detached and nested descendants, writer-excluding
 freeze, cancellation, daemon crash, OCI restart/replacement, cleanup before
