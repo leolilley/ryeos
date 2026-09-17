@@ -25,6 +25,15 @@ def request(claim="installed_qualification"):
         "replaced_delegation", "wrong_node_identity", "replaced_app_root",
         "wrong_controller_account", "stale_binding",
     ]
+    required_observations = [
+        "exact_runtime_coordinates", "physical_c_to_r_containment",
+        "non_root_controller", "real_scoped_worker", "detached_descendant_containment",
+        "nested_descendant_containment", "freeze_excludes_writers",
+        "cancellation_recovery", "daemon_crash_recovery",
+        "daemon_restart_preserves_generation", "container_replacement_changes_generation",
+        "old_lifetime_dead", "volume_reuse_after_death_only",
+        "unrelated_process_untouched", "authenticated_candidate_return",
+    ]
     return {
         "resolved_config": {
             "schema": "ryeos.development.hosted-oci-runtime.v1",
@@ -35,6 +44,7 @@ def request(claim="installed_qualification"):
             "claim_classes": ["structural_smoke", "source_contract", "installed_qualification"],
             "required_capabilities": required_capabilities,
             "required_refusals": required_refusals,
+            "required_observations": required_observations,
             "limits": {"max_observations": 256},
         },
         "evidence": {
@@ -52,7 +62,10 @@ def request(claim="installed_qualification"):
                 "init_start_time_ticks": 1234, "scope_identity": {"device": 1, "inode": 2},
             },
             "provider_generation": "sha256:" + "f" * 64,
-            "observations": [{"id": "complete", "passed": True, "detail": "fixture"}],
+            "observations": [
+                {"id": name, "passed": True, "detail": "fixture"}
+                for name in required_observations
+            ],
             "capabilities": required_capabilities.copy(),
             "refusals": required_refusals.copy(),
         },
@@ -90,7 +103,10 @@ class HostedOciVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "closed current record"):
             VERIFY.evaluate(value)
         value = request()
-        value["evidence"]["observations"] *= 257
+        value["evidence"]["observations"] = [
+            {"id": f"extra-{index}", "passed": True, "detail": "fixture"}
+            for index in range(257)
+        ]
         with self.assertRaisesRegex(ValueError, "exceed"):
             VERIFY.evaluate(value)
 

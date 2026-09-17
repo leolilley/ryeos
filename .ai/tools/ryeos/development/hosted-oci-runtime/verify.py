@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T00:52:58Z:331e6cfa400f5c389b76b48faf8754ff77429458baad1af7ee5cba04e8cbb30f:fAfVsC7UkVKoLFXDa6KCkA7eqadOfc5YfUcnwPhYuzuHCYx5UrNgf/72IYGIhFBrKBMD+LYdHSR5UAZUoVLZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:02:27Z:496f435c211dd534ac781c79dd9cf8034b637c9582db24e6a402d005d8cf40ac:diSZhYxrYm3SbwBEz6kl8sS+HZ9tsOHVHypyOf5RFtK/wJ/sICqcIKhHrwTgqZHtIVPnyyMsPv+RPROM+MMrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/hosted-oci-runtime
 #   version: "1.0.0"
@@ -88,14 +88,19 @@ def evaluate(request):
            or not isinstance(item["id"], str) or type(item["passed"]) is not bool
            or not isinstance(item["detail"], str) for item in observations):
         raise ValueError("observation record is invalid")
+    observation_ids = [item["id"] for item in observations]
+    if len(observation_ids) != len(set(observation_ids)):
+        raise ValueError("observation identifiers must be unique")
     capabilities = string_set(evidence["capabilities"], "capabilities")
     refusals = string_set(evidence["refusals"], "refusals")
     required_capabilities = set(config["required_capabilities"])
     required_refusals = set(config["required_refusals"])
+    required_observations = set(config["required_observations"])
+    passed_observations = {item["id"] for item in observations if item["passed"]}
     installed = claim == "installed_qualification"
     accepted = (not installed or (required_capabilities <= capabilities
                                   and required_refusals <= refusals
-                                  and all(item["passed"] for item in observations)))
+                                  and required_observations <= passed_observations))
     return {
         "schema_version": 1,
         "claim_class": claim,
@@ -103,6 +108,7 @@ def evaluate(request):
         "accepted": accepted,
         "missing_capabilities": sorted(required_capabilities - capabilities),
         "missing_refusals": sorted(required_refusals - refusals),
+        "missing_observations": sorted(required_observations - passed_observations),
         "scope": "bounded evidence validation only; no deployment or kernel authority",
     }
 

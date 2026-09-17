@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T00:52:58Z:e5496b9d97b717c7e868ce32873fbe63de1b82b9fe436d63d326274e9806c58f:SaV8VE2MqZnHYJFuZ1BhJCHjixyvIv34mz8hLHcqojiNUlWQ3TtfpFwG2ja/dUTtkFBaAwplvykLe2CLpqoYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:02:27Z:7401cd82d47c156070a4d17637aa61b30bebbee286f5432947f622dea568aaf4:1HqOkzewzvYkXyfnvrj4Sq/u5OlyeAdaTb7itag88T1hUVdZ28RW7cMagnavUvcZr2Or5RV6zGB/DM/UZR/BAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 name: hosted-oci-runtime
 version: "1.0.0"
@@ -34,6 +34,22 @@ required_refusals:
   - replaced_app_root
   - wrong_controller_account
   - stale_binding
+required_observations:
+  - exact_runtime_coordinates
+  - physical_c_to_r_containment
+  - non_root_controller
+  - real_scoped_worker
+  - detached_descendant_containment
+  - nested_descendant_containment
+  - freeze_excludes_writers
+  - cancellation_recovery
+  - daemon_crash_recovery
+  - daemon_restart_preserves_generation
+  - container_replacement_changes_generation
+  - old_lifetime_dead
+  - volume_reuse_after_death_only
+  - unrelated_process_untouched
+  - authenticated_candidate_return
 claim_classes:
   - structural_smoke
   - source_contract
