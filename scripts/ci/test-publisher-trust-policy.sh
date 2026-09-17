@@ -10,6 +10,22 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# The development publisher has one canonical human-readable label. Local
+# population is allowed to regenerate the root trust pointer, so every default
+# producer and the retained key-side pointer must agree with the committed
+# source document. A mismatch here otherwise dirties the checkout after every
+# supported `--populate` installation.
+development_owner='RyeOS Development'
+grep -Fxq "owner = \"$development_owner\"" \
+    "$root/.dev-keys/PUBLISHER_DEV_TRUST.toml"
+grep -Fxq "owner = \"$development_owner\"" \
+    "$root/bundles/.ai/PUBLISHER_TRUST.toml"
+cmp -s "$root/.dev-keys/PUBLISHER_DEV_TRUST.toml" \
+    "$root/bundles/.ai/PUBLISHER_TRUST.toml"
+grep -Fq 'owner="RyeOS Development"' \
+    "$root/scripts/pkg/install-local-direct.sh"
+grep -Fq 'OWNER="${OWNER:-RyeOS Development}"' "$root/scripts/gate.sh"
+
 # shellcheck source=deploy/entrypoint.sh
 source "$root/deploy/entrypoint.sh"
 # shellcheck source=scripts/pkg/install-local-direct.sh

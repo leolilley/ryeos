@@ -1,6 +1,6 @@
 version = "1.0.0"
 fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
-owner = "ryeos-dev"
+owner = "RyeOS Development"
 attestation = ""
 
 [public_key]

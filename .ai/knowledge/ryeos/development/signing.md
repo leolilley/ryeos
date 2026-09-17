@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T20:28:16Z:0571b485b5d6ab3f159d0061550849a6810276476f93cb0288f2887807c254e7:I5lQvB+QoeW49fglIUnelMI1yyy7NePCF8RyNyVDYeMt+ZKhjMYjvIMXcbS7w5rf9D1AGrOkgqG7AcCozduTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T08:24:14Z:1551863305c5c111b016205c4110d900e2b8cc6c661fe31ec18edc07a5762e8b:MKGleTXknvAR4lBmX2RizU6TuovDhXX7/rnRf9hEzleIotwa4iC88D488ODRaK1p/nUU0iTCXmFq9ae5L0RZDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -18,7 +18,7 @@ by hand.
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev \
+  --owner "RyeOS Development" \
   --all
 ```
 

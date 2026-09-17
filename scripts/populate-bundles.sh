@@ -150,11 +150,19 @@ sign_seed_yaml() {
 
 write_seed_trust_doc() {
   local target="$ROOT/bundles/.ai/PUBLISHER_TRUST.toml"
-  cat > "$target" <<EOF
+  local tmp
+  tmp="$(mktemp "${target}.tmp.XXXXXX")"
+  cat > "$tmp" <<EOF
 public_key = "ed25519:$PUBLISHER_PUBKEY_RAW_B64"
 fingerprint = "$PUBLISHER_FP"
 owner = "$OWNER"
 EOF
+  if cmp -s "$tmp" "$target"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod 0644 "$tmp"
+  mv "$tmp" "$target"
 }
 
 assert_node_init_profile_inventory() {

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-04T02:44:28Z:153467ad522677d85c37b5ef345c31ed253ac1237a5ffc57b307dd3f7f71a3fd:Ts+SzAUoxt2YTfeZlEvytygBpPepJ295gZHkYb2CTA2IwNBQOck7cwpjc0w7C3o6r3hUd64QQWbfFhURlAqxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T08:24:14Z:a6cd0359802765cf7071e6091ed424862f2e42760628642d44f92e3c1e91a4db:ZUrGe1XIeXHjG3fgVu/dWAAPr0kH2MN/9EZX3tKpNQ0ZjDcqEWugGbX643kRMeLWVYyysfT7oySma3GxkRLWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -214,7 +214,7 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev \
+  --owner "RyeOS Development" \
   --all
 ```
 
@@ -524,7 +524,7 @@ refresh/sign bundles as bundles:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev \
+  --owner "RyeOS Development" \
   --all
 ```
 
