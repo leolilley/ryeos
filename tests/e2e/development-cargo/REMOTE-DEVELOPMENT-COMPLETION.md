@@ -18,12 +18,14 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: invoke `ryeos node host setup --confirm` as the ordinary `leo`
-controller for the retained source app root, allowing RyeOS to elevate only its
-internal administrator provisioning step. Then start both nodes normally and finish
-the daemon-backed G0 inventory/G0b freeze. Do not use a custom runner or run the
-whole CLI as root. G1/G2 follow that freeze. G0a found and stopped obsolete `/tmp`
-daemons/restart loops without deleting retained evidence.
+Current gate: explicit user approval is required to extend the existing origin-bound
+remote-operator grant with the exact recovery, Cargo check/test, candidate
+qualification, registry/vendor production and sanitized credential-read scopes
+listed in the latest journal entry. Both canonical nodes are healthy and mutually
+authenticated. After approval, merge once, regard old grant-digest-bound consumer
+bindings as invalid, push the frozen `d928d9a8732090da4dbe7662a7990c5f39f6cc76`
+source generation once, and rebind/qualify against the resulting target HEAD. Do not
+split or route around the authorization review. Do not use a custom runner.
 
 Latest committed fix: `7c4854045 Make installed native verifier projectless`.
 Preceding fix: `e829e913f Package native verifier product relationships`.
@@ -371,6 +373,8 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 17 11:36 NZST | G3a | recovery-qualified bounded-turn source correction | 12 preparer + 7 runtime + 17 bundle tests and focused API graph test passed; signed profile/graph/config | commit; reconcile supported target lifecycle, then freeze G0b |
 | Sept 17 12:26 NZST | G0 lifecycle | supported source `ryeos start` after repairing two exact artifacts left root-owned by the earlier sudo runner | source reached ready on 7423 with v0.5.88, then the unsupervised child was reaped when the host command session ended; target is healthy on 7445 | provision source with `ryeos node host setup --confirm` as `leo`; CLI-internal sudo needs an interactive password/cache refresh |
 | Sept 17 12:30 NZST | G0 lifecycle | attempted host setup first as root, then correctly as `leo` | root invocation refused the invalid root controller; ordinary invocation reached only the expected expired-sudo boundary | user runs `sudo -v`, then repeat ordinary host setup; no custom runner or node reset |
+| Sept 17 12:32 NZST | G0 lifecycle/inventory | source host setup completed by user; ordinary start; both daemon and remote checks | source 7423 and target 7445 healthy on v0.5.88 revision `8c0d738d5bf1`; authenticated route, pinned node/site/vault identities and target enforcement/exclusive-session recovery all match | finish credential/grant/products and freeze target HEAD |
+| Sept 17 12:34 NZST | G0 authority | sanitized credential read and exact public-grant audit | CLI `remote run --no-project` serializes obsolete `live_authority`; explicit current contract reached target but existing grant lacks `credential-profiles/get`. Grant also predates recovery worker, Cargo check/test, candidate qualification and registry/vendor producer scopes | authorization reviewer requires explicit user approval for the grouped exact-scope merge; merge will invalidate old grant-digest-bound consumer bindings, which must be rebound |
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,
