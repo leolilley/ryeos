@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T03:00:17Z:18540baf27873273410336ae1a32a88142f3ea354294ab748db5048ecd545e81:76W3PImxZtETs3B/96GilHApfk6nEJAeTh8jPP5qB+ylSzWJAj4uXavWdJWgac+5fAJkE9opelsFXKBQ+YgUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T06:55:47Z:41b17e9b321350eafb73000091ec19af593f5d33b2e993cbd6aee7531a433c7f:n3wktf7iTlMzU7gTB7T5a5e8liKt7AabmaRz0WRnOr4cY9OLcYy8qEa3HzbLDfKLBbXzXfNfafy19YG9k6c4BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]
@@ -20,6 +20,27 @@ ryeos external-content activate \
   config:development/ryeos/producer-python-activation \
   online
 ```
+
+The publisher-authored GNU Python archive set and raw authoring source closure
+are separate inputs. Activate them independently before running the production
+graph:
+
+```sh
+ryeos external-content activate \
+  config:development/ryeos/gnu-python-archives-activation \
+  online
+
+ryeos external-content activate \
+  config:development/ryeos/authoring-source-inputs-activation \
+  online
+```
+
+Each command returns its own durable sync-job coordinate. Completion retains
+only the exact verified tree named by that signed activation declaration; it
+does not produce, qualify, select or publish the final authoring environment.
+Repeating either coordinate is idempotent. The production graph consumes both
+retained inputs through explicit consumer bindings alongside the independently
+activated bootstrap interpreter.
 
 This recipe binds the retained manifest to the installed native-authoring
 verifier named by the recipe. Before launching a project production Graph, the
