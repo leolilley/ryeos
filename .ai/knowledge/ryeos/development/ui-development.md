@@ -1,211 +1,108 @@
-<!-- ryeos:signed:2026-09-17T00:05:36Z:b36def5aa267cb9ce7842eb92da6150aa4729a249e32002485100751c4bc88e3:YyQ3galHDBFjC8ZAx53/RBzIlrzJrPM7bzsrzehWdYC8G+WNSwDMk3apmPk6K8kQ4GBZlKPNBjTOVJ/r1PlEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T01:17:07Z:64af9f017e0f8a5e7a47e0c54bbba028787028982fed5179797e2ad419d1e447:E0J6aj+0fks5YHzoJAv5G1jhM6F9P4y9jYLcOXUhAoLYGpClg1tTAi+3IaqaBmhRb3Goa2VfF8p09jytPdtpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
-description: "How to iterate on RyeOS UI browser UI assets without republishing bundles for every JS/CSS edit"
+description: "How to develop and qualify the typed Svelte RyeOS browser renderer"
 entry_type: reference
-version: "1.3.0"
+version: "2.0.0"
 ```
 
 # Browser UI Development Workflow
 
-Use this when working on the RyeOS UI browser UI. The goal is to avoid the
-slow bundle/reinstall loop for ordinary JavaScript and CSS changes.
+Read `ui-design-system.md` first. Preserve the Gruvbox palette, tiled workspace,
+launcher, optional slots, authored ambient character and shared Rust-owned UI
+semantics. Do not turn RyeOS into a generic sidebar application.
 
-Read `ui-design-system.md` first for the governing visual language and component
-rules. This workflow explains iteration, not aesthetic choices. Preserve the
-Gruvbox palette, tiled workspace, launcher, optional slots and authored ambient
-character. Refine typography, linework and composition; do not replace them
-with a generic sidebar/page shell. Nested split layouts and view-tab groups
-belong in the shared model, not a browser-only styling workaround.
-The implementation plan is
-`.tmp/ryeos-ui-visual-language-and-composition-implementation-plan.md`.
+## Ownership
 
-The approved visual study is in `crates/clients/web/tests/browser/design/`.
-It is standalone synthetic HTML/CSS, not production or execution evidence.
-Qualify the implementation with actual shared-model projections and production
-renderers; record visual, source-test and installed acceptance separately.
+The browser is a renderer, not a second application model:
 
-## Where the browser UI lives
+- `crates/clients/base/src/ui/` owns semantic state, layout, events and effects.
+- `crates/clients/web/src/wasm.rs` is the typed Rust/WASM boundary.
+- `crates/clients/web/browser/generated/` is generated from the Rust contract.
+- `crates/clients/web/browser/` owns Svelte rendering and browser adapters.
+- `crates/clients/web/pkg/` is generated, reviewed installed output. Never edit
+  it directly.
+- `crates/daemon/ryeos-ui/web-assets.json` is the closed asset manifest.
+- `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
-| Piece | Path |
-|---|---|
-| Static HTML shell | `crates/clients/web/pkg/index.html` |
-| Boot script | `crates/clients/web/pkg/bootstrap.js` |
-| RyeOS UI JS shell | `crates/clients/web/pkg/ryeos_shell.js` |
-| DOM renderer | `crates/clients/web/pkg/ryeos_dom_adapter.js` |
-| Browser effects | `crates/clients/web/pkg/ryeos_effects.js` |
-| Ambient animation | `crates/clients/web/pkg/ryeos_ambient_scene.js` |
-| CSS | `crates/clients/web/pkg/web-shell.css` |
-| Rust/WASM RyeOS UI model | `crates/clients/base/src/ui/` and `crates/clients/web/src/wasm.rs` |
-| Static asset provider | `crates/daemon/ryeos-ui/src/assets.rs` |
+The installed closure is exactly `index.html`, `ryeos_ui.js`, `ryeos_ui.css`,
+`ryeos_three.js`, `ryeos_web.js` and `ryeos_web_bg.wasm`. There is no alternate
+browser renderer, compatibility bootstrap or runtime fallback.
 
-## Fast JS/CSS loop without touching the daemon
+Svelte owns component lifecycle and presentation. Rust remains the sole owner
+of work, authority, navigation, layout and effect semantics. Browser-local
+state is limited to mechanical focus, selection, scroll restoration, pending
+transport handles and opaque Rust-issued layout preference bytes.
 
-Use the local dev proxy. It serves `/ui` and `/ui/assets/*` from
-`crates/clients/web/pkg`, while proxying `/ui/api/*`, launch, and session
-requests to the already-running daemon on `http://127.0.0.1:7400`.
+## Focused source loop
 
-Preferred command:
+Edit authored files under `crates/clients/web/browser/`, then run:
+
+```bash
+cd crates/clients/web
+npm run check:renderer
+npm run build:renderer
+```
+
+The build writes a private generation to `target/ui-browser-stage`; it does not
+publish `pkg/`. The stage validator rejects extra chunks, source maps, bare
+imports, external URLs and any lazy chunk other than `ryeos_three.js`.
+
+Use the local asset proxy or daemon override only with one complete staged or
+published generation. Never combine staged JavaScript with embedded WASM from
+another generation.
 
 ```bash
 scripts/dev-ui-assets.sh --background --open
 ```
 
-This starts the proxy if needed, asks `ryeos web` to mint a normal browser
-launch token, rewrites that one-shot launch URL through the dev proxy, and
-opens it. Use this instead of opening `http://127.0.0.1:7411/ui` directly when
-the browser does not already have a valid `ryeos_session` cookie for the dev
-proxy port.
+The proxy obtains a normal one-shot browser launch from `ryeos web`. Do not
+open its `/ui` route directly unless that origin already owns a valid session.
 
-To start the proxy without opening a fresh session:
+## Required boundary checks
 
 ```bash
-scripts/dev-ui-assets.sh --background
+cargo run -q -p ryeos-ui-contract-exporter -- --check
+cd crates/clients/web
+npm run check:renderer
+npm run build:renderer
+npm test
+npm run test:wasm-contract
 ```
 
-Then open:
+The WASM test is not replaceable by a JSON fixture: it proves actual serde /
+wasm-bindgen enum, optional and `u64`/BigInt behavior. The mounted-root browser
+test additionally requires the exact Playwright browser revision from the
+declared development environment; never substitute a host browser silently.
 
-```text
-http://127.0.0.1:7411/ui
-```
+## Ambient scene
 
-Iterate like this:
+`scene_model.rs` emits semantic scene objects. `AmbientLayer.svelte` retains one
+`ryeos_ambient_scene.js` controller and updates it from accepted envelopes.
+Three.js is the exact local `0.128.0` build chunk; there is no CDN import.
+Visibility comes from the authored surface projection, never a browser-side
+view-name exception. Animation state does not become RyeOS semantic state.
 
-1. edit files under `crates/clients/web/pkg/`;
-2. refresh the browser tab at `http://127.0.0.1:7411/ui`;
-3. repeat.
+## Rebuild boundaries
 
-Stop the proxy:
+- Svelte/CSS changes require browser stage rebuild and complete asset
+  publication.
+- Rust UI/WASM changes also require contract export and WASM regeneration.
+- Asset registry or route changes require the focused `ryeos-ui` rebuild/tests.
+- Bundle definition changes require the normal signed bundle publication path.
 
-```bash
-scripts/dev-ui-assets.sh --stop
-```
-
-Use a different port or upstream daemon if needed:
-
-```bash
-scripts/dev-ui-assets.sh --background --port 7412 --upstream http://127.0.0.1:7400
-```
-
-This is the preferred browser asset workflow because it does **not** stop,
-restart, rebuild, or reinitialize the active RyeOS daemon.
-
-## Daemon-side asset override
-
-Use the dev asset override. This starts the daemon with
-`RYEOS_UI_ASSET_DIR` pointing at `crates/clients/web/pkg`, so `/ui` and
-`/ui/assets/*` are served directly from the checkout.
-
-```bash
-scripts/dev-ui-assets.sh --direct-start
-```
-
-Do **not** run `scripts/pkg/install-local-direct.sh` or
-`scripts/populate-bundles.sh` for every JS/CSS tweak.
-
-Manual equivalent:
-
-```bash
-RYEOS_UI_ASSET_DIR=/home/leo/projects/ryeos-next/crates/clients/web/pkg ryeos start
-```
-
-Print the exact env var:
-
-```bash
-scripts/dev-ui-assets.sh --print-env
-```
-
-## One-time caveat
-
-The dev asset override is implemented in daemon Rust code. If the installed or
-running daemon predates that code, do one rebuild/reinstall/restart first. After
-that, UI asset edits are live from disk.
-
-The proxy mode above does not require this daemon-side code and is safer when
-another agent/user is actively using the default daemon.
-
-Use the heavy packaged install only when you intentionally need to update the
-installed binaries/bundles:
-
-```bash
-scripts/pkg/install-local-direct.sh --trust-source-publishers
-```
-
-That script runs the packaged-layout path using already-built checkout
-artifacts: install `ryeos`/`ryeosd`, install bundle sources, run `ryeos init`,
-and restart an already-running daemon. It populates/rebuilds bundles only when
-explicitly passed `--populate` with `--all` or `--crates`.
-
-## What requires a rebuild or bundle refresh
-
-| Change | Required action |
-|---|---|
-| `crates/clients/web/pkg/*.js` or `*.css` only | run `scripts/dev-ui-assets.sh --background`, then refresh browser at port 7411 |
-| `crates/clients/base/src/ui/*` | rebuild WASM / update `crates/clients/web/pkg/ryeos_web*.{js,wasm}` through the project’s WASM build path |
-| `crates/daemon/ryeos-ui/src/assets.rs` or route/static-mode code | rebuild/restart daemon |
-| Bundle YAML or bundle-owned binaries | `scripts/populate-bundles.sh` or `scripts/gate.sh --refresh-bundles --no-tests` |
-| Full packaged install repair from already-built artifacts | `scripts/pkg/install-local-direct.sh --trust-source-publishers` |
-
-## Lightweight checks
-
-For browser asset edits, prefer cheap checks:
-
-```bash
-node --check crates/clients/web/pkg/ryeos_ambient_scene.js
-node --check crates/clients/web/pkg/ryeos_dom_adapter.js
-```
-
-Avoid broad `cargo test`, `cargo build --release`, or local reinstall loops
-unless the change actually touches Rust, WASM, bundle artifacts, or installed
-daemon behavior.
-
-## Ambient scene state hooks
-
-These hooks remain applicable to authored ambient backgrounds and explicit
-scene/topology views. Preserve their role in RyeOS's visual identity while
-keeping working content legible; do not globally remove ambient character.
-Select ambient composition through signed surface declarations; do not hide a
-named page's background through a renderer-specific canonical-ref check.
-
-The RyeOS UI scene model is the bridge between RyeOS state and the animation.
-`crates/clients/base/src/ui/scene_model.rs` emits semantic objects such as:
-
-- `local_node`
-- `remote_node`
-- `project_core`
-- `space_ring`
-- `item_cluster`
-- `thread_flow`
-- `schedule_pulse`
-- `service_beacon`
-
-`crates/clients/web/pkg/ryeos_ambient_scene.js` consumes those objects and can
-map counts/tone/state into visual scale, color, opacity, pulse rate, stream
-count, orbit count, etc.
-
-Future UI work should keep this separation:
-
-```text
-Rust RyeOS UICore data
-  -> scene_model.rs emits semantic scene objects
-  -> ryeos_ambient_scene.js maps objects to visuals
-  -> browser refresh shows JS/CSS changes immediately in dev asset mode
-```
-
-Do not hardcode daemon fetches inside the animation if the data already belongs
-in the RyeOS UI model. Prefer adding semantic fields/objects to the scene model
-and keeping the animation as a renderer of that state.
+Do not invoke Node, npm, Vite or contract generation from Cargo `build.rs`.
+Ordinary Cargo builds only embed and validate the checked-in asset generation.
 
 ## Common mistakes
 
-- Running `scripts/pkg/install-local-direct.sh` for every CSS/JS edit.
-- Stopping the default daemon while another agent/user is doing work; use proxy
-  mode instead.
-- Rebuilding bundles for changes that only touch `crates/clients/web/pkg`.
-- Forgetting to restart the daemon after changing the env var.
-- Expecting `RYEOS_UI_ASSET_DIR` to affect Rust/WASM model changes; it only
-  serves already-built files from `pkg/`.
-- Adding direct daemon API fetches to the Three.js animation instead of using
-  the RyeOS UI scene model.
+- editing `pkg/` instead of authored browser source;
+- adding browser-side semantic stores, routing or authority decisions;
+- bypassing the single FIFO reducer/effect commit path;
+- importing daemon endpoints from visual components;
+- restoring predecessor module names or fallback logic;
+- using an incomplete asset directory with `RYEOS_UI_ASSET_DIR`;
+- accepting a build produced by ambient host tool versions as deterministic
+  release evidence.

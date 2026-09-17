@@ -171,41 +171,25 @@ mod tests {
     }
 
     #[test]
-    fn get_bootstrap_js() {
-        let provider = WebAssetProvider;
-        let asset = provider
-            .get("bootstrap.js")
-            .expect("bootstrap.js must be embedded");
-        assert!(!asset.bytes.is_empty());
-        assert!(asset.content_type.contains("javascript"));
-    }
-
-    #[test]
-    fn get_web_shell_assets() {
+    fn get_compiled_browser_assets() {
         let provider = WebAssetProvider;
         let css = provider
-            .get("web-shell.css")
-            .expect("web-shell.css must be embedded");
+            .get("ryeos_ui.css")
+            .expect("ryeos_ui.css must be embedded");
         assert!(!css.bytes.is_empty());
         assert!(css.content_type.contains("css"));
 
-        let js = provider
-            .get("ui/assets/ryeos_web.js")
-            .expect("ryeos_web.js must be embedded");
-        assert!(!js.bytes.is_empty());
-        assert!(js.content_type.contains("javascript"));
-
         let ryeos_ui = provider
-            .get("ui/assets/ryeos_shell.js")
-            .expect("ryeos_shell.js must be embedded");
+            .get("ui/assets/ryeos_ui.js")
+            .expect("ryeos_ui.js must be embedded");
         assert!(!ryeos_ui.bytes.is_empty());
         assert!(ryeos_ui.content_type.contains("javascript"));
 
-        let ambient = provider
-            .get("ui/assets/ryeos_ambient_scene.js")
-            .expect("ryeos_ambient_scene.js must be embedded");
-        assert!(!ambient.bytes.is_empty());
-        assert!(ambient.content_type.contains("javascript"));
+        let three = provider
+            .get("ui/assets/ryeos_three.js")
+            .expect("ryeos_three.js must be embedded");
+        assert!(!three.bytes.is_empty());
+        assert!(three.content_type.contains("javascript"));
 
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")
@@ -306,30 +290,18 @@ mod tests {
     }
 
     #[test]
-    fn generated_wasm_glue_exports_every_shell_import() {
+    fn generated_wasm_glue_exports_the_compiled_runtime_surface() {
         // wasm.rs and the checked-in wasm-bindgen outputs are one compiled
         // browser contract. If Rust gains an export without regenerating the
-        // JS/WASM pair, static ES-module linking fails before bootstrap can
-        // enter the application. Derive the required names from the shell's
-        // authored import instead of maintaining a second export list here.
-        let shell =
-            std::str::from_utf8(embedded("ryeos_shell.js")).expect("shell JS must be UTF-8");
+        // JS/WASM pair, the compiled runtime fails before entering the app.
+        // The runtime performs the complete export-inventory check; keep this
+        // provider test focused on representative generated entry points.
         let generated = std::str::from_utf8(embedded("ryeos_web.js"))
             .expect("generated wasm glue must be UTF-8");
-        let named_imports = shell
-            .strip_prefix("import init, {")
-            .and_then(|rest| rest.split_once("} from \"/ui/assets/ryeos_web.js\";"))
-            .map(|(imports, _)| imports)
-            .expect("shell must begin with the generated WASM import");
-
-        for imported in named_imports
-            .lines()
-            .map(|line| line.trim().trim_end_matches(','))
-            .filter(|name| !name.is_empty())
-        {
+        for imported in ["ryeos_start", "ryeos_dispatch", "ryeos_key"] {
             assert!(
                 generated.contains(&format!("export function {imported}(")),
-                "generated wasm glue does not export shell import `{imported}`; regenerate ryeos_web.js and ryeos_web_bg.wasm"
+                "generated wasm glue does not export `{imported}`"
             );
         }
     }

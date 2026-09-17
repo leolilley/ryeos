@@ -15,6 +15,19 @@ export interface RunningRyeOs {
   close(): Promise<void>;
 }
 
+/** Enter the installed browser surface from the generated index document. */
+export async function bootRyeOsDocument(): Promise<RunningRyeOs> {
+  const root = document.getElementById("app");
+  if (!root) throw new Error("RyeOS browser root #app is missing");
+  setBootStage("Joining node", "Opening the authenticated browser session and durable seat.");
+  try {
+    return await bootRyeOs(root);
+  } catch (error) {
+    renderBootFailure(root, error);
+    throw error;
+  }
+}
+
 export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   const wasm = await loadWasm();
   await wasm.default({ module_or_path: "/ui/assets/ryeos_web_bg.wasm" });
@@ -141,4 +154,36 @@ function viewport(): BrowserViewport {
     height: window.innerHeight,
     device_pixel_ratio: window.devicePixelRatio || 1,
   };
+}
+
+function setBootStage(stage: string, detail: string): void {
+  const stageNode = document.getElementById("ryeos-boot-stage");
+  const detailNode = document.getElementById("ryeos-boot-detail");
+  if (stageNode) stageNode.textContent = stage;
+  if (detailNode) detailNode.textContent = detail;
+}
+
+function renderBootFailure(root: HTMLElement, error: unknown): void {
+  console.error("RyeOS boot failed", error);
+  const main = document.createElement("main");
+  main.className = "ryeos-boot ryeos-boot-failed";
+  main.setAttribute("role", "alert");
+  const kicker = document.createElement("p");
+  kicker.className = "ryeos-boot-kicker";
+  kicker.textContent = "RyeOS / connection interrupted";
+  const title = document.createElement("h1");
+  title.textContent = "The node surface did not open";
+  const diagnostic = document.createElement("pre");
+  diagnostic.className = "ryeos-boot-error-detail";
+  diagnostic.textContent = error instanceof Error ? error.message : String(error);
+  const guidance = document.createElement("p");
+  guidance.className = "ryeos-boot-detail";
+  guidance.textContent = "Run ryeos web again to mint a fresh one-time launch, or check ryeos node status if the node is offline.";
+  const retry = document.createElement("button");
+  retry.className = "ryeos-boot-retry";
+  retry.type = "button";
+  retry.textContent = "Retry this session";
+  retry.addEventListener("click", () => location.reload());
+  main.append(kicker, title, diagnostic, guidance, retry);
+  root.replaceChildren(main);
 }

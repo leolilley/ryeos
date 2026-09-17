@@ -102,8 +102,17 @@ def render(manifest: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--refresh-digests", action="store_true")
     args = parser.parse_args()
+    if args.check and args.refresh_digests:
+        raise SystemExit("--check and --refresh-digests are mutually exclusive")
     manifest = load_manifest()
+    if args.refresh_digests:
+        for asset in manifest["assets"]:
+            asset["sha256"] = hashlib.sha256(
+                (PACKAGE / asset["filename"]).read_bytes()
+            ).hexdigest()
+        MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     validate(manifest)
     expected = render(manifest)
     if args.check:

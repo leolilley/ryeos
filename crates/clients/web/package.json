@@ -13,8 +13,8 @@
     "test:renderer-root": "node tests/browser/svelte-root.mjs",
     "test:wasm-contract": "node tests/browser/wasm-contract.mjs",
     "test": "node --test tests/*.test.js",
-    "test:browser": "node tests/browser/run.mjs",
-    "test:all": "npm test && npm run test:browser"
+    "test:browser": "npm run test:renderer-root",
+    "test:all": "npm test && npm run test:wasm-contract && npm run test:renderer-root"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.0",
