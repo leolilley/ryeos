@@ -124,6 +124,21 @@ class CodexContractTests(unittest.TestCase):
                         for arg in profile["workload_args"]
                     )
                 )
+                routes = {route["id"]: route for route in profile["routes"]}
+                for route_id in ("session.start", "session.resume"):
+                    predicates = routes[route_id]["response_predicates"]
+                    self.assertIn({
+                        "pointer": "/response/result/activePermissionProfile/id",
+                        "equals": "danger-full-access",
+                    }, predicates)
+                    self.assertIn({
+                        "pointer": "/response/result/approvalPolicy",
+                        "equals": "never",
+                    }, predicates)
+                    self.assertIn({
+                        "pointer": "/response/result/sandbox/networkAccess",
+                        "equals": True,
+                    }, predicates)
             expected_code_mode_host = name == "authoring.profile.json"
             self.assertEqual(
                 baseline["features"]["code_mode_host"], expected_code_mode_host

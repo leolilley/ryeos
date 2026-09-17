@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T03:41:16Z:1111f8162b7d04f554996d26b712c86e0db8b4213a9f26c4bc0bc93b7a08e76f:v/FxgaFKA0MRX7iy3RJppHPaOdWjir+YXwIK8752LsPl4obt2po2NmfdspjT8xmk8AIJVfB9ISZts+mOqg0JAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T04:06:11Z:cd9683b6a3358a268e09478754cb69948f72bc4fcbc141cddf201d3f2434a489:YW0nOnWBZxTwHmHpdnO1Ku6wcryz4O+mWWmjThq64qCmJ6GzBHi6VsOpNXkjufrh6CWJsvF0IYPuOUuBSmA8Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -30,7 +30,7 @@ worker IPC boundaries; stopped homes receive the complete bounded
 descriptor-relative validation before attachment. The exact mode-0700 pinned
 root is the privacy boundary; descendant mode bits remain opaque workload
 state. This is generic private-home enforcement, not knowledge of Codex
-filenames. The pinned `ryeos-workspace-only`
+filenames. For `worker:codex/hosted`, the pinned `ryeos-workspace-only`
 permission profile denies the filesystem root, reopens only Codex's minimal
 runtime paths, and keeps the private CoW project writable while command
 networking stays disabled. Security-critical settings are repeated as immutable
@@ -54,9 +54,10 @@ profile with ordinary Codex shell/edit tools and `approval_policy=never`.
 The former requires a qualified local process scope. The latter can run only
 when signed node policy explicitly enables trusted process-group sessions. It
 is intended for a single-tenant disposable placement and makes no filesystem,
-kernel, or hostile-descendant containment claim. The worker never receives
-project signing, publication, submission, or deployment-control authority;
-candidate acceptance remains an independent RyeOS operation.
+kernel, credential-secrecy, or hostile-descendant containment claim. The
+operator must keep project signing, publication, submission, Kaggle, and
+deployment-control credentials out of that placement; candidate acceptance
+remains an independent RyeOS operation.
 
 The exact Codex executable, same-version code-mode host, packaged command-
 sandbox companion, and the package's `zsh` and `rg` runtime resources are
@@ -360,15 +361,12 @@ forwarding workflow. Direct target requests are intentionally rejected because
 operator-key possession alone does not prove source-node transit. No shared
 filesystem pathname is required after admission.
 
-Approval decisions require the exact pending request digest. All approval
-classes are deny-only in this release, including command execution: Codex's
-App Server command request can represent a sandbox escalation without exposing
-a complete reviewable permission delta. RyeOS may display the bounded request
-and send decline/cancel, but cannot accept it. The immutable `on-request`
-policy lets supported approval requests reach the RyeOS ledger; the profile's
-`deny_only` contract
-rejects an accept decision before upstream contact. Termination is explicit
-and publication is a separate terminal CAS.
+Approval decisions require the exact pending request digest. The minimal
+hosted profile retains immutable `on-request` plus a deny-only RyeOS approval
+contract: RyeOS may display a bounded request and send decline/cancel, but
+cannot accept it. Authoring profiles instead use immutable `never`, so a
+bounded unattended turn cannot pause for or obtain an approval. Termination is
+explicit and publication is a separate terminal CAS.
 Use the same projectless remote service envelope with the signed generic
 services `worker-executions/resolve-approval`, `terminate`,
 `validate-candidate-closure-and-base`, `publish`, or `discard`; their exact

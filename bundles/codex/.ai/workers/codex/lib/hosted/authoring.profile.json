@@ -569,7 +569,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "ryeos-workspace-only"
+          "equals": "danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -577,11 +577,11 @@
         },
         {
           "pointer": "/response/result/approvalPolicy",
-          "equals": "on-request"
+          "equals": "never"
         },
         {
           "pointer": "/response/result/sandbox/networkAccess",
-          "equals": false
+          "equals": true
         }
       ]
     },
@@ -664,7 +664,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "ryeos-workspace-only"
+          "equals": "danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -672,11 +672,11 @@
         },
         {
           "pointer": "/response/result/approvalPolicy",
-          "equals": "on-request"
+          "equals": "never"
         },
         {
           "pointer": "/response/result/sandbox/networkAccess",
-          "equals": false
+          "equals": true
         }
       ]
     },
