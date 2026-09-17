@@ -10,12 +10,14 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod cgroup;
+mod oci_lifecycle;
 // This is the diagnostic witness that a namespace can outlive a process
 // group. It is not a second production lifecycle backend: membership scans
 // cannot provide the kernel freeze barrier required by workspace capture.
 #[cfg(all(test, target_os = "linux"))]
 mod pid_namespace;
 mod scope;
+pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent};
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
@@ -26,7 +28,8 @@ pub use scope::{
 use std::os::fd::AsRawFd;
 
 /// Durable coordinates required to recover one exact process incarnation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExactProcessIdentity {
     pub boot_id: String,
     pub target_pid: u32,
@@ -187,7 +190,7 @@ struct PinnedMember {
 }
 
 impl ExactProcessIdentity {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.boot_id.trim().is_empty()
             || self.target_pid <= 1
             || self.group_leader_pid <= 1

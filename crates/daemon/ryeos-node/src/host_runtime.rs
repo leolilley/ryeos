@@ -25,9 +25,48 @@ pub struct HostRuntimeBinding {
     pub node_fingerprint: String,
     pub account: lillux::ControllerAccount,
     pub process_scopes: lillux::ProcessScopeConfiguration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci_lifecycle: Option<lillux::OciLifecycleGeneration>,
 }
 
 impl HostRuntimeBinding {
+    /// Host-adapter publication for a path observed through an OCI init mount
+    /// namespace. The stored path is the container spelling; physical identity
+    /// and node identity come from the already-pinned observed directory.
+    pub fn capture_oci_observed(
+        observed_app_root: &PinnedDirectory,
+        runtime_app_root: PathBuf,
+        account: lillux::ControllerAccount,
+        process_scopes: lillux::ProcessScopeConfiguration,
+        oci_lifecycle: lillux::OciLifecycleGeneration,
+    ) -> Result<Self> {
+        account.validate().map_err(anyhow::Error::msg)?;
+        account.require_directory_owner(observed_app_root)?;
+        process_scopes.validate().map_err(anyhow::Error::msg)?;
+        oci_lifecycle.validate().map_err(anyhow::Error::msg)?;
+        if !runtime_app_root.is_absolute() || runtime_app_root.parent().is_none() {
+            bail!("OCI runtime app root must be an absolute non-root path");
+        }
+        let identity_path =
+            Path::new(ryeos_engine::AI_DIR).join("node/identity/public-identity.json");
+        let identity_file = observed_app_root
+            .open_pinned_regular_descendant(&identity_path, false)?
+            .context("OCI app root has no node public identity")?;
+        let observation = identity_file.observation()?;
+        let identity: ryeos_app::identity::PublicIdentityDoc = serde_json::from_slice(
+            &identity_file.read_stable_bounded(&observation, MAX_HOST_RUNTIME_DOCUMENT_BYTES)?,
+        )?;
+        Ok(Self {
+            schema_version: HOST_RUNTIME_BINDING_SCHEMA_VERSION,
+            app_root: runtime_app_root,
+            app_root_identity: observed_app_root.identity()?,
+            node_fingerprint: identity.verified_fingerprint()?,
+            account,
+            process_scopes,
+            oci_lifecycle: Some(oci_lifecycle),
+        })
+    }
+
     pub fn capture(
         app_root: &PinnedDirectory,
         node_fingerprint: String,
@@ -41,6 +80,7 @@ impl HostRuntimeBinding {
             node_fingerprint,
             account,
             process_scopes,
+            oci_lifecycle: None,
         };
         binding.validate(app_root.path())?;
         Ok(binding)
@@ -58,6 +98,11 @@ impl HostRuntimeBinding {
         }
         self.account.validate().map_err(anyhow::Error::msg)?;
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            self.process_scopes
+                .require_oci_generation(lifecycle)
+                .map_err(anyhow::Error::msg)?;
+        }
         if !lillux::valid_hash(&self.node_fingerprint) {
             bail!("host runtime has an invalid node public identity");
         }
@@ -80,6 +125,19 @@ impl HostRuntimeBinding {
             bail!("host-runtime node identity changed");
         }
         Ok(app_root)
+    }
+
+    pub fn capture_oci(
+        app_root: &PinnedDirectory,
+        node_fingerprint: String,
+        account: lillux::ControllerAccount,
+        process_scopes: lillux::ProcessScopeConfiguration,
+        oci_lifecycle: lillux::OciLifecycleGeneration,
+    ) -> Result<Self> {
+        let mut binding = Self::capture(app_root, node_fingerprint, account, process_scopes)?;
+        binding.oci_lifecycle = Some(oci_lifecycle);
+        binding.validate(app_root.path())?;
+        Ok(binding)
     }
 
     pub fn verify_loaded_node_identity(
