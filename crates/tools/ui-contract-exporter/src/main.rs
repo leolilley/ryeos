@@ -121,7 +121,10 @@ fn read_text_tree(root: &Path) -> Result<BTreeMap<PathBuf, String>, Box<dyn std:
             if path.is_dir() {
                 walk(root, &path, out)?;
             } else {
-                out.insert(path.strip_prefix(root)?.to_path_buf(), fs::read_to_string(path)?);
+                out.insert(
+                    path.strip_prefix(root)?.to_path_buf(),
+                    fs::read_to_string(path)?,
+                );
             }
         }
         Ok(())
