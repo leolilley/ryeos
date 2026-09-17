@@ -20,7 +20,8 @@ test("packaged browser generation is the exact clean-cut closure", async () => {
   assert.deepEqual(actual, expected);
   const index = await readFile(new URL("index.html", packageRoot), "utf8");
   assert.match(index, /\/ui\/assets\/ryeos_ui\.css/);
-  assert.match(index, /\/ui\/assets\/ryeos_ui\.js/);
+  assert.match(index, /<script type="module" src="\/ui\/assets\/ryeos_ui\.js"><\/script>/);
+  assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)[^>]*>/);
   assert.doesNotMatch(index, /bootstrap|web-shell|ryeos_shell/);
 });
 

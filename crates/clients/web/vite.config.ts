@@ -17,7 +17,7 @@ export default defineConfig({
     minify: false,
     outDir: process.env.RYEOS_UI_ASSET_STAGE || defaultOutDir,
     rollupOptions: {
-      input: path.resolve(packageRoot, "browser/main.ts"),
+      input: path.resolve(packageRoot, "browser/entry.ts"),
       preserveEntrySignatures: "strict",
       output: {
         manualChunks(id) {
