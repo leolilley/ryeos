@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-HOOK = ROOT / "crates/tools/lillux-oci-hook/src/main.rs"
+HOOK = ROOT / "crates/host-adapters/lillux-oci-hook/src/main.rs"
 CGROUP = ROOT / "crates/kernel/lillux/src/process_control/cgroup.rs"
 
 

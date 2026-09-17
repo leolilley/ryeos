@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T01:47:05Z:ff765a4cc0368950c871d1b90161085ca46f049e3891a9d197d0d97ae339ae38:EETXul9r6ElxL9IzZJBdUKl4N7AsKSJ4EH2S0NuCdcJ/ocIkbdhu79ujoI5epzUlyNHTKM8cSEngpi0m8ma+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:58:51Z:1aaef87d570efaa0aa30305211c4f45628cbe59d6675b33113f65e145526fb0c:x0SAC5j15o4aogz9GMEwwu5OQHI/o9HPo8G4a4M2ErS9ckRCm99GLVmcuSAG9GV251I2TsIE8HfY0ATXLCsqAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 name: contained-workflow-products
 version: "1.0.0"
@@ -9,7 +9,7 @@ source_inputs:
   - docker-bake.release.hcl
   - bundles/.ai/node/init/profiles/contained-workflow.yaml
   - images/contained-workflow/entrypoint.sh
-  - crates/tools/lillux-oci-hook
+  - crates/host-adapters/lillux-oci-hook
 products:
   image:
     bake_target: contained-workflow

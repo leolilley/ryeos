@@ -66,7 +66,8 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
     def test_hook_is_a_locked_workspace_product(self):
         workspace = (ROOT / "Cargo.toml").read_text()
         lockfile = (ROOT / "Cargo.lock").read_text()
-        self.assertIn('"crates/tools/lillux-oci-hook"', workspace)
+        self.assertIn('"crates/host-adapters/lillux-oci-hook"', workspace)
+        self.assertNotIn('"crates/tools/lillux-oci-hook"', workspace)
         self.assertIn('name = "ryeos-lillux-oci-hook"', lockfile)
 
 

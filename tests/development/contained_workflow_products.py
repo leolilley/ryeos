@@ -53,7 +53,7 @@ class ProductEvidenceTests(unittest.TestCase):
             "docker-bake.release.hcl",
             "bundles/.ai/node/init/profiles/contained-workflow.yaml",
             "images/contained-workflow/entrypoint.sh",
-            "crates/tools/lillux-oci-hook",
+            "crates/host-adapters/lillux-oci-hook",
         ):
             self.assertIn(f"  - {relative}", body)
             self.assertTrue((ROOT / relative).exists(), relative)
