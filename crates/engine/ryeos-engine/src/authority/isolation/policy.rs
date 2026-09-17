@@ -1,7 +1,7 @@
 use ryeos_isolation_protocol::{FixedParentViewLimits, IsolationBackendSelection};
 use serde::{Deserialize, Serialize};
 
-pub const ISOLATION_POLICY_VERSION: u32 = 6;
+pub const ISOLATION_POLICY_VERSION: u32 = 7;
 #[cfg(any(test, feature = "test-support"))]
 pub const TEST_ISOLATION_POLICY_RELATIVE_PATH: &str = "test-fixtures/isolation-policy.yaml";
 
@@ -12,6 +12,9 @@ pub struct IsolationPolicy {
     pub mode: IsolationMode,
     pub backend: Option<IsolationBackendSelection>,
     pub process_scopes: IsolationProcessScopePolicy,
+    /// Explicit opt-in for trusted dedicated workers that use RyeOS's direct
+    /// process-group lifecycle without claiming qualified containment.
+    pub trusted_process_group_sessions: bool,
     pub filesystem: IsolationFilesystemPolicy,
     pub network: IsolationNetworkPolicy,
     pub environment: IsolationEnvironmentPolicy,
@@ -27,6 +30,7 @@ impl IsolationPolicy {
             mode: IsolationMode::Disabled,
             backend: None,
             process_scopes: IsolationProcessScopePolicy::Unconfigured {},
+            trusted_process_group_sessions: false,
             filesystem: IsolationFilesystemPolicy {
                 proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
                 // Values for this explicit non-enforcing authoring fixture

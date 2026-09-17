@@ -106,6 +106,13 @@ mod tests {
         unknown_nested["policy"]["unexpected"] = Value::Bool(true);
         assert!(section.parse(&context(), &unknown_nested).is_err());
 
+        let mut missing_trusted_lane = disabled_policy_value();
+        missing_trusted_lane["policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trusted_process_group_sessions");
+        assert!(section.parse(&context(), &missing_trusted_lane).is_err());
+
         assert!(
             section
                 .parse(&context(), &serde_json::json!({"schema": 1}))

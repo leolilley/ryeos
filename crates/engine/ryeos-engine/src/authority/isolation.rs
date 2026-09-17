@@ -4369,6 +4369,7 @@ impl IsolationRuntime {
             };
         let process_scope_readiness = ProcessScopeReadiness::classify(
             policy.process_scopes.clone(),
+            policy.trusted_process_group_sessions,
             process_scope_authority_digest,
             process_scope_capabilities.clone(),
         );

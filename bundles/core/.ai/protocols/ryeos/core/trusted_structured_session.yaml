@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-17T01:51:09Z:402a9c06f347a0c397890208e22cd8f076fea625ecacacdc09e92aa78d9cd20a:4OitD1egwlOgGQ+qSJdRMY7psa4NXjml8whCfww9QVfCgmBXdwz4aRktGCsHd8Z3WtxtMolSIYXOytmEEfOlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T03:41:16Z:b21cdc449421febe07b9060f0d735b1d9be7349f7d2680ad43d1a16fc9194d16:pOozNmTXGq7bSEGJATyk9M16pazU8PZJRFqF+T54t3wuiwxRIUx5f06L5uRLWwApX7sssylnK6nIgNH/OYB0AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
-name: structured_session
+name: trusted_structured_session
 category: ryeos/core
 abi_version: v1
-description: Session-bound structured subprocess with bounded full-duplex frames over a daemon-owned inherited socket.
+description: Session-bound structured subprocess for a node-authorized trusted process-group placement.
 stdin:
   shape: opaque
 stdout:
@@ -19,7 +19,7 @@ lifecycle:
 callback_channel: none
 session:
   process_mode: exclusive_session
-  cleanup_authority: local_process_scope
+  cleanup_authority: trusted_process_group
   workspace_authority: runtime_workspace
   network_authority: node_policy
   runtime_env_allowlist:

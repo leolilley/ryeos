@@ -1081,9 +1081,29 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
             remediation: eligibility.remediation.clone(),
         };
     }
-    DispatchError::SubprocessRunFailed {
-        item_ref,
-        detail: error.to_string(),
+    // `anyhow::Error::to_string` renders only the outermost context. Spawn
+    // ownership deliberately wraps typed engine/Lillux failures (for example
+    // as `spawn item`), so using it here erased the only actionable refusal
+    // before the authenticated caller or retained terminal response could see
+    // it. Preserve the bounded cause chain while keeping the public dispatch
+    // envelope finite.
+    let detail = ryeos_runtime::workload_client::bounded_error_message(&format!("{error:#}"));
+    DispatchError::SubprocessRunFailed { item_ref, detail }
+}
+
+#[cfg(test)]
+mod runner_error_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_spawn_failure_preserves_its_bounded_cause_chain() {
+        let error = anyhow::anyhow!("lillux refused exact mount authority").context("spawn item");
+        let mapped = map_runner_error("tool:test/run".to_owned(), error);
+        let DispatchError::SubprocessRunFailed { item_ref, detail } = mapped else {
+            panic!("ordinary spawn failure must retain the subprocess error class");
+        };
+        assert_eq!(item_ref, "tool:test/run");
+        assert_eq!(detail, "spawn item: lillux refused exact mount authority");
     }
 }
 

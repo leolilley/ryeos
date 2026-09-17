@@ -1,27 +1,20 @@
-# ryeos:signed:2026-09-17T04:06:11Z:be60f580d43a134a4792a2fddf78e5cb78291ba5e2e67f1ba860c155f8184d5d:c2ZHzqAL7PyvyhMphLNqpKtqpnB4g/m8ssO80IYNP8494wlUenXmxQdXC6Teg6ADpAkqSF7WQ7J9r5hDWTzQDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T04:06:11Z:121faed7e79e00aa7cc1eb8510ffbf559ca75dbc3192c17eb08b18ecc8fcce13:UppUR9NVe5LCMY110aEsPvOXdbrqyydDmyaa92uclI5CQpal7N3j0rCMz0DavBelcy54Lp89fgmZ2SZjV6PiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
-version: "1.0.3"
+version: "1.0.0"
 executor_id: "@subprocess"
-description: "Codex authoring profile; select through config:codex/environments/authoring."
-execution_protocol: protocol:ryeos/core/structured_session
+description: "Trusted disposable Codex authoring profile for explicitly opted-in hosted nodes."
+execution_protocol: protocol:ryeos/core/trusted_structured_session
 filesystem_authority: captured_execution
 supported_target:
   os: linux
   arch: x86_64
-
-# RLIMIT_NPROC is shared by the daemon's real UID rather than scoped to this
-# process tree. The kind-owned compiler caps and freezes this signed override;
-# RyeOS separately limits session groups and total dedicated workers.
 session_resources:
   real_uid_process_limit: 4096
-
 source:
   root: "lib/hosted"
   entry: "authoring.profile.json"
   digest: "7f695f93b433d989306337b8a17398c41fe884850cf208dcb394f5b50d32d329"
-
 external_content:
-  # Runtime dependencies must never create mountpoints in the project CoW.
   - id: codex
     kind: file
     mode: pinned
@@ -36,13 +29,6 @@ external_content:
     metadata_hint: "openai-codex-code-mode-host-v0.147.0-x86_64-unknown-linux-musl"
     mount_root: execution_runtime
     mount: codex-code-mode-host
-  - id: codex-bwrap
-    kind: file
-    mode: pinned
-    digest: "5f2c25277b1a2150937372ade46eef46aa2227b749f984bea208b5467540b86f"
-    metadata_hint: "openai-codex-bwrap-v0.147.0-x86_64-unknown-linux-musl"
-    mount_root: execution_runtime
-    mount: codex-resources/bwrap
   - id: codex-zsh
     kind: file
     mode: pinned
@@ -57,7 +43,6 @@ external_content:
     metadata_hint: "openai-codex-rg-v0.147.0-x86_64-unknown-linux-musl"
     mount_root: execution_runtime
     mount: codex-path/rg
-
 config:
   command: "bin:core/ryeos-structured-session-bridge"
   args: ["${source.entry}"]

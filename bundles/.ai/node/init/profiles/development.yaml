@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:36:02Z:b7ad948e605a891c2512b3be972a4f4b6593b2d4a7597c2c93a4653ab05fe7af:XU2eRIbGOKojZM6EUY5wX/Nwp3g7bL5rtJEYVcBFS2Gud7l2ENz7IoHUUVn1aptJEcfE7W37zbCFQIpnDA1IAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T03:41:16Z:ff5146745cac37c7e66b88195e6e4a060c96898c9b27be68c735d1c0896e5226:+GYlCLaHW1XTalo6Sk3RFVIODFmnsptWSCceee/x0gdnpqUBcE757E3mWX1DPVSEdN5WYRZcW+N3mTrfW2h4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -184,7 +184,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 6
+      version: 7
       process_scopes:
         # Semantic requirement only. Lillux supplies the opaque native scope
         # provider from an administrator-owned host association at daemon boot.
@@ -194,6 +194,7 @@ policies:
         # example, an authored CLI's own workspace confinement). Whole-process
         # scope ownership and the nested proc ceiling are selected together.
         nested_sandbox: true
+      trusted_process_group_sessions: false
       mode: enforce
       backend:
         bundle: core

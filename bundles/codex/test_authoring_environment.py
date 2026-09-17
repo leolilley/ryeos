@@ -100,7 +100,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual(self.worker["source"]["entry"], "authoring.profile.json")
         self.assertEqual(self.default_worker["source"]["entry"], "structured-session.profile.json")
 
-    def test_profile_selects_baseline_permission_and_signed_invocation(self):
+    def test_profile_selects_unattended_authoring_and_signed_invocation(self):
         actual = json.loads((SOURCE / "authoring.profile.json").read_text())
         original = json.loads((SOURCE / "structured-session.profile.json").read_text())
         self.assertEqual(actual["required_process_environment"], ["TMPDIR"])
@@ -131,23 +131,37 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         started["observations"] = []
         self.assertEqual(actual["baseline_config"], "authoring.config.toml")
         actual["baseline_config"] = original["baseline_config"]
-        added = ', "/ryeos/realizations/authoring-tools"="read"'
-        self.assertEqual(sum(added in arg for arg in actual["workload_args"]), 1)
-        actual["workload_args"] = [arg.replace(added, "") for arg in actual["workload_args"]]
-        self.assertTrue(any('\":tmpdir\"=\"write\"' in arg for arg in actual["workload_args"]))
-        actual["workload_args"] = [arg.replace('\":tmpdir\"=\"write\"', '\":tmpdir\"=\"deny\"')
-                                  .replace(', \"TMPDIR\"=\"include\"', '') for arg in actual["workload_args"]]
+        self.assertIn('approval_policy="never"', actual["workload_args"])
+        self.assertIn('default_permissions="danger-full-access"', actual["workload_args"])
+        self.assertFalse(any(arg.startswith("permissions=") for arg in actual["workload_args"]))
+        actual["workload_args"] = original["workload_args"]
+        original_routes = {route["id"]: route for route in original["routes"]}
+        for route in actual["routes"]:
+            if route["id"] in ("session.start", "session.resume"):
+                self.assertIn({
+                    "pointer": "/response/result/activePermissionProfile/id",
+                    "equals": "danger-full-access",
+                }, route["response_predicates"])
+                self.assertIn({
+                    "pointer": "/response/result/approvalPolicy",
+                    "equals": "never",
+                }, route["response_predicates"])
+                self.assertIn({
+                    "pointer": "/response/result/sandbox/networkAccess",
+                    "equals": True,
+                }, route["response_predicates"])
+                route["response_predicates"] = original_routes[route["id"]][
+                    "response_predicates"
+                ]
         self.assertEqual(actual, original)
 
-    def test_baseline_only_adds_the_exact_read_permission(self):
+    def test_authoring_baseline_is_explicitly_unattended_and_unconfined(self):
         actual = tomllib.loads((SOURCE / "authoring.config.toml").read_text())
-        original = tomllib.loads((SOURCE / "baseline.config.toml").read_text())
-        filesystem = actual["permissions"]["ryeos-workspace-only"]["filesystem"]
-        self.assertEqual(filesystem.pop("/ryeos/realizations/authoring-tools"), "read")
-        self.assertEqual(filesystem[":tmpdir"], "write")
-        filesystem[":tmpdir"] = "deny"
-        self.assertEqual(actual["shell_environment_policy"]["filters"].pop("TMPDIR"), "include")
-        self.assertEqual(actual, original)
+        self.assertEqual(actual["approval_policy"], "never")
+        self.assertEqual(actual["default_permissions"], "danger-full-access")
+        self.assertNotIn("permissions", actual)
+        self.assertEqual(actual["shell_environment_policy"]["filters"]["TMPDIR"], "include")
+        self.assertTrue(actual["features"]["code_mode_host"])
 
     def test_authored_shell_environment_is_not_silently_dropped(self):
         policy = tomllib.loads((SOURCE / "authoring.config.toml").read_text())[

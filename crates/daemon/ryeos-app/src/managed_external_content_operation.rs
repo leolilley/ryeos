@@ -257,26 +257,28 @@ pub fn publish_activation_receipt(
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let namespace = ryeos_state::objects::EXTERNAL_CONTENT_ACTIVATION_HEAD_NAMESPACE;
-    if let Some(current) = state
+    let current = state
         .state_store
-        .with_state_db(|db| db.read_generic_head_ref(namespace, &operation.activation_id))?
-    {
+        .with_state_db(|db| db.read_generic_head_ref(namespace, &operation.activation_id))?;
+    if let Some(current) = current.as_ref() {
         let value = cas
             .get_object(&current.target_hash)?
             .ok_or_else(|| anyhow::anyhow!("managed activation head target is absent"))?;
         let retained = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
-        // This head identifies the exact activated realization, not the latest
-        // invocation. A later activation under a narrower/current node policy
-        // may reuse the already-bound bytes; its sync job retains that newer
-        // policy/operator while the first completion receipt remains immutable.
-        if !same_activated_realization(&retained, &receipt) {
-            bail!("managed activation head contradicts the exact requested realization");
+        if !same_activation_subject(&retained, &receipt) {
+            bail!("managed activation head contradicts the exact activation subject");
         }
-        return Ok(ManagedActivationPublication {
-            activation_id: operation.activation_id.clone(),
-            receipt_hash: current.target_hash,
-            idempotent: true,
-        });
+        // Binding hashes are grant-generation authority, so a legitimate grant
+        // refresh produces a new realization for the same portable activation
+        // identity. Reuse only the byte-identical realization; otherwise stage
+        // and compare-and-swap a new node-signed receipt below.
+        if same_activated_realization(&retained, &receipt) {
+            return Ok(ManagedActivationPublication {
+                activation_id: operation.activation_id.clone(),
+                receipt_hash: current.target_hash.clone(),
+                idempotent: true,
+            });
+        }
     }
 
     let _permit = state
@@ -309,7 +311,7 @@ pub fn publish_activation_receipt(
             namespace,
             &operation.activation_id,
             &receipt_hash,
-            None,
+            current.as_ref().map(|head| head.target_hash.as_str()),
             &signer,
             &guard,
         )
@@ -322,6 +324,26 @@ pub fn publish_activation_receipt(
         receipt_hash,
         idempotent: false,
     })
+}
+
+fn same_activation_subject(
+    retained: &ryeos_state::objects::ExternalContentActivationReceipt,
+    expected: &ryeos_state::objects::ExternalContentActivationReceipt,
+) -> bool {
+    retained.activation_id == expected.activation_id
+        && retained.activation_ref == expected.activation_ref
+        && retained.activation_program_digest == expected.activation_program_digest
+        && retained.consumer_ref == expected.consumer_ref
+        && retained.publisher_fingerprint == expected.publisher_fingerprint
+        && retained.node_fingerprint == expected.node_fingerprint
+        && retained
+            .components
+            .iter()
+            .map(|component| component.id.as_str())
+            .eq(expected
+                .components
+                .iter()
+                .map(|component| component.id.as_str()))
 }
 
 fn same_activated_realization(
@@ -418,14 +440,19 @@ mod tests {
     }
 
     #[test]
-    fn immutable_activation_head_can_satisfy_a_later_narrower_invocation() {
+    fn activation_subject_survives_policy_and_binding_realization_changes() {
         let first = receipt('e', 'f');
         let later = receipt('1', '2');
+        assert!(same_activation_subject(&first, &later));
         assert!(same_activated_realization(&first, &later));
 
         let mut different = later;
         different.components[0].binding_hash = "3".repeat(64);
+        assert!(same_activation_subject(&first, &different));
         assert!(!same_activated_realization(&first, &different));
+
+        different.components[0].id = "other".to_owned();
+        assert!(!same_activation_subject(&first, &different));
     }
 
     #[test]
