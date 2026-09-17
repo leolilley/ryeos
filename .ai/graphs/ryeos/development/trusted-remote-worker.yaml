@@ -1,0 +1,47 @@
+# ryeos:signed:2026-09-17T03:46:06Z:68082c8e619fe4110a12aa308bf45e03664cbab2613502c511833f3531acda64:m35xPm2C3oPiNhyMVQJORVwoKN80pUyt1pGnqbJDrli/DKLpPmG8gYIdebFOrZJCg42xo/ZH2qTLphyu3M/qDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Run one bounded Codex turn on an explicitly trusted disposable hosted node
+effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/trusted-worker-environment
+      - ryeos.execute.worker_execution.codex/bounded-turn
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate
+config:
+  start: run
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      goal: {type: object}
+      credential_profile_id: {type: string, minLength: 1, maxLength: 256}
+      target_product_selections: {type: array}
+    required: [goal, credential_profile_id, target_product_selections]
+    additionalProperties: false
+  nodes:
+    run:
+      node_type: action
+      effects: live
+      cache_result: false
+      follow: true
+      action:
+        item_id: worker_execution:codex/bounded-turn
+        ref_bindings:
+          environment: config:development/ryeos/trusted-worker-environment
+        product_selections: "${inputs.target_product_selections}"
+        params:
+          goal: "${inputs.goal}"
+          credential_profile_id: "${inputs.credential_profile_id}"
+      assign:
+        candidate_terminal_thread_id: "${dispatch.child_thread_id}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        schema: ryeos.remote_worker_workflow_graph_result.v1
+        candidate_terminal_thread_id: "${state.candidate_terminal_thread_id}"

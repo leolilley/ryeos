@@ -2346,6 +2346,22 @@ fn validate_session_process_control(
         ) => {
             bail!("exclusive session requires protected external placement-incarnation authority");
         }
+        (
+            PersistentSessionProcessMode::ExclusiveSession,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+        ) => {
+            let readiness = &state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .trusted_exclusive_session;
+            if !readiness.ready {
+                bail!(
+                    "trusted process-group session is disabled by node policy ({})",
+                    readiness.reason.as_str()
+                );
+            }
+        }
         (PersistentSessionProcessMode::PooledRequests, _) => {
             bail!("pooled persistent session cannot select dedicated cleanup authority");
         }
@@ -2926,8 +2942,11 @@ pub fn start_exclusive_capsule(
     let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
     if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
-        || session_protocol.cleanup_authority
-            != PersistentSessionCleanupAuthority::LocalProcessScope
+        || !matches!(
+            session_protocol.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+                | PersistentSessionCleanupAuthority::TrustedProcessGroup
+        )
         || session_protocol.workspace_authority
             != PersistentSessionWorkspaceAuthority::RuntimeWorkspace
     {
@@ -2971,47 +2990,53 @@ pub fn start_exclusive_capsule(
         bail!("exclusive persistent-session protocol requires a readiness identity slot");
     }
     // Reserve against the admitted attempt before possible process contact.
-    // This owner (not a provider/kind switch) requires whole-execution control.
-    // Pooled request workers retain their separately admitted strict-group
-    // contract; an unavailable scope here must never select that other path.
-    let control_timeout = state.isolation.process_scope_control_timeout()?;
-    let allocation = state
-        .isolation
-        .plan_process_scope(&identity.worker_instance_id)?;
-    state.state_store.reserve_dedicated_worker_scope(
-        &identity.placement_thread_id,
-        &identity.worker_instance_id,
-        identity.boot_epoch,
-        &allocation,
-    )?;
-    // A restart may discard this unused allocation, but may not retry it to
-    // launch. A concrete result must be bound before possible process contact.
-    let scope = state
-        .isolation
-        .allocate_process_scope(&allocation)
-        .map_err(|error| {
-            let error = anyhow::Error::from(error);
-            match allocation.discard_unlaunched() {
+    // This owner (not a provider/kind switch) requires a dedicated execution.
+    // Qualified hosts allocate a protected local scope. An explicitly trusted
+    // disposable host instead retains the direct process-group lifecycle and
+    // makes no containment claim. Neither path may fall back to pooled work.
+    let (scope, scope_cleanup) = if session_protocol.cleanup_authority
+        == PersistentSessionCleanupAuthority::LocalProcessScope
+    {
+        let control_timeout = state.isolation.process_scope_control_timeout()?;
+        let allocation = state
+            .isolation
+            .plan_process_scope(&identity.worker_instance_id)?;
+        state.state_store.reserve_dedicated_worker_scope(
+            &identity.placement_thread_id,
+            &identity.worker_instance_id,
+            identity.boot_epoch,
+            &allocation,
+        )?;
+        let scope = state
+            .isolation
+            .allocate_process_scope(&allocation)
+            .map_err(|error| {
+                let error = anyhow::Error::from(error);
+                match allocation.discard_unlaunched() {
+                    Ok(()) => error,
+                    Err(cleanup) => error
+                        .context(format!("unlaunched allocation cleanup unproved: {cleanup}"))
+                        .context(ExclusiveWorkerCleanupUnproved),
+                }
+            })?;
+        let scope_recovery = scope.recovery().clone();
+        if let Err(error) = state.state_store.bind_dedicated_worker_scope(
+            &identity.placement_thread_id,
+            &identity.worker_instance_id,
+            identity.boot_epoch,
+            &scope_recovery,
+        ) {
+            return Err(match scope.retire_unlaunched(control_timeout) {
                 Ok(()) => error,
-                Err(cleanup) => error
-                    .context(format!("unlaunched allocation cleanup unproved: {cleanup}"))
-                    .context(ExclusiveWorkerCleanupUnproved),
-            }
-        })?;
-    let scope_recovery = scope.recovery().clone();
-    if let Err(error) = state.state_store.bind_dedicated_worker_scope(
-        &identity.placement_thread_id,
-        &identity.worker_instance_id,
-        identity.boot_epoch,
-        &scope_recovery,
-    ) {
-        return Err(match scope.retire_unlaunched(control_timeout) {
-            Ok(()) => error,
-            Err(retirement) => error.context(format!(
-                "unlaunched scope retirement failed: {retirement}; retained evidence: {scope_recovery:?}"
-            )).context(ExclusiveWorkerCleanupUnproved),
-        });
-    }
+                Err(retirement) => error.context(format!(
+                    "unlaunched scope retirement failed: {retirement}; retained evidence: {scope_recovery:?}"
+                )).context(ExclusiveWorkerCleanupUnproved),
+            });
+        }
+        (Some(scope), Some((scope_recovery, control_timeout)))
+    } else {
+        (None, None)
+    };
     let mut held = spawn_capsule_process_held(
         state,
         capsule_hash,
@@ -3023,21 +3048,25 @@ pub fn start_exclusive_capsule(
         state_root,
         &runtime_environment,
         extra_target_channels,
-        Some(scope),
+        scope,
     )
     .map_err(|error| {
         // Preparation itself can fail after reservation but before spawn.
         // Settle the recorded scope even on that path. An empty scope does
         // not erase an independent unproved wrapper/reap obligation.
-        let error = match scope_recovery.terminate_and_wait(control_timeout) {
-            Ok(()) => error,
-            Err(cleanup) => {
-                return error
-                    .context(format!(
-                        "reserved process scope cleanup remains unproved: {cleanup}"
-                    ))
-                    .context(ExclusiveWorkerCleanupUnproved);
+        let error = if let Some((scope_recovery, control_timeout)) = scope_cleanup.as_ref() {
+            match scope_recovery.terminate_and_wait(*control_timeout) {
+                Ok(()) => error,
+                Err(cleanup) => {
+                    return error
+                        .context(format!(
+                            "reserved process scope cleanup remains unproved: {cleanup}"
+                        ))
+                        .context(ExclusiveWorkerCleanupUnproved);
+                }
             }
+        } else {
+            error
         };
         if error
             .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()

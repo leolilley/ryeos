@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-17T03:41:16Z:b21cdc449421febe07b9060f0d735b1d9be7349f7d2680ad43d1a16fc9194d16:pOozNmTXGq7bSEGJATyk9M16pazU8PZJRFqF+T54t3wuiwxRIUx5f06L5uRLWwApX7sssylnK6nIgNH/OYB0AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: trusted_structured_session
+category: ryeos/core
+abi_version: v1
+description: Session-bound structured subprocess for a node-authorized trusted process-group placement.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections: []
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: none
+session:
+  process_mode: exclusive_session
+  cleanup_authority: trusted_process_group
+  workspace_authority: runtime_workspace
+  network_authority: node_policy
+  runtime_env_allowlist:
+    - RYEOS_WORKLOAD_HOME
+    - RYEOS_WORKLOAD_EXECUTABLE
+    - RYEOS_WORKSPACE
+    - RYEOS_STRUCTURED_SESSION_ROUTE_SET
+    - RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES
+    - RYEOS_STRUCTURED_SESSION_PROFILE_HASH
+    - RYEOS_SESSION_PROCESS_ENVIRONMENT
+  readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
+  channel: inherited_unix_socket
+  channel_env: RYEOS_SESSION_FD
+  framing: u32_be_json
+  wire_protocol: ryeos.structured-session
+  wire_version: 2
+  max_frame_bytes: 16777216

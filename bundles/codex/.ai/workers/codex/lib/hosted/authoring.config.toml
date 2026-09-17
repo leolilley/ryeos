@@ -1,14 +1,15 @@
-# ryeos:signed:2026-09-12T04:00:24Z:66da73966a5144162bf9c6d4629aba2b6172197c7cc28cf6bd438a570ab7211f:yEsSZ/RWMjDJgLdEIAXQJMSmKyGUWhRzQj4kDW7WjF00thxo4Ow9A3clQPyn8MVhKCW3PwPruQZH+a3LzH3uDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T03:41:16Z:dadb63637f98ea0d2df45fe2a871eeb0e20fa5fdfb3bb1c083fa93ca7c8670ab:9nQXei7xxUoLzr6xjsLATIjFxTqLZp8ZDNYILWJuBz98UPssecZHxYNmteLOma23HmeLFzHPeQHjsO451BrDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model_provider = "openai"
 mcp_servers = {}
 check_for_update_on_startup = false
-approval_policy = "on-request"
+approval_policy = "never"
 approvals_reviewer = "user"
-# Pinned Codex 0.147.0 split-filesystem profile. Permission profiles do not
-# compose with legacy sandbox_mode settings, so none are present here.
-default_permissions = "ryeos-workspace-only"
+# Authoring commands rely on the RyeOS execution boundary selected by the
+# worker protocol. Hard-contained nodes supply Lillux isolation; explicitly
+# opted-in trusted/disposable nodes accept the broader container boundary.
+default_permissions = "danger-full-access"
 web_search = "disabled"
 allow_login_shell = false
 
@@ -34,28 +35,6 @@ ignore_default_excludes = false
 "DBUS_*" = "exclude"
 "SSH_*" = "exclude"
 "*PROXY" = "exclude"
-
-[permissions.ryeos-workspace-only]
-extends = ":workspace"
-
-[permissions.ryeos-workspace-only.filesystem]
-":root" = "deny"
-":minimal" = "read"
-":tmpdir" = "write"
-":slash_tmp" = "deny"
-# Process resources are pinned read-only runtime inputs, never project files.
-"/ryeos/realizations/codex" = "read"
-"/ryeos/realizations/codex-code-mode-host" = "read"
-"/ryeos/realizations/codex-resources/bwrap" = "read"
-"/ryeos/realizations/codex-resources/zsh/bin/zsh" = "read"
-"/ryeos/realizations/codex-path/rg" = "read"
-"/ryeos/realizations/authoring-tools" = "read"
-
-[permissions.ryeos-workspace-only.filesystem.":workspace_roots"]
-".ai/cache/ryeos-runtime" = "read"
-
-[permissions.ryeos-workspace-only.network]
-enabled = false
 
 [agents]
 enabled = false
