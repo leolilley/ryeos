@@ -26,7 +26,7 @@ fn compute_etag(bytes: &[u8]) -> String {
 /// This type is deliberately private to the provider. The source of truth is
 /// `web-assets.json`; `generate_asset_registry.py` validates it and emits the
 /// literal `include_bytes!` table below.
-struct WebAssetEntry {
+pub(super) struct WebAssetEntry {
     route: &'static str,
     filename: &'static str,
     content_type: &'static str,
