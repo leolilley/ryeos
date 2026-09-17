@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-07T06:32:12Z:e2de6015e812d20097ea4a7cba118aee4ed136d0f3167025e523013f23c9828a:Rv5LOJMxsyQvWJkZYlu/jVOskNOxsItpl8DgVg7KPYIK+rGxO0CpTVsTGWAlakVD3zQgpz3GtilAhgX9unqYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:e2de6015e812d20097ea4a7cba118aee4ed136d0f3167025e523013f23c9828a:3R0vRSUiUCpPuo+ogGGIUeVh2u5SZlvi9LuonWe/tYQtSg7wO+ZNhifOFweni1TwuC1v6p1L43CS5v5ffT+JCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Offline assembly of the exact shell/Make support consumed by utilities.py.
 
 Acquisition, import, binding and isolation remain with their existing owners.

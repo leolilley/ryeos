@@ -1327,6 +1327,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
             "local-worker contact was claimed without a retained terminal; outcome is unknown and the model will not be contacted again"
         );
     }
+    let owned_thread_id = request.thread_id.clone();
     let worker_body = serde_json::json!({
         "request_body": request.request_body,
         "request_body_sha256": request.coordinate.body_sha256,
@@ -1337,6 +1338,7 @@ pub(super) fn handle_provider_attempt_local_stream_start(
     let owned_attempt_id = request.attempt_id.clone();
     let owned_request_hash = request.request_hash.clone();
     let owned_coordinate = request.coordinate.clone();
+    let owned_accounting_scope = cap.accounting_scope.clone();
     let stream_capacity = stream_capacity.ok_or_else(|| {
         anyhow!("fresh local-worker contact unexpectedly collides with a current stream")
     })?;
@@ -1344,6 +1346,12 @@ pub(super) fn handle_provider_attempt_local_stream_start(
         let terminal = ryeos_executor::execution::persistent_session::execute_capsule(
             &owned_state,
             &owned_capsule,
+            owned_accounting_scope.as_ref(),
+            &ryeos_app::persistent_session::PersistentSessionRequestIdentity {
+                thread_id: owned_thread_id.clone(),
+                request_digest: ryeos_accounting::HexDigest::new(owned_request_hash.clone())
+                    .map_err(anyhow::Error::msg)?,
+            },
             worker_body,
             || cancelled.load(std::sync::atomic::Ordering::Acquire),
             move |delta| publish_delta(delta),

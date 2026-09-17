@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-16T03:44:59Z:6cb7a01e08396ca6d46a1277f694e2f9a5bb2f2bbf948affcc5f77f203f8f0cf:FQOB5GGuPXLYM6Aemsru8+0VDC+VyM9r5o2588OzYh8oaMyq6aNaBr38OEL4Jn2axhQ+gpJKybRCxnaJIbmuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T00:05:36Z:69362417812ba226cb0822b18b04264714f2f8379f09cd698b8b6ce5a204801b:O5s7fBCj6W7j7GcGWwaafNDkqD0C7k1vQ+Kh0074mHJTk7fBXPe+Kub1Fx9+x+hUnjvmaDkxqgj6/dHRqHV6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
@@ -47,10 +47,11 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
-- `ui-design-system`: the governing UI visual language, component anatomy,
-  contextual-input rules, renderer/content ownership and visual review criteria.
-  Read it before implementing or restyling web or terminal UI. It supersedes
-  the older temporary HUD/monospace-everywhere style instructions.
+- `ui-design-system`: the governing Gruvbox visual language, nested-workspace
+  direction, component anatomy, contextual-input rules, renderer/content
+  ownership and visual review criteria. Read it before implementing or restyling
+  web or terminal UI. It preserves the launcher, optional slots and authored
+  ambient character; the rejected neutral-palette/sidebar redesign is superseded.
 
 The installed worker-hosted execution contract lives at
 `knowledge:ryeos/core/execution/worker-hosted-execution` in Standard.

@@ -1320,15 +1320,19 @@ impl IsolationRuntime {
             nested_sandbox,
         } = &policy.process_scopes
         {
-            if policy.mode != IsolationMode::Enforce || *control_timeout_ms == 0 {
-                return Err(refused("required process scopes require enforced isolation and a positive control deadline".to_owned()));
+            if *control_timeout_ms == 0 {
+                return Err(refused(
+                    "required process scopes require a positive control deadline".to_owned(),
+                ));
             }
             if *nested_sandbox
-                && policy.filesystem.proc_filesystem
-                    != ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
+                && (policy.mode != IsolationMode::Enforce
+                    || policy.filesystem.proc_filesystem
+                        != ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested)
             {
                 return Err(refused(
-                    "nested sandbox policy requires pid_namespace_nested proc".to_owned(),
+                    "nested sandbox policy requires enforced isolation and pid_namespace_nested proc"
+                        .to_owned(),
                 ));
             }
         }
@@ -2142,6 +2146,7 @@ impl IsolationRuntime {
             context,
             RequestedLaunchLifecycle::Run,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunch {
@@ -2198,6 +2203,44 @@ impl IsolationRuntime {
             context,
             RequestedLaunchLifecycle::AwaitAttachment,
             scope.as_ref().map(|scope| scope.recovery()),
+            None,
+        )?;
+        self.ensure_registered_generation_current()?;
+        Ok(AppliedIsolationLaunchAwaitingAttachment {
+            request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
+            provenance: applied.provenance,
+        })
+    }
+
+    /// Compile one held launch with an already observed, node-selected device
+    /// set. The descriptor set is not filesystem authority and cannot be
+    /// synthesized from request environment or project content.
+    pub fn apply_awaiting_attachment_in_scope_with_devices(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        scope: Option<lillux::ProcessScope>,
+        devices: &lillux::CharacterDeviceSet,
+    ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        self.ensure_registered_generation_current()?;
+        if let Some(scope) = scope.as_ref() {
+            let timeout = self.process_scope_control_timeout()?;
+            let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
+                refused("retained scope has no admitted provider generation".to_owned())
+            })?;
+            provider.validate_scope(scope).map_err(refused)?;
+            if scope.recovery().control_timeout() != timeout {
+                return Err(refused(
+                    "retained process scope differs from the admitted control budget".to_owned(),
+                ));
+            }
+        }
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            scope.as_ref().map(|scope| scope.recovery()),
+            Some(devices),
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
@@ -2212,6 +2255,7 @@ impl IsolationRuntime {
         context: IsolationLaunchContext<'_>,
         lifecycle: RequestedLaunchLifecycle,
         process_scope: Option<&lillux::ProcessScopeRecovery>,
+        selected_devices: Option<&lillux::CharacterDeviceSet>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
@@ -2223,6 +2267,11 @@ impl IsolationRuntime {
             context.project_authority,
             context.workspace_view,
         )?;
+        if self.state == IsolationRuntimeState::Disabled && selected_devices.is_some() {
+            return Err(refused(
+                "exact character-device grants require enforced isolation".to_owned(),
+            ));
+        }
         let verified_command_authority = context
             .verified_command
             .map(|authority| authority.authority());
@@ -4037,6 +4086,43 @@ impl IsolationRuntime {
             });
         }
 
+        let mut character_device_plan = Vec::new();
+        if let Some(devices) = selected_devices {
+            character_device_plan.reserve(devices.authorities().len());
+            for (index, device) in devices.authorities().iter().enumerate() {
+                let identity = device.identity();
+                let source = IsolationAuthorityId::new(format!("character-device-{index}"))
+                    .map_err(|error| refused(error.to_string()))?;
+                authorities.push(IsolationAuthority {
+                    id: source.clone(),
+                    inherited_fd: device.inherited_descriptor().map_err(|error| {
+                        refused(format!("inspect character-device descriptor: {error}"))
+                    })?,
+                    purpose: IsolationAuthorityPurpose::CharacterDevice,
+                });
+                device.retain_for_child(&mut authority_handles);
+                character_device_plan.push(ryeos_isolation_protocol::IsolationCharacterDevice {
+                    source,
+                    role: identity.role.clone(),
+                    destination: IsolationPath::new(
+                        identity.destination.to_string_lossy().into_owned(),
+                    )
+                    .map_err(|error| refused(error.to_string()))?,
+                    access: match identity.access {
+                        lillux::CharacterDeviceAccess::ReadOnly => {
+                            ryeos_isolation_protocol::IsolationCharacterDeviceAccess::ReadOnly
+                        }
+                        lillux::CharacterDeviceAccess::ReadWrite => {
+                            ryeos_isolation_protocol::IsolationCharacterDeviceAccess::ReadWrite
+                        }
+                    },
+                    major: identity.major,
+                    minor: identity.minor,
+                });
+            }
+            character_device_plan.sort_by(|left, right| left.role.cmp(&right.role));
+        }
+
         let mut environment = envs
             .into_iter()
             .filter(|(name, _)| name != "TMPDIR")
@@ -4079,6 +4165,7 @@ impl IsolationRuntime {
                 }
             },
             devices: IsolationDeviceSurface::Minimal,
+            character_devices: character_device_plan,
             private_tmp: true,
             // Intersect the node's broader ceiling with this exact launch's
             // retained lifetime authority. Ordinary preparers/Tools retain
@@ -8670,6 +8757,7 @@ mod tests {
             },
             network: IsolationNetwork::Isolated,
             devices: IsolationDeviceSurface::Minimal,
+            character_devices: Vec::new(),
             private_tmp: true,
             proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
             pid_namespace: IsolationPidNamespace::Isolated,
@@ -8837,6 +8925,20 @@ mod tests {
     fn process_scope_policy_is_explicit_and_cannot_advertise_unqualified_support() {
         let policy = IsolationPolicy::disabled_for_authoring();
         IsolationRuntime::validate_policy(&policy).unwrap();
+        let mut scoped_without_sandbox = policy.clone();
+        scoped_without_sandbox.process_scopes = IsolationProcessScopePolicy::Required {
+            control_timeout_ms: 1_000,
+            nested_sandbox: false,
+        };
+        IsolationRuntime::validate_policy(&scoped_without_sandbox).unwrap();
+        assert_eq!(scoped_without_sandbox.mode, IsolationMode::Disabled);
+        assert!(matches!(
+            scoped_without_sandbox.process_scopes,
+            IsolationProcessScopePolicy::Required {
+                nested_sandbox: false,
+                ..
+            }
+        ));
         let mut value = serde_json::to_value(&policy).unwrap();
         value.as_object_mut().unwrap().remove("process_scopes");
         assert!(serde_json::from_value::<IsolationPolicy>(value).is_err());

@@ -454,7 +454,7 @@ pub fn ensure_bundles_fresh() {
         let status = std::process::Command::new("bash")
             .arg(root.join("scripts/populate-bundles.sh"))
             .arg("--key").arg(&key)
-            .arg("--owner").arg("ryeos-dev")
+            .arg("--owner").arg("RyeOS Development")
             .arg("--all")
             .current_dir(&root)
             .status()

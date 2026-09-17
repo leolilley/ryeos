@@ -2102,6 +2102,367 @@ const ATTACHMENT_IDENTITY_PHASE: u32 = 1;
 const ATTACHMENT_READY_PHASE: u32 = 2;
 const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
 
+#[cfg(target_os = "linux")]
+struct OccupancyWatchdog {
+    pid: libc::pid_t,
+    cancel: Option<std::fs::File>,
+}
+
+#[cfg(target_os = "linux")]
+impl OccupancyWatchdog {
+    fn cancel_and_reap(&mut self) -> Result<(), String> {
+        if let Some(mut cancel) = self.cancel.take() {
+            let _ = cancel.write_all(&[1]);
+            drop(cancel);
+        }
+        let mut status = 0;
+        loop {
+            let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+            if result == self.pid {
+                self.pid = -1;
+                return Ok(());
+            }
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    self.pid = -1;
+                    return Ok(());
+                }
+                return Err(format!("reap occupancy watchdog: {error}"));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OccupancyWatchdog {
+    fn drop(&mut self) {
+        // Loss of the daemon-side owner is not cancellation authority. The
+        // child retains its keepalive writer and continues to the absolute
+        // scope-kill deadline. A detached waiter prevents a zombie while this
+        // daemon remains alive, but has no descriptor capable of cancelling
+        // enforcement. Normal proved cleanup calls cancel_and_reap.
+        self.cancel.take();
+        let pid = self.pid;
+        if pid <= 0 {
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("lillux-occupancy-watchdog-reaper".to_owned())
+            .spawn(move || {
+                let mut status = 0;
+                while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                        break;
+                    }
+                }
+            });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn arm_occupancy_watchdog(
+    target_pidfd: BorrowedFd<'_>,
+    scope_kill: std::fs::File,
+    limit: &crate::time::OccupancyLimit,
+    cleanup_allowance: Duration,
+) -> Result<OccupancyWatchdog, String> {
+    limit.validate()?;
+    if !matches!(
+        limit.window(cleanup_allowance)?,
+        crate::time::OccupancyWindowState::Service { .. }
+    ) {
+        return Err("occupancy service window elapsed before target release".to_owned());
+    }
+    let cleanup_ns = u64::try_from(cleanup_allowance.as_nanos())
+        .map_err(|_| "occupancy cleanup allowance overflows nanoseconds".to_owned())?;
+    let service_tick = limit
+        .start
+        .tick_ns
+        .checked_add(limit.maximum_occupancy_ns - cleanup_ns)
+        .ok_or_else(|| "occupancy service deadline overflow".to_owned())?;
+    let expiry_tick = limit
+        .start
+        .tick_ns
+        .checked_add(limit.maximum_occupancy_ns)
+        .ok_or_else(|| "occupancy expiry deadline overflow".to_owned())?;
+    let timer_fd = unsafe { libc::timerfd_create(libc::CLOCK_BOOTTIME, libc::TFD_CLOEXEC) };
+    if timer_fd < 0 {
+        return Err(format!(
+            "create occupancy watchdog timer: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let timer = unsafe { OwnedFd::from_raw_fd(timer_fd) };
+    arm_absolute_boottime_timer(timer.as_raw_fd(), service_tick)?;
+    let mut cancel_fds = [-1_i32; 2];
+    if unsafe { libc::pipe2(cancel_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "create occupancy watchdog cancellation boundary: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let cancel_reader = unsafe { OwnedFd::from_raw_fd(cancel_fds[0]) };
+    let cancel_writer = unsafe { OwnedFd::from_raw_fd(cancel_fds[1]) };
+    let mut ready_fds = [-1_i32; 2];
+    if unsafe { libc::pipe2(ready_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "create occupancy watchdog readiness boundary: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut ready_reader = unsafe { std::fs::File::from_raw_fd(ready_fds[0]) };
+    let ready_writer = unsafe { OwnedFd::from_raw_fd(ready_fds[1]) };
+    let duplicate_for_child = |fd: i32| -> Result<OwnedFd, String> {
+        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 8) };
+        if duplicate < 0 {
+            return Err(format!(
+                "duplicate occupancy watchdog authority: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    };
+    let child_cancel_reader = duplicate_for_child(cancel_reader.as_raw_fd())?;
+    let child_timer = duplicate_for_child(timer.as_raw_fd())?;
+    let child_scope_kill = duplicate_for_child(scope_kill.as_raw_fd())?;
+    let child_target_pidfd = duplicate_for_child(target_pidfd.as_raw_fd())?;
+    let child_cancel_keepalive = duplicate_for_child(cancel_writer.as_raw_fd())?;
+    let child_ready_writer = duplicate_for_child(ready_writer.as_raw_fd())?;
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(format!(
+            "fork occupancy watchdog: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if child == 0 {
+        unsafe {
+            occupancy_watchdog_child(
+                child_cancel_reader.as_raw_fd(),
+                child_cancel_keepalive.as_raw_fd(),
+                child_timer.as_raw_fd(),
+                child_scope_kill.as_raw_fd(),
+                child_target_pidfd.as_raw_fd(),
+                child_ready_writer.as_raw_fd(),
+                expiry_tick,
+            )
+        }
+    }
+    drop(ready_writer);
+    drop(child_cancel_reader);
+    drop(child_timer);
+    drop(child_scope_kill);
+    drop(child_target_pidfd);
+    drop(child_cancel_keepalive);
+    drop(child_ready_writer);
+    drop(cancel_reader);
+    let mut readiness_poll = libc::pollfd {
+        fd: ready_reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let polled = unsafe { libc::poll(&mut readiness_poll, 1, 5_000) };
+    let mut ready = [0_u8; 1];
+    let acknowledged = polled == 1
+        && readiness_poll.revents & libc::POLLIN != 0
+        && ready_reader.read_exact(&mut ready).is_ok()
+        && ready[0] == 1;
+    if !acknowledged {
+        let mut cancel = std::fs::File::from(cancel_writer);
+        let _ = cancel.write_all(&[1]);
+        let mut status = 0;
+        while unsafe { libc::waitpid(child, &mut status, 0) } < 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+        return Err(
+            "occupancy watchdog did not acknowledge its isolated enforcement boundary".to_owned(),
+        );
+    }
+    Ok(OccupancyWatchdog {
+        pid: child,
+        cancel: Some(std::fs::File::from(cancel_writer)),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn arm_absolute_boottime_timer(fd: i32, tick_ns: u64) -> Result<(), String> {
+    let seconds = tick_ns / 1_000_000_000;
+    let nanoseconds = tick_ns % 1_000_000_000;
+    let specification = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: libc::timespec {
+            tv_sec: libc::time_t::try_from(seconds)
+                .map_err(|_| "occupancy timer seconds exceed time_t".to_owned())?,
+            tv_nsec: libc::c_long::try_from(nanoseconds)
+                .map_err(|_| "occupancy timer nanoseconds exceed c_long".to_owned())?,
+        },
+    };
+    if unsafe {
+        libc::timerfd_settime(
+            fd,
+            libc::TFD_TIMER_ABSTIME,
+            &specification,
+            std::ptr::null_mut(),
+        )
+    } != 0
+    {
+        return Err(format!(
+            "arm occupancy watchdog timer: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Child side of the crash-surviving lifetime boundary. Only async-signal-safe
+/// syscalls occur after fork; inherited daemon authority is closed before the
+/// child waits or signals anything.
+#[cfg(target_os = "linux")]
+unsafe fn occupancy_watchdog_child(
+    cancel_reader: i32,
+    cancel_keepalive: i32,
+    timer: i32,
+    scope_kill: i32,
+    target_pidfd: i32,
+    ready_writer: i32,
+    expiry_tick: u64,
+) -> ! {
+    for (source, target) in [
+        cancel_reader,
+        timer,
+        scope_kill,
+        target_pidfd,
+        cancel_keepalive,
+        ready_writer,
+    ]
+    .into_iter()
+    .zip([3, 4, 5, 6, 7, 8])
+    {
+        if unsafe { libc::dup2(source, target) } < 0 {
+            unsafe { libc::_exit(125) }
+        }
+    }
+    if unsafe { libc::syscall(libc::SYS_close_range, 9_u32, u32::MAX, 2_u32) } != 0 {
+        unsafe { libc::_exit(125) }
+    }
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+        libc::close(2);
+        libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0);
+    }
+    if unsafe { libc::write(8, [1_u8].as_ptr().cast(), 1) } != 1 {
+        unsafe { libc::_exit(125) }
+    }
+    unsafe { libc::close(8) };
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: 3,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: 4,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        let result = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+        if result < 0 {
+            if unsafe { *libc::__errno_location() } == libc::EINTR {
+                continue;
+            }
+            unsafe { kill_scope_and_exit(5) }
+        }
+        if poll_fds[0].revents != 0 {
+            unsafe { libc::_exit(0) }
+        }
+        if poll_fds[1].revents & libc::POLLIN != 0 {
+            break;
+        }
+    }
+    // The service-boundary request is fenced by the retained pidfd. A numeric
+    // PID or PGID may be recycled after daemon loss and is never safe here.
+    let signal_result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            6,
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0_u32,
+        )
+    };
+    if signal_result != 0 {
+        let error = unsafe { *libc::__errno_location() };
+        if error != libc::ESRCH {
+            unsafe { kill_scope_and_exit(5) }
+        }
+    }
+    let seconds = expiry_tick / 1_000_000_000;
+    let nanoseconds = expiry_tick % 1_000_000_000;
+    let expiry = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        it_value: libc::timespec {
+            tv_sec: seconds as libc::time_t,
+            tv_nsec: nanoseconds as libc::c_long,
+        },
+    };
+    if unsafe { libc::timerfd_settime(4, libc::TFD_TIMER_ABSTIME, &expiry, std::ptr::null_mut()) }
+        != 0
+    {
+        unsafe { kill_scope_and_exit(5) }
+    }
+    for poll_fd in &mut poll_fds {
+        poll_fd.revents = 0;
+    }
+    loop {
+        let result = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+        if result < 0 {
+            if unsafe { *libc::__errno_location() } == libc::EINTR {
+                continue;
+            }
+            unsafe { kill_scope_and_exit(5) }
+        }
+        if poll_fds[0].revents != 0 {
+            unsafe { libc::_exit(0) }
+        }
+        if poll_fds[1].revents & libc::POLLIN != 0 {
+            break;
+        }
+    }
+    unsafe { kill_scope_and_exit(5) }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn kill_scope_and_exit(scope_kill_fd: i32) -> ! {
+    let byte = b'1';
+    loop {
+        let written = unsafe { libc::write(scope_kill_fd, (&byte as *const u8).cast(), 1) };
+        if written == 1 {
+            unsafe { libc::_exit(0) }
+        }
+        if written < 0 && unsafe { *libc::__errno_location() } == libc::EINTR {
+            continue;
+        }
+        // The hard controller itself failed. Do not misreport a clean exit;
+        // the nonzero status remains diagnostic if the daemon survives.
+        unsafe { libc::_exit(126) }
+    }
+}
+
 /// Process-wide lease for descriptors whose inherited open-file descriptions
 /// carry authority across `fork(2)` (notably advisory file locks).
 ///
@@ -2664,6 +3025,12 @@ pub struct RunningProcess {
     /// the backend's final pre-exec boundary. Authoritative lifecycle callers
     /// release it only after persisting the exact reported process identity.
     attachment_release: Option<ProcessAttachmentRelease>,
+    /// Independent Lillux-owned lifetime enforcement. The helper retains only
+    /// the exact target pidfd, exact process-scope kill authority, and
+    /// timer/cancel descriptors; it survives daemon death and owns no project
+    /// authority.
+    #[cfg(target_os = "linux")]
+    occupancy_watchdog: Option<OccupancyWatchdog>,
     groups_terminated: bool,
     wrapper_reaped: bool,
 }
@@ -2825,7 +3192,26 @@ impl ProcessAwaitingAttachment {
     /// Release the child only after its exact identity has been durably
     /// attached, then recover the ordinary `RunningProcess` produced by
     /// `Command::spawn` after exec crosses Rust's normal error boundary.
-    pub fn release_after_attachment(mut self) -> Result<RunningProcess, AttachmentReleaseError> {
+    pub fn release_after_attachment(self) -> Result<RunningProcess, AttachmentReleaseError> {
+        self.release_after_attachment_inner(None)
+    }
+
+    /// Release through a Lillux-owned finite-lifetime boundary. This is
+    /// intentionally available only for the supervised containment route: a
+    /// bare direct child can leave its process group, so it cannot support the
+    /// hard crash-surviving occupancy contract.
+    pub fn release_after_attachment_with_occupancy(
+        self,
+        limit: crate::time::OccupancyLimit,
+        cleanup_allowance: Duration,
+    ) -> Result<RunningProcess, AttachmentReleaseError> {
+        self.release_after_attachment_inner(Some((limit, cleanup_allowance)))
+    }
+
+    fn release_after_attachment_inner(
+        mut self,
+        occupancy: Option<(crate::time::OccupancyLimit, Duration)>,
+    ) -> Result<RunningProcess, AttachmentReleaseError> {
         if self
             .request_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -2870,6 +3256,24 @@ impl ProcessAwaitingAttachment {
                 worker,
                 mut release_registration,
             } => {
+                if occupancy.is_some() {
+                    drop(release_registration);
+                    let settlement = prove_attachment_cleanup(
+                        self.pidfd.as_raw_fd(),
+                        settle_direct_attachment_worker(self.pid, worker),
+                    );
+                    let (detail, cleanup_is_settled) = self.cleanup_failure_detail(settlement);
+                    return Err(AttachmentReleaseError {
+                        phase: "release after attachment",
+                        cleanup_is_settled,
+                        result: spawn_failure(
+                            Instant::now(),
+                            format!(
+                                "hard occupancy requires Lillux supervised containment{detail}"
+                            ),
+                        ),
+                    });
+                }
                 if let Err(error) = release_registration.write_release() {
                     drop(release_registration);
                     let settlement = prove_attachment_cleanup(
@@ -2941,6 +3345,43 @@ impl ProcessAwaitingAttachment {
                             ),
                         ),
                     });
+                }
+                if let Some((limit, cleanup_allowance)) = occupancy {
+                    let enforcement = running
+                        .process_scope
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "hard occupancy requires an exact Lillux process scope".to_owned()
+                        })
+                        .and_then(|scope| scope.occupancy_watchdog_kill_descriptor())
+                        .and_then(|kill| {
+                            arm_occupancy_watchdog(
+                                self.pidfd.as_fd(),
+                                kill,
+                                &limit,
+                                cleanup_allowance,
+                            )
+                        });
+                    match enforcement {
+                        Ok(watchdog) => running.occupancy_watchdog = Some(watchdog),
+                        Err(error) => {
+                            let cleanup = prove_attachment_cleanup(
+                                self.pidfd.as_raw_fd(),
+                                running.abort_and_reap_checked(),
+                            );
+                            let (detail, cleanup_is_settled) = self.cleanup_failure_detail(cleanup);
+                            return Err(AttachmentReleaseError {
+                                phase: "release after attachment",
+                                cleanup_is_settled,
+                                result: spawn_failure(
+                                    Instant::now(),
+                                    format!(
+                                        "arm crash-surviving occupancy enforcement: {error}{detail}"
+                                    ),
+                                ),
+                            });
+                        }
+                    }
                 }
                 match running.release_attachment_boundary() {
                     Ok(()) => Ok(*running),
@@ -3392,8 +3833,19 @@ impl RunningProcess {
     /// this method returning. Observer failure/panic interrupts the existing
     /// waiter, which alone terminates, reaps and closes capture before join.
     pub fn wait_with_stdout<T: Send, E: Send>(
+        self,
+        observe: impl FnOnce(ProcessStdoutReader) -> Result<T, E> + Send,
+    ) -> (SubprocessResult, Result<T, ProcessObservationError<E>>) {
+        self.wait_with_stdout_interruptible(observe, || false)
+    }
+
+    /// Observe stdout while also honoring a caller-owned semantic stop
+    /// predicate. Lillux remains the only signal/reap owner and combines the
+    /// predicate with observer failure under the same supervised wait.
+    pub fn wait_with_stdout_interruptible<T: Send, E: Send>(
         mut self,
         observe: impl FnOnce(ProcessStdoutReader) -> Result<T, E> + Send,
+        mut interrupted: impl FnMut() -> bool,
     ) -> (SubprocessResult, Result<T, ProcessObservationError<E>>) {
         let Some(reader) = self.take_stdout_reader() else {
             return (
@@ -3414,7 +3866,8 @@ impl RunningProcess {
             });
             match observer {
                 Ok(observer) => {
-                    let completion = self.wait_interruptible(|| failed.load(Ordering::Acquire));
+                    let completion =
+                        self.wait_interruptible(|| failed.load(Ordering::Acquire) || interrupted());
                     let observed = match observer.join() {
                         Ok(result) => result.map_err(ProcessObservationError::Observation),
                         Err(_) => Err(ProcessObservationError::Panicked),
@@ -3633,7 +4086,13 @@ impl RunningProcess {
             Err(_) => Ok(()),
         };
         match (group_result, reap_result) {
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Ok(())) => {
+                #[cfg(target_os = "linux")]
+                if let Some(mut watchdog) = self.occupancy_watchdog.take() {
+                    watchdog.cancel_and_reap()?;
+                }
+                Ok(())
+            }
             (Err(group), Ok(())) => Err(group),
             (Ok(()), Err(reap)) => Err(reap),
             (Err(group), Err(reap)) => Err(format!("{group}; {reap}")),
@@ -4766,6 +5225,8 @@ fn lib_spawn_with_stdio(
         start,
         timeout,
         attachment_release,
+        #[cfg(target_os = "linux")]
+        occupancy_watchdog: None,
         groups_terminated: false,
         wrapper_reaped: false,
     };

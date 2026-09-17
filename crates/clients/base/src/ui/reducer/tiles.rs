@@ -28,6 +28,93 @@ fn derived_group_title(view_ref: &str) -> String {
 }
 
 impl RyeOsCore {
+    /// Presentation concurrency fence, not execution authority. Derive it from
+    /// the canonical tree instead of maintaining a second mutable revision.
+    pub fn layout_guard(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let session = self.data.session.as_ref();
+        let bytes = serde_json::to_vec(&(
+            session.map(|s| (&s.session_id, &s.binding_digest)),
+            self.active_workspace,
+            self.workspaces[self.active_workspace].id,
+            &self.workspaces[self.active_workspace].root,
+        ))
+        .expect("layout coordinate serializes");
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    pub(crate) fn new_workspace(&mut self) -> Vec<RyeOsEffect> {
+        if self.workspaces.len() >= crate::surface::workspaces::MAX_WORKSPACES {
+            return Vec::new();
+        }
+        let mut workspace = crate::workspace::Workspace::from_tiling(
+            self.workspaces[self.active_workspace].tiling.clone(),
+            Vec::new(),
+        );
+        workspace.title = format!("Workspace {}", self.workspaces.len() + 1);
+        self.workspaces.push(workspace);
+        self.switch_workspace_tab(self.workspaces.len() - 1)
+    }
+
+    pub(crate) fn rename_workspace(&mut self, id: crate::ids::WorkspaceId, title: &str) {
+        let title = title.trim();
+        if title.is_empty()
+            || title.len() > crate::surface::workspaces::MAX_WORKSPACE_LABEL_BYTES
+            || title.chars().any(char::is_control)
+        {
+            return;
+        }
+        if let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == id)
+        {
+            if workspace.title != title {
+                workspace.title = title.to_owned();
+                self.bump_generation();
+            }
+        }
+    }
+
+    /// Closing presentation never terminates an execution. Stable identity is
+    /// essential here: a delayed close must not target a newly shifted index.
+    pub(crate) fn close_workspace(&mut self, id: crate::ids::WorkspaceId) -> Vec<RyeOsEffect> {
+        let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == id)
+        else {
+            return Vec::new();
+        };
+        if self.workspaces.len() == 1 {
+            return Vec::new();
+        }
+        if self.workspaces[index]
+            .input_buffers
+            .values()
+            .any(|input| !input.text.is_empty())
+        {
+            self.notice(
+                "Workspace has current input. Clear it explicitly before closing.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
+        let previous_active = self.workspaces[self.active_workspace].id;
+        self.workspaces.remove(index);
+        self.active_workspace = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == previous_active)
+            .unwrap_or(index.min(self.workspaces.len() - 1));
+        if previous_active == id {
+            self.refresh_workspace_sources()
+        } else {
+            self.bump_generation();
+            Vec::new()
+        }
+    }
+
     pub(crate) fn cycle_workspace_tab(
         &mut self,
         direction: RyeOsStackMoveDirection,
@@ -38,7 +125,9 @@ impl RyeOsCore {
         };
         // Single-lens has no workspace tabs to page — "cycle" swaps the one
         // center lens through the surface library instead.
-        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
+        if self.workspaces[self.active_workspace].tiling.mode
+            == crate::surface::TilingModeSpec::SingleLens
+        {
             return self.cycle_lens(delta);
         }
         let len = self.workspaces.len().max(1);
@@ -184,8 +273,7 @@ impl RyeOsCore {
         if lenses.is_empty() {
             return Vec::new();
         }
-        let current = self
-            .workspace
+        let current = self.workspaces[self.active_workspace]
             .focused_view()
             .map(|view| view.view_ref.clone());
         let index = current
@@ -202,11 +290,11 @@ impl RyeOsCore {
         if index >= self.workspaces.len() || index == self.active_workspace {
             return Vec::new();
         }
-        if self.active_workspace < self.workspaces.len() {
-            self.workspaces[self.active_workspace] = self.workspace.clone();
-        }
-        self.workspace = self.workspaces[index].clone();
         self.active_workspace = index;
+        self.refresh_workspace_sources()
+    }
+
+    pub(crate) fn refresh_workspace_sources(&mut self) -> Vec<RyeOsEffect> {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.tile_file_space.clear();
@@ -217,21 +305,29 @@ impl RyeOsCore {
         self.data.source_floor.clear();
         self.data.source_subject_fingerprint.clear();
         self.data.timeline_sources.clear();
+        self.data.field_sources.clear();
+        self.data.field_projections.borrow_mut().clear();
         self.deferred_source_fetches.clear();
         self.pending_effects
             .retain(|_, kind| !matches!(kind, RyeOsEffectKind::FetchSource { .. }));
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
-            tile_id: self.workspace.focused_tile.0.to_string(),
+            tile_id: self.workspaces[self.active_workspace]
+                .focused_tile
+                .0
+                .to_string(),
         });
         self.push_motion(RyeOsMotionEventVm::TabChanged {
-            workspace_number: index + 1,
+            workspace_number: self.active_workspace + 1,
         });
         self.bump_generation();
         self.initial_effects()
     }
 
     pub(crate) fn set_tile_cursor(&mut self, tile_id: TileId, index: usize) -> bool {
-        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace]
+            .tiles
+            .get_mut(&tile_id)
+        else {
             return false;
         };
         match &mut tile.local {
@@ -252,7 +348,10 @@ impl RyeOsCore {
         section: usize,
         collapsed: bool,
     ) -> bool {
-        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace]
+            .tiles
+            .get_mut(&tile_id)
+        else {
             return false;
         };
         match &mut tile.local {
@@ -270,14 +369,13 @@ impl RyeOsCore {
     }
 
     pub(crate) fn open_view(&mut self, view: ViewSpec) -> Vec<RyeOsEffect> {
-        for tile_id in self.workspace.tile_ids() {
-            if self
-                .workspace
+        for tile_id in self.workspaces[self.active_workspace].tile_ids() {
+            if self.workspaces[self.active_workspace]
                 .tiles
                 .get(&tile_id)
                 .is_some_and(|tile| tile.view == view)
             {
-                self.workspace.focused_tile = tile_id;
+                self.workspaces[self.active_workspace].focus_tile(tile_id);
                 self.push_motion(RyeOsMotionEventVm::FocusChanged {
                     tile_id: tile_id.0.to_string(),
                 });
@@ -290,17 +388,19 @@ impl RyeOsCore {
         // tile: opening a different view REPLACES the lens in place rather
         // than splitting a second tile. Breadth comes from swapping the
         // single lens, never from arranging panes.
-        let replaced = (self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
-            && !self.workspace.center_is_empty())
+        let replaced = (self.workspaces[self.active_workspace].tiling.mode
+            == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspaces[self.active_workspace].center_is_empty())
         .then(|| {
-            self.workspace
+            self.workspaces[self.active_workspace]
                 .tiles
-                .get(&self.workspace.focused_tile)
+                .get(&self.workspaces[self.active_workspace].focused_tile)
                 .map(|tile| tile.instance_key.clone())
         })
         .flatten();
         if let Some(instance_key) = replaced
-            && let Some(tile_id) = self.workspace.replace_focused_view(view.clone())
+            && let Some(tile_id) =
+                self.workspaces[self.active_workspace].replace_focused_view(view.clone())
         {
             self.invalidate_view_sources(&instance_key);
             self.normalize_field_local_states();
@@ -326,13 +426,12 @@ impl RyeOsCore {
     /// the facet context it read, then refetch so the restored trace re-resolves
     /// and re-subscribes its tail. No-op at the top of the tree (empty stack).
     pub(crate) fn pop_view(&mut self) -> Vec<RyeOsEffect> {
-        let Some(frame) = self.workspace.pop_lens_frame() else {
+        let Some(frame) = self.workspaces[self.active_workspace].pop_lens_frame() else {
             return Vec::new();
         };
-        let replaced_instance = self
-            .workspace
+        let replaced_instance = self.workspaces[self.active_workspace]
             .tiles
-            .get(&self.workspace.focused_tile)
+            .get(&self.workspaces[self.active_workspace].focused_tile)
             .map(|tile| tile.instance_key.clone());
         // Restore the captured facet context by re-appending any facet whose
         // current value differs — last-writer-wins over the seat log, so the
@@ -350,11 +449,14 @@ impl RyeOsCore {
         if let Some(instance_key) = &replaced_instance {
             self.invalidate_view_sources(instance_key);
         }
-        self.workspace.replace_focused_view(frame.view.clone());
+        self.workspaces[self.active_workspace].replace_focused_view(frame.view.clone());
         self.normalize_field_local_states();
-        self.workspace.lens_label = frame.label.clone();
+        self.workspaces[self.active_workspace].lens_label = frame.label.clone();
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
-            tile_id: self.workspace.focused_tile.0.to_string(),
+            tile_id: self.workspaces[self.active_workspace]
+                .focused_tile
+                .0
+                .to_string(),
         });
         self.bump_generation();
         // Refetch: the restored view resolves against the restored facets and
@@ -370,33 +472,49 @@ impl RyeOsCore {
     }
 
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
-        let Some(instance_key) = self
-            .workspace
+        let Some(instance_key) = self.workspaces[self.active_workspace]
             .tiles
             .get(&tile_id)
             .map(|tile| tile.instance_key.clone())
         else {
             return false;
         };
+        if self.workspaces[self.active_workspace]
+            .input_buffers
+            .iter()
+            .any(|(key, input)| {
+                !input.text.is_empty()
+                    && super::model::InputBufferKey::storage_key_belongs_to(key, &instance_key)
+            })
+        {
+            self.notice(
+                "View has current input. Clear it explicitly before closing.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return false;
+        }
         let tile_id_text = tile_id.0.to_string();
-        if self.workspace.tile_ids().len() <= 1 {
-            if self.workspace.center_is_empty() {
+        if self.workspaces[self.active_workspace].tile_ids().len() <= 1 {
+            if self.workspaces[self.active_workspace].center_is_empty() {
                 return false;
             }
             self.invalidate_view_sources(&instance_key);
             self.push_motion(RyeOsMotionEventVm::TileExit {
                 tile_id: tile_id_text,
             });
-            self.workspace.reset_to_empty();
+            self.workspaces[self.active_workspace].reset_to_empty();
             return true;
         }
         self.invalidate_view_sources(&instance_key);
-        if self.workspace.close_tile(tile_id) {
+        if self.workspaces[self.active_workspace].close_tile(tile_id) {
             self.push_motion(RyeOsMotionEventVm::TileExit {
                 tile_id: tile_id_text,
             });
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
-                tile_id: self.workspace.focused_tile.0.to_string(),
+                tile_id: self.workspaces[self.active_workspace]
+                    .focused_tile
+                    .0
+                    .to_string(),
             });
             true
         } else {
@@ -404,12 +522,15 @@ impl RyeOsCore {
         }
     }
 
-    /// Add a center tile through the tiling algorithm (insert: end) and
-    /// emit the motions a renderer needs. Returns the new tile id.
-    pub(crate) fn add_tile_motions(&mut self, view: ViewSpec) -> TileId {
-        let was_empty = self.workspace.center_is_empty();
-        let source_tile_id = self.workspace.focused_tile;
-        let tile_id = self.workspace.add_tile(view);
+    /// Insert into the canonical layout and emit motion only after acceptance.
+    pub(crate) fn add_tile_motions(&mut self, view: ViewSpec) -> Option<TileId> {
+        let was_empty = self.workspaces[self.active_workspace].center_is_empty();
+        let source_tile_id = self.workspaces[self.active_workspace]
+            .tile_ids()
+            .last()
+            .copied()
+            .unwrap_or(self.workspaces[self.active_workspace].focused_tile);
+        let tile_id = self.workspaces[self.active_workspace].add_tile(view)?;
         if !was_empty {
             // New tiles land in the stack region; the motion axis is
             // the stack arrangement. (The first tile into an empty center
@@ -417,7 +538,7 @@ impl RyeOsCore {
             self.push_motion(RyeOsMotionEventVm::TileSplit {
                 source_tile_id: source_tile_id.0.to_string(),
                 new_tile_id: tile_id.0.to_string(),
-                axis: arrange_axis_vm(self.workspace.tiling.stack.arrange),
+                axis: arrange_axis_vm(self.workspaces[self.active_workspace].tiling.stack.arrange),
             });
         }
         self.push_motion(RyeOsMotionEventVm::TileEnter {
@@ -426,14 +547,19 @@ impl RyeOsCore {
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: tile_id.0.to_string(),
         });
-        tile_id
+        Some(tile_id)
     }
 
     pub(crate) fn add_center_tile(&mut self, view: ViewSpec) -> Vec<RyeOsEffect> {
-        let tile_id = self.add_tile_motions(view);
+        let Some(tile_id) = self.add_tile_motions(view) else {
+            self.notice(
+                "The layout cannot accept another view at this position.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
         self.normalize_field_local_states();
-        let Some(view) = self
-            .workspace
+        let Some(view) = self.workspaces[self.active_workspace]
             .tiles
             .get(&tile_id)
             .map(|tile| tile.view.clone())
@@ -473,10 +599,9 @@ mod tests {
             }),
         );
         core.add_center_tile(ViewSpec::bound("view:test/field"));
-        let tile = core
-            .workspace
+        let tile = core.workspaces[core.active_workspace]
             .tiles
-            .get(&core.workspace.focused_tile)
+            .get(&core.workspaces[core.active_workspace].focused_tile)
             .unwrap();
         assert!(matches!(
             tile.local,
@@ -514,9 +639,11 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile = core.workspace.focused_tile;
+        let tile = core.workspaces[core.active_workspace].focused_tile;
         let key = tile.0.to_string();
-        let instance_key = core.workspace.tiles[&tile].instance_key.clone();
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile]
+            .instance_key
+            .clone();
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
                 .encode(),
@@ -610,9 +737,11 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile = core.workspace.focused_tile;
+        let tile = core.workspaces[core.active_workspace].focused_tile;
         let key = tile.0.to_string();
-        let instance_key = core.workspace.tiles[&tile].instance_key.clone();
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile]
+            .instance_key
+            .clone();
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
                 .encode(),
@@ -706,7 +835,7 @@ mod tests {
                 },
             },
         });
-        let before = core.workspace.tile_ids().len();
+        let before = core.workspaces[core.active_workspace].tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::OpenView {
@@ -717,9 +846,12 @@ mod tests {
             },
         });
 
-        assert_eq!(core.workspace.tile_ids().len(), before + 1);
+        assert_eq!(
+            core.workspaces[core.active_workspace].tile_ids().len(),
+            before + 1
+        );
         assert!(matches!(
-            core.workspace.focused_view(),
+            core.workspaces[core.active_workspace].focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
         ));
         assert!(
@@ -730,7 +862,7 @@ mod tests {
         );
         assert!(core.ui.motion.iter().any(|event| matches!(
             event,
-            RyeOsMotionEventVm::TileEnter { tile_id } if tile_id == &core.workspace.focused_tile.0.to_string()
+            RyeOsMotionEventVm::TileEnter { tile_id } if tile_id == &core.workspaces[core.active_workspace].focused_tile.0.to_string()
         )));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
@@ -744,7 +876,8 @@ mod tests {
         // different view swaps the lens in place — the tile count stays at
         // one, no split, and the new view fetches.
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        core.workspaces[core.active_workspace].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
         seed_view(&mut core, "view:ryeos/items/space");
         seed_view(&mut core, "view:test/services");
 
@@ -758,7 +891,7 @@ mod tests {
                 },
             },
         });
-        assert_eq!(core.workspace.tile_ids().len(), 1);
+        assert_eq!(core.workspaces[core.active_workspace].tile_ids().len(), 1);
         core.ui.motion.clear();
 
         // Switching the lens replaces in place — still exactly one tile.
@@ -773,12 +906,12 @@ mod tests {
         });
 
         assert_eq!(
-            core.workspace.tile_ids().len(),
+            core.workspaces[core.active_workspace].tile_ids().len(),
             1,
             "single-lens never splits a second tile"
         );
         assert!(matches!(
-            core.workspace.focused_view(),
+            core.workspaces[core.active_workspace].focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
         ));
         assert!(
@@ -808,7 +941,7 @@ mod tests {
             },
         });
         assert_eq!(
-            core.workspace.tile_ids().len(),
+            core.workspaces[core.active_workspace].tile_ids().len(),
             1,
             "OpenNewView does not add a tile in single-lens"
         );
@@ -846,7 +979,8 @@ mod tests {
             events_url: None,
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        core.workspaces[core.active_workspace].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
 
         // The lens-able library excludes the scene backdrop and the input.
         assert_eq!(
@@ -878,18 +1012,18 @@ mod tests {
         open(&mut core, "view:a");
         cycle(&mut core);
         assert!(
-            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:b"),
+            matches!(core.workspaces[core.active_workspace].focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:b"),
             "cycle forward moves to the next lens"
         );
         assert_eq!(
-            core.workspace.tile_ids().len(),
+            core.workspaces[core.active_workspace].tile_ids().len(),
             1,
             "cycling stays single-lens"
         );
 
         cycle(&mut core);
         assert!(
-            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:a"),
+            matches!(core.workspaces[core.active_workspace].focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:a"),
             "cycle wraps back to the first lens"
         );
     }
@@ -907,7 +1041,7 @@ mod tests {
                 },
             },
         });
-        let before = core.workspace.tile_ids().len();
+        let before = core.workspaces[core.active_workspace].tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::OpenNewView {
@@ -918,15 +1052,17 @@ mod tests {
             },
         });
 
-        let item_tile_count = core
-            .workspace
+        let item_tile_count = core.workspaces[core.active_workspace]
             .tiles
             .values()
             .filter(|tile| {
                 matches!(&tile.view, ViewSpec { view_ref } if view_ref == "view:ryeos/items/space")
             })
             .count();
-        assert_eq!(core.workspace.tile_ids().len(), before + 1);
+        assert_eq!(
+            core.workspaces[core.active_workspace].tile_ids().len(),
+            before + 1
+        );
         assert_eq!(item_tile_count, 2);
         assert!(
             core.ui
@@ -938,6 +1074,40 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { .. })
         ));
+    }
+
+    #[test]
+    fn close_view_keeps_drafts_for_previous_subjects() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let tile_id = core.workspaces[0]
+            .add_tile(ViewSpec {
+                view_ref: "view:test/conversation".into(),
+            })
+            .unwrap();
+        let instance = core.workspaces[0].tiles[&tile_id].instance_key.clone();
+        let mut key =
+            crate::ui::model::InputBufferKey::new(instance, "view:test/conversation", "message");
+        key.target_scope = Some("chain:previous-subject".into());
+        core.workspaces[0].input_buffers.insert(
+            key.storage_key(),
+            crate::ui::model::RyeOsInputState {
+                text: "retain previous draft".into(),
+                ..Default::default()
+            },
+        );
+        assert!(!core.close_tile_or_empty(tile_id));
+        assert!(core.workspaces[0].tiles.contains_key(&tile_id));
+        assert_eq!(
+            core.workspaces[0].input_buffers[&key.storage_key()].text,
+            "retain previous draft"
+        );
+        core.workspaces[0]
+            .input_buffers
+            .get_mut(&key.storage_key())
+            .unwrap()
+            .text
+            .clear();
+        assert!(core.close_tile_or_empty(tile_id));
     }
 
     #[test]
@@ -961,7 +1131,7 @@ mod tests {
                 },
             },
         });
-        let tile_id = core.workspace.tile_ids()[1];
+        let tile_id = core.workspaces[core.active_workspace].tile_ids()[1];
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::CloseTile {
@@ -970,8 +1140,16 @@ mod tests {
             },
         });
 
-        assert!(!core.workspace.tiles.contains_key(&tile_id));
-        assert!(!core.workspace.tile_ids().contains(&tile_id));
+        assert!(
+            !core.workspaces[core.active_workspace]
+                .tiles
+                .contains_key(&tile_id)
+        );
+        assert!(
+            !core.workspaces[core.active_workspace]
+                .tile_ids()
+                .contains(&tile_id)
+        );
         assert!(core.ui.motion.iter().any(|event| matches!(
             event,
             RyeOsMotionEventVm::TileExit { tile_id: closed } if closed == &tile_id.0.to_string()
@@ -985,11 +1163,15 @@ mod tests {
         seed_view(&mut core, view_ref);
 
         core.add_center_tile(ViewSpec::bound(view_ref));
-        let closing_tile = core.workspace.focused_tile;
-        let closing_instance = core.workspace.tiles[&closing_tile].instance_key.clone();
+        let closing_tile = core.workspaces[core.active_workspace].focused_tile;
+        let closing_instance = core.workspaces[core.active_workspace].tiles[&closing_tile]
+            .instance_key
+            .clone();
         core.add_center_tile(ViewSpec::bound(view_ref));
-        let surviving_tile = core.workspace.focused_tile;
-        let surviving_instance = core.workspace.tiles[&surviving_tile].instance_key.clone();
+        let surviving_tile = core.workspaces[core.active_workspace].focused_tile;
+        let surviving_instance = core.workspaces[core.active_workspace].tiles[&surviving_tile]
+            .instance_key
+            .clone();
 
         let closing_keys = [
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
@@ -1049,7 +1231,11 @@ mod tests {
         );
 
         assert!(core.close_tile_or_empty(closing_tile));
-        assert!(core.workspace.tiles.contains_key(&surviving_tile));
+        assert!(
+            core.workspaces[core.active_workspace]
+                .tiles
+                .contains_key(&surviving_tile)
+        );
         for key in &closing_keys {
             assert!(!core.data.sources.contains_key(key));
             assert!(!core.data.source_errors.contains_key(key));
@@ -1086,7 +1272,7 @@ mod tests {
                 },
             },
         });
-        assert!(!core.workspace.center_is_empty());
+        assert!(!core.workspaces[core.active_workspace].center_is_empty());
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1094,7 +1280,7 @@ mod tests {
             },
         });
 
-        assert!(core.workspace.center_is_empty());
+        assert!(core.workspaces[core.active_workspace].center_is_empty());
         // The last-tile close emits a tile-exit motion (no home mode).
         assert!(
             core.ui
@@ -1105,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn master_stack_places_master_right_and_stack_left() {
+    fn opening_views_preserves_existing_split_instead_of_reapplying_recipe() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1140,26 +1326,96 @@ mod tests {
             first,
             second,
             ..
-        }) = core.workspace.layout()
+        }) = core.workspaces[core.active_workspace].layout()
         else {
-            panic!("master stack should split root");
+            panic!("opening alongside should split root");
         };
         assert_eq!(axis, crate::layout::SplitAxis::Horizontal);
-        // The first tile opened is the single master on the RIGHT; the
-        // two later tiles sit side-by-side in the stack on the left.
+        // Existing geometry stays put; the last placement is split again.
         assert!(matches!(
-            second.as_ref(),
-            crate::layout::LayoutTree::Leaf(_)
+            first.as_ref(),
+            crate::layout::LayoutTree::Group { .. }
         ));
-        let crate::layout::LayoutTree::Split { axis, .. } = first.as_ref() else {
-            panic!("stack region should split");
+        let crate::layout::LayoutTree::Split { axis, .. } = second.as_ref() else {
+            panic!("last region should split");
         };
         assert_eq!(*axis, crate::layout::SplitAxis::Horizontal);
     }
 
     #[test]
+    fn workspace_close_is_identity_addressed_and_preserves_input() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let first = core.workspaces[0].id;
+        core.new_workspace();
+        let second = core.workspaces[1].id;
+        core.new_workspace();
+        let third = core.workspaces[2].id;
+        assert!(core.close_workspace(second).is_empty());
+        assert_eq!(core.workspaces[core.active_workspace].id, third);
+        assert!(core.close_workspace(second).is_empty());
+        assert_eq!(core.workspaces.len(), 2);
+        core.workspaces[0].input_buffers.insert(
+            "draft".into(),
+            super::super::model::RyeOsInputState {
+                text: "unsent".into(),
+                ..Default::default()
+            },
+        );
+        assert!(core.close_workspace(first).is_empty());
+        assert_eq!(core.workspaces.len(), 2);
+        assert_eq!(core.workspaces[0].input_buffers["draft"].text, "unsent");
+        core.workspaces[0].input_buffers.clear();
+        core.close_workspace(third);
+        assert_eq!(core.workspaces[core.active_workspace].id, first);
+        core.close_workspace(first);
+        assert_eq!(core.workspaces.len(), 1, "retain a usable final workspace");
+    }
+
+    #[test]
+    fn workspace_rename_bounds_labels_without_changing_identity() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let id = core.workspaces[0].id;
+        core.rename_workspace(id, "  My work  ");
+        assert_eq!(core.workspaces[0].title, "My work");
+        for invalid in ["".to_owned(), "bad\nlabel".to_owned(), "x".repeat(129)] {
+            core.rename_workspace(id, &invalid);
+            assert_eq!(core.workspaces[0].title, "My work");
+        }
+        assert_eq!(core.workspaces[0].id, id);
+    }
+
+    #[test]
+    fn workspace_switch_preserves_slots_drafts_and_focus_independently() {
+        use crate::ui::model::{RyeOsDockEdge, RyeOsFocusTarget};
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let original_focus = core.focus_target();
+        assert_eq!(
+            original_focus,
+            RyeOsFocusTarget::Dock {
+                edge: RyeOsDockEdge::Bottom
+            }
+        );
+        core.focused_input_buffer_mut()
+            .expect("authored input")
+            .text = "unsent original".into();
+        core.workspaces[0].docks.bottom.as_mut().unwrap().size = 11;
+
+        core.new_workspace();
+        assert!(core.workspaces[1].docks.bottom.is_none());
+        assert!(core.focused_input_buffer().is_none());
+        assert!(core.workspaces[1].input_buffers.is_empty());
+
+        core.switch_workspace_tab(0);
+        assert_eq!(core.focus_target(), original_focus);
+        assert_eq!(core.focused_input_buffer().unwrap().text, "unsent original");
+        assert_eq!(core.workspaces[0].docks.bottom.as_ref().unwrap().size, 11);
+    }
+
+    #[test]
     fn workspace_tabs_keep_independent_tile_layouts() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        core.new_workspace();
+        core.switch_workspace_tab(0);
         seed_view(&mut core, "view:test/services");
         seed_view(&mut core, "view:test/files");
         core.dispatch(RyeOsEvent::Ui {
@@ -1180,7 +1436,7 @@ mod tests {
                 },
             },
         });
-        let first_tab_tiles = core.workspace.tile_ids().len();
+        let first_tab_tiles = core.workspaces[core.active_workspace].tile_ids().len();
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1190,7 +1446,7 @@ mod tests {
 
         assert_eq!(core.active_workspace, 1);
         // Fresh tabs start at home: an empty center.
-        assert_eq!(core.workspace.tile_ids().len(), 0);
+        assert_eq!(core.workspaces[core.active_workspace].tile_ids().len(), 0);
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1245,8 +1501,8 @@ mod tests {
                 },
             },
         });
-        let focused = core.workspace.focused_tile;
-        let count = core.workspace.tile_ids().len();
+        let focused = core.workspaces[core.active_workspace].focused_tile;
+        let count = core.workspaces[core.active_workspace].tile_ids().len();
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1256,8 +1512,15 @@ mod tests {
             },
         });
 
-        assert_eq!(core.workspace.focused_tile, focused);
-        assert_eq!(core.workspace.tile_ids().len(), count);
-        assert!(core.workspace.tiles.contains_key(&focused));
+        assert_eq!(core.workspaces[core.active_workspace].focused_tile, focused);
+        assert_eq!(
+            core.workspaces[core.active_workspace].tile_ids().len(),
+            count
+        );
+        assert!(
+            core.workspaces[core.active_workspace]
+                .tiles
+                .contains_key(&focused)
+        );
     }
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T03:41:16Z:ff5146745cac37c7e66b88195e6e4a060c96898c9b27be68c735d1c0896e5226:+GYlCLaHW1XTalo6Sk3RFVIODFmnsptWSCceee/x0gdnpqUBcE757E3mWX1DPVSEdN5WYRZcW+N3mTrfW2h4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:24:33Z:d4be9562e97c964a3bfc236c62fd264d11c069cb18bc7491498aaf6b2320fa8c:ipCrOlez94ZizoFdb3+GOxi8jr7/zuntT/LMi+ZXBSn+FMyRi2yOEDUW/8+S6f0LdWzAxMZdhD8P4vjWCr+KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -13,7 +13,7 @@ exact_bundles:
   - web
 policies:
   accounting:
-    schema: 1
+    schema: 2
     issue_acceptance_window_ms: 60000
   command_registration:
     schema: 1
@@ -108,7 +108,7 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       web: []
   execution:
-    schema: 2
+    schema: 3
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
@@ -130,6 +130,19 @@ policies:
       max_invocations_per_boot: 10000
       max_lifetime_seconds: 604800
       max_request_bytes: 1048576
+    resource_authority:
+      cleanup_allowance_ms: 30000
+      admission:
+        limits:
+          max_requirements: 1
+          max_resource_count: 1
+          max_facts_per_requirement: 16
+        max_total_resource_count: 1
+        max_concurrent_exclusive_allocations: 1
+        allowed_classes: [accelerator]
+        allowed_allocations: [exclusive]
+        allowed_access: [deployment_visible]
+      resources: []
   object_closure:
     schema: 1
     max_roots: 256

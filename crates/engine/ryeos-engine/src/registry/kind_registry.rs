@@ -1050,6 +1050,28 @@ pub struct FilesystemAuthorityCeilingDecl {
     pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
+/// Kind-owned location of a signed process target. Direct subprocesses and
+/// persistent workers use this one projection; session protocols retain only
+/// framing and lifecycle semantics.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTargetDecl {
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub required: bool,
+    pub limits: crate::contracts::ExecutionTargetLimits,
+}
+
+/// Signed resource-authority narrowing. This is separate from the process's
+/// target requirement: a CPU controller may request no resource while
+/// retaining bounded node-policy delegation for a child.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceAuthorityCeilingDecl {
+    pub path: Vec<String>,
+    pub default: crate::contracts::ExecutionResourceAuthorityCeiling,
+}
+
 /// Signed resource and lifecycle ceiling for a callback-free persistent
 /// subprocess session. This contract is deliberately meaning-blind: the
 /// process may implement inference or any future request/response workload,
@@ -1058,10 +1080,6 @@ pub struct FilesystemAuthorityCeilingDecl {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionDecl {
-    /// Composed-value path to the authored node substrate constraint. The
-    /// generic session launcher compares its `{os, arch}` value with the
-    /// current node before capturing content or contacting a worker.
-    pub target_path: Vec<String>,
     pub max_processes: u16,
     pub max_inflight_per_process: u16,
     pub max_address_space_bytes: u64,
@@ -1177,6 +1195,11 @@ pub struct ExecutionSchema {
     /// parent and node restrictions still apply independently.
     #[serde(default)]
     pub filesystem_authority_ceiling: Option<FilesystemAuthorityCeilingDecl>,
+    /// Shared signed platform/resource requirement for this process.
+    #[serde(default)]
+    pub target: Option<ExecutionTargetDecl>,
+    #[serde(default)]
+    pub resource_authority_ceiling: Option<ResourceAuthorityCeilingDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -1200,6 +1223,63 @@ pub struct ExecutionSchema {
 }
 
 impl ExecutionSchema {
+    pub fn project_resource_authority_ceiling(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::contracts::ExecutionResourceAuthorityCeiling, EngineError> {
+        let Some(declaration) = self.resource_authority_ceiling.as_ref() else {
+            return Ok(crate::contracts::ExecutionResourceAuthorityCeiling::NodePolicy);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                return Ok(declaration.default);
+            };
+            value = next;
+        }
+        serde_json::from_value(value.clone()).map_err(|error| EngineError::SchemaLoaderError {
+            reason: format!(
+                "signed resource-authority projection `{}` is invalid: {error}",
+                declaration.path.join(".")
+            ),
+        })
+    }
+
+    pub fn project_target_requirement(
+        &self,
+        composed: &Value,
+    ) -> Result<Option<crate::contracts::ExecutionTargetRequirement>, EngineError> {
+        let Some(declaration) = self.target.as_ref() else {
+            return Ok(None);
+        };
+        let mut value = composed;
+        for segment in &declaration.path {
+            let Some(next) = value.get(segment) else {
+                if declaration.required {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "signed execution target is missing at `{}`",
+                            declaration.path.join(".")
+                        ),
+                    });
+                }
+                return Ok(None);
+            };
+            value = next;
+        }
+        let target =
+            serde_json::from_value::<crate::contracts::ExecutionTargetRequirement>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("invalid signed execution target: {error}"),
+            })?;
+        target
+            .validate_against_limits(declaration.limits)
+            .map_err(|error| EngineError::SchemaLoaderError {
+                reason: format!("invalid signed execution target: {error}"),
+            })?;
+        Ok(Some(target))
+    }
+
     pub fn project_filesystem_authority_ceiling(
         &self,
         composed: &Value,
@@ -2639,6 +2719,8 @@ fn parse_execution_schema(
         "workspace_access",
         "network_authority_ceiling",
         "filesystem_authority_ceiling",
+        "target",
+        "resource_authority_ceiling",
         "method_dispatch",
         "methods",
         "augmentation_methods",
@@ -2797,11 +2879,6 @@ fn parse_execution_schema(
                     ),
                 })?;
             if declaration.max_processes == 0
-                || declaration.target_path.is_empty()
-                || declaration
-                    .target_path
-                    .iter()
-                    .any(|segment| segment.trim().is_empty() || segment.contains('.'))
                 || declaration.max_processes > 64
                 // The current framed-session substrate serializes access to
                 // each child process.  Do not let signed content advertise
@@ -2960,6 +3037,66 @@ fn parse_execution_schema(
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
                         "{display}: execution.filesystem_authority_ceiling.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let target = match execution_value.get("target") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<ExecutionTargetDecl>(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.target declaration: {error}"),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty()
+                        || segment.trim() != segment
+                        || segment.contains('.')
+                        || segment.chars().any(char::is_control)
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.target.path must contain canonical non-empty segments"
+                    ),
+                });
+            }
+            declaration
+                .limits
+                .validate()
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid execution.target limits: {error}"),
+                })?;
+            Some(declaration)
+        }
+        None => None,
+    };
+
+    let resource_authority_ceiling = match execution_value.get("resource_authority_ceiling") {
+        Some(value) => {
+            let declaration = serde_yaml::from_value::<ResourceAuthorityCeilingDecl>(
+                    value.clone(),
+                )
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.resource_authority_ceiling declaration: {error}"
+                    ),
+                })?;
+            if declaration.path.is_empty()
+                || declaration.path.iter().any(|segment| {
+                    segment.trim().is_empty()
+                        || segment.trim() != segment
+                        || segment.contains('.')
+                        || segment.chars().any(char::is_control)
+                })
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: execution.resource_authority_ceiling.path must contain canonical non-empty segments"
                     ),
                 });
             }
@@ -3180,6 +3317,8 @@ fn parse_execution_schema(
         workspace_access,
         network_authority_ceiling,
         filesystem_authority_ceiling,
+        target,
+        resource_authority_ceiling,
         method_dispatch,
         methods,
         augmentation_methods,
@@ -3636,7 +3775,7 @@ mod tests {
     #[test]
     fn persistent_session_decl_reads_pre_override_schema_at_exact_old_limit() {
         let declaration: PersistentSessionDecl = serde_yaml::from_str(
-            "target_path: [supported_target]\nmax_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
+            "max_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
         )
         .unwrap();
         assert_eq!(declaration.real_uid_process_limit, 512);

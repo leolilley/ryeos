@@ -51,7 +51,7 @@ pub struct PublishOptions {
     /// parsers, and handlers during the sign-items phase.
     pub base_trust_store: Option<TrustStore>,
     /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
-    /// "ryeos-dev"). Required when `emit_trust_doc` is true.
+    /// "RyeOS Development"). Required when `emit_trust_doc` is true.
     pub owner: String,
     /// Effective bundle id the generated manifest must carry — the first
     /// bare-id segment of the bundle's item refs (runtime authority requires

@@ -3612,6 +3612,8 @@ struct PreparedManagedLaunchAuthority {
     /// minted scope may create ledger accounts — a missing account for a
     /// recovered scope is fail-closed, never re-created from limits.
     freshly_minted_accounting_scope: bool,
+    /// Node-selected only after exact effect replay has been ruled out.
+    selected_resources: Option<ryeos_app::execution_resources::SelectedExecutionResources>,
 }
 
 /// Whether the exact authority audit for this launch is already part of the
@@ -4623,6 +4625,40 @@ async fn prepare_managed_launch_authority(
         )
         .map_err(BuildAndLaunchError::Internal)?;
     }
+    let recovering_local_capsule = admitted_capsule.is_some() && !cross_site_continuation;
+    if !recovering_local_capsule {
+        if let Some(parent) = params.parent_execution_context {
+            let (filesystem, network) =
+                super::execution_realization::admitted_parent_isolation_ceilings(
+                    params.state,
+                    &parent.parent_thread_id,
+                )
+                .map_err(BuildAndLaunchError::Internal)?;
+            prepared_launch.filesystem_authority_ceiling = prepared_launch
+                .filesystem_authority_ceiling
+                .intersect(filesystem);
+            prepared_launch.network_authority_ceiling =
+                prepared_launch.network_authority_ceiling.intersect(network);
+            prepared_launch.resource_authority_ceiling =
+                prepared_launch.resource_authority_ceiling.intersect(
+                    super::execution_realization::admitted_parent_resource_authority_ceiling(
+                        params.state,
+                        &parent.parent_thread_id,
+                    )
+                    .map_err(BuildAndLaunchError::Internal)?,
+                );
+        }
+        // Dependency admission happens next. Refuse an outer target that its
+        // inherited ceiling denies before any persistent-session capsule can
+        // be minted beneath that widened launch.
+        prepared_launch
+            .resource_authority_ceiling
+            .admits(prepared_launch.target_requirement.as_ref())
+            .map_err(BuildAndLaunchError::Internal)?;
+    }
+    let outer_filesystem_authority_ceiling = prepared_launch.filesystem_authority_ceiling;
+    let outer_network_authority_ceiling = prepared_launch.network_authority_ceiling;
+    let outer_resource_authority_ceiling = prepared_launch.resource_authority_ceiling;
     let mut pending_session_publications =
         super::persistent_session::admit_or_verify_prepared_sessions(
             params.state,
@@ -4632,6 +4668,9 @@ async fn prepare_managed_launch_authority(
             admitted_capsule.is_some() && !cross_site_continuation,
             params.handler_context,
             &engine_roots,
+            outer_filesystem_authority_ceiling,
+            outer_network_authority_ceiling,
+            outer_resource_authority_ceiling,
         )
         .map_err(|error| {
             super::persistent_session::classify_prepared_session_admission_error(&error)
@@ -4888,6 +4927,17 @@ async fn prepare_managed_launch_authority(
             .map_err(BuildAndLaunchError::Internal)?;
         prepared_launch.filesystem_authority_ceiling = filesystem;
         prepared_launch.network_authority_ceiling = network;
+        prepared_launch.resource_authority_ceiling =
+            super::execution_realization::project_launch_resource_authority_ceiling(
+                params.state,
+                engine,
+                &params.resolved.resolved_item.kind,
+                Some(effective_program.resolution()),
+                params
+                    .parent_execution_context
+                    .map(|parent| parent.parent_thread_id.as_str()),
+            )
+            .map_err(BuildAndLaunchError::Internal)?;
     }
     // The current managed protocol grants callback and thread-auth authority.
     // A captured-filesystem child must select a callback-free direct protocol;
@@ -4906,6 +4956,15 @@ async fn prepare_managed_launch_authority(
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "managed isolated network authority requires enforced isolation"
         )));
+    }
+    prepared_launch
+        .resource_authority_ceiling
+        .admits(prepared_launch.target_requirement.as_ref())
+        .map_err(BuildAndLaunchError::Internal)?;
+    if let Some(target) = &prepared_launch.target_requirement {
+        target
+            .validate_current_platform()
+            .map_err(BuildAndLaunchError::Internal)?;
     }
     let admitted_artifact_identity = match (
         current_managed_selection.as_ref(),
@@ -5264,6 +5323,7 @@ async fn prepare_managed_launch_authority(
         pending_session_publications: Some(pending_session_publications),
         augmentation_audits,
         freshly_minted_accounting_scope,
+        selected_resources: None,
     })
 }
 
@@ -5611,33 +5671,6 @@ async fn build_and_launch_inner(
         .launch_metadata
         .get_or_insert_with(Default::default)
         .set_sealed_root_request(sealed_request);
-    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
-    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
-    let realization_admission = super::execution_realization::admit_or_verify(
-        params.state,
-        authority.launch_metadata.as_ref().ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed launch lost its admitted metadata"
-            ))
-        })?,
-        authority.effective_program.resolution(),
-        authority
-            .effective_program
-            .effective_definition_digest()
-            .as_str(),
-        &realization_contract_ref,
-        &realization_contract_digest,
-        authority.pending_external_realization.as_mut(),
-    )
-    .map_err(BuildAndLaunchError::Internal)?;
-    if authority.pending_external_realization.is_none() {
-        authority.pending_external_realization = realization_admission.publication;
-    }
-    authority.launch_metadata = authority
-        .launch_metadata
-        .take()
-        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
-
     if let Some(effect_authority) = params.effect_authority {
         let metadata = authority.launch_metadata.as_mut().ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -5690,6 +5723,40 @@ async fn build_and_launch_inner(
             }
         }
     }
+
+    let selected_resources = params
+        .state
+        .execution_resources
+        .select(authority.prepared_launch.target_requirement.as_ref())
+        .map_err(BuildAndLaunchError::Internal)?;
+    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+    let realization_admission = super::execution_realization::admit_or_verify(
+        params.state,
+        authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch lost its admitted metadata"
+            ))
+        })?,
+        authority.effective_program.resolution(),
+        authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        selected_resources.selections(),
+        authority.pending_external_realization.as_mut(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if authority.pending_external_realization.is_none() {
+        authority.pending_external_realization = realization_admission.publication;
+    }
+    authority.launch_metadata = authority
+        .launch_metadata
+        .take()
+        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
+    authority.selected_resources = Some(selected_resources);
 
     let initial_events = launch_audit_records(
         params.resolved,
@@ -6030,6 +6097,7 @@ async fn run_claimed_thread_row_inner(
         pending_session_publications,
         augmentation_audits,
         freshly_minted_accounting_scope,
+        selected_resources,
     } = authority;
     let retained_effect_authority = launch_metadata
         .as_ref()
@@ -6870,6 +6938,11 @@ async fn run_claimed_thread_row_inner(
     // callbacks.
     let filesystem_authority_ceiling = prepared_launch.filesystem_authority_ceiling;
     let network_authority_ceiling = prepared_launch.network_authority_ceiling;
+    let selected_resources = selected_resources.ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed launch reached spawn without selected resource authority"
+        ))
+    })?;
     let isolation_verified_command = materialized_binary.verified_command;
     let materialized_binary_path = materialized_binary.path;
     let binary_path = materialized_binary_path
@@ -6978,6 +7051,8 @@ async fn run_claimed_thread_row_inner(
     let identity_for_spawn = state.identity.clone();
     let state_for_spawn = (*state).clone();
     let launch_owner_owned = launch_owner.to_string();
+    let accounting_scope_for_spawn = accounting_scope.clone();
+    let chain_root_id_for_spawn = chain_root_id.clone();
 
     if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
         return Err(BuildAndLaunchError::LaunchCancelled {
@@ -7038,6 +7113,8 @@ async fn run_claimed_thread_row_inner(
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             launch_owner: &launch_owner_owned,
+            chain_root_id: &chain_root_id_for_spawn,
+            accounting_scope: accounting_scope_for_spawn.as_ref(),
             vault_bindings: &vault_owned,
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
@@ -7053,6 +7130,7 @@ async fn run_claimed_thread_row_inner(
             // cold one.
             is_resume,
             rearm_native_resume_budget_after_attach,
+            selected_resources,
         });
         drop(spawn_work_timer);
         drop(spawn_worker_total_timer);
@@ -8202,6 +8280,10 @@ async fn prepare_follow_child_launch_inner(
                     execution.handler_context.as_ref(),
                 )?;
             prepared.set_sealed_root_request(augmented_sealed_request);
+            let selected_resources = state
+                .execution_resources
+                .select(authority.prepared_launch.target_requirement.as_ref())
+                .map_err(BuildAndLaunchError::Internal)?;
             let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
             let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
             let realization_admission = super::execution_realization::admit_or_verify(
@@ -8214,6 +8296,7 @@ async fn prepare_follow_child_launch_inner(
                     .as_str(),
                 &realization_contract_ref,
                 &realization_contract_digest,
+                selected_resources.selections(),
                 authority.pending_external_realization.as_mut(),
             )
             .map_err(BuildAndLaunchError::Internal)?;
@@ -8221,6 +8304,7 @@ async fn prepare_follow_child_launch_inner(
                 authority.pending_external_realization = realization_admission.publication;
             }
             prepared = prepared.with_execution_realization_hash(realization_admission.hash);
+            authority.selected_resources = Some(selected_resources);
             let prepared_launch_authority_digest = prepared
                 .admitted_launch_authority()?
                 .ok_or_else(|| anyhow::anyhow!("fresh follow child lost its launch authority"))?
@@ -8241,6 +8325,33 @@ async fn prepare_follow_child_launch_inner(
             // either persisted copy of that identity.
             (launch_metadata.clone(), resume.clone(), None)
         };
+
+    if authority.selected_resources.is_none() {
+        let selected_resources = state
+            .execution_resources
+            .select(authority.prepared_launch.target_requirement.as_ref())
+            .map_err(BuildAndLaunchError::Internal)?;
+        let verified = super::execution_realization::admit_or_verify(
+            state,
+            &launch_metadata,
+            authority.effective_program.resolution(),
+            authority
+                .effective_program
+                .effective_definition_digest()
+                .as_str(),
+            &authority.selected_runtime.canonical_ref.to_string(),
+            &authority.selected_runtime.raw_content_digest,
+            selected_resources.selections(),
+            None,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+        if launch_metadata.execution_realization_hash.as_deref() != Some(verified.hash.as_str()) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-child resource selection differs from retained execution realization"
+            )));
+        }
+        authority.selected_resources = Some(selected_resources);
+    }
 
     Ok(PreparedFollowChildLaunch {
         thread_id: thread_id.to_string(),
@@ -8653,6 +8764,16 @@ pub async fn prepare_remote_machine_successor_launch(
         .selected_runtime
         .raw_content_digest
         .clone();
+    let selected_resources = state
+        .execution_resources
+        .select(
+            prepared
+                .authority
+                .prepared_launch
+                .target_requirement
+                .as_ref(),
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
     let realization_admission = super::execution_realization::admit_or_verify(
         state,
         &prepared.launch_metadata,
@@ -8664,6 +8785,7 @@ pub async fn prepare_remote_machine_successor_launch(
             .as_str(),
         &realization_contract_ref,
         &realization_contract_digest,
+        selected_resources.selections(),
         prepared.authority.pending_external_realization.as_mut(),
     )
     .map_err(BuildAndLaunchError::Internal)?;
@@ -8672,6 +8794,7 @@ pub async fn prepare_remote_machine_successor_launch(
     }
     prepared.launch_metadata = std::mem::take(&mut prepared.launch_metadata)
         .with_execution_realization_hash(realization_admission.hash);
+    prepared.authority.selected_resources = Some(selected_resources);
     prepared.resume_context = target_resume.clone();
     prepared.launch_metadata.isolation = Some(
         state

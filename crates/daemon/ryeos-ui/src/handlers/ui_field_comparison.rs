@@ -29,6 +29,7 @@ const MAX_THREAD_ID_BYTES: usize = 256;
 const MAX_COMPARISON_ATTRIBUTE_BYTES: usize = 4 * 1024;
 const MAX_COMPARISON_PREWIRE_BYTES: usize = 3 * 1024 * 1024;
 const FINAL_REVISION_BYTES_PER_FACT: usize = 64;
+const MAX_RESOURCE_COMPONENT_FACTS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,8 +126,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         (Ok(Some(left)), Ok(Some(right))) => (left, right),
     };
 
-    let left_cost = run_cost_sample(&state.state_store, &subjects[0]);
-    let right_cost = run_cost_sample(&state.state_store, &subjects[1]);
+    let accounting = state.accounting.as_deref();
+    let left_cost = run_cost_sample(&state.state_store, accounting, &subjects[0]);
+    let right_cost = run_cost_sample(&state.state_store, accounting, &subjects[1]);
     let (left_cost, right_cost) = match (left_cost, right_cost) {
         (Ok(left), Ok(right)) => (left, right),
         (left, right) => {
@@ -597,11 +599,14 @@ fn add_cost(
         "comparison-cost",
         &json!({"comparison_id": model.id, "kind": "run_cost", "side": side}),
     )?;
-    let mut attributes = serde_json::to_value(&operand.cost)?;
-    attributes
-        .as_object_mut()
-        .expect("run cost sample serializes as an object")
-        .insert("side".to_string(), Value::String(side.to_string()));
+    let attributes = json!({
+        "side": side,
+        "turns": operand.cost.turns,
+        "input_tokens": operand.cost.input_tokens,
+        "output_tokens": operand.cost.output_tokens,
+        "spend": operand.cost.spend,
+        "basis": operand.cost.basis,
+    });
     emitter.add_entity(FieldFactEntity {
         id: id.clone(),
         kind: "run_cost".to_string(),
@@ -635,7 +640,132 @@ fn add_cost(
         operand_id,
         json!({"side": side}),
         operand_evidence(operand),
-    )
+    )?;
+
+    let resource_id = stable_id(
+        "comparison-resource-cost",
+        &json!({"comparison_id": model.id, "kind": "resource_cost", "side": side}),
+    )?;
+    let retained = operand
+        .cost
+        .resource_components
+        .len()
+        .min(MAX_RESOURCE_COMPONENT_FACTS);
+    let omitted = operand
+        .cost
+        .resource_components
+        .len()
+        .saturating_sub(retained);
+    emitter.add_entity(FieldFactEntity {
+        id: resource_id.clone(),
+        kind: "resource_cost".to_string(),
+        label: if side == "left" {
+            "Left resource cost"
+        } else {
+            "Right resource cost"
+        }
+        .to_string(),
+        parent_id: Some(operand_id.to_string()),
+        status: Some(
+            serde_json::to_value(operand.cost.resource_status)?
+                .as_str()
+                .unwrap_or("unavailable")
+                .to_string(),
+        ),
+        canonical_ref: None,
+        source_content_digest: None,
+        effective_definition_digest: None,
+        admitted_launch_capsule_hash: None,
+        event_ref: None,
+        artifact_ref: None,
+        attributes: json!({
+            "side": side,
+            "operation_count": operand.cost.resource_operation_count,
+            "attributed_spend": operand.cost.resource_attributed_spend,
+            "owned_overhead_spend": operand.cost.resource_owned_overhead_spend,
+            "basis": operand.cost.resource_basis,
+            "components_complete": omitted == 0,
+            "component_count": operand.cost.resource_components.len(),
+            "omitted_component_count": omitted,
+        }),
+        provenance: emitter.provenance(operand_evidence(operand)),
+    })?;
+    add_relation(
+        emitter,
+        model,
+        "measures_operand_resources",
+        &resource_id,
+        operand_id,
+        json!({"side": side}),
+        operand_evidence(operand),
+    )?;
+    for (index, component) in operand
+        .cost
+        .resource_components
+        .iter()
+        .take(MAX_RESOURCE_COMPONENT_FACTS)
+        .enumerate()
+    {
+        let component_id = stable_id(
+            "comparison-resource-cost-component",
+            &json!({
+                "comparison_id": model.id,
+                "side": side,
+                "operation_id": component.operation_id,
+                "allocation": component.allocation,
+                "index": index,
+            }),
+        )?;
+        emitter.add_entity(FieldFactEntity {
+            id: component_id.clone(),
+            kind: "resource_cost_component".to_string(),
+            label: "Resource cost component".to_string(),
+            parent_id: Some(resource_id.clone()),
+            status: Some(
+                serde_json::to_value(component.state)?
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+            canonical_ref: None,
+            source_content_digest: Some(component.authority_digest.clone()),
+            effective_definition_digest: None,
+            admitted_launch_capsule_hash: None,
+            event_ref: None,
+            artifact_ref: None,
+            attributes: json!({
+                "side": side,
+                "operation_id": component.operation_id,
+                "owner_gate_id": component.owner_gate_id,
+                "stable_resource_id": component.stable_resource_id,
+                "charge_class": component.charge_class,
+                "coverage": component.coverage,
+                "rated_spend": component.rated_spend,
+                "committed_spend": component.committed_spend,
+                "allocation": component.allocation,
+                "allocated_spend": component.allocated_spend,
+                "partition_digest": component.partition_digest,
+                "provenance": component.provenance,
+            }),
+            provenance: emitter.provenance(operand_evidence(operand)),
+        })?;
+        add_relation(
+            emitter,
+            model,
+            "contributes_resource_cost",
+            &component_id,
+            &resource_id,
+            json!({"side": side, "index": index}),
+            operand_evidence(operand),
+        )?;
+    }
+    if omitted != 0 {
+        emitter.warn(
+            "resource_cost_components_incomplete",
+            &format!("{side} resource cost omitted {omitted} bounded component facts"),
+        );
+    }
+    Ok(())
 }
 
 fn add_relation(
@@ -818,6 +948,12 @@ mod tests {
                 output_tokens: Some(7),
                 spend: Some("0.125".to_string()),
                 basis: Some(CostBasis::Direct),
+                resource_status: CostSampleStatus::Available,
+                resource_operation_count: 1,
+                resource_attributed_spend: "0.025".to_string(),
+                resource_owned_overhead_spend: "0.005".to_string(),
+                resource_basis: CostBasis::Direct,
+                resource_components: Vec::new(),
             },
         }
     }
@@ -869,6 +1005,24 @@ mod tests {
             .iter()
             .find(|entity| entity.kind == kind)
             .unwrap()
+    }
+
+    fn resource_component(index: usize) -> ryeos_app::accounting_db::ThreadResourceCostComponent {
+        ryeos_app::accounting_db::ThreadResourceCostComponent {
+            operation_id: format!("{:064x}", index + 1),
+            owner_gate_id: format!("{:064x}", index + 10_000),
+            authority_digest: format!("{:064x}", index + 20_000),
+            stable_resource_id: format!("gpu-{index}"),
+            charge_class: ryeos_accounting::ResourceChargeClass::InternalAllocation,
+            state: ryeos_accounting::ResourceBudgetState::Reconciled,
+            coverage: Some(ryeos_accounting::ResourceUsageCoverage::Complete),
+            rated_spend: Some("0.01".to_string()),
+            committed_spend: Some("0.01".to_string()),
+            allocation: ryeos_app::accounting_db::ResourceCostAllocation::OwnerOverhead,
+            allocated_spend: "0.01".to_string(),
+            partition_digest: Some(format!("{:064x}", index + 30_000)),
+            provenance: "resource_owner_overhead",
+        }
     }
 
     #[test]
@@ -975,6 +1129,60 @@ mod tests {
         assert!(!encoded.contains("provider"));
         assert!(!encoded.contains("metadata"));
         assert!(!encoded.contains("source_path"));
+    }
+
+    #[test]
+    fn provider_and_resource_costs_remain_separate_bounded_facts() {
+        let digest = digest('a');
+        let mut model = model(
+            digest.clone(),
+            digest,
+            true,
+            Vec::new(),
+            identical_realization(),
+        );
+        model.left.cost.status = CostSampleStatus::Pending;
+        model.left.cost.resource_status = CostSampleStatus::Available;
+        model.left.cost.resource_components = (0..=MAX_RESOURCE_COMPONENT_FACTS)
+            .map(resource_component)
+            .collect();
+        let document = assemble_document(&model, model.complete(), false).unwrap();
+
+        let left_provider = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "run_cost" && entity.attributes["side"] == "left")
+            .unwrap();
+        let left_resource = document
+            .entities
+            .iter()
+            .find(|entity| entity.kind == "resource_cost" && entity.attributes["side"] == "left")
+            .unwrap();
+        assert_eq!(left_provider.status.as_deref(), Some("pending"));
+        assert_eq!(left_resource.status.as_deref(), Some("available"));
+        assert_eq!(left_resource.attributes["components_complete"], false);
+        assert_eq!(left_resource.attributes["component_count"], 65);
+        assert_eq!(left_resource.attributes["omitted_component_count"], 1);
+        assert_eq!(
+            document
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.kind == "resource_cost_component" && entity.attributes["side"] == "left"
+                })
+                .count(),
+            MAX_RESOURCE_COMPONENT_FACTS
+        );
+        assert!(
+            document
+                .warnings
+                .iter()
+                .any(|warning| { warning["code"] == "resource_cost_components_incomplete" })
+        );
+        assert!(document.entities.iter().all(|entity| {
+            lillux::canonical_json(&entity.attributes).unwrap().len()
+                <= MAX_COMPARISON_ATTRIBUTE_BYTES
+        }));
     }
 
     #[test]

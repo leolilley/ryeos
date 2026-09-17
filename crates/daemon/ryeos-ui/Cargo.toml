@@ -29,6 +29,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }

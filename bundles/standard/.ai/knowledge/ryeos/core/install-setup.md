@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-03T11:56:15Z:d31dc6bd3fa9677d5c2accfd6ecdfec1530f7bb5162266c0f0981adc2b968afd:sR9ZEt/1NMUwfPOOImaNg3+LFsnoGuWSs1ERf3MT0QiY5Au0UIwSDR5IhsCoKTEWId4Se6PM4Zk1xnY5HL5MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T08:24:14Z:61b15f88832ad6e82c201dc1bb07b04bc1f6575f8445906b36c37da737ed7c00:0pTMHCR/H7MGlB5d5nWcS+KbjUiiq+lA2lH3+HcSSD5lG3p3CmfZo4FgQHhgBD7U2qgOo+wCnb/56Gt1OI0PBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -79,7 +79,7 @@ invalid names are skipped; bundle names are not hardcoded.
 ```bash
 cargo build
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev --bundle-set full --all
+  --owner "RyeOS Development" --bundle-set full --all
 ryeos init --source bundles --node-profile full --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ryeos start
 ```

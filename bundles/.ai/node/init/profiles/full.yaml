@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T03:41:16Z:19fd88935fb5f0f8969e1d54d33ebf94b0538a5252dcc41e2fb77a60f35f9aff:SkAvaYIyJ9g/IJQYWO5d95y4QiV6AyGaXqeGzgv2lYp91Uh/zcAR2ULnuF3NcMnlRJQ7hi5SmvTO5WUkVO6DAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:24:33Z:96a02db0727ef0448f6dc7a2d58ecb09cac9b974d7e7aa36a60dac18596ec68c:idc6r0HqAwYWH4tdSQ0C6btornWC15ZaCgTQVgN1ft8BVGlQLe2tHOg8/TuTlnNbrJ+O6KmXCdhI2dP4Y3evAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -13,7 +13,7 @@ exact_bundles:
   - web
 policies:
   accounting:
-    schema: 1
+    schema: 2
     issue_acceptance_window_ms: 60000
   command_registration:
     schema: 1
@@ -108,11 +108,24 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       web: []
   execution:
-    schema: 2
+    schema: 3
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    resource_authority:
+      cleanup_allowance_ms: 30000
+      admission:
+        limits:
+          max_requirements: 1
+          max_resource_count: 1
+          max_facts_per_requirement: 16
+        max_total_resource_count: 1
+        max_concurrent_exclusive_allocations: 1
+        allowed_classes: [accelerator]
+        allowed_allocations: [exclusive]
+        allowed_access: [deployment_visible]
+      resources: []
   object_closure:
     schema: 1
     max_roots: 256
@@ -165,7 +178,11 @@ policies:
     policy:
       version: 7
       process_scopes:
-        mode: unconfigured
+        # Resource-bearing launches require a Lillux-owned durable scope even
+        # when filesystem/network isolation is disabled.
+        mode: required
+        control_timeout_ms: 5000
+        nested_sandbox: false
       trusted_process_group_sessions: false
       mode: disabled
       backend: null

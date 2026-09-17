@@ -182,11 +182,11 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         # This is the current producer's source contract, not reproduction of
         # the separately retained September 6/7 literal-baseline evidence.
         self.assertEqual(hashlib.sha256(production.canonical_json(config)).hexdigest(),
-                         "69b09219bc0205e4c221fb9dca9afa2293f4c6b04e276c14c215acbac0720e21")
+                         "4206611322b3609e395cbc2e9a01973866e1e0a3e0ac500d8a61a3b6a477ec4c")
         self.assertEqual(config["schema"], "ryeos.development.authoring-environment-inputs.v2")
         self.assertEqual(len(config["inputs"]), 111)
         self.assertEqual(sum(item["bytes"] for item in config["inputs"].values()),
-                         139987893)
+                         139999257)
         self.assertEqual(len(config["built_utility_files"]), 41)
         self.assertEqual(config["built_utility_files"]["environment/bin/sed"], "bin/sed")
         self.assertNotIn("environment/bin/sed", config["files"])

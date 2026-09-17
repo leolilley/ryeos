@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-13T08:57:58Z:6f82d73cc88a9168b7c515c2a42e1a0c5a2ceffa24894a47ec1f13d675278a98:2FayYLwnm+nsujvN3jss+qHASmrAEgRUNGoCUSOAtdbDGjxkxh1V7FOZoX8tq8Sck0e1/zfl0QEQP5Fv7UJxCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:6f82d73cc88a9168b7c515c2a42e1a0c5a2ceffa24894a47ec1f13d675278a98:ST1pQECJjpGclkk+sq16CxpjLcujVFgcVOPAZSDRd85g9zwOIGqsklskTwlltqFJGDik2Sd3vMB0kZO8B60JDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 
 # Canonical shared Stage-0 publisher/verifier functions. Source ownership here
 # does not grant execution: the external first-bootstrap publisher and the

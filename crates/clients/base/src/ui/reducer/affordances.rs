@@ -20,12 +20,16 @@ impl RyeOsCore {
         // down may now point past the shortened rows — which would make Enter
         // (activate row) a no-op. Reset the owning tile's cursor to the top so
         // the first narrowed row is selected and openable.
-        if let Some(tile_id) = self.workspace.tile_ids().into_iter().find(|id| {
-            self.workspace
-                .tiles
-                .get(id)
-                .is_some_and(|tile| tile.instance_key == key.view_instance_key)
-        }) {
+        if let Some(tile_id) = self.workspaces[self.active_workspace]
+            .tile_ids()
+            .into_iter()
+            .find(|id| {
+                self.workspaces[self.active_workspace]
+                    .tiles
+                    .get(id)
+                    .is_some_and(|tile| tile.instance_key == key.view_instance_key)
+            })
+        {
             self.set_tile_cursor(tile_id, 0);
         }
         self.emit_fetch_source_for_instance(key.view_instance_key.clone(), &view_ref)
@@ -121,16 +125,19 @@ impl RyeOsCore {
         // `open_view` — a same-lens route retarget (stepping the braid timeline
         // onto a child chain) is still a returnable step-in.
         if drill
-            && self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
-            && !self.workspace.center_is_empty()
-            && let Some(view) = self.workspace.focused_view().cloned()
+            && self.workspaces[self.active_workspace].tiling.mode
+                == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspaces[self.active_workspace].center_is_empty()
+            && let Some(view) = self.workspaces[self.active_workspace]
+                .focused_view()
+                .cloned()
         {
             let facets = self.seat.fold().snapshot();
             // The frame carries the label of the level being left (the
             // current lens label), so the breadcrumb reads the ancestor
             // cognitions, not repeated view titles.
-            let label = self.workspace.lens_label.clone();
-            self.workspace.push_lens_frame(view, facets, label);
+            let label = self.workspaces[self.active_workspace].lens_label.clone();
+            self.workspaces[self.active_workspace].push_lens_frame(view, facets, label);
         }
         let next = if let Some(merge) = merge {
             let mut current = self
@@ -155,7 +162,8 @@ impl RyeOsCore {
         // would falsely label inspection as a composer retarget, while
         // interpreting their authored value would hard-code product schemas.
         if drill {
-            self.workspace.lens_label = (facet == super::seat::KEY_INPUT_ROUTE)
+            self.workspaces[self.active_workspace].lens_label = (facet
+                == super::seat::KEY_INPUT_ROUTE)
                 .then(|| self.seat.fold().input_route().thread)
                 .flatten();
         }
@@ -206,11 +214,11 @@ impl RyeOsCore {
                 .collect::<Vec<_>>()
         };
         let mut targets: Vec<(crate::ids::RyeOsViewInstanceKey, String, Vec<String>)> = self
-            .workspace
+            .workspaces[self.active_workspace]
             .tile_ids()
             .into_iter()
             .filter_map(|tile_id| {
-                let tile = self.workspace.tiles.get(&tile_id)?;
+                let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
                 let channels = subscribed_channels(binding);
@@ -269,7 +277,7 @@ impl RyeOsCore {
 
     pub(crate) fn effects_for_view(&mut self, view: &ViewSpec) -> Vec<RyeOsEffect> {
         let view_ref = view.view_ref.clone();
-        let tile_id = self.workspace.focused_tile;
+        let tile_id = self.workspaces[self.active_workspace].focused_tile;
         self.emit_fetch_source(tile_id, &view_ref)
     }
 }
@@ -321,9 +329,11 @@ mod tests {
                 "refresh": {"on_facet": "selection"}
             }),
         );
-        core.workspace.add_tile(ViewSpec {
-            view_ref: "view:test/static".to_string(),
-        });
+        core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec {
+                view_ref: "view:test/static".to_string(),
+            })
+            .expect("fixture layout accepts view");
 
         assert!(
             core.effects_for_facet("selection").is_empty(),
@@ -361,11 +371,15 @@ mod tests {
                 } }
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec {
-            view_ref: "view:test/inspector".to_string(),
-        });
+        let tile_id = core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec {
+                view_ref: "view:test/inspector".to_string(),
+            })
+            .expect("fixture layout accepts view");
         let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
-            core.workspace.tiles[&tile_id].instance_key.clone(),
+            core.workspaces[core.active_workspace].tiles[&tile_id]
+                .instance_key
+                .clone(),
             "default",
         )
         .encode();
@@ -442,7 +456,7 @@ mod tests {
 
         // 2. The braid lens was opened as a tile.
         assert!(
-            core.workspace
+            core.workspaces[core.active_workspace]
                 .tiles
                 .values()
                 .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
@@ -606,7 +620,7 @@ mod tests {
             "merge preserves existing route fields"
         );
         assert!(
-            core.workspace
+            core.workspaces[core.active_workspace]
                 .tiles
                 .values()
                 .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
@@ -637,9 +651,11 @@ mod tests {
             .insert("view:ryeos/threads/history".to_string(), history);
         core.views
             .insert("view:ryeos/runs/comparison".to_string(), comparison);
-        core.workspace.add_tile(ViewSpec {
-            view_ref: "view:ryeos/runs/comparison".to_string(),
-        });
+        core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec {
+                view_ref: "view:ryeos/runs/comparison".to_string(),
+            })
+            .expect("fixture layout accepts view");
 
         let left_effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -755,9 +771,11 @@ mod tests {
         // (chain_root B) pushes a return frame; PopLens restores A and refetches
         // it. This is the vertical-drill primitive the execution tracer hangs on.
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
-        core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
+        core.workspaces[core.active_workspace].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
+        core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"))
+            .expect("fixture layout accepts view");
         seed_view_value(
             &mut core,
             "view:ryeos/thread/transcript",
@@ -786,7 +804,7 @@ mod tests {
         );
 
         // A return frame captured the pre-drill braid; the fold now reads B.
-        assert_eq!(core.workspace.lens_depth(), 1);
+        assert_eq!(core.workspaces[core.active_workspace].lens_depth(), 1);
         assert_eq!(
             core.seat.fold().get(crate::ui::seat::KEY_INPUT_ROUTE),
             Some(&serde_json::json!({ "chain_root": "B" }))
@@ -796,7 +814,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::PopLens,
         });
-        assert_eq!(core.workspace.lens_depth(), 0);
+        assert_eq!(core.workspaces[core.active_workspace].lens_depth(), 0);
         assert_eq!(
             core.seat.fold().get(crate::ui::seat::KEY_INPUT_ROUTE),
             Some(&serde_json::json!({ "chain_root": "A" }))
@@ -820,7 +838,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::PopLens,
         });
-        assert_eq!(core.workspace.lens_depth(), 0);
+        assert_eq!(core.workspaces[core.active_workspace].lens_depth(), 0);
         assert!(effects.is_empty());
     }
 
@@ -831,9 +849,11 @@ mod tests {
         // route at the child AND pushes a return frame — no open_view, the braid
         // lens re-projects via the route facet. Backspace returns to the parent.
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
-        core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
+        core.workspaces[core.active_workspace].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
+        core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"))
+            .expect("fixture layout accepts view");
         seed_view_value(
             &mut core,
             "view:ryeos/thread/transcript",
@@ -862,9 +882,12 @@ mod tests {
                 },
             },
         });
-        assert_eq!(core.workspace.lens_depth(), 1);
+        assert_eq!(core.workspaces[core.active_workspace].lens_depth(), 1);
         // The breadcrumb tail reads the node stepped into, not the child id.
-        assert_eq!(core.workspace.lens_label.as_deref(), Some("study"));
+        assert_eq!(
+            core.workspaces[core.active_workspace].lens_label.as_deref(),
+            Some("study")
+        );
         let route = core.seat.fold();
         let route = route.get(crate::ui::seat::KEY_INPUT_ROUTE).unwrap();
         assert_eq!(route["thread"], "C");
@@ -885,9 +908,9 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::PopLens,
         });
-        assert_eq!(core.workspace.lens_depth(), 0);
+        assert_eq!(core.workspaces[core.active_workspace].lens_depth(), 0);
         assert_eq!(
-            core.workspace.lens_label, None,
+            core.workspaces[core.active_workspace].lens_label, None,
             "pop restores the top-of-tree label"
         );
         assert_eq!(
@@ -1026,13 +1049,18 @@ mod tests {
             core.seat.fold().get("selection").unwrap()["work"]["thread"],
             "T-inspected"
         );
-        assert_eq!(core.workspace.lens_label, None);
+        assert_eq!(core.workspaces[core.active_workspace].lens_label, None);
     }
 
     #[test]
     fn directive_threads_dock_renders_bound_view_rows() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.ui.docks.left.as_mut().unwrap().visible = true;
+        core.workspaces[core.active_workspace]
+            .docks
+            .left
+            .as_mut()
+            .unwrap()
+            .visible = true;
         seed_view_value(
             &mut core,
             "view:ryeos/threads/list",
@@ -1073,7 +1101,12 @@ mod tests {
     #[test]
     fn sections_view_assembles_one_group_per_section_from_its_own_source() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.ui.docks.left.as_mut().unwrap().visible = true;
+        core.workspaces[core.active_workspace]
+            .docks
+            .left
+            .as_mut()
+            .unwrap()
+            .visible = true;
         seed_view_value(
             &mut core,
             "view:ryeos/threads/list",
@@ -1136,7 +1169,12 @@ mod tests {
     #[test]
     fn sections_view_without_a_loaded_source_shows_an_empty_group() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.ui.docks.left.as_mut().unwrap().visible = true;
+        core.workspaces[core.active_workspace]
+            .docks
+            .left
+            .as_mut()
+            .unwrap()
+            .visible = true;
         seed_view_value(
             &mut core,
             "view:ryeos/threads/list",

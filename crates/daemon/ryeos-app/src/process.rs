@@ -20,7 +20,7 @@ const POST_SIGKILL_WAIT_MS: u64 = 200;
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
-pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 2;
+pub const PROCESS_IDENTITY_SCHEMA_VERSION: u32 = 5;
 
 /// Durable identity for the exact target and its retained process-group leader.
 ///
@@ -44,12 +44,61 @@ pub struct ExecutionProcessIdentity {
     /// permission to downgrade a failed scoped launch or recovery.
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub process_scope: Option<lillux::ProcessScopeRecovery>,
+    /// Exact node-selected resource evidence owned by this process
+    /// incarnation. Empty means no constrained resource was selected.
+    pub resource_selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
+    /// Exact financial operations issued for the selected resources. Empty is
+    /// valid only for a process with no selected resources.
+    pub resource_operations: Vec<ryeos_accounting::ResourceOperationBinding>,
+    /// Node-policy live-allocation ceiling captured with this exact selection.
+    /// It is enforced atomically against other durable process owners.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_allocation_limit: Option<u32>,
+    /// Optional start of financially measured occupancy. The coordinate is
+    /// produced by Lillux and remains opaque to process/recovery code.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_occupancy_start: Option<lillux::time::OccupancyCoordinate>,
+    /// Finite occupancy authority derived from the resource's admitted
+    /// financial maximum. Lillux owns its clock semantics and arithmetic.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_occupancy_limit: Option<lillux::time::OccupancyLimit>,
+    /// Node-owned cleanup reserve within the finite occupancy maximum.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub resource_cleanup_allowance_ms: Option<u64>,
 }
 
 impl ExecutionProcessIdentity {
     pub fn pgid(&self) -> i64 {
         self.group_leader_pid
     }
+
+    /// Stable identity of this kernel process occurrence, independent of the
+    /// resource/timing evidence bound after held spawn. Financial operations
+    /// use this coordinate without interpreting any OS-specific birth field.
+    pub fn owner_incarnation_digest(&self) -> Result<String> {
+        lillux_process_identity(self)?
+            .incarnation_digest()
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+/// Fail-closed service-window observation for the exact captured resource
+/// authority. Lillux owns clock arithmetic; the application only interprets
+/// its portable service/cleanup states.
+pub fn resource_service_window_exhausted(
+    limit: Option<&lillux::time::OccupancyLimit>,
+    cleanup_allowance_ms: Option<u64>,
+) -> bool {
+    let Some(limit) = limit else {
+        return cleanup_allowance_ms.is_some();
+    };
+    let Some(cleanup_allowance_ms) = cleanup_allowance_ms else {
+        return true;
+    };
+    !matches!(
+        limit.window(lillux::time::Duration::from_millis(cleanup_allowance_ms)),
+        Ok(lillux::time::OccupancyWindowState::Service { .. })
+    )
 }
 
 /// Convert the kernel-neutral exact coordinate issued by Lillux into RyeOS's
@@ -69,6 +118,12 @@ pub fn execution_process_identity_from_lillux(
         group_leader_start_time_ticks: i64::try_from(identity.group_leader_start_time_ticks)
             .context("Lillux group birth is outside RyeOS durable range")?,
         process_scope,
+        resource_selections: Vec::new(),
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
     };
     validate_execution_process_identity_shape(&identity)?;
     Ok(identity)
@@ -94,7 +149,118 @@ pub fn validate_execution_process_identity_shape(
             .map_err(anyhow::Error::msg)
             .context("invalid execution scope identity")?;
     }
+    let mut resource_ids = std::collections::BTreeSet::new();
+    for selection in &identity.resource_selections {
+        selection.validate()?;
+        if !resource_ids.insert(selection.stable_id.as_str()) {
+            anyhow::bail!("process identity contains duplicate resource selections");
+        }
+    }
+    if identity.resource_selections.len() != identity.resource_operations.len() {
+        anyhow::bail!("process identity resource selections and operations differ in cardinality");
+    }
+    let exact_owner = identity.owner_incarnation_digest()?;
+    let mut owner_gate_id: Option<&ryeos_accounting::HexDigest> = None;
+    for (selection, operation) in identity
+        .resource_selections
+        .iter()
+        .zip(&identity.resource_operations)
+    {
+        operation.validate().map_err(anyhow::Error::msg)?;
+        if operation.owner_incarnation.as_str() != exact_owner {
+            anyhow::bail!("process resource operation names another owner occurrence");
+        }
+        if owner_gate_id
+            .replace(&operation.owner_gate_id)
+            .is_some_and(|retained| retained != &operation.owner_gate_id)
+        {
+            anyhow::bail!("process resource operations use multiple owner accounting gates");
+        }
+        if selection.stable_id != operation.stable_resource_id {
+            anyhow::bail!("process identity resource operation names another selection");
+        }
+        let start = identity.resource_occupancy_start.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("resource operation lacks its retained occupancy start")
+        })?;
+        if operation.clock_contract_digest.as_str() != start.contract_digest {
+            anyhow::bail!(
+                "process identity resource operation names another occupancy-clock contract"
+            );
+        }
+    }
+    let bounded_maximum_ms = identity
+        .resource_operations
+        .iter()
+        .filter_map(|operation| operation.maximum_occupancy_milliseconds)
+        .min();
+    if identity.resource_selections.is_empty()
+        && (identity.resource_occupancy_start.is_some()
+            || identity.resource_occupancy_limit.is_some()
+            || identity.resource_cleanup_allowance_ms.is_some())
+    {
+        anyhow::bail!("process identity meters occupancy without a selected resource");
+    }
+    if let Some(limit) = &identity.resource_occupancy_limit {
+        limit.validate().map_err(anyhow::Error::msg)?;
+        if identity.resource_occupancy_start.as_ref() != Some(&limit.start) {
+            anyhow::bail!("process identity occupancy limit has a different start coordinate");
+        }
+    }
+    match (
+        bounded_maximum_ms,
+        identity.resource_occupancy_limit.as_ref(),
+        identity.resource_cleanup_allowance_ms,
+    ) {
+        (Some(maximum_ms), Some(limit), Some(cleanup_ms))
+            if maximum_ms.checked_mul(1_000_000) == Some(limit.maximum_occupancy_ns)
+                && cleanup_ms > 0
+                && cleanup_ms < maximum_ms => {}
+        (Some(_), Some(_), Some(_)) => {
+            anyhow::bail!("process identity occupancy limit differs from its financial maximum")
+        }
+        (Some(_), _, _) => {
+            anyhow::bail!("bounded resource operations lack complete occupancy authority")
+        }
+        (None, Some(_), _) | (None, None, Some(_)) => {
+            anyhow::bail!(
+                "advisory resource operations cannot establish finite occupancy authority"
+            )
+        }
+        (None, None, None) => {}
+    }
+    if identity.resource_selections.is_empty() != identity.resource_allocation_limit.is_none()
+        || identity.resource_allocation_limit == Some(0)
+    {
+        anyhow::bail!("process identity resource allocation ceiling is inconsistent");
+    }
     Ok(())
+}
+
+impl ExecutionProcessIdentity {
+    pub fn bind_execution_resources(
+        &mut self,
+        selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
+        operations: Vec<ryeos_accounting::ResourceOperationBinding>,
+        allocation_limit: Option<u32>,
+        occupancy_start: Option<lillux::time::OccupancyCoordinate>,
+        occupancy_limit: Option<lillux::time::OccupancyLimit>,
+        cleanup_allowance_ms: Option<u64>,
+    ) -> Result<()> {
+        if !self.resource_selections.is_empty()
+            || self.resource_occupancy_start.is_some()
+            || self.resource_occupancy_limit.is_some()
+            || self.resource_cleanup_allowance_ms.is_some()
+        {
+            bail!("process identity resource authority is already bound");
+        }
+        self.resource_selections = selections;
+        self.resource_operations = operations;
+        self.resource_allocation_limit = allocation_limit;
+        self.resource_occupancy_start = occupancy_start;
+        self.resource_occupancy_limit = occupancy_limit;
+        self.resource_cleanup_allowance_ms = cleanup_allowance_ms;
+        validate_execution_process_identity_shape(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -426,6 +592,12 @@ fn capture_execution_process_identity_from_pin(
         target_start_time_ticks: target_stat.start_time_ticks,
         group_leader_pid: pgid,
         group_leader_start_time_ticks: group_stat.start_time_ticks,
+        resource_selections: Vec::new(),
+        resource_operations: Vec::new(),
+        resource_allocation_limit: None,
+        resource_occupancy_start: None,
+        resource_occupancy_limit: None,
+        resource_cleanup_allowance_ms: None,
     })
 }
 

@@ -11,143 +11,62 @@ use sha2::{Digest, Sha256};
 
 use ryeos_api::routes::response_modes::static_mode::{StaticAsset, StaticAssetProvider};
 
-/// Content type inferred from file extension.
-fn content_type_for_path(path: &str) -> &'static str {
-    if path.ends_with(".html") {
-        "text/html; charset=utf-8"
-    } else if path.ends_with(".js") {
-        "application/javascript; charset=utf-8"
-    } else if path.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if path.ends_with(".wasm") {
-        "application/wasm"
-    } else if path.ends_with(".ico") {
-        "image/x-icon"
-    } else if path.ends_with(".json") {
-        "application/json"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-}
-
 /// Compute a SHA-256 ETag for the given bytes.
 fn compute_etag(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let hash = hasher.finalize();
-    // Use first 32 hex chars (128 bits) — sufficient for ETag uniqueness.
+    // Quote the complete content digest so development assets have the same
+    // ETag shape as manifest-pinned embedded assets.
     format!("\"{:x}\"", hash)
 }
 
-// ── Compile-time embedded bytes ─────────────────────────────────────────
+/// One member of the closed browser asset generation.
+///
+/// This type is deliberately private to the provider. The source of truth is
+/// `web-assets.json`; `generate_asset_registry.py` validates it and emits the
+/// literal `include_bytes!` table below.
+pub(super) struct WebAssetEntry {
+    route: &'static str,
+    filename: &'static str,
+    content_type: &'static str,
+    cache_control: &'static str,
+    sha256: &'static str,
+    imports: &'static [&'static str],
+    bytes: &'static [u8],
+}
 
-static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
-static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
-static RYEOS_UI_COMPONENTS_CHROME_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_chrome.js");
-static RYEOS_UI_COMPONENTS_FIELD_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_field.js");
-static RYEOS_UI_COMPONENTS_HOME_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_home.js");
-static RYEOS_UI_COMPONENTS_NAVIGATION_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_navigation.js");
-static RYEOS_UI_COMPONENTS_PRIMITIVES_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_primitives.js");
-static RYEOS_UI_COMPONENTS_WORKSPACE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_components_workspace.js");
-static RYEOS_UI_DOM_ADAPTER_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_dom_adapter.js");
-static RYEOS_UI_AMBIENT_SCENE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_ambient_scene.js");
-static RYEOS_UI_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_effects.js");
-static RYEOS_UI_FIELD_ACCESSIBILITY_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_field_accessibility.js");
-static RYEOS_UI_FIELD_CANVAS_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_field_canvas.js");
-static RYEOS_UI_FIELD_LAYOUT_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_field_layout.js");
-static RYEOS_UI_GRID_CANVAS_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_grid_canvas.js");
-static RYEOS_UI_KEYBOARD_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_keyboard.js");
-static RYEOS_UI_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_motion.js");
-static RYEOS_UI_PRESENTATION_STATE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/ryeos_presentation_state.js");
-static RYEOS_UI_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_shell.js");
-static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
-static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
-static RYEOS_WEB_WASM: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web_bg.wasm");
+include!("generated_web_assets.rs");
 
 /// Web UI static asset provider — owns the embedded web client assets.
 pub struct WebAssetProvider;
 
 impl StaticAssetProvider for WebAssetProvider {
     fn get(&self, path: &str) -> Option<StaticAsset> {
-        let trimmed = path.trim_start_matches('/');
-        if let Some(asset) = dev_asset(trimmed) {
-            return Some(asset);
+        debug_assert_eq!(ASSET_MANIFEST_SCHEMA, "ryeos.ui.asset-manifest.v1");
+        debug_assert_eq!(
+            ASSET_UI_BINDING_REVISION,
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        );
+        let entry = asset_entry(path)?;
+        debug_assert!(entry.imports.iter().all(|imported| {
+            WEB_ASSETS
+                .iter()
+                .any(|candidate| candidate.route == *imported)
+        }));
+        if let Some(root) = std::env::var_os("RYEOS_UI_ASSET_DIR").map(PathBuf::from) {
+            // Once an override is selected, absence fails visibly. Never mix a
+            // staged source generation with embedded files from another one.
+            if !dev_generation_is_complete(&root) {
+                return None;
+            }
+            return dev_asset(&root, entry);
         }
-        let (bytes, cache_control) = match trimmed {
-            "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
-            "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
-            "ryeos_components_chrome.js" | "ui/assets/ryeos_components_chrome.js" => {
-                (RYEOS_UI_COMPONENTS_CHROME_JS, "no-cache")
-            }
-            "ryeos_components_field.js" | "ui/assets/ryeos_components_field.js" => {
-                (RYEOS_UI_COMPONENTS_FIELD_JS, "no-cache")
-            }
-            "ryeos_components_home.js" | "ui/assets/ryeos_components_home.js" => {
-                (RYEOS_UI_COMPONENTS_HOME_JS, "no-cache")
-            }
-            "ryeos_components_navigation.js" | "ui/assets/ryeos_components_navigation.js" => {
-                (RYEOS_UI_COMPONENTS_NAVIGATION_JS, "no-cache")
-            }
-            "ryeos_components_primitives.js" | "ui/assets/ryeos_components_primitives.js" => {
-                (RYEOS_UI_COMPONENTS_PRIMITIVES_JS, "no-cache")
-            }
-            "ryeos_components_workspace.js" | "ui/assets/ryeos_components_workspace.js" => {
-                (RYEOS_UI_COMPONENTS_WORKSPACE_JS, "no-cache")
-            }
-            "ryeos_dom_adapter.js" | "ui/assets/ryeos_dom_adapter.js" => {
-                (RYEOS_UI_DOM_ADAPTER_JS, "no-cache")
-            }
-            "ryeos_ambient_scene.js" | "ui/assets/ryeos_ambient_scene.js" => {
-                (RYEOS_UI_AMBIENT_SCENE_JS, "no-cache")
-            }
-            "ryeos_effects.js" | "ui/assets/ryeos_effects.js" => (RYEOS_UI_EFFECTS_JS, "no-cache"),
-            "ryeos_field_accessibility.js" | "ui/assets/ryeos_field_accessibility.js" => {
-                (RYEOS_UI_FIELD_ACCESSIBILITY_JS, "no-cache")
-            }
-            "ryeos_field_canvas.js" | "ui/assets/ryeos_field_canvas.js" => {
-                (RYEOS_UI_FIELD_CANVAS_JS, "no-cache")
-            }
-            "ryeos_field_layout.js" | "ui/assets/ryeos_field_layout.js" => {
-                (RYEOS_UI_FIELD_LAYOUT_JS, "no-cache")
-            }
-            "ryeos_grid_canvas.js" | "ui/assets/ryeos_grid_canvas.js" => {
-                (RYEOS_UI_GRID_CANVAS_JS, "no-cache")
-            }
-            "ryeos_keyboard.js" | "ui/assets/ryeos_keyboard.js" => {
-                (RYEOS_UI_KEYBOARD_JS, "no-cache")
-            }
-            "ryeos_motion.js" | "ui/assets/ryeos_motion.js" => (RYEOS_UI_MOTION_JS, "no-cache"),
-            "ryeos_presentation_state.js" | "ui/assets/ryeos_presentation_state.js" => {
-                (RYEOS_UI_PRESENTATION_STATE_JS, "no-cache")
-            }
-            "ryeos_shell.js" | "ui/assets/ryeos_shell.js" => (RYEOS_UI_SHELL_JS, "no-cache"),
-            "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
-            "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
-            "ryeos_web_bg.wasm" | "ui/assets/ryeos_web_bg.wasm" => (RYEOS_WEB_WASM, "no-cache"),
-            _ => return None,
-        };
         Some(StaticAsset {
-            bytes: bytes.to_vec(),
-            content_type: content_type_for_path(trimmed),
-            etag: compute_etag(bytes),
-            cache_control,
+            bytes: entry.bytes.to_vec(),
+            content_type: entry.content_type,
+            etag: format!("\"{}\"", entry.sha256),
+            cache_control: entry.cache_control,
         })
     }
 }
@@ -156,29 +75,40 @@ impl StaticAssetProvider for WebAssetProvider {
 ///
 /// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/web/pkg` before starting
 /// `ryeosd`, then `/ui` and `/ui/assets/*` are served from that directory
-/// instead of the compile-time embedded bytes. This is intentionally an env-gated
-/// development escape hatch so UI JS/CSS can be refreshed without repopulating
-/// bundles or recompiling the daemon for every edit.
-fn dev_asset(trimmed: &str) -> Option<StaticAsset> {
-    let root = std::env::var_os("RYEOS_UI_ASSET_DIR").map(PathBuf::from)?;
-    let relative = asset_relative_path(trimmed)?;
-    let path = safe_join(&root, &relative)?;
+/// instead of the compile-time embedded bytes. Only filenames admitted by the
+/// compiled manifest can be served. Selecting an override is generation-wide:
+/// a missing staged member is an error, never permission to fall back to the
+/// embedded member from a different generation.
+fn dev_asset(root: &Path, entry: &WebAssetEntry) -> Option<StaticAsset> {
+    let relative = PathBuf::from(entry.filename);
+    let path = safe_join(root, &relative)?;
     let bytes = std::fs::read(&path).ok()?;
     let etag = compute_etag(&bytes);
     Some(StaticAsset {
         bytes,
-        content_type: content_type_for_path(relative.to_str().unwrap_or(trimmed)),
+        content_type: entry.content_type,
         etag,
         cache_control: "no-store",
     })
 }
 
-fn asset_relative_path(trimmed: &str) -> Option<PathBuf> {
-    let relative = trimmed.strip_prefix("ui/assets/").unwrap_or(trimmed);
-    if relative == "ui/index.html" {
-        return Some(PathBuf::from("index.html"));
-    }
-    Some(PathBuf::from(relative))
+fn dev_generation_is_complete(root: &Path) -> bool {
+    WEB_ASSETS.iter().all(|entry| {
+        safe_join(root, Path::new(entry.filename))
+            .and_then(|path| std::fs::symlink_metadata(path).ok())
+            .is_some_and(|metadata| metadata.file_type().is_file())
+    })
+}
+
+fn asset_entry(path: &str) -> Option<&'static WebAssetEntry> {
+    let trimmed = path.trim_start_matches('/');
+    let route = match trimmed {
+        "ui" | "ui/" | "index.html" | "ui/index.html" => "/ui".to_string(),
+        value if value.starts_with("ui/assets/") => format!("/{value}"),
+        value if !value.contains('/') => format!("/ui/assets/{value}"),
+        _ => return None,
+    };
+    WEB_ASSETS.iter().find(|entry| entry.route == route)
 }
 
 fn safe_join(root: &Path, relative: &Path) -> Option<PathBuf> {
@@ -196,6 +126,37 @@ fn safe_join(root: &Path, relative: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct SourceManifest {
+        schema_version: String,
+        ui_binding_revision: String,
+        assets: Vec<SourceAsset>,
+    }
+
+    #[derive(Deserialize)]
+    struct SourceAsset {
+        route: String,
+        filename: String,
+        mime: String,
+        cache: String,
+        sha256: String,
+        imports: Vec<String>,
+    }
+
+    fn source_manifest() -> SourceManifest {
+        serde_json::from_str(include_str!("../web-assets.json"))
+            .expect("browser asset manifest must parse")
+    }
+
+    fn embedded(filename: &str) -> &'static [u8] {
+        WEB_ASSETS
+            .iter()
+            .find(|entry| entry.filename == filename)
+            .unwrap_or_else(|| panic!("missing embedded asset {filename}"))
+            .bytes
+    }
 
     #[test]
     fn get_index_html() {
@@ -210,41 +171,25 @@ mod tests {
     }
 
     #[test]
-    fn get_bootstrap_js() {
-        let provider = WebAssetProvider;
-        let asset = provider
-            .get("bootstrap.js")
-            .expect("bootstrap.js must be embedded");
-        assert!(!asset.bytes.is_empty());
-        assert!(asset.content_type.contains("javascript"));
-    }
-
-    #[test]
-    fn get_web_shell_assets() {
+    fn get_compiled_browser_assets() {
         let provider = WebAssetProvider;
         let css = provider
-            .get("web-shell.css")
-            .expect("web-shell.css must be embedded");
+            .get("ryeos_ui.css")
+            .expect("ryeos_ui.css must be embedded");
         assert!(!css.bytes.is_empty());
         assert!(css.content_type.contains("css"));
 
-        let js = provider
-            .get("ui/assets/ryeos_web.js")
-            .expect("ryeos_web.js must be embedded");
-        assert!(!js.bytes.is_empty());
-        assert!(js.content_type.contains("javascript"));
-
         let ryeos_ui = provider
-            .get("ui/assets/ryeos_shell.js")
-            .expect("ryeos_shell.js must be embedded");
+            .get("ui/assets/ryeos_ui.js")
+            .expect("ryeos_ui.js must be embedded");
         assert!(!ryeos_ui.bytes.is_empty());
         assert!(ryeos_ui.content_type.contains("javascript"));
 
-        let ambient = provider
-            .get("ui/assets/ryeos_ambient_scene.js")
-            .expect("ryeos_ambient_scene.js must be embedded");
-        assert!(!ambient.bytes.is_empty());
-        assert!(ambient.content_type.contains("javascript"));
+        let three = provider
+            .get("ui/assets/ryeos_three.js")
+            .expect("ryeos_three.js must be embedded");
+        assert!(!three.bytes.is_empty());
+        assert!(three.content_type.contains("javascript"));
 
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")
@@ -254,57 +199,109 @@ mod tests {
     }
 
     #[test]
-    fn every_authored_browser_module_is_embedded() {
-        // The browser resolves the complete ES-module graph before executing
-        // bootstrap.js. A missing transitive module therefore used to leave
-        // the static loading document on screen without reaching its error
-        // handler. Keep the compiled asset closure equal to the authored JS
-        // closure so additions fail here instead of in an installed browser.
+    fn packaged_asset_inventory_equals_the_closed_registry() {
         let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/pkg");
-        let provider = WebAssetProvider;
-        let mut modules = std::fs::read_dir(package)
+        let mut packaged = std::fs::read_dir(package)
             .expect("read authored web package")
             .map(|entry| entry.expect("read authored web package entry").path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("js"))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("html" | "js" | "css" | "wasm" | "png" | "svg" | "ico")
+                )
+            })
+            .map(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .expect("browser asset filename must be UTF-8")
+                    .to_string()
+            })
             .collect::<Vec<_>>();
-        modules.sort();
+        packaged.sort();
+        let mut admitted = WEB_ASSETS
+            .iter()
+            .map(|entry| entry.filename.to_string())
+            .collect::<Vec<_>>();
+        admitted.sort();
+        assert_eq!(packaged, admitted);
+    }
 
-        for module in modules {
-            let name = module
-                .file_name()
-                .and_then(|value| value.to_str())
-                .expect("browser module filename must be UTF-8");
-            assert!(
-                provider.get(&format!("ui/assets/{name}")).is_some(),
-                "authored browser module `{name}` is absent from the embedded asset closure"
+    #[test]
+    fn source_manifest_and_generated_registry_are_identical() {
+        let source = source_manifest();
+        assert_eq!(source.schema_version, ASSET_MANIFEST_SCHEMA);
+        assert_eq!(source.ui_binding_revision, ASSET_UI_BINDING_REVISION);
+        assert_eq!(source.assets.len(), WEB_ASSETS.len());
+        for (source, generated) in source.assets.iter().zip(WEB_ASSETS) {
+            assert_eq!(source.route, generated.route);
+            assert_eq!(source.filename, generated.filename);
+            assert_eq!(source.mime, generated.content_type);
+            assert_eq!(source.cache, generated.cache_control);
+            assert_eq!(source.sha256, generated.sha256);
+            assert_eq!(
+                source
+                    .imports
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                generated.imports
             );
         }
     }
 
     #[test]
-    fn generated_wasm_glue_exports_every_shell_import() {
+    fn embedded_bytes_match_manifest_and_import_closure_is_closed() {
+        assert_eq!(
+            ASSET_UI_BINDING_REVISION,
+            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
+        );
+        for entry in WEB_ASSETS {
+            assert_eq!(compute_etag(entry.bytes), format!("\"{}\"", entry.sha256));
+            for imported in entry.imports {
+                assert!(
+                    WEB_ASSETS
+                        .iter()
+                        .any(|candidate| candidate.route == *imported),
+                    "{} imports unregistered route {imported}",
+                    entry.route
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn development_override_is_closed_and_never_falls_back() {
+        let directory = tempfile::tempdir().expect("create staged asset directory");
+        let index = asset_entry("/ui").expect("index is admitted");
+        assert!(!dev_generation_is_complete(directory.path()));
+        assert!(dev_asset(directory.path(), index).is_none());
+        assert!(asset_entry("/ui/assets/not-admitted.js").is_none());
+
+        for entry in WEB_ASSETS {
+            std::fs::write(directory.path().join(entry.filename), entry.bytes)
+                .expect("write complete staged asset generation");
+        }
+        assert!(dev_generation_is_complete(directory.path()));
+        std::fs::write(directory.path().join(index.filename), b"development index")
+            .expect("write staged index");
+        let staged = dev_asset(directory.path(), index).expect("read admitted staged asset");
+        assert_eq!(staged.bytes, b"development index");
+        assert_eq!(staged.cache_control, "no-store");
+    }
+
+    #[test]
+    fn generated_wasm_glue_exports_the_compiled_runtime_surface() {
         // wasm.rs and the checked-in wasm-bindgen outputs are one compiled
         // browser contract. If Rust gains an export without regenerating the
-        // JS/WASM pair, static ES-module linking fails before bootstrap can
-        // enter the application. Derive the required names from the shell's
-        // authored import instead of maintaining a second export list here.
-        let shell = std::str::from_utf8(RYEOS_UI_SHELL_JS).expect("shell JS must be UTF-8");
-        let generated =
-            std::str::from_utf8(RYEOS_WEB_JS).expect("generated wasm glue must be UTF-8");
-        let named_imports = shell
-            .strip_prefix("import init, {")
-            .and_then(|rest| rest.split_once("} from \"/ui/assets/ryeos_web.js\";"))
-            .map(|(imports, _)| imports)
-            .expect("shell must begin with the generated WASM import");
-
-        for imported in named_imports
-            .lines()
-            .map(|line| line.trim().trim_end_matches(','))
-            .filter(|name| !name.is_empty())
-        {
+        // JS/WASM pair, the compiled runtime fails before entering the app.
+        // The runtime performs the complete export-inventory check; keep this
+        // provider test focused on representative generated entry points.
+        let generated = std::str::from_utf8(embedded("ryeos_web.js"))
+            .expect("generated wasm glue must be UTF-8");
+        for imported in ["ryeos_start", "ryeos_dispatch", "ryeos_key"] {
             assert!(
                 generated.contains(&format!("export function {imported}(")),
-                "generated wasm glue does not export shell import `{imported}`; regenerate ryeos_web.js and ryeos_web_bg.wasm"
+                "generated wasm glue does not export `{imported}`"
             );
         }
     }
@@ -327,13 +324,5 @@ mod tests {
         let a1 = provider.get("index.html").unwrap();
         let a2 = provider.get("index.html").unwrap();
         assert_eq!(a1.etag, a2.etag);
-    }
-
-    #[test]
-    fn content_type_for_extensions() {
-        assert!(content_type_for_path("foo.wasm").contains("wasm"));
-        assert!(content_type_for_path("foo.css").contains("css"));
-        assert!(content_type_for_path("foo.ico").contains("icon"));
-        assert_eq!(content_type_for_path("foo.bin"), "application/octet-stream");
     }
 }

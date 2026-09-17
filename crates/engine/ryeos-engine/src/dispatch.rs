@@ -21,6 +21,7 @@ pub fn execute_plan(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
+    validate_plan_target_without_selection(plan)?;
     let mut result: Option<ExecutionCompletion> = None;
 
     for node in &plan.nodes {
@@ -70,6 +71,67 @@ pub fn execute_plan(
         continuation_request: None,
         metadata: None,
     }))
+}
+
+fn validate_plan_target_without_selection(plan: &ExecutionPlan) -> Result<(), EngineError> {
+    plan.resource_authority_ceiling
+        .admits(plan.target_requirement.as_ref())
+        .map_err(|error| EngineError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
+    if let Some(target) = &plan.target_requirement {
+        target
+            .validate_current_platform()
+            .map_err(|error| EngineError::ExecutionFailed {
+                reason: error.to_string(),
+            })?;
+        if target.requests_resources() {
+            return Err(EngineError::ExecutionFailed {
+                reason: "execution target requests resources but no selected target is attached"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_target_with_selection(
+    plan: &ExecutionPlan,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+) -> Result<(), EngineError> {
+    plan.resource_authority_ceiling
+        .admits(plan.target_requirement.as_ref())
+        .map_err(|error| EngineError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
+    let Some(target) = &plan.target_requirement else {
+        if !selections.is_empty() || devices.is_some() {
+            return Err(EngineError::ExecutionFailed {
+                reason: "resource authority was supplied to a plan with no target requirement"
+                    .to_owned(),
+            });
+        }
+        return Ok(());
+    };
+    target
+        .validate_selections(selections)
+        .map_err(|error| EngineError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
+    let mut expected_devices = selections
+        .iter()
+        .flat_map(|selection| selection.character_devices.iter().cloned())
+        .collect::<Vec<_>>();
+    expected_devices.sort_by(|left, right| left.role.cmp(&right.role));
+    match (expected_devices.is_empty(), devices) {
+        (true, None) => Ok(()),
+        (false, Some(devices)) if devices.identities() == expected_devices => Ok(()),
+        _ => Err(EngineError::ExecutionFailed {
+            reason: "selected character-device authority contradicts retained resource evidence"
+                .to_owned(),
+        }),
+    }
 }
 
 /// Dispatch a subprocess plan node via Lillux.
@@ -397,6 +459,12 @@ impl SpawnedExecutionAwaitingAttachment {
         self.pending.scope_recovery()
     }
 
+    pub fn exact_process_identity(&self) -> Result<lillux::ExactProcessIdentity, EngineError> {
+        self.pending
+            .exact_process_identity()
+            .map_err(|reason| EngineError::ExecutionFailed { reason })
+    }
+
     #[cfg(target_os = "linux")]
     pub fn pidfd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.pending.pidfd()
@@ -414,6 +482,21 @@ impl SpawnedExecutionAwaitingAttachment {
         let running = self
             .pending
             .release_after_attachment()
+            .map_err(|source| EngineError::AttachmentReleaseFailed { source })?;
+        Ok(RunningExecution {
+            running,
+            debug: self.debug,
+        })
+    }
+
+    pub fn release_after_attachment_with_occupancy(
+        self,
+        limit: lillux::time::OccupancyLimit,
+        cleanup_allowance: std::time::Duration,
+    ) -> Result<RunningExecution, EngineError> {
+        let running = self
+            .pending
+            .release_after_attachment_with_occupancy(limit, cleanup_allowance)
             .map_err(|source| EngineError::AttachmentReleaseFailed { source })?;
         Ok(RunningExecution {
             running,
@@ -512,6 +595,25 @@ impl RunningExecution {
         }
         (completion, observation)
     }
+
+    pub fn wait_with_stdout_interruptible<T: Send, E: Send>(
+        self,
+        observe: impl FnOnce(lillux::ProcessStdoutReader) -> Result<T, E> + Send,
+        interrupted: impl FnMut() -> bool,
+    ) -> (
+        ExecutionCompletion,
+        Result<T, lillux::ProcessObservationError<E>>,
+    ) {
+        let (result, observation) = self
+            .running
+            .wait_with_stdout_interruptible(observe, interrupted);
+        let debug = self.debug.map(|c| c.into_block(&result));
+        let mut completion = translate_result(result);
+        if let Some(debug) = debug {
+            inject_debug(&mut completion, debug);
+        }
+        (completion, observation)
+    }
 }
 
 /// Spawn a plan's subprocess at its attachment boundary without permitting
@@ -523,12 +625,54 @@ pub fn spawn_plan(
     spawn_plan_with_scope(plan, ctx, None)
 }
 
+/// Spawn with exact node-selected resource evidence and descriptor authority.
+/// Selection is performed by the daemon; this boundary independently checks
+/// it against the signed target before Lillux receives any device handle.
+pub fn spawn_plan_with_resources(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    spawn_plan_with_scope_and_resources(plan, ctx, None, selections, devices)
+}
+
 /// The scope is allocated and durably retained by the existing launch owner,
 /// not inferred from a kind name or provider-specific executable.
 pub(crate) fn spawn_plan_with_scope(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    validate_plan_target_without_selection(plan)?;
+    spawn_first_plan_node(plan, ctx, scope, None)
+}
+
+pub(crate) fn spawn_plan_with_scope_and_resources(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
+    selections: &[crate::contracts::ExecutionResourceSelection],
+    devices: Option<&lillux::CharacterDeviceSet>,
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    if selections.iter().any(|selection| {
+        selection.enforcement
+            == crate::contracts::ExecutionResourceEnforcement::CharacterDeviceGrant
+    }) && !ctx.isolation.is_enforced()
+    {
+        return Err(EngineError::Internal(
+            "execution-restricted resource requires enforced exact device isolation".to_owned(),
+        ));
+    }
+    validate_plan_target_with_selection(plan, selections, devices)?;
+    spawn_first_plan_node(plan, ctx, scope, devices)
+}
+
+fn spawn_first_plan_node(
+    plan: &ExecutionPlan,
+    ctx: &EngineContext,
+    scope: Option<lillux::ProcessScope>,
+    devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     if let Some(node) = plan.nodes.first() {
         match node {
@@ -541,6 +685,7 @@ pub(crate) fn spawn_plan_with_scope(
                     plan.network_authority_ceiling,
                     ctx,
                     scope,
+                    devices,
                 );
             }
             PlanNode::Complete { .. } => {
@@ -561,6 +706,7 @@ fn spawn_subprocess(
     network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
+    devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     let request = isolation_plan_request_awaiting_attachment(
         spec,
@@ -569,6 +715,7 @@ fn spawn_subprocess(
         network_authority_ceiling,
         ctx,
         scope,
+        devices,
     )?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
@@ -656,6 +803,7 @@ fn isolation_plan_request_awaiting_attachment(
     network_authority_ceiling: crate::isolation::IsolationNetworkAuthorityCeiling,
     ctx: &EngineContext,
     scope: Option<lillux::ProcessScope>,
+    devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
     let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
     let filesystem_authority_ceiling = ctx
@@ -663,53 +811,59 @@ fn isolation_plan_request_awaiting_attachment(
         .intersect(filesystem_authority_ceiling);
     let node_filesystem = filesystem_authority_ceiling
         == crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy;
-    ctx.isolation
-        .apply_awaiting_attachment_in_scope_with_provenance(
-            request,
-            crate::isolation::IsolationLaunchContext {
-                project_path,
-                project_authority: ctx.isolation_project_authority,
-                immutable_project: ctx.isolation_immutable_project.as_ref(),
-                workspace_view: ctx.isolation_workspace_view.as_ref(),
-                filesystem_authority_ceiling,
-                network_authority_ceiling: ctx
-                    .isolation_network_authority_ceiling
-                    .intersect(network_authority_ceiling),
-                live_access: ctx.isolation_live_access_authority.as_ref(),
-                // Keep the exact launch-owned state authority on the held path
-                // too; only ambient node-policy mounts are removed by this ceiling.
-                state_root: ctx.isolation_state_root.as_deref(),
-                checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
-                checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
-                daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
-                bundle_roots: if node_filesystem {
-                    &ctx.isolation_bundle_roots
-                } else {
-                    &[]
-                },
-                node_trusted_keys_dir: ctx
-                    .isolation_node_trusted_keys_dir
-                    .as_deref()
-                    .filter(|_| node_filesystem),
-                verified_code: &verified_code,
-                verified_command: ctx
-                    .isolation_verified_command
-                    .as_ref()
-                    .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
-                    .or_else(|| {
-                        spec.verified_command.as_ref().map(|command| {
-                            command.code() as &dyn crate::isolation::IsolationCommandAuthority
-                        })
-                    }),
-                external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
-                writable_runtime_view_mounts: &ctx.isolation_writable_runtime_view_mounts,
-                target_channels: &ctx.isolation_target_channels,
-                item_ref,
-                thread_id: &ctx.thread_id,
+    let context = (
+        request,
+        crate::isolation::IsolationLaunchContext {
+            project_path,
+            project_authority: ctx.isolation_project_authority,
+            immutable_project: ctx.isolation_immutable_project.as_ref(),
+            workspace_view: ctx.isolation_workspace_view.as_ref(),
+            filesystem_authority_ceiling,
+            network_authority_ceiling: ctx
+                .isolation_network_authority_ceiling
+                .intersect(network_authority_ceiling),
+            live_access: ctx.isolation_live_access_authority.as_ref(),
+            // Keep the exact launch-owned state authority on the held path
+            // too; only ambient node-policy mounts are removed by this ceiling.
+            state_root: ctx.isolation_state_root.as_deref(),
+            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
+            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            bundle_roots: if node_filesystem {
+                &ctx.isolation_bundle_roots
+            } else {
+                &[]
             },
-            scope,
-        )
-        .map(|applied| applied.request)
+            node_trusted_keys_dir: ctx
+                .isolation_node_trusted_keys_dir
+                .as_deref()
+                .filter(|_| node_filesystem),
+            verified_code: &verified_code,
+            verified_command: ctx
+                .isolation_verified_command
+                .as_ref()
+                .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
+                .or_else(|| {
+                    spec.verified_command.as_ref().map(|command| {
+                        command.code() as &dyn crate::isolation::IsolationCommandAuthority
+                    })
+                }),
+            external_read_only_mounts: &ctx.isolation_external_read_only_mounts,
+            writable_runtime_view_mounts: &ctx.isolation_writable_runtime_view_mounts,
+            target_channels: &ctx.isolation_target_channels,
+            item_ref,
+            thread_id: &ctx.thread_id,
+        },
+    );
+    match devices {
+        Some(devices) => ctx
+            .isolation
+            .apply_awaiting_attachment_in_scope_with_devices(context.0, context.1, scope, devices),
+        None => ctx
+            .isolation
+            .apply_awaiting_attachment_in_scope_with_provenance(context.0, context.1, scope),
+    }
+    .map(|applied| applied.request)
 }
 
 fn isolation_plan_request_parts<'a>(
@@ -899,6 +1053,9 @@ mod tests {
                 crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                crate::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "test".into(),
             executor_chain: vec!["@test".into()],
             executor_authorities: Vec::new(),

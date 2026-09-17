@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|local-inference|hosted-node|hosted-workflow|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + central-auth + standard + web + browser + ryeos-ui +
@@ -18,6 +18,7 @@
 #   central-host    core + central-auth + standard + web + tv-tracker-authoring —
 #                   standard node plus the rye/web/search tool and app authoring
 #   standard        core + central-auth + standard — scheduler/graph/directive node
+#   local-inference core + central-auth + standard + local-inference — provider-neutral inference node
 #   hosted-node     core + central-auth + hosted-node — lean remote-admission plane
 #   hosted-workflow core + central-auth + standard + hosted-node + codex + opencode — hosted
 #                   node that also runs scheduler/graph/directive and hosted workloads
@@ -90,7 +91,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|central-host|standard|hosted-node|hosted-workflow|release-artifacts) ;;
+  full|central-host|standard|local-inference|hosted-node|hosted-workflow|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -149,11 +150,19 @@ sign_seed_yaml() {
 
 write_seed_trust_doc() {
   local target="$ROOT/bundles/.ai/PUBLISHER_TRUST.toml"
-  cat > "$target" <<EOF
+  local tmp
+  tmp="$(mktemp "${target}.tmp.XXXXXX")"
+  cat > "$tmp" <<EOF
 public_key = "ed25519:$PUBLISHER_PUBKEY_RAW_B64"
 fingerprint = "$PUBLISHER_FP"
 owner = "$OWNER"
 EOF
+  if cmp -s "$tmp" "$target"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod 0644 "$tmp"
+  mv "$tmp" "$target"
 }
 
 assert_node_init_profile_inventory() {
@@ -266,7 +275,7 @@ staged_payload_records_for_set() {
     core ryeos-structured-session-bridge ryeos-structured-session static \
     core ryeos-lillux-isolation-adapter ryeos-lillux-isolation-adapter static
   case "$BUNDLE_SET" in
-    full|central-host|standard|hosted-workflow|release-artifacts)
+    full|central-host|standard|local-inference|hosted-workflow|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         standard ryeos-directive-runtime ryeos-directive-runtime release \
         standard ryeos-directive-launch-preparer ryeos-handler-bins release \
@@ -394,7 +403,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
-  standard)
+  standard|local-inference)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
@@ -551,7 +560,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$R
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -613,7 +622,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "local-inference" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   ryeos_term_update "publishing local-inference bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$LOCAL_INFERENCE" \
     --registry-root "$CORE" \

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-07T08:05:59Z:9c2b51c98e5ace0b2584d8d5a608087d76cd2658510d54d66d1c7abf9ec0636f:QC62Y286PnWqKQ/iuy44uCmyskNLZrMjnzdvE82Mv4VfYnjgs4fhx3b73uTWdF6zj8hGhPdFya/TzpqHeHnFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:9c2b51c98e5ace0b2584d8d5a608087d76cd2658510d54d66d1c7abf9ec0636f:yTisOQq/FMmYs5UXA3a5JSfnfxrnainHBfVEc9a1ZuUftkuj3m9QuSgqaiDE77nyG8D0z6rWirv9HOfPmHl3Cw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Admitted utility production entry, shared by the Tool and its E2E probe.
 
 utilities.py owns the sole compiler recipe; preparation.py owns source selection.

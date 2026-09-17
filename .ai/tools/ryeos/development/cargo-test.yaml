@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:45:13Z:6bc9defdeef809d26ab5a839edae26f53d0096b4682b5efb3bdabb3b241f4435:557Xl+X7O9Tt5nDGJ+PY+icyajU5UDyaDhhAZqwncFlgRz3wYLU1JZDdqmbjwnwCWnBmKyXGkBu3U8IFqlr7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:50Z:6bc9defdeef809d26ab5a839edae26f53d0096b4682b5efb3bdabb3b241f4435:6PT1er4wr1I70spSkpPI1TsCFQmBI2rhgKl0Uh+KKuxzUJ7g8wY9LGdlROAaGhEuR94r67nSOOILvy2FKz9OBA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: ryeos/development
 name: cargo-test
 version: "1.0.1"

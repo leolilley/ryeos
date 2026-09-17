@@ -147,7 +147,7 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
                  The harness trusts the platform-author and dev-publisher (741a8bc6…) keys \
                  only. This usually means bundles/{{core,standard}}/.ai/bin was last signed \
                  with a different (e.g. operator) key. Re-sign with the dev key:\n\n  \
-                 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev\n\n\
+                 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner \"RyeOS Development\"\n\n\
                  then re-run. Every live-registry test fails with this same message until then."
             );
         }

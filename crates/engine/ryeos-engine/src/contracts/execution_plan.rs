@@ -504,6 +504,12 @@ pub struct ExecutionPlan {
     /// Signed filesystem projection, frozen alongside networking. This is
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed process suitability/resource request. Required explicit null
+    /// distinguishes a workload with no target requirement from a predecessor
+    /// plan that predates the current execution contract.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_requirement: Option<super::ExecutionTargetRequirement>,
+    pub resource_authority_ceiling: super::ExecutionResourceAuthorityCeiling,
     pub cache_key: String,
     /// Daemon supervision profile hint, derived from the root item's kind.
     #[serde(default)]

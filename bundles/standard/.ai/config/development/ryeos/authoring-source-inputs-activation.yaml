@@ -1,0 +1,24 @@
+# ryeos:signed:2026-09-17T06:38:02Z:18ddb257077b8ca3d791d5ddfeada960e481a75f98a85486dd723762d1364a05:fArOApGFAxEETXNOS0GS7qn4tvdy/4rHIIEo2MWqpo4VFq+4MFiASHTiRWqmfDGj8RDtg5xzjZEqOnp4EKoLAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+category: development/ryeos
+schema: ryeos.external_content_activation.v3
+consumer_ref: tool:ryeos/environments/qualification/authoring-source-inputs
+sources:
+  - id: authoring-source-inputs-release
+    url: https://github.com/leolilley/ryeos/releases/download/ryeos-development-runtime-inputs-v1/ryeos-authoring-source-inputs-v2.tar.gz
+    sha256: 5d96c864bc93a40168976c3d814b1d6a6850c7edfa03071f482034610560df2d
+    maximum_compressed_bytes: 242451026
+    maximum_expanded_bytes: 247900160
+    maximum_entries: 56
+    archive_format: tar_gzip
+components:
+  - id: authoring-source-inputs
+    storage: large_content
+    shape:
+      kind: whole_archive_tree
+      source: authoring-source-inputs-release
+      prefix: ryeos-authoring-source-inputs-v2
+      bounds:
+        maximum_entries: 55
+        maximum_depth: 2
+        maximum_file_bytes: 119166922
+        maximum_total_bytes: 247886376

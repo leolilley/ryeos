@@ -359,7 +359,7 @@ fn write_operator_authorized(
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
 // app_root or any operator/publisher-managed bundle.
 // To re-sign bundled items, use:
-//   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
+//   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner "RyeOS Development"
 // or `ryeos publish <bundle-dir> --key ... --owner ...` for one bundle.
 // See docs/operations/signing-bundles.md.
 

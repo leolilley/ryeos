@@ -6206,6 +6206,177 @@ impl StateStore {
         g.runtime_db.attach_worker_process(record)
     }
 
+    pub fn attach_pooled_resource_owner(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("pooled resource-owner attachment admission is closed for daemon shutdown");
+        }
+        g.runtime_db
+            .attach_pooled_resource_owner(owner_coordinate, process_identity)
+    }
+
+    /// Linearization point between a durable pooled-owner attachment and held
+    /// process release. Shutdown closes the same gate under this lock; only the
+    /// exact current process incarnation may consume its one-shot fence.
+    pub fn authorize_pooled_resource_owner_release(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("pooled resource-owner release is fenced during daemon shutdown");
+        }
+        g.runtime_db
+            .consume_pooled_resource_owner_release_fence(owner_coordinate, process_identity)
+    }
+
+    /// Dedicated-worker counterpart to pooled release authorization. The
+    /// worker journal must still name the exact attached occurrence before its
+    /// resource-owner fence can be consumed.
+    pub fn authorize_dedicated_resource_owner_release(
+        &self,
+        worker_instance_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("dedicated resource-owner release is fenced during daemon shutdown");
+        }
+        let worker = g
+            .runtime_db
+            .worker_process(worker_instance_id)?
+            .ok_or_else(|| anyhow!("dedicated resource-owner release has no worker journal"))?;
+        if worker.state != runtime_db::WorkerProcessState::Attached
+            || worker.cleanup_state != "owned"
+            || worker.process_identity != *process_identity
+        {
+            bail!("dedicated resource-owner release contradicts its attached worker journal");
+        }
+        g.runtime_db
+            .consume_dedicated_resource_owner_release_fence(worker_instance_id, process_identity)
+    }
+
+    pub fn clear_pooled_resource_owner(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .clear_pooled_resource_owner(owner_coordinate, process_identity)
+    }
+
+    pub fn prove_pooled_resource_owner_cleanup(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        evidence: &runtime_db::ProcessResourceCleanupEvidence,
+    ) -> Result<runtime_db::ProcessResourceCleanupEvidence> {
+        self.lock()?.runtime_db.prove_pooled_resource_owner_cleanup(
+            owner_coordinate,
+            process_identity,
+            evidence,
+        )
+    }
+
+    pub fn prove_thread_resource_owner_cleanup(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        evidence: &runtime_db::ProcessResourceCleanupEvidence,
+    ) -> Result<runtime_db::ProcessResourceCleanupEvidence> {
+        self.lock()?.runtime_db.prove_thread_resource_owner_cleanup(
+            thread_id,
+            process_identity,
+            evidence,
+        )
+    }
+
+    pub fn prove_dedicated_resource_owner_cleanup(
+        &self,
+        worker_instance_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        evidence: &runtime_db::ProcessResourceCleanupEvidence,
+    ) -> Result<runtime_db::ProcessResourceCleanupEvidence> {
+        self.lock()?
+            .runtime_db
+            .prove_dedicated_resource_owner_cleanup(worker_instance_id, process_identity, evidence)
+    }
+
+    pub fn process_resource_owners(&self) -> Result<Vec<runtime_db::ProcessResourceOwnerRecord>> {
+        self.lock()?.runtime_db.process_resource_owners()
+    }
+
+    pub fn reserve_process_resource_launch(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("process resource reservation is closed for daemon shutdown");
+        }
+        g.runtime_db.reserve_process_resource_launch(reservation)
+    }
+
+    pub fn bind_process_resource_scope(
+        &self,
+        owner_kind: &str,
+        owner_coordinate: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("process resource scope binding is closed for daemon shutdown");
+        }
+        g.runtime_db
+            .bind_process_resource_scope(owner_kind, owner_coordinate, recovery)
+    }
+
+    pub fn process_resource_reservations(
+        &self,
+    ) -> Result<Vec<runtime_db::ProcessResourceReservationRecord>> {
+        self.lock()?.runtime_db.process_resource_reservations()
+    }
+
+    pub fn process_resource_reservation(
+        &self,
+        owner_kind: &str,
+        owner_coordinate: &str,
+    ) -> Result<Option<runtime_db::ProcessResourceReservationRecord>> {
+        self.lock()?
+            .runtime_db
+            .process_resource_reservation(owner_kind, owner_coordinate)
+    }
+
+    pub fn clear_process_resource_reservation(
+        &self,
+        reservation: &runtime_db::ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .clear_process_resource_reservation(reservation)
+    }
+
     /// Existing durable session/worker owners supplement thread membership:
     /// failed held launches can retain unknown worker contact without writing
     /// execution_workspace.process_identity. Caller holds the root operation
@@ -13189,6 +13360,14 @@ impl StateStore {
         )
     }
 
+    pub fn get_resource_budget_transition_identity(
+        &self,
+        transition_id: &str,
+    ) -> Result<Option<queries::ResourceBudgetTransitionIdentity>> {
+        let g = self.lock()?;
+        queries::get_resource_budget_transition_identity(g.state_db.projection(), transition_id)
+    }
+
     pub fn summarize_provider_attempt_budget(
         &self,
         filter: &queries::AccountingSummaryFilter<'_>,
@@ -13202,6 +13381,14 @@ impl StateStore {
     ) -> Result<queries::AccountingProjectionBounds> {
         let g = self.lock()?;
         queries::provider_attempt_budget_projection_bounds(g.state_db.projection())
+    }
+
+    pub fn summarize_direct_resource_cost(
+        &self,
+        thread_id: &str,
+    ) -> Result<queries::ResourceCostSummary> {
+        let g = self.lock()?;
+        queries::summarize_direct_resource_cost(g.state_db.projection(), thread_id)
     }
 
     pub fn thread_projection_health(
@@ -14244,6 +14431,8 @@ impl StateStore {
             );
         }
         Self::authorize_thread_workspace_contact_locked(&g, thread_id)?;
+        g.runtime_db
+            .consume_process_release_fence(thread_id, process_identity)?;
         Ok(())
     }
 
@@ -17883,6 +18072,12 @@ mod tests {
             target_start_time_ticks: 10,
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let thread_id = &binding.borrower_launch_owner.thread_id;
         let owner = store
@@ -18321,6 +18516,12 @@ mod tests {
             target_start_time_ticks: 10,
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let owner = store.get_launch_claim(child).unwrap().unwrap().claimed_by;
         store
@@ -19915,6 +20116,12 @@ mod tests {
                         group_leader_pid: 101,
                         group_leader_start_time_ticks: 201,
                         process_scope: None,
+                        resource_selections: Vec::new(),
+                        resource_operations: Vec::new(),
+                        resource_allocation_limit: None,
+                        resource_occupancy_start: None,
+                        resource_occupancy_limit: None,
+                        resource_cleanup_allowance_ms: None,
                     },
                     control_channel_identity: "fixture-control".to_owned(),
                     state: runtime_db::WorkerProcessState::Attached,
@@ -22099,6 +22306,117 @@ mod tests {
         assert!(error.to_string().contains("closed for daemon shutdown"));
     }
 
+    fn process_resource_reservation_fixture(
+        coordinate: &str,
+    ) -> (
+        runtime_db::ProcessResourceReservationRecord,
+        lillux::ProcessScopeRecovery,
+    ) {
+        let host =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let planned = serde_json::json!({
+            "version": 2,
+            "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": host["backend"]["boot_id"],
+                "parent": {"containing_device": 1, "inode": 2},
+                "name": format!("resource-{coordinate}")}
+        });
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(planned.clone()).unwrap();
+        let mut bound = planned;
+        bound["version"] = 4.into();
+        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 3});
+        let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
+        (
+            runtime_db::ProcessResourceReservationRecord {
+                owner_kind: "thread".to_owned(),
+                owner_coordinate: coordinate.to_owned(),
+                daemon_generation_id: runtime_db::daemon_generation_id().to_owned(),
+                selections: vec![ryeos_engine::contracts::ExecutionResourceSelection {
+                    stable_id: format!("accelerator-{coordinate}"),
+                    class: "accelerator".to_owned(),
+                    matched_facts: BTreeMap::new(),
+                    observation_contract_digest: "1".repeat(64),
+                    device_binding_digest: "2".repeat(64),
+                    access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                    enforcement:
+                        ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+                    character_devices: Vec::new(),
+                }],
+                allocation_limit: 1,
+                scope_allocation: allocation,
+                scope_recovery: None,
+            },
+            recovery,
+        )
+    }
+
+    #[test]
+    fn shutdown_closure_serializes_resource_reservation_and_scope_binding() {
+        let store = Arc::new(test_store());
+        let (reservation, _) = process_resource_reservation_fixture("reserve-race");
+        let guard = store.lock().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reserve_store = Arc::clone(&store);
+        let reserve_record = reservation.clone();
+        let reserve = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            reserve_store.reserve_process_resource_launch(&reserve_record)
+        });
+        ready_rx.recv().unwrap();
+        // This is the shutdown linearization point while the reservation is
+        // queued behind the same StateStore lock. It must observe closure
+        // after acquiring the lock, not rely on a stale pre-lock read.
+        store
+            .process_attachment_admission_open
+            .store(false, Ordering::Release);
+        drop(guard);
+        assert!(
+            reserve
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("closed for daemon shutdown")
+        );
+        assert!(store.process_resource_reservations().unwrap().is_empty());
+
+        let store = Arc::new(test_store());
+        let (reservation, recovery) = process_resource_reservation_fixture("bind-race");
+        store.reserve_process_resource_launch(&reservation).unwrap();
+        let guard = store.lock().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let bind_store = Arc::clone(&store);
+        let bind = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            bind_store.bind_process_resource_scope("thread", "bind-race", &recovery)
+        });
+        ready_rx.recv().unwrap();
+        store
+            .process_attachment_admission_open
+            .store(false, Ordering::Release);
+        drop(guard);
+        assert!(
+            bind.join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("closed for daemon shutdown")
+        );
+        assert_eq!(
+            store
+                .process_resource_reservation("thread", "bind-race")
+                .unwrap()
+                .unwrap()
+                .scope_recovery,
+            None
+        );
+    }
+
     #[test]
     fn shutdown_gate_rejects_late_dedicated_worker_attachment() {
         let store = test_store();
@@ -22119,6 +22437,12 @@ mod tests {
                 target_start_time_ticks: 10,
                 group_leader_pid: 12345,
                 group_leader_start_time_ticks: 10,
+                resource_selections: Vec::new(),
+                resource_operations: Vec::new(),
+                resource_allocation_limit: None,
+                resource_occupancy_start: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
             },
             control_channel_identity: "fd:test".to_owned(),
             state: runtime_db::WorkerProcessState::Attached,
@@ -22741,6 +23065,12 @@ mod tests {
                     target_start_time_ticks: 10,
                     group_leader_pid: 67890,
                     group_leader_start_time_ticks: 20,
+                    resource_selections: Vec::new(),
+                    resource_operations: Vec::new(),
+                    resource_allocation_limit: None,
+                    resource_occupancy_start: None,
+                    resource_occupancy_limit: None,
+                    resource_cleanup_allowance_ms: None,
                 },
                 &crate::launch_metadata::RuntimeLaunchMetadata::default(),
                 None,
@@ -22772,6 +23102,12 @@ mod tests {
             target_start_time_ticks: 10,
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         store
             .attach_new_thread_process(
@@ -22822,6 +23158,12 @@ mod tests {
             target_start_time_ticks: 11,
             group_leader_pid: 12346,
             group_leader_start_time_ticks: 11,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         store
             .attach_new_thread_process(
@@ -22937,6 +23279,12 @@ mod tests {
             target_start_time_ticks: 12,
             group_leader_pid: 12347,
             group_leader_start_time_ticks: 12,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         let store = open_store();
         store

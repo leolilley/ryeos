@@ -1400,6 +1400,9 @@ mod tests {
             persistent_sessions: std::sync::Arc::new(
                 ryeos_app::persistent_session::PersistentSessionPool::new(),
             ),
+            execution_resources: std::sync::Arc::new(
+                ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
+            ),
         };
         (tmpdir, state)
     }

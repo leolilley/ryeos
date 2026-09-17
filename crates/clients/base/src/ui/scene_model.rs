@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::atlas::model::AtlasInteractionVm;
 use crate::atlas::{
-    AtlasFileInput, AtlasFileSpaceInput, AtlasInput, AtlasItemInput, AtlasProjectionVm,
-    AtlasUiStateVm, NamespaceAtlasVm, build_file_space_atlas, build_namespace_atlas,
+    AtlasFileInput, AtlasFileSpaceInput, AtlasInput, AtlasItemInput, AtlasItemKind, AtlasLensVm,
+    AtlasProjectionVm, AtlasUiStateVm, NamespaceAtlasVm, build_file_space_atlas,
+    build_namespace_atlas,
 };
 
-use super::event::RyeOsUiIntent;
+use super::event::{RyeOsUiEvent, RyeOsUiIntent};
 use super::view_model::RyeOsTone;
 
 /// The scene's design cadence: one animation step per this many
@@ -23,6 +25,9 @@ pub struct RyeOsSceneModel {
     pub objects: Vec<RyeOsSceneObjectVm>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atlas: Option<NamespaceAtlasVm>,
+    /// Exact controls and interactions for this mounted scene. Browser clients
+    /// render and echo these events; they do not reconstruct atlas policy.
+    pub actions: Vec<RyeOsSceneActionVm>,
     /// Ambient animation energy in `[0, 1]` — how alive the scene reads.
     /// The builder maps a real signal into it (the backdrop uses the
     /// node's live-thread count); renderers quicken pacing and lift
@@ -45,6 +50,15 @@ pub struct RyeOsSceneModel {
     /// scene view or resetting generation-keyed motion.
     #[serde(default = "default_break_amount")]
     pub break_amount: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsSceneActionVm {
+    pub id: String,
+    pub group: String,
+    pub label: String,
+    pub active: bool,
+    pub event: RyeOsUiEvent,
 }
 
 /// A scene-level light sweep: a band of brightness `width` wide (scene
@@ -220,11 +234,134 @@ impl Default for RyeOsSceneModel {
             },
             objects: Vec::new(),
             atlas: None,
+            actions: Vec::new(),
             energy: 0.0,
             sweep: None,
             screen_offset: [0.0, 0.0],
             break_amount: default_break_amount(),
         }
+    }
+}
+
+/// Bind one portable scene projection to its mounted tile. This is the sole
+/// owner of atlas control and interaction events: renderers receive exact
+/// payloads and never infer roots, lenses, layers, or activation intents.
+pub fn bind_scene_actions(scene: &mut RyeOsSceneModel, tile_id: Option<String>) {
+    let Some(atlas) = scene.atlas.as_ref() else {
+        return;
+    };
+    let target = tile_id;
+    let mut actions = vec![
+        RyeOsSceneActionVm {
+            id: "projection:ai_space".to_string(),
+            group: "projection".to_string(),
+            label: "AI space".to_string(),
+            active: atlas.projection == AtlasProjectionVm::AiSpace,
+            event: RyeOsUiEvent::SetAtlasProjection {
+                tile_id: target.clone(),
+                projection: AtlasProjectionVm::AiSpace,
+                root: None,
+            },
+        },
+        RyeOsSceneActionVm {
+            id: "projection:file_space".to_string(),
+            group: "projection".to_string(),
+            label: "Files".to_string(),
+            active: atlas.projection == AtlasProjectionVm::FileSpace,
+            event: RyeOsUiEvent::SetAtlasProjection {
+                tile_id: target.clone(),
+                projection: AtlasProjectionVm::FileSpace,
+                root: Some(atlas.ui.file_space_root.clone()),
+            },
+        },
+    ];
+    for (kind, label) in [
+        (AtlasItemKind::Directive, "Directives"),
+        (AtlasItemKind::Tool, "Tools"),
+        (AtlasItemKind::Knowledge, "Knowledge"),
+        (AtlasItemKind::Config, "Config"),
+    ] {
+        let active = atlas.ui.visible_layers.contains(&kind);
+        actions.push(RyeOsSceneActionVm {
+            id: format!("layer:{kind:?}").to_ascii_lowercase(),
+            group: "layer".to_string(),
+            label: label.to_string(),
+            active,
+            event: RyeOsUiEvent::SetAtlasLayerVisible {
+                tile_id: target.clone(),
+                kind,
+                visible: !active,
+            },
+        });
+    }
+    for (lens, label) in [
+        (AtlasLensVm::None, "All"),
+        (AtlasLensVm::Knowledge, "Knowledge lens"),
+    ] {
+        actions.push(RyeOsSceneActionVm {
+            id: format!("lens:{lens:?}").to_ascii_lowercase(),
+            group: "lens".to_string(),
+            label: label.to_string(),
+            active: atlas.ui.active_lens == lens,
+            event: RyeOsUiEvent::SetAtlasLens {
+                tile_id: target.clone(),
+                lens,
+            },
+        });
+    }
+    for node in &atlas.nodes {
+        if let Some(interaction) = &node.interaction {
+            actions.push(interaction_action(
+                format!("node:{}", node.id),
+                &node.label,
+                interaction,
+                &target,
+            ));
+        }
+        for item in &node.stack {
+            if let Some(interaction) = &item.interaction {
+                actions.push(interaction_action(
+                    format!("item:{}", item.id),
+                    &item.label,
+                    interaction,
+                    &target,
+                ));
+            }
+        }
+    }
+    scene.actions = actions;
+}
+
+fn interaction_action(
+    id: String,
+    label: &str,
+    interaction: &AtlasInteractionVm,
+    tile_id: &Option<String>,
+) -> RyeOsSceneActionVm {
+    let event = match interaction {
+        AtlasInteractionVm::InspectItem { canonical_ref } => RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::InspectItem {
+                canonical_ref: canonical_ref.clone(),
+            },
+        },
+        AtlasInteractionVm::ReadFile { root, path } => RyeOsUiEvent::Activate {
+            intent: RyeOsUiIntent::ReadFile {
+                root: root.clone(),
+                path: path.clone(),
+            },
+        },
+        AtlasInteractionVm::FocusFolder { root, path } => RyeOsUiEvent::SetAtlasFileSpacePath {
+            tile_id: tile_id.clone(),
+            root: root.clone(),
+            path: path.clone(),
+        },
+    };
+    RyeOsSceneActionVm {
+        id,
+        group: "interaction".to_string(),
+        label: label.to_string(),
+        active: false,
+        event,
     }
 }
 
@@ -1027,7 +1164,22 @@ mod tests {
             ..RyeOsItemsDto::default()
         });
 
-        let scene = build_scene_model(&core, &core.ui.atlas, None, None);
+        let mut scene = build_scene_model(&core, &core.ui.atlas, None, None);
+        bind_scene_actions(&mut scene, Some("7".to_string()));
+        assert!(scene.actions.iter().any(|action| {
+            action.id == "projection:file_space"
+                && matches!(
+                    &action.event,
+                    RyeOsUiEvent::SetAtlasProjection { tile_id: Some(id), root: Some(root), .. }
+                        if id == "7" && root == "project"
+                )
+        }));
+        assert!(
+            scene
+                .actions
+                .iter()
+                .any(|action| action.id == "lens:knowledge")
+        );
         let atlas = scene.atlas.expect("atlas");
         assert_eq!(atlas.generation, 42);
         let stack_node = atlas

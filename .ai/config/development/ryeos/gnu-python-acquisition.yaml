@@ -1,0 +1,36 @@
+# ryeos:signed:2026-09-17T05:41:43Z:fec8ebd95bb55a81984a54e9705a8dedb44da987185cc47657738ee55a0fc510:9FGsOKVakJCZXwHvZLJlOEIIdoj6k64HsrklyDluJduqnIJZG33SHg1EOhaVUUR3kI9budU3IR84WYqa0Sl0BA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+category: development/ryeos
+name: gnu-python-acquisition
+version: "1.0.0"
+description: Exact public acquisition inputs for the GNU CPython producer archive realization
+schema: ryeos.publisher_tree_acquisition.v1
+source_date_epoch: 1786060800
+artifact:
+  release_tag: ryeos-development-runtime-inputs-v1
+  archive: ryeos-gnu-python-archives-v1.tar.gz
+  prefix: ryeos-gnu-python-archives-v1
+  storage: large_content
+  manifest_digest: ec7d4a2a749b0b709dabca0a7919c3a897a9b671be56332b67a659b6bd82cac6
+  entries: 4
+  total_bytes: 166112647
+sources:
+  - target: cpython-gnu-install.tar.gz
+    url: https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.14.7%2B20260807-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+    bytes: 35940499
+    sha256: a2478d654ed51d443bae21ec20ad927f116b4f5aae4094ab74918a6aa38f0575
+    mode: 420
+  - target: cpython-gnu-full.tar.zst
+    url: https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.14.7%2B20260807-x86_64-unknown-linux-gnu-pgo%2Blto-full.tar.zst
+    bytes: 127731089
+    sha256: eb419a7d8d526e1372b5e3db6478176d48380832dffb14fd5a8565a23227901a
+    mode: 420
+  - target: cpython-source-deps-zstd-1.5.7.tar.gz
+    url: https://github.com/python/cpython-source-deps/archive/refs/tags/zstd-1.5.7.tar.gz
+    bytes: 2440298
+    sha256: f24b52470d12f466e9fa4fcc94e6c530625ada51d7b36de7fdc6ed7e6f499c8e
+    mode: 420
+  - target: upstream-build-zlib.sh
+    url: https://raw.githubusercontent.com/astral-sh/python-build-standalone/20260807/cpython-unix/build-zlib.sh
+    bytes: 761
+    sha256: 58e58a24f79cec8ecfc250adcce8ec829753e59cdfd54cf4de4d37018c45c0f9
+    mode: 420

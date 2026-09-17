@@ -108,7 +108,7 @@ jobs:
         run: |
           scripts/populate-bundles.sh \
             --key .dev-keys/PUBLISHER_DEV.pem \
-            --owner ryeos-dev \
+            --owner "RyeOS Development" \
             --bundle-set full \
             --all \
             --jobs 2

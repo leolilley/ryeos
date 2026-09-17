@@ -26,6 +26,8 @@ macro_rules! id_type {
 }
 
 id_type!(TileId);
+id_type!(ViewGroupId);
+id_type!(WorkspaceId);
 id_type!(ThreadId);
 id_type!(ThreadTurnId);
 id_type!(ThreadRowId);

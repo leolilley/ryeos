@@ -12,6 +12,7 @@ pub mod effect;
 pub mod event;
 pub mod field;
 pub mod keymap;
+pub mod layout_preferences;
 pub mod model;
 pub mod reducer;
 pub mod scene_model;

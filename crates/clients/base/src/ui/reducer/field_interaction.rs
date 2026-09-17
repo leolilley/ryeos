@@ -764,8 +764,7 @@ impl RyeOsCore {
     }
 
     fn visible_field_instances(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
-        let mut instances = self
-            .workspace
+        let mut instances = self.workspaces[self.active_workspace]
             .tiles
             .values()
             .filter_map(|tile| {
@@ -788,7 +787,7 @@ impl RyeOsCore {
     }
 
     fn view_ref_for_instance(&self, instance_key: &RyeOsViewInstanceKey) -> Option<String> {
-        self.workspace
+        self.workspaces[self.active_workspace]
             .tiles
             .values()
             .find(|tile| &tile.instance_key == instance_key)
@@ -895,10 +894,13 @@ impl RyeOsCore {
                 .changes
                 .retain(|_, change| now_ms.saturating_sub(change.at_ms) <= 2_000);
         }
-        for tile in self.workspace.tiles.values_mut() {
+        for tile in self.workspaces[self.active_workspace].tiles.values_mut() {
             expire(&mut tile.local, now_ms);
         }
-        for local in self.ui.dock_local.values_mut() {
+        for local in self.workspaces[self.active_workspace]
+            .dock_local
+            .values_mut()
+        {
             expire(local, now_ms);
         }
     }
@@ -908,9 +910,14 @@ impl RyeOsCore {
         instance_key: &RyeOsViewInstanceKey,
     ) -> Option<&mut FieldLocalState> {
         let local = if let Some(tile_id) = instance_key.workspace_tile_id() {
-            &mut self.workspace.tiles.get_mut(&tile_id)?.local
+            &mut self.workspaces[self.active_workspace]
+                .tiles
+                .get_mut(&tile_id)?
+                .local
         } else {
-            self.ui.dock_local.get_mut(instance_key)?
+            self.workspaces[self.active_workspace]
+                .dock_local
+                .get_mut(instance_key)?
         };
         match local {
             ViewLocalState::Field(local) => Some(local),
@@ -1172,11 +1179,14 @@ mod tests {
             });
         }
 
-        let instances = core
-            .workspace
+        let instances = core.workspaces[core.active_workspace]
             .tile_ids()
             .into_iter()
-            .map(|tile_id| core.workspace.tiles[&tile_id].instance_key.clone())
+            .map(|tile_id| {
+                core.workspaces[core.active_workspace].tiles[&tile_id]
+                    .instance_key
+                    .clone()
+            })
             .collect::<Vec<_>>();
         assert_eq!(instances.len(), 2);
         let cut = FieldCursorState::BraidCut {
@@ -1316,8 +1326,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core
-            .workspace
+        let instance_key = core.workspaces[core.active_workspace]
             .tiles
             .values()
             .next()
@@ -1479,8 +1488,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core
-            .workspace
+        let instance_key = core.workspaces[core.active_workspace]
             .tiles
             .values()
             .next()
@@ -1606,11 +1614,17 @@ mod tests {
                 error: None,
             },
         });
-        let tile_id = core.workspace.tiles.keys().next().copied().unwrap();
-        core.workspace.focused_tile = tile_id;
-        core.ui.focus_target = Some(RyeOsFocusTarget::WorkspaceTile {
-            tile_id: tile_id.0.to_string(),
-        });
+        let tile_id = core.workspaces[core.active_workspace]
+            .tiles
+            .keys()
+            .next()
+            .copied()
+            .unwrap();
+        core.workspaces[core.active_workspace].focused_tile = tile_id;
+        core.workspaces[core.active_workspace].focus_target =
+            Some(RyeOsFocusTarget::WorkspaceTile {
+                tile_id: tile_id.0.to_string(),
+            });
 
         let down = ryeos_key_command(
             RyeOsKeyEvent {
@@ -1658,8 +1672,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core
-            .workspace
+        let instance_key = core.workspaces[core.active_workspace]
             .tiles
             .values()
             .next()
@@ -1714,8 +1727,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core
-            .workspace
+        let instance_key = core.workspaces[core.active_workspace]
             .tiles
             .values()
             .next()

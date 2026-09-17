@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T10:36:33Z:3a4bc5951073b05bafa38eb3ba3a88f11987bd12c4c0cffd510cba441e89aa70:SEI0xVzIOwZdi/KxS3MtAybFx1ObpDgoLJTSjjcxb9Wa0z3ierWePEbBpdw4nt25XJ+4JGfnoijOAj0XhpoQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T05:41:42Z:e0337077095eadc11f1eef3aaeeced66b861f0487880cd6a947ecf4b5549e9ab:P4BfLz9zaF0M/nHysBsu88lxnA0iptxQJ8Y7KRWQGnm6cgP93eBrD9gZaA4Wct55gCrS7gsWrSF5bAaADTgdDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 {
   "built_utility_files": {
     "environment/bin/awk": "bin/awk",
@@ -325,9 +325,9 @@
       "sha256": "af40d0f4cb7a55994906c009a7ba865047f0d487c95bceb8db59ffc4f2173d20"
     },
     "sources/ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz": {
-      "bytes": 82623880,
+      "bytes": 82635244,
       "mode": 420,
-      "sha256": "24e7f72bbd9b026bcbe4d188946702054b24e4062184e103d63baa1a5379f0e2"
+      "sha256": "560c0197ffe8a6952cb2c6e0ffd70bf3e5ab84984870df1092b7462cc6955af2"
     },
     "sources/zsh-exec-wrapper.patch": {
       "bytes": 998,
@@ -905,12 +905,12 @@
     ],
     "utility_bootstrap_archives": {
       "ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz": {
-        "bytes": 82623880,
-        "sha256": "24e7f72bbd9b026bcbe4d188946702054b24e4062184e103d63baa1a5379f0e2"
+        "bytes": 82635244,
+        "sha256": "560c0197ffe8a6952cb2c6e0ffd70bf3e5ab84984870df1092b7462cc6955af2"
       },
       "ryeos-authoring-tools-1.0.0-x86_64-linux-musl.tar.gz": {
-        "bytes": 4782852,
-        "sha256": "7872d73354ffb67c2859c9c58f499c0471902abcc6bb855a1e5e0b5021543479"
+        "bytes": 4798026,
+        "sha256": "aefc06b7c85c136e398cb572c66a8f6bd48e6a0e21382f5baacdc0cc5bf5e070"
       }
     },
     "workload_members": {

@@ -1219,6 +1219,13 @@ fn build_plan_with_execution_root(
         .project_filesystem_authority_ceiling(root_value)?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
+    let target_requirement = execution.project_target_requirement(root_value)?;
+    let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
+    resource_authority_ceiling
+        .admits(target_requirement.as_ref())
+        .map_err(|error| EngineError::SchemaLoaderError {
+            reason: error.to_string(),
+        })?;
     let no_host_environment = HostEnvBindings::default();
     let host_env = match filesystem_authority_ceiling {
         crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution => {
@@ -1305,6 +1312,8 @@ fn build_plan_with_execution_root(
         materialization_requirements: Vec::new(),
         network_authority_ceiling,
         filesystem_authority_ceiling,
+        target_requirement,
+        resource_authority_ceiling,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
@@ -1789,7 +1798,7 @@ config:
                 "version": "1.0.0",
                 "executor_id": "@subprocess",
                 "execution_protocol": "protocol:ryeos/core/structured_session",
-                "supported_target": {"os": "linux", "arch": "x86_64"},
+                "supported_target": {"os": "linux", "arch": "x86_64", "resources": []},
                 "source": {"root": "lib/session", "entry": "profile.json", "digest": "a".repeat(64)},
                 "external_content": [],
                 "config": {"command": "/bin/sh", "args": ["--version"]}

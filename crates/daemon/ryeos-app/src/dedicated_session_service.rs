@@ -217,7 +217,7 @@ pub async fn wait_for_projection_change(
     state: &AppState,
     placement_thread_id: &str,
     observed_updated_at_ms: i64,
-    timeout: std::time::Duration,
+    timeout: lillux::time::Duration,
 ) -> Result<DedicatedSessionRecord> {
     let signal = projection_signal(placement_thread_id);
     let notified = signal.notified();
@@ -244,9 +244,9 @@ pub async fn wait_for_projection_change(
 pub async fn wait_for_worker_attachment_projection(
     state: &AppState,
     placement_thread_id: &str,
-    timeout: std::time::Duration,
+    timeout: lillux::time::Duration,
 ) -> Result<Option<DedicatedSessionRecord>> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = lillux::time::MonotonicDeadline::after(timeout);
     loop {
         let signal = projection_signal(placement_thread_id);
         let notified = signal.notified();
@@ -262,7 +262,7 @@ pub async fn wait_for_worker_attachment_projection(
         }) {
             return Ok(current);
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.remaining();
         if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
             return state.state_store.dedicated_session(placement_thread_id);
         }
@@ -279,9 +279,9 @@ pub async fn wait_for_exact_approval_state(
     reservation_token: &str,
     decision_digest: &str,
     approval_state: &str,
-    timeout: std::time::Duration,
+    timeout: lillux::time::Duration,
 ) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = lillux::time::MonotonicDeadline::after(timeout);
     loop {
         let signal = projection_signal(placement_thread_id);
         let notified = signal.notified();
@@ -298,7 +298,7 @@ pub async fn wait_for_exact_approval_state(
         )? {
             return Ok(true);
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.remaining();
         if remaining.is_zero() || tokio::time::timeout(remaining, notified).await.is_err() {
             return state.state_store.dedicated_approval_has_exact_state(
                 placement_thread_id,
@@ -2987,6 +2987,11 @@ pub async fn execute_command(
     };
     let pool = Arc::clone(&state.persistent_sessions);
     let execution_session_id = placement_thread_id.to_string();
+    let resource_request_identity = crate::persistent_session::PersistentSessionRequestIdentity {
+        thread_id: placement_thread_id.to_owned(),
+        request_digest: ryeos_accounting::HexDigest::new(request_digest.clone())
+            .map_err(anyhow::Error::msg)?,
+    };
     let is_runtime_recovery = command_kind == "reattach";
     let progress_state = state.clone();
     let progress_session = session.clone();
@@ -2994,11 +2999,12 @@ pub async fn execute_command(
     let progress_digest = request_digest.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let contact_deadline = contact_deadline_at_ms.map(|deadline_at_ms| {
-            let now = std::time::Instant::now();
             let remaining_ms = deadline_at_ms
                 .saturating_sub(lillux::time::timestamp_millis())
                 .max(0) as u64;
-            now + std::time::Duration::from_millis(remaining_ms)
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(
+                remaining_ms,
+            ))
         });
         if is_runtime_recovery {
             let recovery = payload
@@ -3025,8 +3031,9 @@ pub async fn execute_command(
             // Recheck at the pool's actual pre-write boundary, after blocking
             // task scheduling and pool-lock acquisition. A retained count
             // reservation cannot turn queueing past expiry into new contact.
-            pool.execute_exclusive_with_deadline(
+            pool.execute_exclusive_attributed_with_deadline(
                 &execution_session_id,
+                Some(&resource_request_identity),
                 payload,
                 || {
                     contact_deadline_at_ms
@@ -5281,20 +5288,41 @@ pub fn retire_worker_process(
     let registry_outcome = state
         .persistent_sessions
         .retire_exclusive(placement_thread_id)?;
+    let terminal_was_observed =
+        std::cell::Cell::new(registry_outcome == ExclusiveRetirementOutcome::Reaped);
     let prove_from_identity = || match execution_group_liveness(&worker.process_identity) {
         IdentityLiveness::DeadOrStale => true,
         IdentityLiveness::Alive => {
             let killed = kill_by_action(&worker.process_identity, ShutdownAction::Hard);
-            killed.success
+            let dead = killed.success
                 && execution_group_liveness(&worker.process_identity)
-                    == IdentityLiveness::DeadOrStale
+                    == IdentityLiveness::DeadOrStale;
+            terminal_was_observed.set(dead);
+            dead
         }
         IdentityLiveness::Unavailable => false,
     };
-    Ok(resolve_worker_retirement(
-        registry_outcome,
-        prove_from_identity,
-    ))
+    let outcome = resolve_worker_retirement(registry_outcome, prove_from_identity);
+    if outcome == "reaped" {
+        let proposed = if terminal_was_observed.get() {
+            crate::runtime_db::ProcessResourceCleanupEvidence::capture(&worker.process_identity)?
+        } else {
+            crate::runtime_db::ProcessResourceCleanupEvidence::capture_unobserved_terminal(
+                &worker.process_identity,
+            )?
+        };
+        let evidence = state.state_store.prove_dedicated_resource_owner_cleanup(
+            &worker.worker_instance_id,
+            &worker.process_identity,
+            &proposed,
+        )?;
+        crate::execution_resources::settle_process_resource_operations_after_cleanup(
+            state,
+            &worker.process_identity,
+            &evidence,
+        )?;
+    }
+    Ok(outcome)
 }
 
 fn resolve_worker_retirement(

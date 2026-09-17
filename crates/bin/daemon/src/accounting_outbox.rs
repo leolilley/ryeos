@@ -1,31 +1,26 @@
 //! Accounting audit outbox publisher.
 //!
 //! Publishes committed ledger transitions to the target thread chain as
-//! `provider_attempt_budget_transition_v1` events, exactly once, in
-//! per-attempt transition order. This is a daemon-only audit path — it may
+//! typed provider/resource budget transition events, exactly once, in
+//! per-operation transition order. This is a daemon-only audit path — it may
 //! append after thread terminality, which ordinary runtimes cannot.
 //!
 //! Idempotency across a crash between CAS append and outbox acknowledgement:
 //! every projected accounting transition retains its unique transition ID,
-//! canonical payload fingerprint, attempt coordinate, and chain sequence.
+//! canonical payload fingerprint, typed operation coordinate, and chain sequence.
 //! Retry acknowledges only that exact identity; it never infers publication
 //! from a later summary row.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use ryeos_app::accounting_db::AccountingDb;
 use ryeos_app::state_store::{NewEventRecord, StateStore};
+use std::sync::Arc;
 
-const IDLE_POLL: Duration = Duration::from_millis(1_000);
-const ERROR_BACKOFF: Duration = Duration::from_millis(5_000);
+const IDLE_POLL: lillux::time::Duration = lillux::time::Duration::from_millis(1_000);
+const ERROR_BACKOFF: lillux::time::Duration = lillux::time::Duration::from_millis(5_000);
 const CLAIM_LEASE_MS: i64 = 30_000;
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
+    lillux::time::timestamp_millis()
 }
 
 pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
@@ -83,23 +78,42 @@ fn publish_one(
     // Exact-once recovery after append-before-ack: only the complete identity
     // recorded from the projected daemon event proves this outbox row was
     // already appended.
-    if let Some(projected) =
-        store.get_provider_attempt_budget_transition_identity(&row.transition_id)?
-    {
-        if projected.attempt_id != row.attempt_id
-            || projected.transition_sequence != i64::from(row.transition_sequence)
-            || projected.payload_fingerprint != row.payload_fingerprint
-        {
-            anyhow::bail!(
-                "outbox recovery integrity failure for transition {}: projected identity \
-                 contradicts committed ledger row {} sequence {}",
-                row.transition_id,
-                row.attempt_id,
-                row.transition_sequence
-            );
+    match row.event_type.as_str() {
+        ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 => {
+            if let Some(projected) =
+                store.get_provider_attempt_budget_transition_identity(&row.transition_id)?
+            {
+                if projected.attempt_id != row.operation_id
+                    || projected.transition_sequence != i64::from(row.transition_sequence)
+                    || projected.payload_fingerprint != row.payload_fingerprint
+                {
+                    anyhow::bail!(
+                        "provider outbox recovery identity contradicts transition {}",
+                        row.transition_id
+                    );
+                }
+                ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
+                return Ok(());
+            }
         }
-        ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
-        return Ok(());
+        ryeos_state::event_types::RESOURCE_BUDGET_TRANSITION_V1 => {
+            if let Some(projected) =
+                store.get_resource_budget_transition_identity(&row.transition_id)?
+            {
+                if projected.operation_id != row.operation_id
+                    || projected.transition_sequence != i64::from(row.transition_sequence)
+                    || projected.payload_fingerprint != row.payload_fingerprint
+                {
+                    anyhow::bail!(
+                        "resource outbox recovery identity contradicts transition {}",
+                        row.transition_id
+                    );
+                }
+                ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
+                return Ok(());
+            }
+        }
+        unknown => anyhow::bail!("accounting outbox has unknown event type `{unknown}`"),
     }
 
     let thread_id = row
@@ -109,7 +123,7 @@ fn publish_one(
         .ok_or_else(|| anyhow::anyhow!("outbox payload has no thread_id"))?
         .to_owned();
     let record = NewEventRecord {
-        event_type: ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1.to_owned(),
+        event_type: row.event_type.clone(),
         storage_class: "indexed".to_owned(),
         payload: row.payload.clone(),
     };

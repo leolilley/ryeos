@@ -2,9 +2,11 @@
 
 Updated: 2026-09-17, Pacific/Auckland. Owner: this execution thread.
 Status: EXECUTING — G0a/G3a and both grant-refresh activation corrections are
-implemented and independently reviewed. Exact v0.5.88 daemon `ac4bea5bb65a` is
-built; its supported host installation awaits the user-terminal sudo step. No
-E2E pass claimed.
+implemented and independently reviewed. The former `/tmp` source and target were
+deleted during an explicitly requested disk cleanup, invalidating every node-,
+grant-, snapshot-, and product-bound live witness. Fresh v0.5.91 nodes are now
+initialized, host-provisioned, healthy, and mutually pinned; exact authority and
+products are being reconstructed. No E2E pass claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -19,14 +21,14 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: install committed daemon correction `ac4bea5bb` through the supported
-shared host package transaction. Source was stopped normally because both canonical
-services execute `/usr/bin/ryeosd`; target remains live on the predecessor. The
-user must run the exact installer command in the latest journal entry, after which
-restart source normally and retry the same exhausted producer-Python activation job
-against the already-frozen target snapshot. Do not create another node, push again,
-regenerate the grant, use a custom runner, copy the binary directly, or issue bare
-host-upgrade phases outside the audited installer.
+Current gate: reconstruct G0 authority on the fresh v0.5.91 pair. The narrow
+source-node transfer/co-signing grant and `qualification` identity pin are complete.
+The origin-bound configured-operator grant is awaiting explicit approval for its
+exact remote-development production, activation, verifier, and worker-execution
+scopes. After that, push the newly pinned source project once and reproduce all
+target-local products before resuming the native verifier boundary. Do not reuse
+historical hashes or launch IDs, create another node, use a custom runner, copy a
+binary directly, or issue bare host-upgrade phases outside the audited installer.
 
 Latest committed fix: `ac4bea5bb Advance managed activation realizations safely`.
 It CAS-advances the portable activation head when verified grant-bound binding hashes
@@ -87,22 +89,22 @@ These are last-known coordinates; G0 must confirm them without mutation.
 | Field | Retained value |
 |---|---|
 | Repo / branch | `/home/leo/projects/ryeos-next`, `next` |
-| Source app root | `/tmp/ryeos-remote-workflow-e2e.yf2N1aE2/direct-source-203962472` |
+| Source app root | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-node` |
 | Source HTTP | `http://127.0.0.1:7423` |
-| Source project | `/tmp/ryeos-remote-workflow-e2e.yf2N1aE2/source-project` |
-| Source node fingerprint | `f5c288477d0f254d58ef4e5ea764138f546fbb7bfe79609ee15a06286319fe10` |
-| Source operator | `a95068840fd400e29cfe554898fb9395b6db7972a4f6a267bef140b2df51405c` |
+| Source project | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-project`, detached `bc58d9b709194a8e13f26f641585e2266ba4ba7f`, tree `7a8ea1a83864345f5d7c2d6a8fffcb2a3b8b4e7c` |
+| Source node fingerprint | `e1430400ff3d2d919a362b56fc7e0e72dead08977da3ff83e2a4ec0831a9916e` |
+| Source operator | `e70c09cb19bfbbc804fc1da882dad65ccca2a2799471c2f6b4fb5402ce0f1756` |
 | Remote route | `qualification` — must resolve to target below |
-| Target app root | `/tmp/ryeos-remote-e2e-v057.2nyR5o/target-node` |
-| Target HTTP / UDS | `127.0.0.1:7445` / `/tmp/ryeos-remote-e2e-v057.2nyR5o/target.sock` |
-| Target node fingerprint | `7579ab7d6dcf7aed46c4f210b0edf8a4ed472a5fa58250d66ee12ef91014ae9e` |
-| Target local operator | `3caf68dda07ecdf77fa07d5e33c52e32562688c81f7d17c26dda1083876826fd` |
-| Target vault identity | `dc60a9fba7956d4ac2bdaf6056b4da9f3b7f0220e08c07e0957d3340c447fdec` |
+| Target app root | `/tmp/ryeos-remote-e2e-v091.UyjanrF8/target-node` |
+| Target HTTP / UDS | `127.0.0.1:7445` / `/tmp/ryeos-remote-e2e-v091.UyjanrF8/target.sock` |
+| Target node fingerprint | `2719d3c2cd8bd3e3dac1f2a91381961fb65afa5c743f86439a46e865391704fd` |
+| Target local operator | `56feba567a49ae05a1f09c02c91b32ab477b78a204456db458102431f1d7d796` |
+| Target vault identity | `0b29be10b26bea6ac4bb2034c71aee41a35fc34f287d5d482f3b922c7be501b8` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
-| Frozen target snapshot / target HEAD | `24ec8029a1a78b99b27c71d42bf9430c203f77ae2a0b957532e66a48f514b21d`; tree `71d9dea4f94cd42ce9d0a66133072367804e80c5c3471e854d4bcfe537cc7a2d`; push thread `svc-1789605680099-4e72ff92` |
-| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.88, sha256 `e8f5ae94194a6788016d87e40717867343bcaf20079b66eb1b799f9987f04118`; `/usr/bin/ryeosd` v0.5.88 revision `8c0d738d5bf1`, sha256 `e512aa7d7386210804d7495539ba37318543048617b41a7dd21b8a13eafda444` |
+| Frozen target snapshot / target HEAD | `19fd0c0119daa9358a7f9a280cd3d08a8d6b403e717fa7e40e73e9cb066def9e`; tree `7e09b35c0110494cc3f8667e671f4f7706440741673575ca8835283b9a011d4b`; 3,010 entries; source Git `bc58d9b709194a8e13f26f641585e2266ba4ba7f`; historical `24ec8029…` remains invalid |
+| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.91, sha256 `ffbc1cbff010e02ca7b09a2d56a6c4bfb93480b9fdfa8219d71966f8122edd7a`; `/usr/bin/ryeosd` v0.5.91, sha256 `be8171f3afc77425bca8d9a5e5d76e02a7f4028d31ae965db884c2f42c76f0e4` |
 | Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` remains v0.5.87 revision `3a43ed50ee3e`, sha256 `263b937620543e2a72ef7e8d4d19225c48a4e40921c8c6b9a1af56e5080aa28b`; it is not the canonical target service image |
-| Target daemon last known | canonical runit service `ryeos-08df80…`, healthy on 7445 with v0.5.88 at 2026-09-17T12:23 NZST |
+| Target daemon last known | fresh canonical host service healthy on 7445 with installed v0.5.91 at 2026-09-17T18:57 NZST; source likewise healthy on 7423 |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
 
 G0 must fill source/target binary revisions and digests, bundle identities, runtime

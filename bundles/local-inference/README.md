@@ -25,6 +25,57 @@ assets. Disabled-isolation activation and replay are functional/recovery
 conformance evidence over bytes the RyeOS publisher has already chosen to
 trust; same-UID observations are not evidence that adversarial code is safe.
 
+Bundle-specific publisher authoring lives under `authoring/`, not in RyeOS's
+generic release scripts and not in the admitted `.ai` runtime closure. The
+reviewed Qwen3-4B source contract can be materialized from its immutable
+upstream revision with:
+
+```text
+python3 bundles/local-inference/authoring/author_model.py \
+  --contract bundles/local-inference/authoring/contracts/qwen3-4b-bf16-model-source-v1.json \
+  --cache /path/to/digest-cache \
+  --output /absent/output/qwen3-4b
+```
+
+The pre-observation numeric reference contract is
+`authoring/contracts/qwen3-4b-bf16-numeric-oracle-request-v1.json`. It freezes
+the independent reference procedure and comparison policy only; it contains no
+observations and grants no activation, publication, qualification, or ARC
+acceptance authority. Focused authoring tests live in `tests/authoring/`.
+
+The independent CPU oracle and the pinned tinygrad `CUDA:PTX` candidate have
+now been compared through the consequence-free authoring utility
+`authoring/compare_numeric_oracle.py`. The compact retained evidence is
+`authoring/evidence/qwen3-4b-bf16-numeric-conformance-v1.json`; it binds the
+exact request, model manifest, reference environment, candidate source,
+compiler closure, and observed device. All three cases matched their greedy
+tokens and complete top-16 sets within the predeclared error bounds. The
+candidate ran in Modal's Python 3.12 image process; the admitted runtime's musl
+loader/libraries served the exact compiler closure but its Python interpreter
+did not run the model. This establishes numeric conformance only. It is not
+runtime ABI, target, hardware, isolation, worker/provider, publication, or ARC
+acceptance qualification.
+
+A follow-up operator calibration ran the same candidate under the admitted
+musl Python 3.14 runtime. Binding tinygrad's POSIX support to that runtime's
+exact `libc.so` was valid, but Modal's observed NVIDIA driver library then
+failed to load because it requires the glibc symbol `gnu_get_libc_version`.
+The CPU workers keep their musl runtime. A GPU worker must instead compose a
+separately admitted GNU runtime and qualify its complete driver ABI; it must
+not fall back to the host interpreter or ambient library search.
+
+An executable local-model profile is the signed worker composition, not a
+model name selected by Python code. It binds exact immutable products for the
+Python runtime, tinygrad source, compiler/toolchain and model/tokenizer, plus
+the admitted worker source and its backend, numeric and resource contract.
+The source-owned Qwen-family semantics are bounded data under
+`lib/local-tinygrad/model-profiles/`; they do not resolve products or grant
+activation. A project such as ARC selects one already-qualified provider and
+worker profile as a unit. It does not independently choose ambient Python,
+tinygrad, toolchain or model versions, and it cannot combine an ARC-trained
+derivative with a different execution closure without new qualification and
+promotion.
+
 On the default trusted single-user node, RyeOS delivers the exact signed source
 and external realizations through a daemon-owned private workspace and runs the
 persistent worker under disabled OS isolation. Explicit node policy may select

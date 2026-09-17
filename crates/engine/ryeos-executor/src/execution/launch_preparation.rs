@@ -48,6 +48,16 @@ const MAX_CONTENT_DEPENDENCY_BYTES: usize = 4 * 1024 * 1024;
 
 const MAX_ENVIRONMENT_CONTRIBUTION_BYTES: usize = 256 * 1024;
 
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefBindingLaunchRecord {
@@ -75,6 +85,9 @@ pub struct PreparedRuntimeLaunch {
     /// restart and cross-site rebinding preserve these exact values.
     pub filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     pub network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_requirement: Option<ryeos_engine::contracts::ExecutionTargetRequirement>,
+    pub resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     pub runtime_data: BTreeMap<String, Value>,
     pub required_secrets: Vec<PreparedSecret>,
     pub runtime_facts: BTreeMap<String, Value>,
@@ -2035,6 +2048,15 @@ fn finish_runtime_launch_preparation_parts(
                 LaunchPrepareErrorClass::Configuration,
             )
         })?;
+    let target_requirement = execution
+        .project_target_requirement(&inputs.primary.composed.composed)
+        .map_err(|error| DispatchError::Internal(error.into()))?;
+    let resource_authority_ceiling = execution
+        .project_resource_authority_ceiling(&inputs.primary.composed.composed)
+        .map_err(|error| DispatchError::Internal(error.into()))?;
+    engine
+        .admit_execution_target(target_requirement.as_ref(), resource_authority_ceiling)
+        .map_err(|error| DispatchError::Internal(error.into()))?;
     Ok(PreparedRuntimeLaunch {
         project_result_requirement: project_result_requirement_for_bindings(
             &contract.ref_bindings,
@@ -2046,6 +2068,8 @@ fn finish_runtime_launch_preparation_parts(
         network_authority_ceiling: execution
             .project_network_authority_ceiling(&inputs.primary.composed.composed)
             .map_err(|error| DispatchError::Internal(error.into()))?,
+        target_requirement,
+        resource_authority_ceiling,
         runtime_data: result.runtime_data,
         required_secrets: result
             .required_secrets
@@ -3018,6 +3042,9 @@ mod ref_binding_projection_tests {
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             network_authority_ceiling:
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             runtime_data: BTreeMap::new(),
             required_secrets: Vec::new(),
             runtime_facts: BTreeMap::new(),

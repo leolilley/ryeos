@@ -1,0 +1,23 @@
+:root {
+  --bg: #1d2021;
+  --plane: #242423;
+  --plane-raised: #282827;
+  --plane-selected: #3b3028;
+  --line: #4a4842;
+  --line-strong: #665f52;
+  --text: #ebdbb2;
+  --muted: #a89984;
+  --faint: #7c7468;
+  --accent: #d65d0e;
+  --accent-bright: #fe8019;
+  --yellow: #fabd2f;
+  --green: #8ec07c;
+  --red: #fb4934;
+  --blue: #83a598;
+  --system-height: 48px;
+  --strip-height: 53px;
+  --status-height: 27px;
+  --nav-width: 205px;
+  --font-ui: Inter, "IBM Plex Sans", "Helvetica Neue", sans-serif;
+  --font-data: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+}

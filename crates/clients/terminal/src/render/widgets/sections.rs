@@ -134,6 +134,7 @@ mod tests {
 
     fn row(primary: &str, meta: Option<&str>) -> RyeOsRowVm {
         RyeOsRowVm {
+            glyph: None,
             id: primary.to_string(),
             primary: primary.to_string(),
             secondary: None,

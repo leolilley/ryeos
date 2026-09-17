@@ -39,7 +39,7 @@ gate_fail() {
 # Default publisher signing key + owner — used by populate-bundles.sh.
 # Override with KEY=... OWNER=... if you have a different setup.
 KEY="${KEY:-$ROOT/.dev-keys/PUBLISHER_DEV.pem}"
-OWNER="${OWNER:-ryeos-dev}"
+OWNER="${OWNER:-RyeOS Development}"
 
 skip_tests=0
 refresh_bundles=0

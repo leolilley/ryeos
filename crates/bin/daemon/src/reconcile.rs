@@ -2160,6 +2160,8 @@ fn reconcile_runtime_workspace_operations_before_thread_recovery(
 /// through every root-backed projection repair and detached only afterward.
 #[doc(hidden)]
 pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> {
+    reconcile_process_resource_reservations(state)?;
+    reconcile_process_resource_owners(state)?;
     quiesce_unattached_worker_scopes(state)?;
     quiesce_dedicated_workers(state)?;
     ryeos_app::dedicated_session_service::reconcile_command_outboxes(state)
@@ -2211,6 +2213,148 @@ pub async fn reconcile_dedicated_worker_startup(state: &AppState) -> Result<()> 
         .state_store
         .resume_closed_worker_scope_retirements()
         .context("resume exactly journaled closed-worker scope retirement")?;
+    Ok(())
+}
+
+/// Retained pre-contact rows can only be retired.  They are never authority
+/// to allocate or relaunch after restart.  A bound scope may contain a child
+/// from the crash gap before attachment, so Lillux must prove termination
+/// before exclusive capacity is released.
+#[cfg_attr(test, doc(hidden))]
+pub fn reconcile_process_resource_reservations(state: &AppState) -> Result<()> {
+    for reservation in state.state_store.process_resource_reservations()? {
+        ryeos_app::execution_resources::cleanup_process_resource_reservation(state, &reservation)
+            .with_context(|| {
+            format!(
+                "retire retained {} resource reservation `{}`",
+                reservation.owner_kind, reservation.owner_coordinate
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg_attr(test, doc(hidden))]
+pub fn reconcile_process_resource_owners(state: &AppState) -> Result<()> {
+    let owners = state.state_store.process_resource_owners()?;
+    let attached = owners
+        .iter()
+        .map(|owner| owner.owner_incarnation.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(accounting) = state.accounting.as_ref() {
+        for recovery in accounting.open_resource_owner_recoveries()? {
+            if attached.contains(recovery.owner_incarnation.as_str()) {
+                continue;
+            }
+            let dead = match execution_group_liveness(&recovery.process_identity) {
+                IdentityLiveness::DeadOrStale => true,
+                IdentityLiveness::Alive => {
+                    let killed = kill_by_action(
+                        &recovery.process_identity,
+                        ryeos_app::process::ShutdownAction::Hard,
+                    );
+                    killed.success
+                        && execution_group_liveness(&recovery.process_identity)
+                            == IdentityLiveness::DeadOrStale
+                }
+                IdentityLiveness::Unavailable => false,
+            };
+            if !dead {
+                anyhow::bail!(
+                    "cannot prove cleanup of unattached resource owner `{}`",
+                    recovery.owner_incarnation
+                );
+            }
+            accounting.release_unattached_resource_owner_gate(
+                &recovery.owner_gate_id,
+                &recovery.owner_incarnation,
+                lillux::time::timestamp_millis(),
+            )?;
+        }
+    }
+    for owner in owners {
+        let evidence = if owner.cleanup_proved {
+            owner
+                .cleanup_evidence
+                .clone()
+                .context("cleanup-proved resource owner lacks terminal meter evidence")?
+        } else {
+            let (dead, terminal_was_observed) =
+                match execution_group_liveness(&owner.process_identity) {
+                    IdentityLiveness::DeadOrStale => (true, false),
+                    IdentityLiveness::Alive => {
+                        let killed = kill_by_action(
+                            &owner.process_identity,
+                            ryeos_app::process::ShutdownAction::Hard,
+                        );
+                        let dead = killed.success
+                            && execution_group_liveness(&owner.process_identity)
+                                == IdentityLiveness::DeadOrStale;
+                        (dead, dead)
+                    }
+                    IdentityLiveness::Unavailable => (false, false),
+                };
+            if !dead {
+                anyhow::bail!(
+                    "cannot prove cleanup of retained pooled resource owner `{}`",
+                    owner.owner_coordinate
+                );
+            }
+            let proposed = if terminal_was_observed {
+                ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture(
+                    &owner.process_identity,
+                )?
+            } else {
+                ryeos_app::runtime_db::ProcessResourceCleanupEvidence::capture_unobserved_terminal(
+                    &owner.process_identity,
+                )?
+            };
+            match owner.owner_kind.as_str() {
+                "thread" => state.state_store.prove_thread_resource_owner_cleanup(
+                    &owner.owner_coordinate,
+                    &owner.process_identity,
+                    &proposed,
+                )?,
+                "pooled_session" => state.state_store.prove_pooled_resource_owner_cleanup(
+                    &owner.owner_coordinate,
+                    &owner.process_identity,
+                    &proposed,
+                )?,
+                "dedicated_worker" => state.state_store.prove_dedicated_resource_owner_cleanup(
+                    &owner.owner_coordinate,
+                    &owner.process_identity,
+                    &proposed,
+                )?,
+                other => anyhow::bail!("unsupported durable resource owner kind `{other}`"),
+            }
+        };
+        let settlement =
+            ryeos_app::execution_resources::settle_process_resource_operations_after_cleanup(
+                state,
+                &owner.process_identity,
+                &evidence,
+            );
+        if let Err(error) = settlement {
+            tracing::warn!(
+                owner_kind = %owner.owner_kind,
+                owner_coordinate = %owner.owner_coordinate,
+                error = %format!("{error:#}"),
+                "retained resource owner cleanup is proved; financial settlement remains pending"
+            );
+            continue;
+        }
+        if owner.owner_kind == "pooled_session" {
+            state
+                .state_store
+                .clear_pooled_resource_owner(&owner.owner_coordinate, &owner.process_identity)
+                .with_context(|| {
+                    format!(
+                        "clear retained pooled resource owner `{}`",
+                        owner.owner_coordinate
+                    )
+                })?;
+        }
+    }
     Ok(())
 }
 
@@ -3983,6 +4127,7 @@ mod tests {
                 pid: None,
                 pgid: None,
                 process_identity: None,
+                process_release_fence: None,
                 process_dead_observed_at_ms: None,
                 stop_requested_at_ms: None,
                 stop_intent: None,

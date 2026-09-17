@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-13T08:45:08Z:4bf3d35e513f216f7631858d3dd664156d71ac42e6cd392c62d24a0c0d924c12:J9pYs/rGwyDAgg6ODP1pU27kYqLUwpRVKjnoFqb7zQXH6ZwTGcNbF10G7JmTI9fEVEIrpmQ24KI9E7Zlir7qCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:b180472550fc6b13226c8668f3d99b70264940bebd83de7c3f1dcfd153b48f1e:J9aaTw9+BVLq+wwVlAPYNWPLcS+dQB4Bbx09f3xNrvIlZ8DDKcl0yS4nYRR3OQ6YFIsowkMXvLzRwNi+bRWvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.2.0"
+version: "1.3.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -37,6 +37,19 @@ execution:
   # The default for an ordinary tool is owned here, never by its dispatcher.
   filesystem_authority_ceiling:
     path: [filesystem_authority]
+    default: node_policy
+  # Direct opaque producers and evaluators use the same signed target
+  # contract as resident workers. Ordinary tools omit it and request no
+  # constrained execution resource.
+  target:
+    path: [supported_target]
+    required: false
+    limits:
+      max_requirements: 1
+      max_resource_count: 1
+      max_facts_per_requirement: 16
+  resource_authority_ceiling:
+    path: [resource_authority]
     default: node_policy
   terminator:
     kind: subprocess
@@ -148,6 +161,12 @@ composed_value_contract:
     external_product_slots:
       type: single
       prim: array
+    supported_target:
+      type: single
+      prim: mapping
+    resource_authority:
+      type: single
+      prim: string
 runtime:
   # Tool invocation selectors remain ordinary schema-validated input. The
   # shared runtime template may project one scalar `params` value into one
@@ -204,6 +223,8 @@ runtime:
     # it is not a runtime-handler block.
     - external_content
     - external_product_slots
+    - supported_target
+    - resource_authority
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare

@@ -1,0 +1,93 @@
+{
+  "schema": "ryeos.local_inference_numeric_conformance_evidence.v1",
+  "scope": "numeric_conformance_only",
+  "consequences": "none",
+  "passed": true,
+  "does_not_establish": [
+    "hardware_qualification",
+    "runtime_or_isolation_qualification",
+    "worker_or_provider_activation",
+    "artifact_publication",
+    "arc_candidate_acceptance"
+  ],
+  "request": {
+    "path": "authoring/contracts/qwen3-4b-bf16-numeric-oracle-request-v1.json",
+    "sha256": "2a82f946b4c63e18b52c065b1f972c5c1223f19ae0dac126b0e2989923eac2a9"
+  },
+  "model": {
+    "model_id": "qwen3-4b",
+    "large_content_manifest_digest": "8b3605c6ede96f971372782e5e5ade48dcd789e255291b411feb5bd4163a363f"
+  },
+  "reference": {
+    "modal_app_id": "ap-SsZ47f7aVHbtl3MTZPV5FZ",
+    "environment_manifest_digest": "a202bca48337d6796e9629c11cfaef509a9b5062a2e707a6d0a07f1e03faba11",
+    "evidence_sha256": "8b9c68fdf4f77dae9768d3205dbee18910ed0b2a5a05e0c1972f63e91ac3bddd",
+    "implementation": "transformers-4.51.0-qwen3-cpu-float32-eager",
+    "minimum_observed_top1_margin": 1.6679954528808594
+  },
+  "candidate": {
+    "modal_app_id": "ap-4izojV5QimRiFoLGawoQYx",
+    "evidence_sha256": "07669b38d50a669bd3a6304ec153cdea6c1c806fb240077597794a184d2058a7",
+    "tinygrad_revision": "4c206a52b1a72a98db8c97576959b54fa2a38232",
+    "device": "CUDA:PTX",
+    "requested_gpu": "L4",
+    "observed_gpu": {
+      "name": "NVIDIA L4",
+      "uuid": "GPU-e818d7a9-62bf-04a9-1b37-df6ef9a227db",
+      "memory_mib": 23034,
+      "compute_capability": "8.9",
+      "driver_version": "580.95.05"
+    },
+    "network": "blocked_by_modal_function_contract",
+    "execution_boundary": {
+      "interpreter": "modal_debian_slim_python_3.12",
+      "interpreter_patch_and_binary_identity_retained": false,
+      "admitted_runtime_archive_use": "musl_loader_and_libraries_for_admitted_compiler_only",
+      "worker_runtime_abi_qualification": false
+    },
+    "runtime_archive_sha256": "7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef",
+    "tinygrad_archive_sha256": "accc141e942323c8b865c776b5c1425792e86a1c4981fdf4d711d80db2ac5780",
+    "toolchain_archive_sha256": "5ca0c1141b4400505e46305ba3e620d316aecf17d758e3be406c26da914ebb55",
+    "source_sha256": {
+      "model.py": "e2a7c1e0c70b1ba92ea33ecf0bac02a50b414c6636a492c8a9250c5ff39f661c",
+      "model_contract.py": "f7edcd0fcf4c85585ccbfb3411a605f27bf12597718543b2298c9f5ab3e1c62d",
+      "tokenizer.py": "9c74e306fbeaa74e4a07ff5a42200a056758c7719a0f4f611faf4292b9c962db",
+      "compiler.py": "50f29407c05bbf7b1b663298d97b1539a76439c13918b1ec2b2d09b111aa8140",
+      "model-profiles/qwen3-4b.json": "30e171a9803f0f5820630687a96862d12acf797073e670d9744578e210c38e2c",
+      "compare_numeric_oracle.py": "9744a7d4e25de1089d398707b9eec6f294f8559775a918d86827133a64419f12"
+    },
+    "timing_seconds": {
+      "model_load": 5.053664936999999,
+      "candidate_observation": 468.281183684,
+      "total": 473.334848621
+    }
+  },
+  "cases": {
+    "plain_exact_reply": {
+      "top1_token_matches": true,
+      "greedy_tokens_match": true,
+      "top16_overlap": 16,
+      "maximum_matched_log_probability_absolute_error": 0.00003847183930361098,
+      "matched_log_probability_mean_absolute_error": 0.00001969746820407181
+    },
+    "thinking_tool_request": {
+      "top1_token_matches": true,
+      "greedy_tokens_match": true,
+      "top16_overlap": 16,
+      "maximum_matched_log_probability_absolute_error": 0.00004126765830392287,
+      "matched_log_probability_mean_absolute_error": 0.000021980326089021673
+    },
+    "tool_response_continuation": {
+      "top1_token_matches": true,
+      "greedy_tokens_match": true,
+      "top16_overlap": 16,
+      "maximum_matched_log_probability_absolute_error": 0.00005513443726101741,
+      "matched_log_probability_mean_absolute_error": 0.000023379904308118427
+    }
+  },
+  "retention": {
+    "operator_volume": "ryeos-local-inference-artifacts",
+    "reference_path": "/evidence/qwen3-4b-bf16-numeric-oracle-v1/numeric-oracle.json",
+    "candidate_path": "/evidence/qwen3-4b-bf16-numeric-candidate-v1/candidate-comparison.json"
+  }
+}

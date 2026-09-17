@@ -4,12 +4,12 @@
 //! exact pool identity, bounded framing, serial request correlation,
 //! cancellation, readiness, reuse, idle retirement, and process teardown.
 
+use lillux::time::{Duration, MonotonicDeadline};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -199,10 +199,70 @@ pub struct StartedPersistentSession {
     /// post-readiness reader is started. Workers never receive this closure;
     /// they can only submit bounded protocol frames for it to validate.
     pub observation_sink: Option<PersistentSessionObservationSink>,
+    /// One-shot settlement owned by the same process registry. It is invoked
+    /// only after checked reap/death proof, never from request completion.
+    pub cleanup_observer: Option<PersistentSessionCleanupObserver>,
+    /// Finite resource occupancy authority for this exact process occurrence.
+    /// `None` is valid only for sessions without a financially bounded
+    /// selected execution resource.
+    pub resource_occupancy_limit: Option<lillux::time::OccupancyLimit>,
+    /// Exact node-policy cleanup reserve captured with this process owner.
+    pub resource_cleanup_allowance_ms: Option<u64>,
+    pub resource_attribution_sink: Option<PersistentSessionResourceAttributionSink>,
+    /// Live eligibility of the exact resident owner gate. Checked for every
+    /// request after leasing and before any worker contact.
+    pub resource_eligibility: Option<PersistentSessionResourceEligibility>,
 }
 
 pub type PersistentSessionObservationSink =
     Arc<dyn Fn(Value) -> Result<Value> + Send + Sync + 'static>;
+pub type PersistentSessionCleanupObserver = Arc<dyn Fn() -> Result<()> + Send + Sync + 'static>;
+pub struct PersistentSessionResourceRequestLease {
+    finish: Option<Box<dyn FnOnce() -> Result<()> + Send + 'static>>,
+}
+
+impl PersistentSessionResourceRequestLease {
+    pub fn new(finish: impl FnOnce() -> Result<()> + Send + 'static) -> Self {
+        Self {
+            finish: Some(Box::new(finish)),
+        }
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        self.finish
+            .take()
+            .expect("resource request lease finishes once")()
+    }
+}
+
+impl Drop for PersistentSessionResourceRequestLease {
+    fn drop(&mut self) {
+        if let Some(finish) = self.finish.take()
+            && let Err(error) = finish()
+        {
+            tracing::error!(error = %format!("{error:#}"), "resident resource request lease cleanup failed");
+        }
+    }
+}
+
+pub type PersistentSessionResourceEligibility =
+    Arc<dyn Fn() -> Result<PersistentSessionResourceRequestLease> + Send + Sync + 'static>;
+pub type PersistentSessionResourceAttributionSink = Arc<
+    dyn Fn(
+            &PersistentSessionRequestIdentity,
+            &lillux::time::OccupancyCoordinate,
+            &lillux::time::OccupancyCoordinate,
+        ) -> Result<()>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentSessionRequestIdentity {
+    pub thread_id: String,
+    pub request_digest: ryeos_accounting::HexDigest,
+}
 
 struct BudgetedSessionFrame {
     frame: PersistentSessionFrame,
@@ -224,6 +284,11 @@ struct SessionProcess {
     /// Once ownership was consumed by an abort attempt whose reap proof
     /// failed, absence of `running` must never be reinterpreted as proof.
     cleanup_unproved: Mutex<Option<String>>,
+    cleanup_observer: Mutex<Option<PersistentSessionCleanupObserver>>,
+    resource_occupancy_limit: Option<lillux::time::OccupancyLimit>,
+    resource_cleanup_allowance_ms: Option<u64>,
+    resource_attribution_sink: Option<PersistentSessionResourceAttributionSink>,
+    resource_eligibility: Option<PersistentSessionResourceEligibility>,
     leased: AtomicBool,
     last_used_ms: AtomicU64,
     closed: Arc<AtomicBool>,
@@ -306,7 +371,7 @@ impl SessionProcess {
         &self,
         wire: &PersistentSessionWireContract,
         frame: &PersistentSessionFrame,
-        deadline: Instant,
+        deadline: MonotonicDeadline,
     ) -> Result<()> {
         if let Some(reason) = self
             .reader_failure
@@ -363,7 +428,7 @@ impl SessionProcess {
                 request_id: None,
                 body: Some(acknowledgement),
             },
-            Instant::now() + Duration::from_secs(30),
+            MonotonicDeadline::after(Duration::from_secs(30)),
         )
     }
 
@@ -413,6 +478,14 @@ impl SessionProcess {
                 bail!("{reason}");
             }
         }
+        if let Some(observer) = self
+            .cleanup_observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            observer().context("settle persistent-session resource operation after reap")?;
+        }
         Ok(())
     }
 }
@@ -433,7 +506,17 @@ impl Drop for SessionProcess {
         {
             if let Err(error) = running.abort_and_reap_checked() {
                 tracing::error!(%error, "persistent-session drop cleanup could not be proved");
+                return;
             }
+        }
+        if let Some(observer) = self
+            .cleanup_observer
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            && let Err(error) = observer()
+        {
+            tracing::error!(%error, "persistent-session resource settlement failed after drop reap");
         }
     }
 }
@@ -453,7 +536,7 @@ fn run_session_reader(
         let frame = match next {
             Ok(Some(frame)) => frame,
             Ok(None) => {
-                std::thread::sleep(IO_POLL_INTERVAL);
+                lillux::time::sleep(IO_POLL_INTERVAL);
                 continue;
             }
             Err(error) => break format!("read response frame: {error:#}"),
@@ -1044,8 +1127,31 @@ impl PersistentSessionPool {
         session_id: &str,
         request_body: Value,
         cancelled: C,
+        on_delta: D,
+        absolute_deadline: Option<MonotonicDeadline>,
+    ) -> Result<Value>
+    where
+        C: Fn() -> bool,
+        D: FnMut(Value) -> Result<Option<Value>>,
+    {
+        self.execute_exclusive_attributed_with_deadline(
+            session_id,
+            None,
+            request_body,
+            cancelled,
+            on_delta,
+            absolute_deadline,
+        )
+    }
+
+    pub fn execute_exclusive_attributed_with_deadline<C, D>(
+        &self,
+        session_id: &str,
+        request_identity: Option<&PersistentSessionRequestIdentity>,
+        request_body: Value,
+        cancelled: C,
         mut on_delta: D,
-        absolute_deadline: Option<Instant>,
+        absolute_deadline: Option<MonotonicDeadline>,
     ) -> Result<Value>
     where
         C: Fn() -> bool,
@@ -1066,9 +1172,44 @@ impl PersistentSessionPool {
                 .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
             (Arc::clone(&entry.process), entry.contract.clone())
         };
+        if process
+            .leased
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            bail!("exclusive persistent session already has an active request");
+        }
+        if let Err(error) =
+            require_resource_service_window(&process, contract.lifecycle.request_timeout_ms)
+        {
+            let retirement = self.retire_exclusive(session_id)?;
+            process.leased.store(false, Ordering::Release);
+            return Err(match retirement {
+                ExclusiveRetirementOutcome::Reaped | ExclusiveRetirementOutcome::Absent => error,
+                ExclusiveRetirementOutcome::Reserved => error.context(
+                    "resource lifetime expired while the exclusive session remained reserved",
+                ),
+                ExclusiveRetirementOutcome::Unproved => error
+                    .context("resource lifetime expired and exclusive cleanup could not be proved"),
+            });
+        }
+        let (resource_request_lease, attribution_start) =
+            match begin_resource_request_evidence(&process, request_identity, true) {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    let cleanup = process.retire().err();
+                    process.leased.store(false, Ordering::Release);
+                    return Err(match cleanup {
+                        Some(cleanup) => error.context(format!(
+                            "exclusive resource-owner cleanup could not be proved: {cleanup}"
+                        )),
+                        None => error,
+                    });
+                }
+            };
         let deadline =
             exclusive_request_deadline(contract.lifecycle.request_timeout_ms, absolute_deadline);
-        let result = execute_on_process(
+        let mut result = execute_on_process(
             &process,
             &contract.wire,
             PersistentSessionFrameKind::Request,
@@ -1078,6 +1219,13 @@ impl PersistentSessionPool {
             &mut on_delta,
         )
         .map_err(|error| attach_process_diagnostic(&process, error));
+        finish_resource_request_evidence(
+            &process,
+            request_identity,
+            attribution_start.as_ref(),
+            resource_request_lease,
+            &mut result,
+        );
         if result.is_err() {
             let cleanup = process.retire().err();
             let mut state = self
@@ -1104,6 +1252,10 @@ impl PersistentSessionPool {
                 .exclusive_failure_cleanup
                 .insert(session_id.to_owned(), cleanup_state);
             self.inner.changed.notify_all();
+        } else {
+            process.last_used_ms.store(now_ms(), Ordering::Release);
+            process.leased.store(false, Ordering::Release);
+            self.inner.changed.notify_all();
         }
         result
     }
@@ -1122,7 +1274,7 @@ impl PersistentSessionPool {
         &self,
         session_id: &str,
         control_body: Value,
-        absolute_deadline: Option<Instant>,
+        absolute_deadline: Option<MonotonicDeadline>,
     ) -> Result<Value> {
         self.ensure_admission_open()?;
         validate_exclusive_session_id(session_id)?;
@@ -1139,9 +1291,44 @@ impl PersistentSessionPool {
                 .ok_or_else(|| anyhow!("exclusive persistent session is not attached"))?;
             (Arc::clone(&entry.process), entry.contract.clone())
         };
+        if process
+            .leased
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            bail!("exclusive persistent session already has an active control request");
+        }
+        if let Err(error) =
+            require_resource_service_window(&process, contract.lifecycle.request_timeout_ms)
+        {
+            let retirement = self.retire_exclusive(session_id)?;
+            process.leased.store(false, Ordering::Release);
+            return Err(match retirement {
+                ExclusiveRetirementOutcome::Reaped | ExclusiveRetirementOutcome::Absent => error,
+                ExclusiveRetirementOutcome::Reserved => error.context(
+                    "resource lifetime expired while the exclusive session remained reserved",
+                ),
+                ExclusiveRetirementOutcome::Unproved => error
+                    .context("resource lifetime expired and exclusive cleanup could not be proved"),
+            });
+        }
+        let (resource_request_lease, _) =
+            match begin_resource_request_evidence(&process, None, false) {
+                Ok(evidence) => evidence,
+                Err(error) => {
+                    let cleanup = process.retire().err();
+                    process.leased.store(false, Ordering::Release);
+                    return Err(match cleanup {
+                    Some(cleanup) => error.context(format!(
+                        "exclusive control resource-owner cleanup could not be proved: {cleanup}"
+                    )),
+                    None => error,
+                });
+                }
+            };
         let deadline =
             exclusive_request_deadline(contract.lifecycle.request_timeout_ms, absolute_deadline);
-        let result = execute_on_process(
+        let mut result = execute_on_process(
             &process,
             &contract.wire,
             PersistentSessionFrameKind::Control,
@@ -1151,6 +1338,7 @@ impl PersistentSessionPool {
             &mut |_| Ok(None),
         )
         .map_err(|error| attach_process_diagnostic(&process, error));
+        finish_resource_request_evidence(&process, None, None, resource_request_lease, &mut result);
         if result.is_err() {
             let cleanup = process.retire().err();
             let mut state = self
@@ -1176,6 +1364,10 @@ impl PersistentSessionPool {
             state
                 .exclusive_failure_cleanup
                 .insert(session_id.to_owned(), cleanup_state);
+            self.inner.changed.notify_all();
+        } else {
+            process.last_used_ms.store(now_ms(), Ordering::Release);
+            process.leased.store(false, Ordering::Release);
             self.inner.changed.notify_all();
         }
         result
@@ -1298,6 +1490,35 @@ impl PersistentSessionPool {
         lifecycle: &PersistentSessionLifecycleContract,
         wire: &PersistentSessionWireContract,
         request_body: Value,
+        spawn: F,
+        cancelled: C,
+        on_delta: D,
+    ) -> Result<Value>
+    where
+        F: FnMut() -> Result<StartedPersistentSession>,
+        C: Fn() -> bool,
+        D: FnMut(Value) -> Result<()>,
+    {
+        self.execute_attributed(
+            pool_key,
+            lifecycle,
+            wire,
+            None,
+            request_body,
+            spawn,
+            cancelled,
+            on_delta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_attributed<F, C, D>(
+        &self,
+        pool_key: &str,
+        lifecycle: &PersistentSessionLifecycleContract,
+        wire: &PersistentSessionWireContract,
+        request_identity: Option<&PersistentSessionRequestIdentity>,
+        request_body: Value,
         mut spawn: F,
         cancelled: C,
         mut on_delta: D,
@@ -1314,8 +1535,75 @@ impl PersistentSessionPool {
         validate_pool_key(pool_key)?;
         lifecycle.validate()?;
         wire.validate()?;
-        let deadline = Instant::now() + Duration::from_millis(lifecycle.request_timeout_ms);
+        let deadline =
+            MonotonicDeadline::after(Duration::from_millis(lifecycle.request_timeout_ms));
         let process = self.acquire(pool_key, lifecycle, wire, &mut spawn, &cancelled, deadline)?;
+        let resource_request_lease = match &process.resource_eligibility {
+            Some(eligible) => match eligible() {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    let cleanup = process.retire().err();
+                    if let Some(cleanup) = cleanup.as_ref() {
+                        self.poison_after_unproved_cleanup(cleanup.to_string());
+                    } else {
+                        self.remove(pool_key, &process);
+                    }
+                    process.leased.store(false, Ordering::Release);
+                    self.inner.changed.notify_all();
+                    return Err(match cleanup {
+                        Some(cleanup) => error.context(format!(
+                            "ineligible resource-owner cleanup could not be proved: {cleanup}"
+                        )),
+                        None => error,
+                    });
+                }
+            },
+            None => None,
+        };
+        let attribution_start = match (&process.resource_attribution_sink, request_identity) {
+            (Some(_), Some(_)) => match lillux::time::occupancy_now()
+                .map_err(anyhow::Error::msg)
+                .context("sample persistent-session request occupancy start")
+            {
+                Ok(start) => Some(start),
+                Err(error) => {
+                    let cleanup = process.retire().err();
+                    if let Some(cleanup) = cleanup.as_ref() {
+                        self.poison_after_unproved_cleanup(cleanup.to_string());
+                    } else {
+                        self.remove(pool_key, &process);
+                    }
+                    process.leased.store(false, Ordering::Release);
+                    self.inner.changed.notify_all();
+                    return Err(match cleanup {
+                        Some(cleanup) => error.context(format!(
+                            "resource-meter failure cleanup could not be proved: {cleanup}"
+                        )),
+                        None => error,
+                    });
+                }
+            },
+            (Some(_), None) => {
+                let error = anyhow!(
+                    "resource-bearing persistent-session request lacks attribution identity"
+                );
+                let cleanup = process.retire().err();
+                if let Some(cleanup) = cleanup.as_ref() {
+                    self.poison_after_unproved_cleanup(cleanup.to_string());
+                } else {
+                    self.remove(pool_key, &process);
+                }
+                process.leased.store(false, Ordering::Release);
+                self.inner.changed.notify_all();
+                return Err(match cleanup {
+                    Some(cleanup) => error.context(format!(
+                        "unattributed resource-owner cleanup could not be proved: {cleanup}"
+                    )),
+                    None => error,
+                });
+            }
+            (None, _) => None,
+        };
         let result = execute_on_process(
             &process,
             wire,
@@ -1325,7 +1613,35 @@ impl PersistentSessionPool {
             deadline,
             &mut |value| on_delta(value).map(|()| None),
         );
-        let result = result.map_err(|error| attach_process_diagnostic(&process, error));
+        let mut result = result.map_err(|error| attach_process_diagnostic(&process, error));
+        if let (Some(sink), Some(identity), Some(start)) = (
+            &process.resource_attribution_sink,
+            request_identity,
+            attribution_start.as_ref(),
+        ) {
+            let attribution = lillux::time::occupancy_now()
+                .map_err(anyhow::Error::msg)
+                .context("sample persistent-session request occupancy end")
+                .and_then(|end| sink(identity, start, &end));
+            if let Err(error) = attribution {
+                result = Err(match result {
+                    Ok(_) => error,
+                    Err(request) => request.context(format!(
+                        "resource request attribution also failed: {error:#}"
+                    )),
+                });
+            }
+        }
+        if let Some(lease) = resource_request_lease
+            && let Err(error) = lease.finish()
+        {
+            result = Err(match result {
+                Ok(_) => error,
+                Err(request) => request.context(format!(
+                    "resource request lease cleanup also failed: {error:#}"
+                )),
+            });
+        }
         match result {
             Ok(value) => {
                 process.last_used_ms.store(now_ms(), Ordering::Release);
@@ -1601,7 +1917,7 @@ impl PersistentSessionPool {
         wire: &PersistentSessionWireContract,
         spawn: &mut F,
         cancelled: &C,
-        deadline: Instant,
+        deadline: MonotonicDeadline,
     ) -> Result<Arc<SessionProcess>>
     where
         F: FnMut() -> Result<StartedPersistentSession>,
@@ -1620,7 +1936,7 @@ impl PersistentSessionPool {
                 self.remove_empty_group(key);
                 bail!("persistent-session request was cancelled before worker contact");
             }
-            if Instant::now() >= deadline {
+            if deadline.has_elapsed() {
                 self.remove_empty_group(key);
                 bail!("persistent-session request exceeded its signed timeout while queued");
             }
@@ -1656,12 +1972,13 @@ impl PersistentSessionPool {
                 bail!("persistent-session pool key was reused with a different contract");
             }
             if let Some(process) = group.processes.iter().find(|process| {
-                process
-                    .leased
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
+                resource_service_window_is_sufficient(process, lifecycle.request_timeout_ms)
+                    && process
+                        .leased
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
             }) {
-                if cancelled() || Instant::now() >= deadline {
+                if cancelled() || deadline.has_elapsed() {
                     process.leased.store(false, Ordering::Release);
                     self.inner.changed.notify_all();
                     bail!("persistent-session request ended before worker contact");
@@ -1675,7 +1992,7 @@ impl PersistentSessionPool {
                 && total_cpu_seconds.saturating_add(lifecycle.max_cpu_seconds)
                     <= self.inner.limits.max_total_cpu_seconds
             {
-                if cancelled() || Instant::now() >= deadline {
+                if cancelled() || deadline.has_elapsed() {
                     bail!("persistent-session request ended before worker spawn");
                 }
                 group.spawning += 1;
@@ -1756,7 +2073,7 @@ impl PersistentSessionPool {
                 self.inner.changed.notify_all();
                 return Err(failure.error);
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.remaining();
             let wait = remaining.min(IO_POLL_INTERVAL);
             let (next, _) = self
                 .inner
@@ -1839,9 +2156,7 @@ impl PersistentSessionPool {
             }
         }
 
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .unwrap_or_else(Instant::now);
+        let deadline = MonotonicDeadline::after(timeout);
         let (pooled, exclusive, prior_unproved) = {
             let mut state = self
                 .inner
@@ -1851,7 +2166,7 @@ impl PersistentSessionPool {
             while state.groups.values().any(|group| group.spawning != 0)
                 || state.exclusive_starts_in_flight != 0
             {
-                let remaining = deadline.saturating_duration_since(Instant::now());
+                let remaining = deadline.remaining();
                 if remaining.is_zero() {
                     bail!("persistent-session shutdown timed out waiting for admitted starts");
                 }
@@ -2531,7 +2846,86 @@ fn ready_process(
         lifelines,
         expected_boot_identity,
         observation_sink,
+        cleanup_observer,
+        resource_occupancy_limit,
+        resource_cleanup_allowance_ms,
+        resource_attribution_sink,
+        resource_eligibility,
     } = started;
+    if cleanup_observer.is_some()
+        && (resource_occupancy_limit.is_none()
+            || resource_attribution_sink.is_none()
+            || resource_eligibility.is_none())
+    {
+        let error =
+            anyhow!("resource-bearing persistent session has no bounded occupancy authority");
+        return match running.abort_and_reap_checked() {
+            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
+            Err(cleanup) => Err(ReadyProcessFailure {
+                error: error.context(format!(
+                    "unbounded persistent-session refusal cleanup could not be proved: {cleanup}"
+                )),
+                cleanup_unproved: true,
+            }),
+        };
+    }
+    if cleanup_observer.is_none()
+        && (resource_occupancy_limit.is_some()
+            || resource_attribution_sink.is_some()
+            || resource_eligibility.is_some())
+    {
+        let error = anyhow!("persistent-session resource evidence is incomplete");
+        return match running.abort_and_reap_checked() {
+            Ok(()) => Err(ReadyProcessFailure {
+                error,
+                cleanup_unproved: false,
+            }),
+            Err(cleanup) => Err(ReadyProcessFailure {
+                error: error.context(format!(
+                    "incomplete resource-evidence cleanup could not be proved: {cleanup}"
+                )),
+                cleanup_unproved: true,
+            }),
+        };
+    }
+    if let Some(limit) = &resource_occupancy_limit {
+        let cleanup = Duration::from_millis(resource_cleanup_allowance_ms.ok_or_else(|| {
+            ReadyProcessFailure {
+                error: anyhow!("bounded persistent-session resource lacks a cleanup reserve"),
+                cleanup_unproved: false,
+            }
+        })?);
+        let request = Duration::from_millis(lifecycle.request_timeout_ms);
+        match limit.window(cleanup).map_err(anyhow::Error::msg) {
+            Ok(lillux::time::OccupancyWindowState::Service { remaining })
+                if remaining >= request => {}
+            Ok(_) => {
+                let error = anyhow!(
+                    "persistent-session resource lifetime cannot admit one complete request"
+                );
+                return match running.abort_and_reap_checked() {
+                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
+                    Err(cleanup) => Err(ReadyProcessFailure {
+                        error: error.context(format!(
+                            "persistent-session lifetime refusal cleanup could not be proved: {cleanup}"
+                        )),
+                        cleanup_unproved: true,
+                    }),
+                };
+            }
+            Err(error) => {
+                return match running.abort_and_reap_checked() {
+                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
+                    Err(cleanup) => Err(ReadyProcessFailure {
+                        error: error.context(format!(
+                            "persistent-session occupancy-clock refusal cleanup could not be proved: {cleanup}"
+                        )),
+                        cleanup_unproved: true,
+                    }),
+                };
+            }
+        }
+    }
     let reader_budget_bytes = (wire.max_frame_bytes as usize).saturating_add(4);
     let reader_budget =
         match BacklogBytePermit::try_reserve(Arc::clone(&backlog), reader_budget_bytes) {
@@ -2539,10 +2933,7 @@ fn ready_process(
             Err(error) => {
                 let error = attach_running_diagnostic(&running, error);
                 return match running.abort_and_reap_checked() {
-                    Ok(()) => Err(ReadyProcessFailure {
-                        error,
-                        cleanup_unproved: false,
-                    }),
+                    Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
                     Err(cleanup) => Err(ReadyProcessFailure {
                         error: error.context(format!(
                             "persistent-session IPC-budget cleanup could not be proved: {cleanup}"
@@ -2560,12 +2951,12 @@ fn ready_process(
             error,
             cleanup_unproved: false,
         })?;
-    let deadline = Instant::now() + timeout;
+    let deadline = MonotonicDeadline::after(timeout);
     let mut reader = FrameReader::default();
     let frame = match loop {
         match reader.read_next(&mut socket, wire.max_frame_bytes) {
             Ok(Some(frame)) => break Ok(frame),
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None) if !deadline.has_elapsed() => {
                 sleep_until_io_retry(deadline);
                 continue;
             }
@@ -2576,17 +2967,14 @@ fn ready_process(
         Ok(frame) => frame,
         Err(error) => {
             return match running.wait_for_natural_exit(Duration::from_millis(200)) {
-                Ok(completion) => Err(ReadyProcessFailure {
-                    error: attach_completion_diagnostic(&completion, error),
-                    cleanup_unproved: false,
-                }),
+                Ok(completion) => Err(settle_ready_cleanup(
+                    attach_completion_diagnostic(&completion, error),
+                    cleanup_observer.as_ref(),
+                )),
                 Err(running) => {
                     let error = attach_running_diagnostic(&running, error);
                     match running.abort_and_reap_checked() {
-                        Ok(()) => Err(ReadyProcessFailure {
-                            error,
-                            cleanup_unproved: false,
-                        }),
+                        Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
                         Err(cleanup) => Err(ReadyProcessFailure {
                             error: error.context(format!(
                                 "persistent-session readiness cleanup could not be proved: {cleanup}"
@@ -2612,10 +3000,7 @@ fn ready_process(
     if let Err(error) = readiness {
         let error = attach_running_diagnostic(&running, error);
         return match running.abort_and_reap_checked() {
-            Ok(()) => Err(ReadyProcessFailure {
-                error,
-                cleanup_unproved: false,
-            }),
+            Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
             Err(cleanup) => Err(ReadyProcessFailure {
                 error: error.context(format!(
                     "persistent-session readiness cleanup could not be proved: {cleanup}"
@@ -2632,10 +3017,7 @@ fn ready_process(
                 anyhow!(error).context("clone persistent-session writer descriptor"),
             );
             return match running.abort_and_reap_checked() {
-                Ok(()) => Err(ReadyProcessFailure {
-                    error,
-                    cleanup_unproved: false,
-                }),
+                Ok(()) => Err(settle_ready_cleanup(error, cleanup_observer.as_ref())),
                 Err(cleanup) => Err(ReadyProcessFailure {
                     error: error.context(format!(
                         "persistent-session descriptor-clone cleanup could not be proved: {cleanup}"
@@ -2656,6 +3038,11 @@ fn ready_process(
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
         cleanup_unproved: Mutex::new(None),
+        cleanup_observer: Mutex::new(cleanup_observer),
+        resource_occupancy_limit,
+        resource_cleanup_allowance_ms,
+        resource_attribution_sink,
+        resource_eligibility,
         leased: AtomicBool::new(false),
         last_used_ms: AtomicU64::new(now_ms()),
         closed: Arc::new(AtomicBool::new(false)),
@@ -2663,6 +3050,24 @@ fn ready_process(
         _reader_budget: reader_budget,
         _lifelines: lifelines,
     })
+}
+
+fn settle_ready_cleanup(
+    error: anyhow::Error,
+    observer: Option<&PersistentSessionCleanupObserver>,
+) -> ReadyProcessFailure {
+    match observer.map(|observer| observer()).unwrap_or(Ok(())) {
+        Ok(()) => ReadyProcessFailure {
+            error,
+            cleanup_unproved: false,
+        },
+        Err(settlement) => ReadyProcessFailure {
+            error: error.context(format!(
+                "persistent-session resource settlement after reap failed: {settlement:#}"
+            )),
+            cleanup_unproved: true,
+        },
+    }
 }
 
 fn attach_process_diagnostic(process: &SessionProcess, error: anyhow::Error) -> anyhow::Error {
@@ -2717,7 +3122,7 @@ fn execute_on_process<C, D>(
     request_kind: PersistentSessionFrameKind,
     request_body: Value,
     cancelled: &C,
-    deadline: Instant,
+    deadline: MonotonicDeadline,
     on_delta: &mut D,
 ) -> Result<Value>
 where
@@ -2731,7 +3136,13 @@ where
     );
     let receiver = process.register_request(&request_id)?;
     let outcome = (|| {
-        if cancelled() || Instant::now() >= deadline {
+        let resource_expired = || {
+            process
+                .resource_occupancy_limit
+                .as_ref()
+                .is_some_and(|limit| limit.is_expired().unwrap_or(true))
+        };
+        if cancelled() || deadline.has_elapsed() || resource_expired() {
             bail!("persistent-session request ended before worker contact");
         }
         process
@@ -2749,7 +3160,10 @@ where
             .context("send persistent-session request frame")?;
         let mut cancel_sent = false;
         loop {
-            if Instant::now() >= deadline {
+            if resource_expired() {
+                bail!("persistent-session resource occupancy authority expired");
+            }
+            if deadline.has_elapsed() {
                 bail!("persistent-session request exceeded its signed timeout");
             }
             if cancelled() && !cancel_sent {
@@ -2768,9 +3182,7 @@ where
                     .context("send persistent-session cancellation frame")?;
                 cancel_sent = true;
             }
-            let wait = deadline
-                .saturating_duration_since(Instant::now())
-                .min(IO_POLL_INTERVAL);
+            let wait = deadline.remaining().min(IO_POLL_INTERVAL);
             let budgeted = match receiver.recv_timeout(wait) {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(reason)) => bail!("persistent-session reader failed: {reason}"),
@@ -2824,6 +3236,73 @@ where
     outcome
 }
 
+fn begin_resource_request_evidence(
+    process: &SessionProcess,
+    request_identity: Option<&PersistentSessionRequestIdentity>,
+    require_attribution: bool,
+) -> Result<(
+    Option<PersistentSessionResourceRequestLease>,
+    Option<lillux::time::OccupancyCoordinate>,
+)> {
+    let lease = process
+        .resource_eligibility
+        .as_ref()
+        .map(|eligible| eligible())
+        .transpose()?;
+    let start = match (&process.resource_attribution_sink, request_identity) {
+        (Some(_), Some(_)) if require_attribution => Some(
+            lillux::time::occupancy_now()
+                .map_err(anyhow::Error::msg)
+                .context("sample exclusive resource request occupancy start")?,
+        ),
+        (Some(_), None) if require_attribution => {
+            bail!("resource-bearing exclusive request lacks attribution identity")
+        }
+        (None, Some(_)) if require_attribution => {
+            bail!("exclusive request attribution identity has no admitted resource sink")
+        }
+        _ => None,
+    };
+    Ok((lease, start))
+}
+
+fn finish_resource_request_evidence(
+    process: &SessionProcess,
+    request_identity: Option<&PersistentSessionRequestIdentity>,
+    attribution_start: Option<&lillux::time::OccupancyCoordinate>,
+    lease: Option<PersistentSessionResourceRequestLease>,
+    result: &mut Result<Value>,
+) {
+    if let (Some(sink), Some(identity), Some(start)) = (
+        &process.resource_attribution_sink,
+        request_identity,
+        attribution_start,
+    ) {
+        let attribution = lillux::time::occupancy_now()
+            .map_err(anyhow::Error::msg)
+            .context("sample exclusive resource request occupancy end")
+            .and_then(|end| sink(identity, start, &end));
+        if let Err(error) = attribution {
+            *result = Err(match std::mem::replace(result, Ok(Value::Null)) {
+                Ok(_) => error,
+                Err(request) => request.context(format!(
+                    "exclusive resource request attribution also failed: {error:#}"
+                )),
+            });
+        }
+    }
+    if let Some(lease) = lease
+        && let Err(error) = lease.finish()
+    {
+        *result = Err(match std::mem::replace(result, Ok(Value::Null)) {
+            Ok(_) => error,
+            Err(request) => request.context(format!(
+                "exclusive resource request lease cleanup also failed: {error:#}"
+            )),
+        });
+    }
+}
+
 fn require_frame_identity(
     frame: &PersistentSessionFrame,
     wire: &PersistentSessionWireContract,
@@ -2834,20 +3313,54 @@ fn require_frame_identity(
     Ok(())
 }
 
+fn resource_service_window_is_sufficient(
+    process: &SessionProcess,
+    request_timeout_ms: u64,
+) -> bool {
+    require_resource_service_window(process, request_timeout_ms).is_ok()
+}
+
+fn require_resource_service_window(
+    process: &SessionProcess,
+    request_timeout_ms: u64,
+) -> Result<()> {
+    let Some(limit) = &process.resource_occupancy_limit else {
+        return Ok(());
+    };
+    let required = Duration::from_millis(request_timeout_ms);
+    match limit
+        .window(Duration::from_millis(
+            process
+                .resource_cleanup_allowance_ms
+                .context("bounded resource owner lacks cleanup allowance")?,
+        ))
+        .map_err(anyhow::Error::msg)?
+    {
+        lillux::time::OccupancyWindowState::Service { remaining } if remaining >= required => {
+            Ok(())
+        }
+        lillux::time::OccupancyWindowState::Service { .. }
+        | lillux::time::OccupancyWindowState::Cleanup { .. }
+        | lillux::time::OccupancyWindowState::Expired => {
+            bail!("persistent-session resource service window is exhausted")
+        }
+    }
+}
+
 fn exclusive_request_deadline(
     request_timeout_ms: u64,
-    absolute_deadline: Option<Instant>,
-) -> Instant {
-    let signed_deadline = Instant::now() + Duration::from_millis(request_timeout_ms);
+    absolute_deadline: Option<MonotonicDeadline>,
+) -> MonotonicDeadline {
+    let signed_deadline = MonotonicDeadline::after(Duration::from_millis(request_timeout_ms));
     absolute_deadline.map_or(signed_deadline, |absolute| signed_deadline.min(absolute))
 }
 
 fn lock_writer_before_deadline(
     writer: &Mutex<lillux::InheritedDuplexChannel>,
-    deadline: Instant,
+    deadline: MonotonicDeadline,
 ) -> Result<std::sync::MutexGuard<'_, lillux::InheritedDuplexChannel>> {
     loop {
-        if Instant::now() >= deadline {
+        if deadline.has_elapsed() {
             bail!("persistent-session frame deadline expired while waiting for its writer");
         }
         match writer.try_lock() {
@@ -2862,7 +3375,7 @@ fn write_frame(
     stream: &mut impl Write,
     wire: &PersistentSessionWireContract,
     frame: &PersistentSessionFrame,
-    deadline: Instant,
+    deadline: MonotonicDeadline,
 ) -> Result<()> {
     let encoded = encode_frame(wire, frame)?;
     let mut written = 0;
@@ -2870,7 +3383,7 @@ fn write_frame(
         // The writer lock or a previous partial write may consume the entire
         // remaining budget. Never initiate another write syscall after expiry,
         // even if the descriptor is immediately writable at that point.
-        if Instant::now() >= deadline {
+        if deadline.has_elapsed() {
             bail!("persistent-session frame write exceeded its deadline");
         }
         // The typed Lillux endpoint owns the underlying descriptor operation;
@@ -2880,7 +3393,7 @@ fn write_frame(
             Ok(0) => bail!("persistent-session channel closed while writing a frame"),
             Ok(count) => written += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) if is_io_timeout(&error) && Instant::now() < deadline => {
+            Err(error) if is_io_timeout(&error) && !deadline.has_elapsed() => {
                 sleep_until_io_retry(deadline);
             }
             Err(error) if is_io_timeout(&error) => {
@@ -2892,10 +3405,10 @@ fn write_frame(
     Ok(())
 }
 
-fn sleep_until_io_retry(deadline: Instant) {
-    let remaining = deadline.saturating_duration_since(Instant::now());
+fn sleep_until_io_retry(deadline: MonotonicDeadline) {
+    let remaining = deadline.remaining();
     if !remaining.is_zero() {
-        std::thread::sleep(IO_POLL_INTERVAL.min(remaining));
+        lillux::time::sleep(IO_POLL_INTERVAL.min(remaining));
     }
 }
 
@@ -3086,12 +3599,7 @@ fn validate_exclusive_session_id(session_id: &str) -> Result<()> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
+    lillux::time::timestamp_millis().try_into().unwrap_or(0)
 }
 
 fn sweep_stream_registry(streams: &StreamRegistry) {
@@ -3134,7 +3642,7 @@ fn spawn_stream_reaper(streams: Weak<StreamRegistry>) {
         .name("ryeos-session-stream-reaper".to_owned())
         .spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(60));
+                lillux::time::sleep(Duration::from_secs(60));
                 let Some(streams) = streams.upgrade() else {
                     break;
                 };
@@ -3150,12 +3658,13 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
         .name("ryeos-session-reaper".to_owned())
         .spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(1));
+                lillux::time::sleep(Duration::from_secs(1));
                 let Some(inner) = inner.upgrade() else {
                     break;
                 };
                 let now = now_ms();
                 let mut retired = Vec::new();
+                let mut retired_exclusive = Vec::new();
                 let state = inner
                     .state
                     .lock()
@@ -3164,8 +3673,12 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                     let idle = group.contract.lifecycle.idle_timeout_ms;
                     for process in &group.processes {
                         let expired = !process.leased.load(Ordering::Acquire)
-                            && now.saturating_sub(process.last_used_ms.load(Ordering::Acquire))
-                                >= idle;
+                            && (now.saturating_sub(process.last_used_ms.load(Ordering::Acquire))
+                                >= idle
+                                || !resource_service_window_is_sufficient(
+                                    process,
+                                    group.contract.lifecycle.request_timeout_ms,
+                                ));
                         if expired
                             && process
                                 .leased
@@ -3179,6 +3692,38 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                         {
                             retired.push((key.clone(), Arc::clone(process)));
                         }
+                    }
+                }
+                for (session_id, entry) in &state.exclusive {
+                    let expired = entry
+                        .process
+                        .resource_occupancy_limit
+                        .as_ref()
+                        .is_some_and(|limit| {
+                            !matches!(
+                                limit.window(Duration::from_millis(
+                                    entry
+                                        .process
+                                        .resource_cleanup_allowance_ms
+                                        .unwrap_or(u64::MAX),
+                                )),
+                                Ok(lillux::time::OccupancyWindowState::Service { .. })
+                            )
+                        });
+                    if expired
+                        && entry
+                            .process
+                            .leased
+                            .compare_exchange(
+                                false,
+                                true,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                    {
+                        retired_exclusive
+                            .push((session_id.clone(), Arc::clone(&entry.process)));
                     }
                 }
                 drop(state);
@@ -3210,6 +3755,39 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                         }
                     }
                 }
+                for (session_id, process) in retired_exclusive {
+                    match process.retire() {
+                        Ok(()) => {
+                            let mut state = inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if state
+                                .exclusive
+                                .get(&session_id)
+                                .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+                            {
+                                state.exclusive.remove(&session_id);
+                                state
+                                    .exclusive_failure_cleanup
+                                    .insert(session_id, "reaped");
+                            }
+                        }
+                        Err(error) => {
+                            let mut state = inner
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state
+                                .cleanup_unproved
+                                .get_or_insert_with(|| error.to_string());
+                            state
+                                .exclusive_failure_cleanup
+                                .insert(session_id, "unproved");
+                            tracing::error!(%error, "expired exclusive-session cleanup could not be proved; pool quarantined");
+                        }
+                    }
+                }
                 inner.changed.notify_all();
                 // Do not retain the pool through the next sleep. The
                 // background reaper must not become an accidental owner.
@@ -3225,15 +3803,16 @@ mod tests {
 
     #[test]
     fn absolute_contact_deadline_caps_existing_signed_io_deadline() {
-        let expired = Instant::now() - Duration::from_millis(1);
-        assert_eq!(exclusive_request_deadline(60_000, Some(expired)), expired);
-        let distant = Instant::now() + Duration::from_secs(60);
-        assert!(exclusive_request_deadline(100, Some(distant)) < distant);
-        let before = Instant::now();
+        let expired = MonotonicDeadline::after(Duration::ZERO);
+        assert!(exclusive_request_deadline(60_000, Some(expired)).has_elapsed());
+        let distant = MonotonicDeadline::after(Duration::from_secs(60));
+        assert!(
+            exclusive_request_deadline(100, Some(distant)).remaining()
+                <= Duration::from_millis(100)
+        );
         let interactive = exclusive_request_deadline(100, None);
-        let after = Instant::now();
-        assert!(interactive >= before + Duration::from_millis(100));
-        assert!(interactive <= after + Duration::from_millis(100));
+        assert!(!interactive.has_elapsed());
+        assert!(interactive.remaining() <= Duration::from_millis(100));
     }
 
     #[test]
@@ -3267,7 +3846,13 @@ mod tests {
                 request_id: Some("expired-request".into()),
                 body: Some(serde_json::json!({"kind":"fixture"})),
             };
-            let error = write_frame(&mut writer, &wire, &frame, Instant::now()).unwrap_err();
+            let error = write_frame(
+                &mut writer,
+                &wire,
+                &frame,
+                MonotonicDeadline::after(Duration::ZERO),
+            )
+            .unwrap_err();
             assert!(
                 error
                     .to_string()
@@ -3285,12 +3870,16 @@ mod tests {
         // A same-thread holder makes an unconditional lock deadlock. The
         // bounded acquisition must return without needing that lock released.
         assert!(
-            lock_writer_before_deadline(&writer, Instant::now() + Duration::from_millis(1),)
-                .is_err()
+            lock_writer_before_deadline(
+                &writer,
+                MonotonicDeadline::after(Duration::from_millis(1)),
+            )
+            .is_err()
         );
         drop(held);
         assert!(
-            lock_writer_before_deadline(&writer, Instant::now() + Duration::from_secs(1),).is_ok()
+            lock_writer_before_deadline(&writer, MonotonicDeadline::after(Duration::from_secs(1)),)
+                .is_ok()
         );
     }
 
@@ -3432,6 +4021,9 @@ while True:
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            target_requirement: None,
+            resource_authority_ceiling:
+                ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "fixture".to_owned(),
             thread_kind: Some("worker".to_owned()),
             executor_chain: Vec::new(),
@@ -3494,6 +4086,11 @@ while True:
             lifelines: vec![Box::new(app_root)],
             expected_boot_identity: None,
             observation_sink,
+            cleanup_observer: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+            resource_attribution_sink: None,
+            resource_eligibility: None,
         })
     }
 
@@ -4161,7 +4758,7 @@ while True:
                 bail!("cancelled acquisition must not spawn")
             },
             &|| true,
-            Instant::now() + Duration::from_secs(1),
+            MonotonicDeadline::after(Duration::from_secs(1)),
         );
         let error = match result {
             Ok(_) => panic!("cancelled acquisition unexpectedly returned a worker"),
@@ -4190,7 +4787,7 @@ while True:
                 bail!("quarantined pool must not spawn")
             },
             &|| false,
-            Instant::now() + Duration::from_secs(1),
+            MonotonicDeadline::after(Duration::from_secs(1)),
         );
         let error = match result {
             Ok(_) => panic!("quarantined pool returned replacement capacity"),

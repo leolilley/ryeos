@@ -35,6 +35,7 @@ members = [
     "crates/tools/lillux-isolation-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
+    "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]

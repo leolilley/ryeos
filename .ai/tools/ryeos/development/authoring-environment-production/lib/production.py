@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T15:36:50Z:7456daa992ae8a0b98551f2db8d65afbf6799139553df434064db25e1e28e08b:4dwjiqeDN9HO3yKXcOEAC6eVtgE8SStYTpNf/H29mYxKYO8BoLCWr8XhaZOU6g4hN+j65rbsuTZ6mjT9u/SuCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:7456daa992ae8a0b98551f2db8d65afbf6799139553df434064db25e1e28e08b:PtWa2EvdZOCz/RIrQqbBFRseLy4d5hLSqHLcqZ/6iKkDz6w0yhibg0gnH7SSpu+oaLQDxpPaZ55D/mgbqkD2CQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Finite, offline authoring-environment assembly; no acquisition or publication.
 
 RyeOS owns capture, namespaces, result snapshots and import/binding. This code

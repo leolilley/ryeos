@@ -1,0 +1,256 @@
+# ryeos:signed:2026-09-17T07:24:52Z:165921bbfcff903764ae74e9b309af8d2dc06f08e6cc7f855975cb4eeece32c1:Bl/OLI172TA1K+QYR4sSCf5D/rgy4gxgEtTGxrP8meh5UFUDHZ0889upMj6Cjk5vzDShDOpNJQtAMnVHJwzaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: 1
+exact_bundles:
+  - central-auth
+  - core
+  - local-inference
+  - standard
+policies:
+  accounting:
+    schema: 2
+    issue_acceptance_window_ms: 60000
+  command_registration:
+    schema: 1
+    claim_rules:
+      - claim:
+          kind: command.root
+          value: help
+        required_caps:
+          - ryeos.register.command.root.help
+      - claim:
+          kind: command.root
+          value: init
+        required_caps:
+          - ryeos.register.command.root.init
+      - claim:
+          kind: command.root
+          value: start
+        required_caps:
+          - ryeos.register.command.root.start
+      - claim:
+          kind: command.root
+          value: stop
+        required_caps:
+          - ryeos.register.command.root.stop
+      - claim:
+          kind: command.root
+          value: node
+        required_caps:
+          - ryeos.register.command.root.node
+      - claim:
+          kind: command.root
+          value: system
+        required_caps:
+          - ryeos.register.command.root.system
+      - claim:
+          kind: command.root
+          value: identity
+        required_caps:
+          - ryeos.register.command.root.identity
+      - claim:
+          kind: command.root
+          value: execute
+        required_caps:
+          - ryeos.register.command.root.execute
+      - claim:
+          kind: command.dispatch.kind
+          value: direct_execute_item_ref
+        required_caps:
+          - ryeos.register.command.dispatch.direct_execute_item_ref
+      - claim:
+          kind: command.dispatch.kind
+          value: local_handler
+        required_caps:
+          - ryeos.register.command.dispatch.local_handler
+    system_source_caps:
+      - ryeos.register.command.dispatch.direct_execute_item_ref
+      - ryeos.register.command.dispatch.local_handler
+      - ryeos.register.command.root.execute
+      - ryeos.register.command.root.help
+      - ryeos.register.command.root.identity
+      - ryeos.register.command.root.init
+      - ryeos.register.command.root.node
+      - ryeos.register.command.root.start
+      - ryeos.register.command.root.stop
+      - ryeos.register.command.root.system
+    bundle_source_caps:
+      central-auth: []
+      local-inference: []
+      core:
+        - ryeos.register.command.dispatch.direct_execute_item_ref
+        - ryeos.register.command.dispatch.local_handler
+        - ryeos.register.command.root.execute
+        - ryeos.register.command.root.help
+        - ryeos.register.command.root.identity
+        - ryeos.register.command.root.init
+        - ryeos.register.command.root.node
+        - ryeos.register.command.root.start
+        - ryeos.register.command.root.stop
+        - ryeos.register.command.root.system
+      standard:
+        - ryeos.register.command.dispatch.direct_execute_item_ref
+  execution:
+    schema: 3
+    max_live_fanout: 8
+    max_private_materialization_copy_bytes: 17179869184
+    host_env_passthrough: []
+    workload_client: null
+    resource_authority:
+      cleanup_allowance_ms: 30000
+      admission:
+        limits:
+          max_requirements: 1
+          max_resource_count: 1
+          max_facts_per_requirement: 16
+        max_total_resource_count: 1
+        max_concurrent_exclusive_allocations: 1
+        allowed_classes: [accelerator]
+        allowed_allocations: [exclusive]
+        allowed_access: [deployment_visible]
+      resources: []
+  object_closure:
+    schema: 1
+    max_roots: 256
+    max_objects: 32768
+    max_blobs: 32768
+    max_object_bytes: 33554432
+    max_total_object_bytes: 67108864
+    max_blob_bytes: 134217728
+    max_total_blob_bytes: 134217728
+    max_response_bytes: 268435456
+    max_links_per_object: 100000
+  thread_history:
+    schema: 1
+    default_retention: durable
+    item_authored_retention: allow
+    minimum_terminal_for: null
+  maintenance:
+    schema: 1
+    schedules:
+      - schedule_id: maintenance-gc
+        item_ref: service:maintenance/gc
+        ref_bindings: {}
+        schedule_type: cron
+        expression: "0 0 4 * * *"
+        timezone: UTC
+        misfire_policy: skip
+        overlap_policy: skip
+        lateness_grace_secs: 60
+        initial_enabled: true
+        params:
+          compact: true
+          policy:
+            manual_pushes: 10
+            auto_snapshots: 30
+          deep: true
+          schedule_fire_max_age_days: 30
+          schedule_fire_max_count: 500
+          sync_job_retention_days: 14
+          seat_lease_grace_seconds: 600
+          durable_cas_upload_max_age_seconds: 21600
+        capabilities:
+          - ryeos.execute.service.maintenance/gc
+  hosted:
+    schema: 1
+    admission_enabled: false
+    admission_token_ttl_secs: null
+    allow_loopback_http: true
+  isolation:
+    schema: 1
+    policy:
+      version: 7
+      process_scopes:
+        # Device allocation and bounded occupancy are released only after
+        # Lillux proves this exact process scope empty.
+        mode: required
+        control_timeout_ms: 5000
+        nested_sandbox: false
+      trusted_process_group_sessions: false
+      mode: disabled
+      backend: null
+      filesystem:
+        proc_filesystem: empty
+        live_project:
+          mode: fixed_parents
+          limits:
+            max_entries: 2048
+            max_depth: 64
+        readable:
+          - "{node_public_identity}"
+          - "{daemon_socket}"
+          - "{bundle_roots}"
+          - "{node_trusted_keys}"
+          - "{verified_code}"
+        writable:
+          - "{project}"
+          - "{checkpoint_dir}"
+      network:
+        mode: host
+        runtime_files: []
+      environment:
+        allow:
+          - "*"
+      limits:
+        open_files: 1024
+        stdout_bytes: 8388608
+        stderr_bytes: 8388608
+        verified_artifact_file_bytes: 67108864
+        verified_artifact_total_bytes: 268435456
+        verified_artifact_files: 4096
+  ingest_ignore:
+    schema: 2
+    patterns:
+      - "*.pyc"
+      - ".DS_Store"
+      - ".env"
+      - ".git/"
+      - ".hg/"
+      - ".svn/"
+      - ".venv/"
+      - "/.ai/config/remotes/"
+      - "__pycache__/"
+      - "node_modules/"
+      - "target/"
+  external_content:
+    schema: 1
+    roots: {}
+    limits:
+      max_depth: 11
+      max_entries: 4480
+      max_file_bytes: 1503300328
+      max_total_bytes: 1514745854
+      store_budget_bytes: 4294967296
+      minimum_free_bytes: 2147483648
+    managed_activation:
+      enabled: true
+      limits:
+        allow_online: true
+        allowed_https_hosts:
+          - github.com
+          - release-assets.githubusercontent.com
+          - releases.openai.com
+        max_redirects: 2
+        max_archives: 4
+        max_compressed_bytes: 1329438282
+        max_expanded_bytes: 1893273600
+        max_members: 4836
+        max_member_bytes: 1503300328
+        max_concurrent_activations: 1
+        cache_budget_bytes: 2147483648
+        store_budget_bytes: 4294967296
+        minimum_free_bytes: 2147483648
+        max_attempts: 3
+  persistent_sessions:
+    schema: 1
+    enabled: true
+    limits:
+      max_pool_groups: 4
+      max_total_processes: 4
+      max_total_address_space_bytes: 68719476736
+      max_total_cpu_seconds: 14400
+      max_real_uid_process_limit: 4096
+      max_open_streams: 32
+      max_active_streams: 4
+      max_active_streams_per_subject: 1
+      max_stream_backlog_bytes: 16777216
+      max_total_backlog_bytes: 67108864

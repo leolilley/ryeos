@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T15:46:29Z:1dc367a947028e9ffb5e01e30a535b9301c300adb651810b318977c7b99c072f:C3MXs8q7rss9/n00Eqq1OfoJT4VkrpXDd3B1UJfXraBY4U5FbHIiDV4azm0yxdxhViaxeTrBbNQ1I/AUpqYKCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:1dc367a947028e9ffb5e01e30a535b9301c300adb651810b318977c7b99c072f:b3gOia8ktRPAMJ3hJYl3LsOXcdKtgC7fcPsPw8xemjjTFYV8qpN54/UhTeMmn2hjBE8Bpt+pGlRtfvPupj/WBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Finite GNU CPython ELF relocation and closure inspection.
 
 The caller supplies an already selected ``python/`` tree and the admitted

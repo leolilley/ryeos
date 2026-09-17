@@ -118,6 +118,7 @@ class ExactSessionProcess:
             "RYEOS_SESSION_FD": str(child.fileno()),
             "PATH": "",
             "DEV": "CPU",
+            "RYEOS_LOCAL_MODEL_PROFILE": "qwen3-0.6b",
             "CACHELEVEL": "0",
             "CCACHE": "0",
             "LANG": "C",

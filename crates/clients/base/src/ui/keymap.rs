@@ -175,6 +175,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
     }
 
     match event.key {
+        RyeOsKey::Char('n') if event.modifiers.alt_only() => intent(RyeOsUiIntent::NewWorkspace),
         // Ctrl+K is the reliable view-overlay binding: a control char that
         // terminals and tmux pass straight through. Alt+K is kept for
         // environments that deliver it, but Alt/ESC combos are eaten by
@@ -257,6 +258,12 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::ArrowRight if event.modifiers.ctrl_only() => {
             cycle_tab(RyeOsStackMoveDirection::Down)
         }
+        RyeOsKey::Char('[') if event.modifiers.alt_only() => intent(RyeOsUiIntent::CycleViewTab {
+            direction: RyeOsStackMoveDirection::Up,
+        }),
+        RyeOsKey::Char(']') if event.modifiers.alt_only() => intent(RyeOsUiIntent::CycleViewTab {
+            direction: RyeOsStackMoveDirection::Down,
+        }),
         RyeOsKey::ArrowLeft if event.modifiers.alt_only() => ui(RyeOsUiEvent::PopLens),
         RyeOsKey::Escape if event.modifiers.none() && context.input_blurrable => {
             ui(RyeOsUiEvent::BlurInput)
@@ -674,14 +681,22 @@ impl super::model::RyeOsCore {
                 let Some(instance_key) = focused_field_instance(self) else {
                     return Vec::new();
                 };
-                if self.ui.field_query_editing.as_ref() != Some(&instance_key) {
-                    self.ui.field_query_editing = Some(instance_key);
+                if self.workspaces[self.active_workspace]
+                    .field_query_editing
+                    .as_ref()
+                    != Some(&instance_key)
+                {
+                    self.workspaces[self.active_workspace].field_query_editing = Some(instance_key);
                     self.bump_generation();
                 }
                 Vec::new()
             }
             RyeOsKeyCommand::EndFocusedFieldQuery => {
-                if self.ui.field_query_editing.take().is_some() {
+                if self.workspaces[self.active_workspace]
+                    .field_query_editing
+                    .take()
+                    .is_some()
+                {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -760,7 +775,11 @@ impl super::model::RyeOsCore {
         let Some((instance_key, field)) = focused_field(self) else {
             return Vec::new();
         };
-        if self.ui.field_query_editing.as_ref() != Some(&instance_key) {
+        if self.workspaces[self.active_workspace]
+            .field_query_editing
+            .as_ref()
+            != Some(&instance_key)
+        {
             return Vec::new();
         }
         let mut query = field.search.query;
@@ -824,10 +843,9 @@ impl super::model::RyeOsCore {
                     return (false, Vec::new());
                 };
                 FocusedRowsTarget {
-                    instance_key: self
-                        .workspace
+                    instance_key: self.workspaces[self.active_workspace]
                         .tiles
-                        .get(&self.workspace.focused_tile)
+                        .get(&self.workspaces[self.active_workspace].focused_tile)
                         .map(|tile| tile.instance_key.clone())
                         .expect("focused VM tile has workspace state"),
                     count_and_feed,
@@ -928,7 +946,10 @@ pub(crate) fn focused_field_key_context(
             .is_none_or(|item| item.can_continue)
     });
     Some(RyeOsFieldKeyContext {
-        query_editing: core.ui.field_query_editing.as_ref() == Some(&instance_key),
+        query_editing: core.workspaces[core.active_workspace]
+            .field_query_editing
+            .as_ref()
+            == Some(&instance_key),
         query_has_text: !field.search.query.is_empty(),
         group_collapsible: group.is_some(),
         group_collapsed: group.is_some_and(|group| group.collapsed),
@@ -966,10 +987,9 @@ fn focused_field_instance(
 ) -> Option<crate::ids::RyeOsViewInstanceKey> {
     use super::model::RyeOsFocusTarget;
     let instance_key = match core.focus_target() {
-        RyeOsFocusTarget::WorkspaceTile { .. } => core
-            .workspace
+        RyeOsFocusTarget::WorkspaceTile { .. } => core.workspaces[core.active_workspace]
             .tiles
-            .get(&core.workspace.focused_tile)
+            .get(&core.workspaces[core.active_workspace].focused_tile)
             .map(|tile| tile.instance_key.clone()),
         RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(edge)),
     }?;
@@ -989,26 +1009,28 @@ fn view_local_for_instance<'a>(
     core: &'a super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a crate::workspace::ViewLocalState> {
-    core.workspace
+    core.workspaces[core.active_workspace]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| &tile.local)
-        .or_else(|| core.ui.dock_local.get(instance_key))
+        .or_else(|| {
+            core.workspaces[core.active_workspace]
+                .dock_local
+                .get(instance_key)
+        })
 }
 
 fn view_local_for_instance_mut<'a>(
     core: &'a mut super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
 ) -> Option<&'a mut crate::workspace::ViewLocalState> {
-    let tile_id = core
-        .workspace
+    let tile_id = core.workspaces[core.active_workspace]
         .tiles
         .iter()
         .find_map(|(tile_id, tile)| (&tile.instance_key == instance_key).then_some(*tile_id));
     if let Some(tile_id) = tile_id {
-        return core
-            .workspace
+        return core.workspaces[core.active_workspace]
             .tiles
             .get_mut(&tile_id)
             .map(|tile| &mut tile.local);
@@ -1019,7 +1041,7 @@ fn view_local_for_instance_mut<'a>(
         .any(|(key, _)| key == instance_key)
     {
         return Some(
-            core.ui
+            core.workspaces[core.active_workspace]
                 .dock_local
                 .entry(instance_key.clone())
                 .or_insert_with(initial_list_local_state),

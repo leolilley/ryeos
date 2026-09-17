@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-07T06:05:34Z:fbc984b45e09df6173f616214c05e7d46861fa2cedd8bcc6b4b780c0501a51e9:a8lQ14sR0pVJYLoHC64vrL99MGEnI8FsHat6kq4RldM4R57FYBDFzV7Nfyia4aY4wFTQ0ZNuFNRV/oI8LYODBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T08:24:14Z:57dfb90ccaa1b1cacd6c7a13839d512ec4f783d2f9183dad8f56dec00f1d337d:972OWhTeqG+DgfKXInx092TuF1gQS5SyQiXZJcNAzQr/XzzJ0SxN88eFLwqzoTA4/cJHBovZH+KSi3328V4ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -74,7 +74,7 @@ directly:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev \
+  --owner "RyeOS Development" \
   --all
 ```
 

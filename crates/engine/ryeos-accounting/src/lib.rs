@@ -10,6 +10,7 @@ pub mod admission;
 pub mod authority;
 pub mod event;
 pub mod money;
+pub mod resource;
 pub mod rpc;
 pub mod state;
 
@@ -28,6 +29,17 @@ pub use event::{
     PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION, ProviderAttemptBudgetTransitionV1, transition_id,
 };
 pub use money::{MoneyError, NANOS_PER_USD, UsdNanos, reported_decimal_scale};
+pub use resource::{
+    RESOURCE_ACCOUNTING_AUTHORITY_VERSION, RESOURCE_BUDGET_TRANSITION_VERSION,
+    RESOURCE_METER_CONTRACT_VERSION, RESOURCE_OPERATION_BINDING_VERSION,
+    RESOURCE_RATED_CHARGE_VERSION, RESOURCE_REQUEST_ATTRIBUTION_VERSION, RESOURCE_TARIFF_VERSION,
+    RESOURCE_USAGE_OBSERVATION_VERSION, RESOURCE_USAGE_PARTITION_VERSION,
+    ResourceAccountingAuthority, ResourceAttributedShare, ResourceBudgetState,
+    ResourceBudgetTransitionV1, ResourceChargeClass, ResourceMeterContract, ResourceMeterKind,
+    ResourceOperationBinding, ResourceRatedCharge, ResourceRequestAttribution,
+    ResourceSpendAuthority, ResourceTariffDocument, ResourceUsageCoverage, ResourceUsageInterval,
+    ResourceUsageObservation, ResourceUsagePartition,
+};
 pub use rpc::{
     MAX_DIAGNOSTIC_LEN, MAX_RAW_DECIMAL_LEN, ProviderAttemptBudgetRecord, ProviderAttemptGetParams,
     ProviderAttemptLocalStreamControl, ProviderAttemptLocalStreamControlParams,

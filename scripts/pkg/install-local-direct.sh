@@ -54,7 +54,7 @@ Options:
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
-                        (default: ryeos-dev)
+                        (default: RyeOS Development)
   --bundle-set SET      Bundle set to populate/install: full, standard
                         (core+central-auth+standard), hosted-node
                         (core+central-auth+hosted-node), or hosted-workflow
@@ -518,7 +518,7 @@ cleanup_shadows=1
 trust_source_publishers=0
 reset_node_policy_generation=0
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
-owner="ryeos-dev"
+owner="RyeOS Development"
 bundle_set="full"
 node_profile_override=""
 jobs=""            # forwarded to populate as cargo -j N

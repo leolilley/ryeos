@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-06T03:45:22Z:076b4710fc08b14b2bebd3dd6bf5ef7d14aaf9693c028ac2b373b734d93babd8:ET+o5s/GpdlyKzJlhoHyMcwTHr1tk/3Mlgx2o97w3KHwgiuDICbxgWiC/b0WUF9csLXKd2bvEb175/bd69iTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:29:59Z:3f91e886a3ca1a616a92aff43454cf5cdae169e00d4831b0cbb1624bbe438706:gC4bmpQTB7ODASSfgES1wq7uYqAro6LsyLLs+njx8R1t8Z0cGbdH87bbtrQCP/14rVbxYDl+Usz71VsA+7t0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.0.2"
+version: "1.1.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -33,8 +33,17 @@ execution:
         - protocol:ryeos/core/structured_session
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
+  target:
+    path: [supported_target]
+    required: true
+    limits:
+      max_requirements: 1
+      max_resource_count: 1
+      max_facts_per_requirement: 16
+  resource_authority_ceiling:
+    path: [resource_authority]
+    default: node_policy
   persistent_session:
-    target_path: [supported_target]
     max_processes: 1
     max_inflight_per_process: 1
     max_address_space_bytes: 17179869184
@@ -51,7 +60,7 @@ execution:
     allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:
-      max_total_bytes: 4294967296
+      max_total_bytes: 17179869184
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -77,6 +86,7 @@ composed_value_contract:
     description: {type: single, prim: string}
     session_resources: {type: single, prim: mapping}
     filesystem_authority: {type: single, prim: string}
+    resource_authority: {type: single, prim: string}
 runtime:
   handlers:
     - type: config
@@ -94,6 +104,7 @@ runtime:
     - supported_target
     - session_resources
     - filesystem_authority
+    - resource_authority
 metadata:
   rules:
     name:

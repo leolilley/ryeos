@@ -252,6 +252,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_coordinate
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_fingerprint
     ON provider_attempt_budget_transition_once(payload_fingerprint);
 
+-- Resource occupancy is a distinct financial dimension. It intentionally has
+-- no provider/model/token vocabulary and is never added through a synthetic
+-- provider attempt.
+CREATE TABLE IF NOT EXISTS resource_budget_latest (
+    operation_id TEXT PRIMARY KEY,
+    transition_sequence INTEGER NOT NULL,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    launch_generation TEXT NOT NULL,
+    owner_incarnation TEXT NOT NULL,
+    stable_resource_id TEXT NOT NULL,
+    authority_digest TEXT NOT NULL,
+    transition TEXT NOT NULL,
+    reserved_usd_nanos INTEGER NOT NULL,
+    budget_charge_usd_nanos INTEGER,
+    usage_digest TEXT,
+    occurred_at_ms INTEGER NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_budget_execution
+    ON resource_budget_latest(execution_budget_id);
+CREATE INDEX IF NOT EXISTS idx_resource_budget_thread
+    ON resource_budget_latest(thread_id);
+CREATE INDEX IF NOT EXISTS idx_resource_budget_resource
+    ON resource_budget_latest(stable_resource_id);
+CREATE INDEX IF NOT EXISTS idx_resource_budget_occurred
+    ON resource_budget_latest(occurred_at_ms, transition);
+
+CREATE TABLE IF NOT EXISTS resource_budget_transition_once (
+    transition_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    transition_sequence INTEGER NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_budget_once_coordinate
+    ON resource_budget_transition_once(operation_id, transition_sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_budget_once_fingerprint
+    ON resource_budget_transition_once(payload_fingerprint);
+
 -- Exact source-scoped identity for daemon-authored project observations.
 -- This is a rebuildable index over chain history, not an operational ledger;
 -- its lifetime therefore exactly matches the durable evidence it identifies.
@@ -1175,6 +1221,154 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "resource_budget_latest",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "budget_authority_site_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "ledger_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "execution_budget_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "root_chain_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "audit_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_generation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_incarnation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stable_resource_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "authority_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "budget_charge_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "usage_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "occurred_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_budget_transition_once",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "project_observation_once",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -1524,6 +1718,42 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::IndexSpec {
                 name: "idx_provider_attempt_budget_once_fingerprint",
                 table: "provider_attempt_budget_transition_once",
+                columns: &["payload_fingerprint"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_execution",
+                table: "resource_budget_latest",
+                columns: &["execution_budget_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_thread",
+                table: "resource_budget_latest",
+                columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_resource",
+                table: "resource_budget_latest",
+                columns: &["stable_resource_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_occurred",
+                table: "resource_budget_latest",
+                columns: &["occurred_at_ms", "transition"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_once_coordinate",
+                table: "resource_budget_transition_once",
+                columns: &["operation_id", "transition_sequence"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_budget_once_fingerprint",
+                table: "resource_budget_transition_once",
                 columns: &["payload_fingerprint"],
                 unique: true,
             },

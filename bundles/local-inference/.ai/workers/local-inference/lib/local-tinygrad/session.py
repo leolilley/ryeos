@@ -26,6 +26,19 @@ MAX_TOOLS = 256
 MAX_TOOL_BYTES = 4 * 1024 * 1024
 
 
+def _validate_tinygrad_device(value: object) -> str:
+    # The signed concrete worker owns tinygrad's backend/interface selection.
+    # This shared adapter validates only a bounded tinygrad coordinate; it does
+    # not duplicate the signed profile as a backend allowlist.
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[A-Z][A-Z0-9]*(?::[A-Z0-9]+)*", value) is None
+        or len(value) > 64
+    ):
+        raise RuntimeError("local worker has no admitted tinygrad device selection")
+    return value
+
+
 def _is_within(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
@@ -45,6 +58,13 @@ def _verify_loaded_module_origins(*roots: Path) -> None:
 
 def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     session_fd = os.environ.get("RYEOS_SESSION_FD")
+    tinygrad_device = _validate_tinygrad_device(os.environ.get("DEV"))
+    model_profile = os.environ.get("RYEOS_LOCAL_MODEL_PROFILE")
+    if (
+        not isinstance(model_profile, str)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,63}", model_profile)
+    ):
+        raise RuntimeError("local worker has no admitted model-profile selection")
     workspace = Path.cwd().resolve()
     worker_root = Path(__file__).resolve(strict=True).parent
     if workspace not in worker_root.parents:
@@ -65,7 +85,15 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
         "PYTHONHASHSEED": "0",
         "PYTHONSAFEPATH": "1",
         "PATH": "",
-        "DEV": "CPU",
+        # Tinygrad's generated POSIX bindings require an explicit libc
+        # coordinate. Bind the libc from the admitted runtime tree; never let
+        # its loader search the host filesystem.
+        "LIBC_PATH": str(workspace / "runtime" / "lib" / "libc.so"),
+        # DEV is owned by the signed concrete worker profile. RyeOS selects
+        # and grants resources generically; this worker owns tinygrad's name
+        # for the backend that consumes that already-admitted access.
+        "DEV": tinygrad_device,
+        "RYEOS_LOCAL_MODEL_PROFILE": model_profile,
         "CACHELEVEL": "0",
         "CCACHE": "0",
         "LANG": "C",
@@ -86,6 +114,9 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     ]
     runtime_root = (workspace / "runtime").resolve(strict=True)
     python_root = (runtime_root / "python").resolve(strict=True)
+    libc = (runtime_root / "lib" / "libc.so").resolve(strict=True)
+    if not libc.is_file() or os.environ["LIBC_PATH"] != str(libc):
+        raise RuntimeError("local worker libc is outside the admitted runtime")
     if Path(sys.prefix).resolve(strict=True) != python_root:
         raise RuntimeError("local worker interpreter prefix is outside the admitted runtime")
     if (
@@ -109,7 +140,7 @@ from compiler import install_admitted_compiler  # noqa: E402
 
 install_admitted_compiler(Path.cwd())
 
-from model import MAX_CONTEXT, MAX_OUTPUT_TOKENS, MODEL_ID, QwenModel  # noqa: E402
+from model import QwenModel  # noqa: E402
 from tokenizer import QwenTokenizer, render_chat  # noqa: E402
 
 _verify_loaded_module_origins(RUNTIME_ROOT, WORKER_ROOT, TINYGRAD_ROOT)
@@ -292,7 +323,12 @@ class OutputRouter:
             self.buffer = "<tool_call>" + self.buffer
 
 
-def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float, int]:
+def _validate_request(
+    outer: dict[str, Any],
+    *,
+    expected_model: str,
+    output_ceiling: int,
+) -> tuple[dict[str, Any], int, float, int]:
     if set(outer) != {"request_body", "request_body_sha256", "requested_output_ceiling"}:
         raise ValueError("local worker envelope shape is not canonical")
     request_body, body_digest, ceiling = (
@@ -329,7 +365,7 @@ def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float
     unknown = sorted(set(request) - allowed)
     if unknown:
         raise ValueError(f"local Qwen request contains unsupported fields: {unknown}")
-    if request.get("model") != MODEL_ID or request.get("stream") is not True:
+    if request.get("model") != expected_model or request.get("stream") is not True:
         raise ValueError("local Qwen request names the wrong model or is not streaming")
     if request.get("stream_options") not in (None, {"include_usage": True}):
         raise ValueError("local Qwen stream options changed")
@@ -352,7 +388,7 @@ def _validate_request(outer: dict[str, Any]) -> tuple[dict[str, Any], int, float
         or isinstance(output_limit, bool)
         or output_limit <= 0
         or output_limit > ceiling
-        or output_limit > MAX_OUTPUT_TOKENS
+        or output_limit > output_ceiling
     ):
         raise ValueError("local Qwen output limit exceeds its admitted ceiling")
     temperature = request.get("temperature", 0.0)
@@ -378,8 +414,8 @@ def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
     consumed: list[tuple[int, int]] = []
     for match in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", raw, re.DOTALL):
         try:
-            value = json.loads(match.group(1))
-        except json.JSONDecodeError:
+            value = _strict_json_loads(match.group(1))
+        except ValueError:
             continue
         if (
             not isinstance(value, dict)
@@ -409,8 +445,13 @@ def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
 class Worker:
     def __init__(self, *, load_model: bool = False):
         self.model_root = Path("model")
-        self.tokenizer = QwenTokenizer(self.model_root) if load_model else None
-        self.model = QwenModel(self.model_root) if load_model else None
+        self.profile_id = os.environ["RYEOS_LOCAL_MODEL_PROFILE"]
+        # Tokenizer/template/generation bytes are device-independent preflight.
+        # Validate them before model construction may touch Device.DEFAULT.
+        self.tokenizer = (
+            QwenTokenizer(self.model_root, self.profile_id) if load_model else None
+        )
+        self.model = QwenModel(self.model_root, self.profile_id) if load_model else None
 
     def _execute_in_process(
         self,
@@ -421,14 +462,21 @@ class Worker:
     ) -> dict[str, Any]:
         if self.tokenizer is None or self.model is None:
             raise RuntimeError("local Qwen model state is not resident")
-        request, output_limit, temperature, seed = _validate_request(outer)
+        request, output_limit, temperature, seed = _validate_request(
+            outer,
+            expected_model=self.model.model_id,
+            output_ceiling=self.model.output_ceiling,
+        )
         rendered = render_chat(
             request["messages"],
             request.get("tools") or [],
             request.get("enable_thinking", True),
         )
         prompt_tokens = self.tokenizer.encode(rendered)
-        if len(prompt_tokens) >= MAX_CONTEXT or len(prompt_tokens) + output_limit > MAX_CONTEXT:
+        if (
+            len(prompt_tokens) >= self.model.context_ceiling
+            or len(prompt_tokens) + output_limit > self.model.context_ceiling
+        ):
             raise ValueError("local Qwen prompt plus output exceeds the admitted context")
         decoder = self.tokenizer.stream_decoder()
         router = OutputRouter()
