@@ -147,9 +147,6 @@ impl OciLifecycleIntent {
     pub(crate) fn lifecycle_path(&self) -> &std::path::Path {
         &self.lifecycle_path
     }
-    pub(crate) fn controller_path(&self) -> &std::path::Path {
-        &self.controller_path
-    }
     pub(crate) fn host_lifetime(&self) -> &super::ProcessHostLifetime {
         &self.host_lifetime
     }
