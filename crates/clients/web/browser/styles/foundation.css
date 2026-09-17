@@ -1,0 +1,11 @@
+* { box-sizing: border-box; }
+html, body, #ryeos-root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-ui); font-size: 13px; }
+button, textarea, input { color: inherit; font: inherit; }
+button { border: 0; background: none; text-align: left; }
+button:not(:disabled) { cursor: pointer; }
+button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-bright); outline-offset: -1px; }
+[data-tone="good"] { color: var(--green); }
+[data-tone="warn"] { color: var(--yellow); }
+[data-tone="bad"] { color: var(--red); }
+[data-tone="accent"] { color: var(--accent-bright); }
