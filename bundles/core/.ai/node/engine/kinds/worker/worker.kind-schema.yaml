@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T22:32:47Z:9f42ba5bebe96d08725af0326fd8b9b94e1edf38d66de1deca92f08b856a8973:N189o3IBeTT+4FMhM2o/4ta4nUuNhz4zpJY/DcelE/434wsPH0UBxRj2MECJ88GrKPHOVaQeAm8ECQ5XjdVGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:29:59Z:3f91e886a3ca1a616a92aff43454cf5cdae169e00d4831b0cbb1624bbe438706:gC4bmpQTB7ODASSfgES1wq7uYqAro6LsyLLs+njx8R1t8Z0cGbdH87bbtrQCP/14rVbxYDl+Usz71VsA+7t0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
 version: "1.1.0"
 location:
@@ -60,7 +60,7 @@ execution:
     allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:
-      max_total_bytes: 4294967296
+      max_total_bytes: 17179869184
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

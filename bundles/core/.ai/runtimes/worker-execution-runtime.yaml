@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T01:19:33Z:af43ea685bbb2c2dbce22184f38a3581cb689ba1352353dfe7a77b0669f5e45f:XATqV/XhIpy/rmDW9bik3Vf0w6xJsX5VaG3OrfaUn9uyQK/I+wvrr6bgHP/QiRTcAbTJXbZK9FLx5CKtw0IyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T01:29:59Z:8b3f18367a99d2c397e2872980cfdd00cc41c8803a191d8e799479b2f9cfddf9:JLY/2ADPXe13Xl7Pn/mqSLkAodoFhKDUQeFEn5CPKnVZ2lS3wwB8F09G/Ap0F7WftAGbLxV3TznM/Mjs3WKpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: worker_execution
 default: true
@@ -41,7 +41,7 @@ launch_contract:
     external_content:
       allowed_mount_roots: [project, execution_runtime]
       max_declarations: 8
-      large_content_max_total_bytes: 4294967296
+      large_content_max_total_bytes: 17179869184
   evidence_attachments:
     max_attachments: 16
     max_total_bytes: 536870912

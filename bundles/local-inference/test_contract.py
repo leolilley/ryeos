@@ -61,6 +61,17 @@ ACTIVATION_KNOWLEDGE_PATH = (
     BUNDLE / ".ai/knowledge/local-inference/activation.md"
 )
 FULL_PROFILE_PATH = REPOSITORY / "bundles/.ai/node/init/profiles/full.yaml"
+WORKER_KIND_PATH = (
+    REPOSITORY / "bundles/core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"
+)
+WORKER_RUNTIME_PATH = (
+    REPOSITORY / "bundles/core/.ai/runtimes/worker-execution-runtime.yaml"
+)
+QWEN3_4B_SOURCE_CONTRACT_PATH = (
+    BUNDLE / "authoring/contracts/qwen3-4b-bf16-model-source-v1.json"
+)
+
+
 def worker_source_manifest_digest() -> str:
     entries = []
     total = 0
@@ -111,6 +122,24 @@ class LocalInferenceContractTests(unittest.TestCase):
             for profile, path in PROVIDER_PATHS.items()
         }
         cls.release = json.loads(RELEASE_PATH.read_text(encoding="utf-8"))
+
+    def test_worker_kind_and_runtime_admit_the_reviewed_4b_product_ceiling(self) -> None:
+        model_source = json.loads(
+            QWEN3_4B_SOURCE_CONTRACT_PATH.read_text(encoding="utf-8")
+        )
+        worker_kind = yaml.safe_load(WORKER_KIND_PATH.read_text(encoding="utf-8"))
+        worker_runtime = yaml.safe_load(
+            WORKER_RUNTIME_PATH.read_text(encoding="utf-8")
+        )
+        kind_ceiling = worker_kind["execution"]["external_content"]["large_content"][
+            "max_total_bytes"
+        ]
+        runtime_ceiling = worker_runtime["launch_contract"]["content_dependencies"][
+            "external_content"
+        ]["large_content_max_total_bytes"]
+        self.assertEqual(kind_ceiling, 16 * 1024**3)
+        self.assertEqual(runtime_ceiling, kind_ceiling)
+        self.assertGreater(kind_ceiling, model_source["selected_file_bytes"])
 
     def test_activation_is_a_closed_whole_tree_recipe(self) -> None:
         for profile, activation in self.activations.items():
