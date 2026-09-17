@@ -254,6 +254,10 @@ pub struct RyeOsFieldEntityVm {
     pub traits: RyeOsFieldEntityTraitsVm,
     pub badges: Vec<RyeOsFieldBadgeVm>,
     pub preview_ids: Vec<String>,
+    /// Whether the exact current comparison selection admits toggling this
+    /// entity. Renderers consume this projection; they do not reproduce grid
+    /// compatibility policy.
+    pub compare_available: bool,
     pub selected: bool,
     pub selectable: bool,
     pub select_intent: Option<RyeOsUiIntent>,
@@ -1239,75 +1243,76 @@ pub fn project_field(
             .cmp(&right.source)
             .then_with(|| left.id.cmp(&right.id))
     });
-    RyeOsFieldVm {
-        schema_version: FIELD_VM_SCHEMA.to_string(),
-        id: field_id.to_string(),
-        title: title.to_string(),
-        revision,
-        structural_revision,
-        data_revision,
-        local_revision,
-        sources: source_status,
-        subjects,
-        groups,
-        layers,
-        entities,
-        relations,
-        previews,
-        metrics,
-        traversal,
-        selected,
-        compare,
-        cursor,
-        replay,
-        search: RyeOsFieldSearchVm {
-            query: local.query,
-            match_ids,
-            active_match,
-            truncated: search_truncated,
-        },
-        expansions,
-        changes: local
-            .changes
-            .iter()
-            .filter_map(|(_key, change)| {
-                let kind = match change.kind.as_str() {
-                    "entered" => RyeOsFieldChangeKind::Entered,
-                    "exited" => RyeOsFieldChangeKind::Exited,
-                    "updated" => RyeOsFieldChangeKind::Updated,
-                    "status_changed" => RyeOsFieldChangeKind::StatusChanged,
-                    "relation_added" => RyeOsFieldChangeKind::RelationAdded,
-                    "relation_removed" => RyeOsFieldChangeKind::RelationRemoved,
-                    _ => return None,
-                };
-                Some(RyeOsFieldChangeVm {
-                    id: change.id.clone(),
-                    kind,
-                    at_ms: change.at_ms,
-                    tone: change
-                        .tone
-                        .as_ref()
-                        .and_then(|tone| serde_json::from_value(Value::String(tone.clone())).ok()),
-                    prior_fingerprint: change.prior_fingerprint.clone(),
-                    fingerprint: change.fingerprint.clone(),
-                    tombstone: change
-                        .tombstone_label
-                        .as_ref()
-                        .map(|label| RyeOsFieldTombstoneVm {
-                            label: label.clone(),
-                            traits: change
-                                .tombstone_traits
-                                .as_ref()
-                                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                                .unwrap_or_default(),
+    let mut field =
+        RyeOsFieldVm {
+            schema_version: FIELD_VM_SCHEMA.to_string(),
+            id: field_id.to_string(),
+            title: title.to_string(),
+            revision,
+            structural_revision,
+            data_revision,
+            local_revision,
+            sources: source_status,
+            subjects,
+            groups,
+            layers,
+            entities,
+            relations,
+            previews,
+            metrics,
+            traversal,
+            selected,
+            compare,
+            cursor,
+            replay,
+            search: RyeOsFieldSearchVm {
+                query: local.query,
+                match_ids,
+                active_match,
+                truncated: search_truncated,
+            },
+            expansions,
+            changes: local
+                .changes
+                .iter()
+                .filter_map(|(_key, change)| {
+                    let kind = match change.kind.as_str() {
+                        "entered" => RyeOsFieldChangeKind::Entered,
+                        "exited" => RyeOsFieldChangeKind::Exited,
+                        "updated" => RyeOsFieldChangeKind::Updated,
+                        "status_changed" => RyeOsFieldChangeKind::StatusChanged,
+                        "relation_added" => RyeOsFieldChangeKind::RelationAdded,
+                        "relation_removed" => RyeOsFieldChangeKind::RelationRemoved,
+                        _ => return None,
+                    };
+                    Some(RyeOsFieldChangeVm {
+                        id: change.id.clone(),
+                        kind,
+                        at_ms: change.at_ms,
+                        tone: change.tone.as_ref().and_then(|tone| {
+                            serde_json::from_value(Value::String(tone.clone())).ok()
                         }),
+                        prior_fingerprint: change.prior_fingerprint.clone(),
+                        fingerprint: change.fingerprint.clone(),
+                        tombstone: change.tombstone_label.as_ref().map(|label| {
+                            RyeOsFieldTombstoneVm {
+                                label: label.clone(),
+                                traits: change
+                                    .tombstone_traits
+                                    .as_ref()
+                                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                                    .unwrap_or_default(),
+                            }
+                        }),
+                    })
                 })
-            })
-            .take(512)
-            .collect(),
-        warnings,
-        provenance: provenance.into_iter().collect(),
-    }
+                .take(512)
+                .collect(),
+            warnings,
+            provenance: provenance.into_iter().collect(),
+        };
+    project_compare_availability(&mut field);
+    field
 }
 
 /// Fingerprint the expensive projection inputs. Accepted source revision and
@@ -1449,6 +1454,7 @@ pub(crate) fn apply_field_local_state(
         compare.truncate(1);
     }
     field.compare = compare;
+    project_compare_availability(&mut field);
     field.replay.playing = local.playback.playing;
     field.cursor = field.replay.anchor.clone();
 
@@ -1754,6 +1760,7 @@ fn project_entity(
         traits,
         badges: project_badges(set.get("badges"), &raw_value, warnings),
         preview_ids: Vec::new(),
+        compare_available: false,
         selected,
         selectable: true,
         select_intent,
@@ -2347,6 +2354,28 @@ fn entities_have_compatible_previews_in(
     preview_for_entity(previews, left_entity_id)
         .zip(preview_for_entity(previews, right_entity_id))
         .is_some_and(|(left, right)| previews_compatible(left, right))
+}
+
+fn project_compare_availability(field: &mut RyeOsFieldVm) {
+    let anchor = field.compare.first().cloned();
+    let compare = field.compare.clone();
+    let previews = field.previews.clone();
+    for entity in &mut field.entities {
+        entity.compare_available = if compare.contains(&entity.id) {
+            true
+        } else {
+            let Some(candidate) = preview_for_entity(&previews, &entity.id) else {
+                continue;
+            };
+            if candidate.comparison_key.is_none() {
+                false
+            } else if let Some(anchor) = anchor.as_deref() {
+                entities_have_compatible_previews_in(&previews, anchor, &entity.id)
+            } else {
+                true
+            }
+        };
+    }
 }
 
 pub(crate) fn entity_has_comparable_preview(field: &RyeOsFieldVm, entity_id: &str) -> bool {
@@ -3030,6 +3059,7 @@ mod tests {
                 .iter()
                 .all(|entity| entity.preview_ids.len() == 1)
         );
+        assert!(field.entities.iter().all(|entity| entity.compare_available));
         assert!(
             field
                 .previews

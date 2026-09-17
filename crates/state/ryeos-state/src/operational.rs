@@ -16,14 +16,14 @@ use crate::sqlite_schema;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
 const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
-// Dispatch-effect records retain complete launch and caller authority. Epoch 10
-// is the clean-cut activation for launch-capsule schema 25, which retains
-// receiving-kind content ceilings alongside fixed-parent filesystem authority.
-// Predecessor rows cannot prove that authority and must be retired.
+// Dispatch-effect records retain complete launch and caller authority. Epoch 11
+// is the clean-cut activation for launch-capsule schema 28, which additionally
+// retains the exact admitted execution-resource authority. Predecessor rows
+// cannot prove that resource authority and must be retired.
 // Provider-call records do not carry that dependency and remain current.
-const REPLAY_INDEX_EPOCH: i32 = 10;
+const REPLAY_INDEX_EPOCH: i32 = 11;
 #[cfg(test)]
-const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 25;
+const DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA: u32 = 28;
 pub const OPERATIONAL_DB_FILENAME: &str = "operational.sqlite3";
 pub(crate) const OPERATIONAL_INITIALIZED_FILENAME: &str = "operational.initialized";
 const OPERATIONAL_INITIALIZED_CONTENT: &[u8] = b"ryeos-operational-v1\n";
@@ -132,7 +132,7 @@ CREATE TABLE replay_index_epoch (
     epoch INTEGER NOT NULL CHECK (epoch > 0)
 );
 
-INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 10);
+INSERT INTO replay_index_epoch (singleton, epoch) VALUES (1, 11);
 
 CREATE TABLE credential_profiles (
     profile_id TEXT PRIMARY KEY,
@@ -4644,14 +4644,14 @@ mod tests {
     #[test]
     fn fresh_schema_declares_only_the_current_replay_epoch() {
         assert!(SCHEMA_SQL.contains("answer_digest TEXT NOT NULL"));
-        assert!(SCHEMA_SQL.contains("VALUES (1, 10)"));
-        assert!(!SCHEMA_SQL.contains("VALUES (1, 9)"));
+        assert!(SCHEMA_SQL.contains("VALUES (1, 11)"));
+        assert!(!SCHEMA_SQL.contains("VALUES (1, 10)"));
     }
 
     #[test]
     fn replay_epoch_fences_the_current_dispatch_effect_capsule_contract() {
-        assert_eq!(REPLAY_INDEX_EPOCH, 10);
-        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 25);
+        assert_eq!(REPLAY_INDEX_EPOCH, 11);
+        assert_eq!(DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA, 28);
         assert_eq!(
             DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA,
             crate::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,

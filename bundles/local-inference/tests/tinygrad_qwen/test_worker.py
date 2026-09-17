@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import threading
 import unittest
 import unicodedata
@@ -22,24 +23,60 @@ WORKSPACE = Path(os.environ["RYEOS_LOCAL_WORKER_TEST_WORKSPACE"]).resolve(strict
 RUN_MODEL_GOLDENS = os.environ.get("RYEOS_RUN_MODEL_GOLDENS") == "1"
 os.environ["REGEN"] = "1"
 os.environ["DEVICE"] = "HOST-SHOULD-NOT-SELECT-A-BACKEND"
+# The fixture worker's signed descriptor selects this tinygrad backend.
+os.environ["DEV"] = "CPU"
+os.environ["RYEOS_LOCAL_MODEL_PROFILE"] = "qwen3-0.6b"
 os.chdir(WORKSPACE)
 sys.path[:0] = [str(WORKSPACE / "worker"), str(WORKSPACE / "tinygrad")]
 
-from session import WORKER_ROOT, OutputRouter, Worker, _read_frame, _validate_request  # noqa: E402
-from model import QwenModel  # noqa: E402
+from session import (  # noqa: E402
+    WORKER_ROOT,
+    OutputRouter,
+    Worker,
+    _parse_tools,
+    _read_frame,
+    _validate_tinygrad_device,
+    _validate_request as _validate_request_impl,
+)
+from model import (  # noqa: E402
+    QwenModel,
+    _require_exact_shard_files,
+    _validate_then_materialize_shards,
+)
 from tinygrad import Tensor  # noqa: E402
 from tokenizer import QwenTokenizer, render_chat  # noqa: E402
+from model_contract import load_model_profiles  # noqa: E402
+
+
+TEST_PROFILE = load_model_profiles()["qwen3-0.6b"]
+
+
+def _validate_request(outer: dict, **overrides: object):
+    arguments = {
+        "expected_model": TEST_PROFILE.model_id,
+        "output_ceiling": TEST_PROFILE.output_ceiling,
+        **overrides,
+    }
+    return _validate_request_impl(outer, **arguments)
 
 
 class WorkerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.model_root = WORKSPACE / "model"
-        cls.tokenizer = QwenTokenizer(cls.model_root)
+        cls.tokenizer = QwenTokenizer(cls.model_root, TEST_PROFILE.model_id)
 
     def test_worker_source_root_is_derived_from_the_admitted_entrypoint(self) -> None:
         self.assertEqual(WORKER_ROOT, Path(__import__("session").__file__).resolve().parent)
         self.assertIn(WORKSPACE, WORKER_ROOT.parents)
+
+    def test_tinygrad_device_is_signed_data_not_a_shared_backend_allowlist(self) -> None:
+        self.assertEqual(_validate_tinygrad_device("CPU"), "CPU")
+        self.assertEqual(_validate_tinygrad_device("CUDA:PTX"), "CUDA:PTX")
+        for malformed in (None, "", "cuda", "CUDA::PTX", "CUDA/PTX", "A" * 65):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(RuntimeError, "device selection"):
+                    _validate_tinygrad_device(malformed)
 
     def test_tokenizer_matches_independent_reference_ids(self) -> None:
         cases = {
@@ -114,8 +151,59 @@ class WorkerContractTests(unittest.TestCase):
             ],
         )
         self.assertIn("# Tools\n", rendered_with_tools)
-        self.assertIn('<tools>\n{"type":"function"', rendered_with_tools)
+        self.assertIn('<tools>\n{"type": "function"', rendered_with_tools)
         self.assertTrue(rendered_with_tools.endswith("<|im_start|>assistant\n"))
+
+    def test_tool_history_preserves_strict_string_argument_bytes(self) -> None:
+        arguments = '{ "z": 1, "a": 2 }'
+        rendered = render_chat(
+            [
+                {"role": "user", "content": "Use it."},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "probe_1",
+                                "arguments": arguments,
+                            }
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "done"},
+            ],
+            [],
+        )
+        self.assertIn(f'{{"name": "probe_1", "arguments": {arguments}}}', rendered)
+        with self.assertRaisesRegex(ValueError, "strict JSON"):
+            render_chat(
+                [
+                    {"role": "user", "content": "Use it."},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "probe_1",
+                                    "arguments": '{"x":1,"x":2}',
+                                }
+                            }
+                        ],
+                    },
+                ],
+                [],
+            )
+
+    def test_generated_tool_json_is_strict(self) -> None:
+        for raw in (
+            '<tool_call>{"name":"probe","arguments":{"x":1,"x":2}}</tool_call>',
+            '<tool_call>{"name":"probe","arguments":{"x":NaN}}</tool_call>',
+        ):
+            calls, remainder = _parse_tools(raw, "request")
+            self.assertEqual(calls, [])
+            self.assertEqual(remainder, raw)
 
     def test_rust_cancel_frame_fixture_is_accepted(self) -> None:
         payload = (
@@ -207,6 +295,42 @@ class WorkerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-finite JSON number"):
             _validate_request(outer_for(request))
 
+    def test_qwen3_4b_request_identity_and_output_ceiling_are_exact(self) -> None:
+        request = {
+            "model": "qwen3-4b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "max_tokens": 2048,
+            "temperature": 0.0,
+            "seed": 0,
+        }
+
+        def outer() -> dict[str, object]:
+            body = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+            return {
+                "request_body": body,
+                "request_body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "requested_output_ceiling": 2048,
+            }
+
+        _, output_limit, _, _ = _validate_request(
+            outer(), expected_model="qwen3-4b", output_ceiling=2048
+        )
+        self.assertEqual(output_limit, 2048)
+        request["max_tokens"] = 2049
+        with self.assertRaisesRegex(ValueError, "output limit"):
+            _validate_request(
+                outer(), expected_model="qwen3-4b", output_ceiling=2048
+            )
+        request["max_tokens"] = 1
+        request["model"] = "qwen3-0.6b"
+        with self.assertRaisesRegex(ValueError, "wrong model"):
+            _validate_request(
+                outer(), expected_model="qwen3-4b", output_ceiling=2048
+            )
+
     def test_kernel_lowering_uses_the_admitted_compiler(self) -> None:
         value = (Tensor([1.0, 2.0]) + Tensor([3.0, 4.0])).realize()
         self.assertEqual(value.shape, (2,))
@@ -227,13 +351,77 @@ class WorkerContractTests(unittest.TestCase):
         self.assertNotIn("REGEN", os.environ)
         self.assertNotIn("DEVICE", os.environ)
         self.assertEqual(os.environ.get("DEV"), "CPU")
+        self.assertEqual(
+            os.environ.get("RYEOS_LOCAL_MODEL_PROFILE"), "qwen3-0.6b"
+        )
+        self.assertEqual(
+            os.environ.get("LIBC_PATH"),
+            str(
+                (WORKSPACE / "runtime" / "lib" / "libc.so").resolve(
+                    strict=True
+                )
+            ),
+        )
+
+    def test_all_shards_validate_before_any_tensor_materialization(self) -> None:
+        events: list[str] = []
+
+        class Contract:
+            shard_names = ("first.safetensors", "last.safetensors")
+            tensors = {
+                "first": object(),
+                "last": object(),
+            }
+
+        class Shard:
+            tensors: dict[str, object] = {}
+
+            def __init__(self, path: Path, _expected: dict[str, object]):
+                events.append(f"validate:{path.name}")
+                if path.name == "last.safetensors":
+                    raise ValueError("corrupt final shard")
+
+            def materialize(self) -> None:
+                events.append("materialize")
+
+        with self.assertRaisesRegex(ValueError, "corrupt final shard"):
+            _validate_then_materialize_shards(
+                Path("model"),
+                Contract(),
+                {"first": "first.safetensors", "last": "last.safetensors"},
+                Shard,
+            )
+        self.assertEqual(events, ["validate:first.safetensors", "validate:last.safetensors"])
+
+    def test_shard_set_rejects_missing_extra_and_symlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.safetensors"
+            second = root / "second.safetensors"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            expected = (first.name, second.name)
+            _require_exact_shard_files(root, expected)
+
+            extra = root / "extra.safetensors"
+            extra.write_bytes(b"extra")
+            with self.assertRaisesRegex(ValueError, "shard set changed"):
+                _require_exact_shard_files(root, expected)
+            extra.unlink()
+
+            second.unlink()
+            with self.assertRaisesRegex(ValueError, "shard set changed"):
+                _require_exact_shard_files(root, expected)
+            second.symlink_to(first.name)
+            with self.assertRaisesRegex(ValueError, "not an ordinary"):
+                _require_exact_shard_files(root, expected)
 
     @unittest.skipUnless(
         RUN_MODEL_GOLDENS,
         "enable the targeted model golden explicitly",
     )
     def test_model_mapping_is_complete_and_strict(self) -> None:
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         self.assertEqual(len(model._mapped.tensors), 311)
         self.assertEqual(len(model._model.blk), 28)
 
@@ -245,7 +433,7 @@ class WorkerContractTests(unittest.TestCase):
         prompt = self.tokenizer.encode(
             render_chat([{"role": "user", "content": "Reply OK."}], [])
         )
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         embedded = model._model.token_embd(Tensor([prompt])).float()
         for block in model._model.blk:
             embedded = block(embedded, 0)
@@ -352,7 +540,7 @@ class WorkerContractTests(unittest.TestCase):
         prompt = self.tokenizer.encode(
             render_chat([{"role": "user", "content": "Name one color."}], [])
         )
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         first = list(model.generate(prompt, 6, 0.7, 4242))
         second = list(model.generate(prompt, 6, 0.7, 4242))
         self.assertEqual(first, second)

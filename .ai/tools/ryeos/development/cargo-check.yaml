@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:45:13Z:d12951172d3e30819cf0ac0192bda37b7549cef3002ec1f1cc2c8322322c2ead:Ihzj2JGuZJRpm33fgeK+pQaiuOup+IZhnmzOrfRF/jTZfxMc6t32JeLcvFRTeUFsiyJ5AsF36Xz3RjGfe44lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:50Z:d12951172d3e30819cf0ac0192bda37b7549cef3002ec1f1cc2c8322322c2ead:UjQhBOGxbSIR1hHAf4CwD4RSmXkX/r2GjupY8TqACSKkf1G1hcSwsHizQx26sY86EWnc0R62TJzF6jcta+SPAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: ryeos/development
 name: cargo-check
 version: "1.0.1"

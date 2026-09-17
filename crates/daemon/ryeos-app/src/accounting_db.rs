@@ -46,8 +46,11 @@ use ryeos_accounting::{
     ChargeReconciliationAuthority, HexDigest, MAX_RAW_DECIMAL_LEN, MoneyError,
     PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION, ProviderAccountingAuthority,
     ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ProviderCallPublicationProof,
-    ProviderRetryAdvance, ProviderRetryDecision, ReconciliationReason, SpendAccounting,
-    SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, TokenAccounting, UsdNanos,
+    ProviderRetryAdvance, ProviderRetryDecision, ReconciliationReason, ResourceAccountingAuthority,
+    ResourceBudgetState, ResourceBudgetTransitionV1, ResourceRatedCharge,
+    ResourceRequestAttribution, ResourceSpendAuthority, ResourceUsageCoverage,
+    ResourceUsageObservation, ResourceUsagePartition, SpendAccounting, SpendBoundAuthority,
+    SpendBoundCertificate, SpendTariffDocument, TokenAccounting, UsdNanos,
     VerifiedPreparedSpendBound, transition_id,
 };
 use ryeos_engine::launch_envelope_types::AggregateExecutionLimits;
@@ -57,7 +60,7 @@ use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
-const ACCOUNTING_SCHEMA_VERSION: i32 = 3;
+const ACCOUNTING_SCHEMA_VERSION: i32 = 6;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
@@ -321,8 +324,130 @@ CREATE INDEX idx_execution_resource_claim_budget
 PRAGMA user_version=3;
 "#;
 
+const SCHEMA_V4_SQL: &str = r#"
+CREATE TABLE resource_financial_operation (
+    operation_id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    authority_digest TEXT NOT NULL,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    directive_budget_id TEXT,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    launch_generation TEXT NOT NULL,
+    owner_incarnation TEXT NOT NULL,
+    stable_resource_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN (
+        'reservation_denied', 'reserved', 'released_unissued', 'issued', 'reconciled',
+        'charged_reserved_maximum', 'reservation_bound_violated',
+        'advisory_pending', 'advisory_released_unissued',
+        'advisory_issued', 'advisory_reconciled'
+    )),
+    reserved_usd_nanos INTEGER NOT NULL CHECK (reserved_usd_nanos >= 0),
+    budget_charge_usd_nanos INTEGER CHECK (
+        budget_charge_usd_nanos IS NULL OR budget_charge_usd_nanos >= 0
+    ),
+    usage_json TEXT,
+    rated_charge_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    issued_at_ms INTEGER,
+    settled_at_ms INTEGER,
+    authority_json TEXT NOT NULL
+);
+
+CREATE INDEX idx_resource_financial_operation_owner
+    ON resource_financial_operation(thread_id, launch_generation, owner_incarnation);
+CREATE INDEX idx_resource_financial_operation_state
+    ON resource_financial_operation(state);
+
+CREATE TABLE resource_financial_debit (
+    operation_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    held_usd_nanos INTEGER NOT NULL CHECK (held_usd_nanos >= 0),
+    committed_usd_nanos INTEGER NOT NULL CHECK (committed_usd_nanos >= 0),
+    PRIMARY KEY (operation_id, account_id),
+    FOREIGN KEY (operation_id) REFERENCES resource_financial_operation(operation_id),
+    FOREIGN KEY (account_id) REFERENCES budget_account(account_id)
+);
+
+CREATE INDEX idx_resource_financial_debit_account
+    ON resource_financial_debit(account_id);
+
+PRAGMA user_version=4;
+"#;
+
+const SCHEMA_V5_SQL: &str = r#"
+DROP INDEX idx_outbox_attempt;
+ALTER TABLE accounting_audit_outbox
+    RENAME COLUMN attempt_id TO operation_id;
+CREATE INDEX idx_outbox_operation
+    ON accounting_audit_outbox(operation_id, transition_sequence);
+ALTER TABLE accounting_audit_outbox
+    ADD COLUMN event_type TEXT NOT NULL DEFAULT 'unclassified'
+        CHECK (event_type IN (
+            'unclassified',
+            'provider_attempt_budget_transition_v1',
+            'resource_budget_transition_v1'
+        ));
+
+CREATE TABLE resource_request_attribution (
+    attribution_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    attribution_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (operation_id) REFERENCES resource_financial_operation(operation_id)
+);
+
+CREATE INDEX idx_resource_request_attribution_operation
+    ON resource_request_attribution(operation_id, attribution_id);
+
+CREATE TABLE resource_usage_partition (
+    operation_id TEXT PRIMARY KEY,
+    partition_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (operation_id) REFERENCES resource_financial_operation(operation_id)
+);
+
+PRAGMA user_version=5;
+"#;
+
+const SCHEMA_V6_SQL: &str = r#"
+CREATE TABLE resource_owner_accounting_gate (
+    owner_gate_id TEXT PRIMARY KEY,
+    owner_incarnation TEXT NOT NULL UNIQUE,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    directive_budget_id TEXT,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    owner_recovery_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('open', 'cleanup_proved', 'liability_pending', 'fenced')),
+    active_request_count INTEGER NOT NULL CHECK (active_request_count >= 0),
+    fenced_reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX idx_resource_owner_gate_accounts
+    ON resource_owner_accounting_gate(execution_budget_id, directive_budget_id, state);
+
+ALTER TABLE resource_financial_operation ADD COLUMN owner_gate_id TEXT
+    REFERENCES resource_owner_accounting_gate(owner_gate_id);
+CREATE INDEX idx_resource_financial_operation_gate
+    ON resource_financial_operation(owner_gate_id, state);
+
+PRAGMA user_version=6;
+"#;
+
 fn current_schema_sql() -> String {
-    format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}")
+    format!(
+        "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}"
+    )
 }
 
 const fn col(
@@ -437,7 +562,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "accounting_audit_outbox",
                 columns: &[
                     col("outbox_seq", "INTEGER", true, true),
-                    col("attempt_id", "TEXT", false, true),
+                    col("operation_id", "TEXT", false, true),
                     col("audit_chain_root_id", "TEXT", false, true),
                     col("transition_sequence", "INTEGER", false, true),
                     col("transition_id", "TEXT", false, true),
@@ -447,6 +572,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("published_chain_seq", "INTEGER", false, false),
                     col("created_at_ms", "INTEGER", false, true),
                     col("lease_expires_at_ms", "INTEGER", false, false),
+                    col("event_type", "TEXT", false, true),
                 ],
             },
             sqlite_schema::TableSpec {
@@ -586,6 +712,81 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("created_at_ms", "INTEGER", false, true),
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "resource_owner_accounting_gate",
+                columns: &[
+                    col("owner_gate_id", "TEXT", true, true),
+                    col("owner_incarnation", "TEXT", false, true),
+                    col("budget_authority_site_id", "TEXT", false, true),
+                    col("ledger_epoch", "INTEGER", false, true),
+                    col("execution_budget_id", "TEXT", false, true),
+                    col("directive_budget_id", "TEXT", false, false),
+                    col("root_chain_id", "TEXT", false, true),
+                    col("audit_chain_root_id", "TEXT", false, true),
+                    col("owner_recovery_json", "TEXT", false, false),
+                    col("state", "TEXT", false, true),
+                    col("active_request_count", "INTEGER", false, true),
+                    col("fenced_reason", "TEXT", false, false),
+                    col("created_at_ms", "INTEGER", false, true),
+                    col("updated_at_ms", "INTEGER", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_financial_operation",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("request_digest", "TEXT", false, true),
+                    col("authority_digest", "TEXT", false, true),
+                    col("budget_authority_site_id", "TEXT", false, true),
+                    col("ledger_epoch", "INTEGER", false, true),
+                    col("execution_budget_id", "TEXT", false, true),
+                    col("directive_budget_id", "TEXT", false, false),
+                    col("root_chain_id", "TEXT", false, true),
+                    col("audit_chain_root_id", "TEXT", false, true),
+                    col("thread_id", "TEXT", false, true),
+                    col("launch_generation", "TEXT", false, true),
+                    col("owner_incarnation", "TEXT", false, true),
+                    col("stable_resource_id", "TEXT", false, true),
+                    col("state", "TEXT", false, true),
+                    col("reserved_usd_nanos", "INTEGER", false, true),
+                    col("budget_charge_usd_nanos", "INTEGER", false, false),
+                    col("usage_json", "TEXT", false, false),
+                    col("rated_charge_json", "TEXT", false, false),
+                    col("created_at_ms", "INTEGER", false, true),
+                    col("issued_at_ms", "INTEGER", false, false),
+                    col("settled_at_ms", "INTEGER", false, false),
+                    col("authority_json", "TEXT", false, true),
+                    col("owner_gate_id", "TEXT", false, false),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_financial_debit",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("account_id", "TEXT", true, true),
+                    col("held_usd_nanos", "INTEGER", false, true),
+                    col("committed_usd_nanos", "INTEGER", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_request_attribution",
+                columns: &[
+                    col("attribution_id", "TEXT", true, true),
+                    col("operation_id", "TEXT", false, true),
+                    col("thread_id", "TEXT", false, true),
+                    col("request_digest", "TEXT", false, true),
+                    col("attribution_json", "TEXT", false, true),
+                    col("created_at_ms", "INTEGER", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_usage_partition",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("partition_json", "TEXT", false, true),
+                    col("created_at_ms", "INTEGER", false, true),
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -619,9 +820,9 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
-                name: "idx_outbox_attempt",
+                name: "idx_outbox_operation",
                 table: "accounting_audit_outbox",
-                columns: &["attempt_id", "transition_sequence"],
+                columns: &["operation_id", "transition_sequence"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -640,6 +841,42 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_execution_resource_claim_budget",
                 table: "execution_resource_claim",
                 columns: &["execution_budget_id", "dimension", "outcome"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_owner_gate_accounts",
+                table: "resource_owner_accounting_gate",
+                columns: &["execution_budget_id", "directive_budget_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_financial_operation_gate",
+                table: "resource_financial_operation",
+                columns: &["owner_gate_id", "state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_financial_operation_owner",
+                table: "resource_financial_operation",
+                columns: &["thread_id", "launch_generation", "owner_incarnation"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_financial_operation_state",
+                table: "resource_financial_operation",
+                columns: &["state"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_financial_debit_account",
+                table: "resource_financial_debit",
+                columns: &["account_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_request_attribution_operation",
+                table: "resource_request_attribution",
+                columns: &["operation_id", "attribution_id"],
                 unique: false,
             },
         ],
@@ -742,12 +979,59 @@ pub struct FenceOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxRow {
     pub outbox_seq: i64,
-    pub attempt_id: String,
+    /// Exact typed financial operation coordinate. Provider rows carry an
+    /// attempt ID; resource rows carry a resource-operation ID.
+    pub operation_id: String,
     pub audit_chain_root_id: String,
     pub transition_sequence: u32,
     pub transition_id: String,
+    pub event_type: String,
     pub payload: serde_json::Value,
     pub payload_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadResourceCostSample {
+    pub operation_count: u64,
+    pub pending_operation_count: u64,
+    /// Shares assigned to requests made by this exact thread.
+    pub attributed_usd_nanos: u64,
+    /// Unassigned startup/idle/teardown remainder for operations this thread
+    /// physically owns. This remains visibly separate from request shares.
+    pub owned_overhead_usd_nanos: u64,
+    pub components: Vec<ThreadResourceCostComponent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCostAllocation {
+    RequestAttribution,
+    OwnerOverhead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadResourceCostComponent {
+    pub operation_id: String,
+    pub owner_gate_id: String,
+    pub authority_digest: String,
+    pub stable_resource_id: String,
+    pub charge_class: ryeos_accounting::ResourceChargeClass,
+    pub state: ResourceBudgetState,
+    pub coverage: Option<ResourceUsageCoverage>,
+    pub rated_spend: Option<String>,
+    pub committed_spend: Option<String>,
+    pub allocation: ResourceCostAllocation,
+    pub allocated_spend: String,
+    pub partition_digest: Option<String>,
+    pub provenance: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenResourceOwnerRecovery {
+    pub owner_gate_id: String,
+    pub owner_incarnation: String,
+    pub process_identity: crate::process::ExecutionProcessIdentity,
 }
 
 /// Snapshot of one budget account for gauges and tests.
@@ -799,6 +1083,46 @@ pub enum ExecutionResourceClaimOutcome {
     Admitted { replayed: bool },
     ReleasedUncontacted { replayed: bool },
     Denied { reason: String, replayed: bool },
+}
+
+/// Daemon-derived operands for one exact resource-owner financial operation.
+/// The maximum and tariff remain sealed in `authority`; callers never supply
+/// an amount independently.
+pub struct ReserveResourceOperationArgs<'a> {
+    pub owner_gate_id: &'a str,
+    pub operation_id: &'a str,
+    pub request_digest: &'a str,
+    pub execution_budget_id: &'a str,
+    pub directive_budget_id: Option<&'a str>,
+    pub root_chain_id: &'a str,
+    pub audit_chain_root_id: &'a str,
+    pub thread_id: &'a str,
+    pub launch_generation: &'a str,
+    pub owner_incarnation: &'a str,
+    pub authority: &'a ResourceAccountingAuthority,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceOperationReserveOutcome {
+    Reserved { replayed: bool },
+    Advisory { replayed: bool },
+    ReleasedUnissued { replayed: bool },
+    Denied { replayed: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceOperationIssueOutcome {
+    pub replayed: bool,
+    pub financial_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceOperationSettlement {
+    pub state: ResourceBudgetState,
+    pub charge: ResourceRatedCharge,
+    pub budget_charge: Option<UsdNanos>,
+    pub replayed: bool,
 }
 
 /// Authoritative live reservation gauges. These sum each attempt once from
@@ -1052,6 +1376,18 @@ struct GateRow {
     audit_chain_root_id: String,
     credential_binding_digest: Option<String>,
     state: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResourceOwnerGateRow {
+    owner_incarnation: String,
+    execution_budget_id: String,
+    directive_budget_id: Option<String>,
+    root_chain_id: String,
+    audit_chain_root_id: String,
+    owner_recovery_json: Option<String>,
+    state: String,
+    active_request_count: u64,
 }
 
 /// Post-commit anchor obligation of one ledger transaction.
@@ -1397,6 +1733,425 @@ fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn persist_resource_usage_partition(
+    conn: &Connection,
+    usage: &ResourceUsageObservation,
+    charge: &ResourceRatedCharge,
+    budget_charge_nanos: Option<i64>,
+    now_ms: i64,
+) -> Result<()> {
+    if usage.coverage != ResourceUsageCoverage::Complete {
+        return Ok(());
+    }
+    let mut statement = conn.prepare(
+        "SELECT attribution_json FROM resource_request_attribution
+          WHERE operation_id=?1 ORDER BY attribution_id",
+    )?;
+    let encoded = statement
+        .query_map(rusqlite::params![usage.operation_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let attributions = encoded
+        .into_iter()
+        .map(|value| serde_json::from_str::<ResourceRequestAttribution>(&value))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let allocated_charge = budget_charge_nanos
+        .map(u64::try_from)
+        .transpose()
+        .context("resource budget charge is negative")?
+        .unwrap_or(0);
+    let partition = ResourceUsagePartition::derive(usage, charge, allocated_charge, &attributions)
+        .map_err(anyhow::Error::msg)?;
+    let partition_json = canonical_json_string(&serde_json::to_value(&partition)?)?;
+    let retained: Option<String> = conn
+        .query_row(
+            "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+            rusqlite::params![usage.operation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(retained) = retained {
+        if retained != partition_json {
+            bail!("resource usage partition replay contradicts retained evidence");
+        }
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO resource_usage_partition (operation_id, partition_json, created_at_ms)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![usage.operation_id, partition_json, now_ms],
+    )?;
+    Ok(())
+}
+
+fn validate_monotonic_resource_usage_completion(
+    prior: &ResourceUsageObservation,
+    prior_charge: &ResourceRatedCharge,
+    completed: &ResourceUsageObservation,
+    completed_charge: &ResourceRatedCharge,
+) -> Result<()> {
+    let retains_every_observed_interval = prior.intervals.iter().all(|observed| {
+        completed.intervals.iter().any(|final_interval| {
+            final_interval.start_tick_ns <= observed.start_tick_ns
+                && final_interval.end_tick_ns >= observed.end_tick_ns
+        })
+    });
+    if prior.coverage != ResourceUsageCoverage::Partial
+        || completed.coverage != ResourceUsageCoverage::Complete
+        || prior.operation_id != completed.operation_id
+        || prior.owner_incarnation != completed.owner_incarnation
+        || prior.stable_resource_id != completed.stable_resource_id
+        || prior.clock_incarnation_digest != completed.clock_incarnation_digest
+        || prior.meter_contract_digest != completed.meter_contract_digest
+        || prior.clock_contract_digest != completed.clock_contract_digest
+        || !retains_every_observed_interval
+        || completed_charge.amount < prior_charge.amount
+    {
+        bail!("partial resource settlement correction contradicts retained evidence");
+    }
+    Ok(())
+}
+
+fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
+    let mut gate_statement = conn.prepare(
+        "SELECT owner_gate_id, owner_incarnation, budget_authority_site_id,
+                ledger_epoch, execution_budget_id, directive_budget_id,
+                root_chain_id, audit_chain_root_id, owner_recovery_json, state,
+                active_request_count, fenced_reason
+         FROM resource_owner_accounting_gate ORDER BY owner_gate_id",
+    )?;
+    let gates = gate_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(gate_statement);
+    for (
+        gate_id,
+        owner,
+        site,
+        epoch,
+        execution,
+        directive,
+        root,
+        audit_root,
+        recovery,
+        state,
+        active_requests,
+        reason,
+    ) in gates
+    {
+        HexDigest::new(owner.clone()).map_err(anyhow::Error::msg)?;
+        let expected = HexDigest::of_canonical_json(&serde_json::json!({
+            "kind": "resource_owner_accounting_gate",
+            "version": 1,
+            "budget_authority_site_id": site,
+            "ledger_epoch": u64::try_from(epoch).context("resource owner gate epoch is negative")?,
+            "execution_budget_id": execution,
+            "directive_budget_id": directive,
+            "root_chain_id": root,
+            "audit_chain_root_id": audit_root,
+            "owner_incarnation": owner,
+        }))
+        .map_err(anyhow::Error::msg)?;
+        let valid_state = match (state.as_str(), reason.as_deref()) {
+            ("open", None) => recovery.is_some(),
+            ("cleanup_proved", None) | ("liability_pending", None) => {
+                recovery.is_some() && active_requests == 0
+            }
+            ("fenced", Some(_)) => active_requests == 0,
+            _ => false,
+        };
+        if active_requests < 0 || gate_id != expected.as_str() || !valid_state {
+            bail!("resource owner accounting gate identity/state is invalid");
+        }
+    }
+    let mut statement = conn.prepare(
+        "SELECT operation_id, authority_digest, owner_incarnation, owner_gate_id,
+                stable_resource_id, state, reserved_usd_nanos,
+                budget_charge_usd_nanos, usage_json, rated_charge_json,
+                authority_json, budget_authority_site_id, ledger_epoch,
+                execution_budget_id, directive_budget_id, root_chain_id,
+                audit_chain_root_id
+           FROM resource_financial_operation ORDER BY operation_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (
+        operation_id,
+        authority_digest,
+        owner_incarnation,
+        owner_gate_id,
+        stable_resource_id,
+        state,
+        reserved_nanos,
+        budget_charge_nanos,
+        usage_json,
+        rated_charge_json,
+        authority_json,
+        site_id,
+        ledger_epoch,
+        execution_budget_id,
+        directive_budget_id,
+        root_chain_id,
+        audit_chain_root_id,
+    ) in rows
+    {
+        HexDigest::new(operation_id.clone()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(owner_incarnation.clone()).map_err(anyhow::Error::msg)?;
+        let owner_gate_id = owner_gate_id
+            .ok_or_else(|| anyhow::anyhow!("resource operation lacks owner accounting gate"))?;
+        HexDigest::new(owner_gate_id.clone()).map_err(anyhow::Error::msg)?;
+        let gate: (String, String, i64, String, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT owner_incarnation, budget_authority_site_id, ledger_epoch,
+                        execution_budget_id, directive_budget_id, root_chain_id,
+                        audit_chain_root_id
+                 FROM resource_owner_accounting_gate WHERE owner_gate_id=?1",
+                rusqlite::params![owner_gate_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .context("resource operation owner accounting gate is absent")?;
+        if gate
+            != (
+                owner_incarnation.clone(),
+                site_id,
+                ledger_epoch,
+                execution_budget_id,
+                directive_budget_id,
+                root_chain_id,
+                audit_chain_root_id,
+            )
+        {
+            bail!("resource operation authority diverges from its owner accounting gate");
+        }
+        let state = ResourceBudgetState::parse(&state)
+            .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+        let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+        authority.validate().map_err(anyhow::Error::msg)?;
+        if authority.authority_digest.as_str() != authority_digest
+            || authority.stable_resource_id != stable_resource_id
+        {
+            bail!("resource operation authority identity diverges from its retained row");
+        }
+        let advisory = matches!(authority.spend, ResourceSpendAuthority::Advisory);
+        if advisory
+            != matches!(
+                state,
+                ResourceBudgetState::AdvisoryPending
+                    | ResourceBudgetState::AdvisoryReleasedUnissued
+                    | ResourceBudgetState::AdvisoryIssued
+                    | ResourceBudgetState::AdvisoryReconciled
+            )
+            || (advisory && reserved_nanos != 0)
+        {
+            bail!("resource operation spend authority contradicts its retained state");
+        }
+        let terminal = matches!(
+            state,
+            ResourceBudgetState::Reconciled
+                | ResourceBudgetState::ChargedReservedMaximum
+                | ResourceBudgetState::ReservationBoundViolated
+                | ResourceBudgetState::AdvisoryReconciled
+        );
+        let charged_maximum_usage_pending = state == ResourceBudgetState::ChargedReservedMaximum
+            && usage_json.is_none()
+            && rated_charge_json.is_none()
+            && budget_charge_nanos == Some(reserved_nanos);
+        if terminal && !charged_maximum_usage_pending {
+            let usage: ResourceUsageObservation = serde_json::from_str(
+                usage_json
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("settled resource operation lacks usage"))?,
+            )?;
+            if usage.operation_id != operation_id || usage.owner_incarnation != owner_incarnation {
+                bail!("settled resource usage contradicts its operation owner");
+            }
+            let charge: ResourceRatedCharge = serde_json::from_str(
+                rated_charge_json
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("settled resource operation lacks charge"))?,
+            )?;
+            charge
+                .validate(&authority, &usage)
+                .map_err(anyhow::Error::msg)?;
+            if advisory != budget_charge_nanos.is_none() {
+                bail!("resource operation budget charge contradicts advisory authority");
+            }
+        } else if charged_maximum_usage_pending {
+            // Financial fencing conservatively charged the admitted maximum;
+            // the exact process owner still owes typed cleanup usage.
+        } else if state == ResourceBudgetState::AdvisoryIssued
+            && usage_json.is_some()
+            && rated_charge_json.is_some()
+            && budget_charge_nanos.is_none()
+        {
+            let usage: ResourceUsageObservation =
+                serde_json::from_str(usage_json.as_deref().expect("checked above"))?;
+            if usage.coverage != ResourceUsageCoverage::Partial
+                || usage.operation_id != operation_id
+                || usage.owner_incarnation != owner_incarnation
+            {
+                bail!("unresolved advisory resource usage is not exact partial evidence");
+            }
+            let charge: ResourceRatedCharge =
+                serde_json::from_str(rated_charge_json.as_deref().expect("checked above"))?;
+            charge
+                .validate(&authority, &usage)
+                .map_err(anyhow::Error::msg)?;
+        } else if usage_json.is_some()
+            || rated_charge_json.is_some()
+            || budget_charge_nanos.is_some()
+        {
+            bail!("nonterminal resource operation retains terminal evidence");
+        }
+    }
+    Ok(())
+}
+
+fn validate_resource_usage_partitions(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT attribution_id, operation_id, thread_id, request_digest, attribution_json
+           FROM resource_request_attribution ORDER BY operation_id, attribution_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut by_operation: std::collections::BTreeMap<String, Vec<ResourceRequestAttribution>> =
+        std::collections::BTreeMap::new();
+    for (attribution_id, operation_id, thread_id, request_digest, encoded) in rows {
+        let attribution: ResourceRequestAttribution = serde_json::from_str(&encoded)?;
+        attribution.validate().map_err(anyhow::Error::msg)?;
+        if attribution.attribution_id.as_str() != attribution_id
+            || attribution.operation_id.as_str() != operation_id
+            || attribution.thread_id != thread_id
+            || attribution.request_digest.as_str() != request_digest
+        {
+            bail!("resource request-attribution columns contradict retained evidence");
+        }
+        by_operation
+            .entry(operation_id)
+            .or_default()
+            .push(attribution);
+    }
+    for (operation_id, attributions) in &mut by_operation {
+        attributions.sort_by_key(|item| item.interval.start_tick_ns);
+        if attributions
+            .windows(2)
+            .any(|pair| pair[1].interval.start_tick_ns < pair[0].interval.end_tick_ns)
+        {
+            bail!("resource request attributions overlap for {operation_id}");
+        }
+    }
+    let mut statement = conn.prepare(
+        "SELECT operation_id, partition_json FROM resource_usage_partition ORDER BY operation_id",
+    )?;
+    let partitions = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (operation_id, encoded) in partitions {
+        let (usage_json, charge_json, budget_charge): (String, String, Option<i64>) = conn.query_row(
+            "SELECT usage_json, rated_charge_json, budget_charge_usd_nanos FROM resource_financial_operation
+              WHERE operation_id=?1",
+            rusqlite::params![operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let usage: ResourceUsageObservation = serde_json::from_str(&usage_json)?;
+        let charge: ResourceRatedCharge = serde_json::from_str(&charge_json)?;
+        let expected = ResourceUsagePartition::derive(
+            &usage,
+            &charge,
+            budget_charge
+                .map(u64::try_from)
+                .transpose()
+                .context("resource partition budget charge is negative")?
+                .unwrap_or(0),
+            by_operation
+                .get(&operation_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let retained: ResourceUsagePartition = serde_json::from_str(&encoded)?;
+        if retained != expected {
+            bail!("resource usage partition contradicts retained operation evidence");
+        }
+    }
+    let missing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_financial_operation AS operation
+          WHERE operation.usage_json IS NOT NULL
+            AND json_extract(operation.usage_json, '$.coverage') = 'complete'
+            AND NOT EXISTS (
+                SELECT 1 FROM resource_usage_partition AS partition
+                 WHERE partition.operation_id = operation.operation_id
+            )",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing != 0 {
+        bail!("{missing} completely settled resource operation(s) lack a usage partition");
+    }
+    Ok(())
+}
+
 fn optional_usd_nanos(value: Option<u64>) -> Result<Option<UsdNanos>> {
     value
         .map(|value| {
@@ -1532,6 +2287,561 @@ struct RawAccountingDb {
 }
 
 impl AccountingDb {
+    pub fn open_resource_owner_recoveries(&self) -> Result<Vec<OpenResourceOwnerRecovery>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT owner_gate_id, owner_incarnation, owner_recovery_json
+               FROM resource_owner_accounting_gate
+              WHERE state='open'
+              ORDER BY owner_gate_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(owner_gate_id, owner_incarnation, encoded)| {
+                let encoded =
+                    encoded.context("open resource owner gate lacks recovery identity")?;
+                let process_identity: crate::process::ExecutionProcessIdentity =
+                    serde_json::from_str(&encoded)
+                        .context("decode resource owner gate recovery identity")?;
+                crate::process::validate_execution_process_identity_shape(&process_identity)?;
+                if process_identity.owner_incarnation_digest()? != owner_incarnation
+                    || !process_identity.resource_selections.is_empty()
+                {
+                    bail!("resource owner gate recovery identity is contradictory");
+                }
+                Ok(OpenResourceOwnerRecovery {
+                    owner_gate_id,
+                    owner_incarnation,
+                    process_identity,
+                })
+            })
+            .collect()
+    }
+
+    pub fn release_unattached_resource_owner_gate(
+        &self,
+        owner_gate_id: &str,
+        owner_incarnation: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(owner_incarnation.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "release unattached resource owner", || {
+            let gate = self
+                .load_resource_owner_gate(&conn, owner_gate_id)?
+                .context("resource owner accounting gate is absent")?;
+            if gate.owner_incarnation != owner_incarnation {
+                bail!("resource owner recovery names another incarnation");
+            }
+            if gate.state == "fenced" {
+                return Ok(());
+            }
+            if gate.active_request_count != 0 {
+                bail!("unattached resource owner retains active request leases");
+            }
+            let mut statement = conn.prepare(
+                "SELECT operation_id, request_digest, state
+                   FROM resource_financial_operation
+                  WHERE owner_gate_id=?1 ORDER BY operation_id",
+            )?;
+            let operations = statement
+                .query_map(rusqlite::params![owner_gate_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for (operation_id, request_digest, state) in operations {
+                let state = ResourceBudgetState::parse(&state)
+                    .context("unattached resource operation has invalid state")?;
+                match state {
+                    ResourceBudgetState::Reserved | ResourceBudgetState::AdvisoryPending => {
+                        self.release_unissued_resource_operation_in_transaction(
+                            &conn,
+                            &operation_id,
+                            &request_digest,
+                            now_ms,
+                        )?;
+                    }
+                    ResourceBudgetState::ReleasedUnissued
+                    | ResourceBudgetState::AdvisoryReleasedUnissued
+                    | ResourceBudgetState::ReservationDenied => {}
+                    _ => bail!("unattached resource owner has crossed its issue boundary"),
+                }
+            }
+            let changed = conn.execute(
+                "UPDATE resource_owner_accounting_gate
+                    SET state='fenced', fenced_reason='unattached_owner_cleanup_proved',
+                        updated_at_ms=?2
+                  WHERE owner_gate_id=?1 AND state!='fenced' AND active_request_count=0",
+                rusqlite::params![owner_gate_id, now_ms],
+            )?;
+            if changed != 1 {
+                bail!("unattached resource owner gate lost its release CAS");
+            }
+            Ok(())
+        })
+    }
+
+    fn load_resource_owner_gate(
+        &self,
+        conn: &Connection,
+        owner_gate_id: &str,
+    ) -> Result<Option<ResourceOwnerGateRow>> {
+        conn.query_row(
+            "SELECT owner_incarnation, execution_budget_id, directive_budget_id,
+                    root_chain_id, audit_chain_root_id, owner_recovery_json, state,
+                    active_request_count
+             FROM resource_owner_accounting_gate
+             WHERE owner_gate_id=?1 AND budget_authority_site_id=?2 AND ledger_epoch=?3",
+            rusqlite::params![owner_gate_id, self.site_id, self.epoch_i64()],
+            |row| {
+                Ok(ResourceOwnerGateRow {
+                    owner_incarnation: row.get(0)?,
+                    execution_budget_id: row.get(1)?,
+                    directive_budget_id: row.get(2)?,
+                    root_chain_id: row.get(3)?,
+                    audit_chain_root_id: row.get(4)?,
+                    owner_recovery_json: row.get(5)?,
+                    state: row.get(6)?,
+                    active_request_count: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .context("load resource owner accounting gate")
+    }
+
+    pub fn resource_operation_state(&self, operation_id: &str) -> Result<ResourceBudgetState> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| row.get(0),
+            )
+            .context("load resource operation state")?;
+        ResourceBudgetState::parse(&state)
+            .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))
+    }
+
+    /// Retain one request interval inside an already-issued resident resource
+    /// operation. This is analytical evidence only: it never mutates account
+    /// holds, commitments, operation state, or the financial anchor.
+    pub fn record_resource_request_attribution(
+        &self,
+        attribution: &ResourceRequestAttribution,
+        now_ms: i64,
+    ) -> Result<bool> {
+        attribution.validate().map_err(anyhow::Error::msg)?;
+        let encoded = canonical_json_string(&serde_json::to_value(attribution)?)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "resource request attribution", || {
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![attribution.operation_id.as_str()],
+                    |row| row.get(0),
+                )
+                .context("load resource operation for request attribution")?;
+            let state = ResourceBudgetState::parse(&state)
+                .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+            if !matches!(
+                state,
+                ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued
+            ) {
+                bail!("resource request attribution requires an issued live operation");
+            }
+            let retained: Option<String> = conn
+                .query_row(
+                    "SELECT attribution_json FROM resource_request_attribution
+                      WHERE attribution_id=?1",
+                    rusqlite::params![attribution.attribution_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(retained) = retained {
+                if retained != encoded {
+                    bail!("resource request-attribution replay contradicts retained evidence");
+                }
+                return Ok(false);
+            }
+            let mut statement = conn.prepare(
+                "SELECT attribution_json FROM resource_request_attribution
+                  WHERE operation_id=?1 ORDER BY attribution_id",
+            )?;
+            let existing = statement
+                .query_map(
+                    rusqlite::params![attribution.operation_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for existing in existing {
+                let existing: ResourceRequestAttribution = serde_json::from_str(&existing)?;
+                if attribution.interval.start_tick_ns < existing.interval.end_tick_ns
+                    && existing.interval.start_tick_ns < attribution.interval.end_tick_ns
+                {
+                    bail!("resource request attributions overlap");
+                }
+            }
+            conn.execute(
+                "INSERT INTO resource_request_attribution (
+                    attribution_id, operation_id, thread_id, request_digest,
+                    attribution_json, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    attribution.attribution_id.as_str(),
+                    attribution.operation_id.as_str(),
+                    attribution.thread_id,
+                    attribution.request_digest.as_str(),
+                    encoded,
+                    now_ms,
+                ],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// Atomically retain the complete multi-resource attribution set for one
+    /// request. Every row is validated before the transaction publishes any
+    /// of them, preventing a partial attribution when one selected resource
+    /// disagrees.
+    pub fn record_resource_request_attributions(
+        &self,
+        attributions: &[ResourceRequestAttribution],
+        now_ms: i64,
+    ) -> Result<()> {
+        let prepared = attributions
+            .iter()
+            .map(|attribution| {
+                attribution.validate().map_err(anyhow::Error::msg)?;
+                Ok((
+                    attribution,
+                    canonical_json_string(&serde_json::to_value(attribution)?)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "resource request attribution batch", || {
+            let mut new = Vec::new();
+            for (attribution, encoded) in &prepared {
+                let retained: Option<String> = conn
+                    .query_row(
+                        "SELECT attribution_json FROM resource_request_attribution
+                          WHERE attribution_id=?1",
+                        rusqlite::params![attribution.attribution_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                match retained {
+                    Some(retained) if retained != *encoded => {
+                        bail!("resource request-attribution replay contradicts retained evidence")
+                    }
+                    Some(_) => {}
+                    None => new.push((*attribution, encoded)),
+                }
+            }
+            let mut pending_by_operation: std::collections::BTreeMap<
+                &str,
+                Vec<&ResourceRequestAttribution>,
+            > = std::collections::BTreeMap::new();
+            for (attribution, _) in &new {
+                pending_by_operation
+                    .entry(attribution.operation_id.as_str())
+                    .or_default()
+                    .push(attribution);
+            }
+            for (operation_id, pending) in &pending_by_operation {
+                let state: String = conn.query_row(
+                    "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![operation_id],
+                    |row| row.get(0),
+                )?;
+                if !matches!(
+                    ResourceBudgetState::parse(&state),
+                    Some(ResourceBudgetState::Issued | ResourceBudgetState::AdvisoryIssued)
+                ) {
+                    bail!("resource request attribution requires an issued live operation");
+                }
+                let mut intervals = Vec::new();
+                let mut statement = conn.prepare(
+                    "SELECT attribution_json FROM resource_request_attribution
+                      WHERE operation_id=?1 ORDER BY attribution_id",
+                )?;
+                for encoded in statement
+                    .query_map(rusqlite::params![operation_id], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+                {
+                    intervals.push(
+                        serde_json::from_str::<ResourceRequestAttribution>(&encoded)?.interval,
+                    );
+                }
+                intervals.extend(pending.iter().map(|item| item.interval.clone()));
+                intervals.sort_by_key(|interval| interval.start_tick_ns);
+                if intervals
+                    .windows(2)
+                    .any(|pair| pair[1].start_tick_ns < pair[0].end_tick_ns)
+                {
+                    bail!("resource request attributions overlap");
+                }
+            }
+            for (attribution, encoded) in new {
+                conn.execute(
+                    "INSERT INTO resource_request_attribution (
+                        attribution_id, operation_id, thread_id, request_digest,
+                        attribution_json, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        attribution.attribution_id.as_str(),
+                        attribution.operation_id.as_str(),
+                        attribution.thread_id,
+                        attribution.request_digest.as_str(),
+                        encoded,
+                        now_ms,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn resource_usage_partition(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<ResourceUsagePartition>> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let encoded: Option<String> = conn
+            .query_row(
+                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|encoded| serde_json::from_str(&encoded).map_err(anyhow::Error::from))
+            .transpose()
+    }
+
+    pub fn thread_resource_cost_sample(&self, thread_id: &str) -> Result<ThreadResourceCostSample> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT operation.operation_id, operation.thread_id, operation.state,
+                    operation.budget_charge_usd_nanos, partition.partition_json,
+                    operation.owner_gate_id, operation.authority_digest,
+                    operation.stable_resource_id, operation.authority_json,
+                    operation.usage_json, operation.rated_charge_json
+               FROM resource_financial_operation operation
+               LEFT JOIN resource_usage_partition partition
+                 ON partition.operation_id=operation.operation_id
+              WHERE operation.thread_id=?1 OR EXISTS (
+                    SELECT 1 FROM resource_request_attribution attribution
+                     WHERE attribution.operation_id=operation.operation_id
+                       AND attribution.thread_id=?1)
+              ORDER BY operation.operation_id",
+        )?;
+        let rows = statement
+            .query_map([thread_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut sample = ThreadResourceCostSample::default();
+        for (
+            operation_id,
+            owner_thread_id,
+            state,
+            budget_charge,
+            partition,
+            owner_gate_id,
+            authority_digest,
+            stable_resource_id,
+            authority_json,
+            usage_json,
+            rated_charge_json,
+        ) in rows
+        {
+            sample.operation_count = sample
+                .operation_count
+                .checked_add(1)
+                .context("resource operation count overflow")?;
+            let state = ResourceBudgetState::parse(&state)
+                .with_context(|| format!("resource operation {operation_id} has unknown state"))?;
+            let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+            let owner_gate_id = owner_gate_id
+                .ok_or_else(|| anyhow::anyhow!("resource cost component lacks owner gate"))?;
+            let unresolved = matches!(
+                state,
+                ResourceBudgetState::Reserved
+                    | ResourceBudgetState::Issued
+                    | ResourceBudgetState::ChargedReservedMaximum
+                    | ResourceBudgetState::AdvisoryPending
+                    | ResourceBudgetState::AdvisoryIssued
+            );
+            if unresolved {
+                let coverage = usage_json
+                    .as_deref()
+                    .map(serde_json::from_str::<ResourceUsageObservation>)
+                    .transpose()?
+                    .map(|usage| usage.coverage);
+                let rated_spend = rated_charge_json
+                    .as_deref()
+                    .map(serde_json::from_str::<ResourceRatedCharge>)
+                    .transpose()?
+                    .map(|charge| charge.amount.to_canonical_string());
+                let committed_spend = budget_charge
+                    .map(UsdNanos::from_nanos)
+                    .transpose()?
+                    .map(|charge| charge.to_canonical_string());
+                sample.pending_operation_count = sample
+                    .pending_operation_count
+                    .checked_add(1)
+                    .context("pending resource operation count overflow")?;
+                sample.components.push(ThreadResourceCostComponent {
+                    operation_id,
+                    owner_gate_id,
+                    authority_digest,
+                    stable_resource_id,
+                    charge_class: authority.tariff.charge_class,
+                    state,
+                    coverage,
+                    rated_spend,
+                    committed_spend,
+                    allocation: if owner_thread_id == thread_id {
+                        ResourceCostAllocation::OwnerOverhead
+                    } else {
+                        ResourceCostAllocation::RequestAttribution
+                    },
+                    allocated_spend: "0".to_owned(),
+                    partition_digest: None,
+                    provenance: "daemon_accounting_ledger",
+                });
+                continue;
+            }
+            let coverage = usage_json
+                .as_deref()
+                .map(serde_json::from_str::<ResourceUsageObservation>)
+                .transpose()?
+                .map(|usage| usage.coverage);
+            let rated_spend = rated_charge_json
+                .as_deref()
+                .map(serde_json::from_str::<ResourceRatedCharge>)
+                .transpose()?
+                .map(|charge| charge.amount.to_canonical_string());
+            let committed_spend = budget_charge
+                .map(UsdNanos::from_nanos)
+                .transpose()?
+                .map(|charge| charge.to_canonical_string());
+            if let Some(partition) = partition {
+                let partition: ResourceUsagePartition = serde_json::from_str(&partition)
+                    .with_context(|| format!("decode resource partition {operation_id}"))?;
+                let partition_digest =
+                    HexDigest::of_canonical_json(&serde_json::to_value(&partition)?)
+                        .map_err(anyhow::Error::msg)?;
+                for share in partition
+                    .attributed
+                    .iter()
+                    .filter(|share| share.thread_id == thread_id)
+                {
+                    sample.attributed_usd_nanos = sample
+                        .attributed_usd_nanos
+                        .checked_add(share.allocated_usd_nanos)
+                        .context("attributed resource cost overflow")?;
+                    sample.components.push(ThreadResourceCostComponent {
+                        operation_id: operation_id.clone(),
+                        owner_gate_id: owner_gate_id.clone(),
+                        authority_digest: authority_digest.clone(),
+                        stable_resource_id: stable_resource_id.clone(),
+                        charge_class: authority.tariff.charge_class,
+                        state,
+                        coverage,
+                        rated_spend: rated_spend.clone(),
+                        committed_spend: committed_spend.clone(),
+                        allocation: ResourceCostAllocation::RequestAttribution,
+                        allocated_spend: UsdNanos::from_nanos(i64::try_from(
+                            share.allocated_usd_nanos,
+                        )?)?
+                        .to_canonical_string(),
+                        partition_digest: Some(partition_digest.as_str().to_owned()),
+                        provenance: "daemon_accounting_ledger",
+                    });
+                }
+                if owner_thread_id == thread_id {
+                    sample.owned_overhead_usd_nanos = sample
+                        .owned_overhead_usd_nanos
+                        .checked_add(partition.overhead_usd_nanos)
+                        .context("resource overhead cost overflow")?;
+                    sample.components.push(ThreadResourceCostComponent {
+                        operation_id: operation_id.clone(),
+                        owner_gate_id,
+                        authority_digest,
+                        stable_resource_id,
+                        charge_class: authority.tariff.charge_class,
+                        state,
+                        coverage,
+                        rated_spend,
+                        committed_spend,
+                        allocation: ResourceCostAllocation::OwnerOverhead,
+                        allocated_spend: UsdNanos::from_nanos(i64::try_from(
+                            partition.overhead_usd_nanos,
+                        )?)?
+                        .to_canonical_string(),
+                        partition_digest: Some(partition_digest.as_str().to_owned()),
+                        provenance: "daemon_accounting_ledger",
+                    });
+                }
+            } else if owner_thread_id == thread_id {
+                let charge = budget_charge.unwrap_or(0);
+                sample.owned_overhead_usd_nanos = sample
+                    .owned_overhead_usd_nanos
+                    .checked_add(u64::try_from(charge).context("resource charge is negative")?)
+                    .context("resource overhead cost overflow")?;
+                sample.components.push(ThreadResourceCostComponent {
+                    operation_id,
+                    owner_gate_id,
+                    authority_digest,
+                    stable_resource_id,
+                    charge_class: authority.tariff.charge_class,
+                    state,
+                    coverage,
+                    rated_spend,
+                    committed_spend,
+                    allocation: ResourceCostAllocation::OwnerOverhead,
+                    allocated_spend: UsdNanos::from_nanos(charge)?.to_canonical_string(),
+                    partition_digest: None,
+                    provenance: "daemon_accounting_ledger",
+                });
+            }
+        }
+        Ok(sample)
+    }
+
     /// Open the ledger at a runtime-state directory path with its own
     /// dedicated exclusive OS lock, independent of the runtime-state
     /// namespace lock. The daemon composition calls this directly after
@@ -2167,6 +3477,1362 @@ impl AccountingDb {
         })
     }
 
+    /// Open the durable admission gate for one exact resident resource-owner
+    /// occurrence. This gate is deliberately independent of a request launch
+    /// gate: a pooled process can serve multiple requests, while all of its
+    /// resource liability remains owned by the same admitted accounts.
+    pub fn open_resource_owner_accounting_gate(
+        &self,
+        owner_identity: &crate::process::ExecutionProcessIdentity,
+        execution_budget_id: &str,
+        directive_budget_id: Option<&str>,
+        root_chain_id: &str,
+        audit_chain_root_id: &str,
+        now_ms: i64,
+    ) -> Result<HexDigest> {
+        crate::process::validate_execution_process_identity_shape(owner_identity)?;
+        if !owner_identity.resource_selections.is_empty() {
+            bail!("resource owner recovery identity must precede resource binding");
+        }
+        let owner_incarnation = owner_identity.owner_incarnation_digest()?;
+        let owner_recovery_json = canonical_json_string(&serde_json::to_value(owner_identity)?)?;
+        HexDigest::new(owner_incarnation.to_owned()).map_err(anyhow::Error::msg)?;
+        let owner_gate_id = HexDigest::of_canonical_json(&serde_json::json!({
+            "kind": "resource_owner_accounting_gate",
+            "version": 1,
+            "budget_authority_site_id": self.site_id,
+            "ledger_epoch": self.epoch,
+            "execution_budget_id": execution_budget_id,
+            "directive_budget_id": directive_budget_id,
+            "root_chain_id": root_chain_id,
+            "audit_chain_root_id": audit_chain_root_id,
+            "owner_incarnation": owner_incarnation,
+        }))
+        .map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "open resource owner accounting gate", || {
+            let execution = self.require_active_account(&conn, "execution", execution_budget_id)?;
+            if execution.root_chain_id != root_chain_id {
+                bail!("resource owner gate root chain contradicts its execution account");
+            }
+            if let Some(directive_budget_id) = directive_budget_id {
+                let directive =
+                    self.require_active_account(&conn, "directive_item", directive_budget_id)?;
+                if directive.execution_budget_id != execution_budget_id
+                    || directive.root_chain_id != root_chain_id
+                {
+                    bail!("resource owner gate directive account has different authority");
+                }
+            }
+            let existing = self.load_resource_owner_gate(&conn, owner_gate_id.as_str())?;
+            if let Some(existing) = existing {
+                if existing.owner_incarnation != owner_incarnation
+                    || existing.execution_budget_id != execution_budget_id
+                    || existing.directive_budget_id.as_deref() != directive_budget_id
+                    || existing.root_chain_id != root_chain_id
+                    || existing.audit_chain_root_id != audit_chain_root_id
+                    || existing.owner_recovery_json.as_deref() != Some(owner_recovery_json.as_str())
+                {
+                    bail!("resource owner gate identity was reused with different authority");
+                }
+                if existing.state != "open" {
+                    bail!("resource owner accounting gate is fenced");
+                }
+                return Ok(());
+            }
+            let conflicting: Option<String> = conn
+                .query_row(
+                    "SELECT owner_gate_id FROM resource_owner_accounting_gate
+                     WHERE owner_incarnation=?1",
+                    rusqlite::params![owner_incarnation],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if conflicting.is_some() {
+                bail!("resource owner occurrence is already bound to another accounting gate");
+            }
+            conn.execute(
+                "INSERT INTO resource_owner_accounting_gate (
+                    owner_gate_id, owner_incarnation, budget_authority_site_id,
+                    ledger_epoch, execution_budget_id, directive_budget_id,
+                    root_chain_id, audit_chain_root_id, owner_recovery_json,
+                    state, active_request_count, fenced_reason,
+                    created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'open', 0, NULL, ?10, ?10)",
+                rusqlite::params![
+                    owner_gate_id.as_str(),
+                    owner_incarnation,
+                    self.site_id,
+                    self.epoch_i64(),
+                    execution_budget_id,
+                    directive_budget_id,
+                    root_chain_id,
+                    audit_chain_root_id,
+                    owner_recovery_json,
+                    now_ms,
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(owner_gate_id)
+    }
+
+    pub fn resource_owner_gate_eligible(
+        &self,
+        owner_gate_id: &str,
+        owner_incarnation: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
+            return Ok(false);
+        };
+        if gate.owner_incarnation != owner_incarnation || gate.state != "open" {
+            return Ok(false);
+        }
+        if self
+            .require_active_account(&conn, "execution", &gate.execution_budget_id)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        if let Some(directive) = gate.directive_budget_id.as_deref()
+            && self
+                .require_active_account(&conn, "directive_item", directive)
+                .is_err()
+        {
+            return Ok(false);
+        }
+        let deadline: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT deadline_at_ms FROM execution_resource_budget
+                  WHERE execution_budget_id=?1",
+                rusqlite::params![gate.execution_budget_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if deadline
+            .flatten()
+            .is_some_and(|deadline| deadline <= now_ms)
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Prove that an exact resource-owner occurrence is still financially
+    /// eligible immediately before its held process is released. Historical
+    /// `Issued` replay is insufficient on its own: every operation must still
+    /// belong to the same open gate and active accounts, and its tariff must
+    /// not have expired before live resource contact begins.
+    pub fn authorize_resource_owner_release(
+        &self,
+        bindings: &[ryeos_accounting::ResourceOperationBinding],
+        now_ms: i64,
+    ) -> Result<()> {
+        let first = bindings
+            .first()
+            .context("resource-owner release requires at least one operation")?;
+        let conn = self.lock_conn()?;
+        let gate = self
+            .load_resource_owner_gate(&conn, first.owner_gate_id.as_str())?
+            .context("resource-owner release has no accounting gate")?;
+        if gate.owner_incarnation != first.owner_incarnation.as_str() || gate.state != "open" {
+            bail!("resource-owner release differs from its exact open accounting gate");
+        }
+        self.require_active_account(&conn, "execution", &gate.execution_budget_id)?;
+        if let Some(directive) = gate.directive_budget_id.as_deref() {
+            self.require_active_account(&conn, "directive_item", directive)?;
+        }
+        let deadline: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT deadline_at_ms FROM execution_resource_budget
+                  WHERE execution_budget_id=?1",
+                rusqlite::params![gate.execution_budget_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if deadline
+            .flatten()
+            .is_some_and(|deadline| deadline <= now_ms)
+        {
+            bail!("resource-owner release is outside its execution deadline");
+        }
+        for binding in bindings {
+            binding.validate().map_err(anyhow::Error::msg)?;
+            if binding.owner_gate_id != first.owner_gate_id
+                || binding.owner_incarnation != first.owner_incarnation
+            {
+                bail!("resource-owner release operations do not share one owner authority");
+            }
+            let (
+                request_digest,
+                owner_gate_id,
+                owner_incarnation,
+                state,
+                authority_digest,
+                stable_resource_id,
+                authority_json,
+            ): (String, String, String, String, String, String, String) = conn
+                .query_row(
+                    "SELECT request_digest, owner_gate_id, owner_incarnation, state,
+                            authority_digest, stable_resource_id, authority_json
+                       FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![binding.operation_id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .context("load exact resource operation before owner release")?;
+            if request_digest != binding.request_digest.as_str()
+                || owner_gate_id != binding.owner_gate_id.as_str()
+                || owner_incarnation != binding.owner_incarnation.as_str()
+                || authority_digest != binding.authority_digest.as_str()
+                || stable_resource_id != binding.stable_resource_id
+                || !matches!(state.as_str(), "issued" | "advisory_issued")
+            {
+                bail!("resource-owner release operation is absent, unissued, or contradictory");
+            }
+            let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+            authority.validate().map_err(anyhow::Error::msg)?;
+            let maximum_occupancy_milliseconds = match authority.spend {
+                ResourceSpendAuthority::Bounded {
+                    maximum_occupancy_milliseconds,
+                    ..
+                } => Some(maximum_occupancy_milliseconds),
+                ResourceSpendAuthority::Advisory => None,
+            };
+            if authority.authority_digest != binding.authority_digest
+                || authority.stable_resource_id != binding.stable_resource_id
+                || authority.meter.contract_digest != binding.meter_contract_digest
+                || authority.meter.clock_contract_digest != binding.clock_contract_digest
+                || maximum_occupancy_milliseconds != binding.maximum_occupancy_milliseconds
+            {
+                bail!("resource-owner release binding differs from retained accounting authority");
+            }
+            if authority
+                .tariff
+                .expires_at_ms
+                .is_some_and(|expiry| expiry <= now_ms)
+            {
+                bail!("resource tariff expired before process release");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_resource_owner_request(
+        &self,
+        owner_gate_id: &str,
+        owner_incarnation: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "begin resident resource request", || {
+            let gate = self
+                .load_resource_owner_gate(&conn, owner_gate_id)?
+                .context("resource owner accounting gate is absent")?;
+            if gate.state != "open" || gate.owner_incarnation != owner_incarnation {
+                bail!("resident resource owner accounting gate is not eligible");
+            }
+            self.require_active_account(&conn, "execution", &gate.execution_budget_id)?;
+            if let Some(directive) = gate.directive_budget_id.as_deref() {
+                self.require_active_account(&conn, "directive_item", directive)?;
+            }
+            let deadline: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT deadline_at_ms FROM execution_resource_budget
+                      WHERE execution_budget_id=?1",
+                    rusqlite::params![gate.execution_budget_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if deadline
+                .flatten()
+                .is_some_and(|deadline| deadline <= now_ms)
+            {
+                bail!("resident resource execution scope has expired");
+            }
+            let changed = conn.execute(
+                "UPDATE resource_owner_accounting_gate
+                    SET active_request_count=active_request_count+1, updated_at_ms=?3
+                  WHERE owner_gate_id=?1 AND owner_incarnation=?2 AND state='open'",
+                rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
+            )?;
+            if changed != 1 {
+                bail!("resident resource request lost its owner gate CAS");
+            }
+            Ok(())
+        })
+    }
+
+    pub fn finish_resource_owner_request(
+        &self,
+        owner_gate_id: &str,
+        owner_incarnation: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let changed = conn.execute(
+            "UPDATE resource_owner_accounting_gate
+                SET active_request_count=active_request_count-1, updated_at_ms=?3
+              WHERE owner_gate_id=?1 AND owner_incarnation=?2
+                AND active_request_count>0",
+            rusqlite::params![owner_gate_id, owner_incarnation, now_ms],
+        )?;
+        if changed != 1 {
+            bail!("resident resource request lease is absent or contradictory");
+        }
+        Ok(())
+    }
+
+    pub fn fence_resource_owner_accounting_gate(
+        &self,
+        owner_gate_id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<()> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        if reason.is_empty() {
+            bail!("resource owner gate fence reason is empty");
+        }
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "fence resource owner accounting gate", || {
+            let Some(gate) = self.load_resource_owner_gate(&conn, owner_gate_id)? else {
+                bail!("resource owner accounting gate is absent");
+            };
+            if gate.state == "fenced" {
+                return Ok(());
+            }
+            if gate.active_request_count != 0 {
+                bail!("resource owner accounting gate retains active requests");
+            }
+            conn.execute(
+                "UPDATE resource_owner_accounting_gate
+                 SET state='fenced', fenced_reason=?2, updated_at_ms=?3
+                 WHERE owner_gate_id=?1 AND state!='fenced'",
+                rusqlite::params![owner_gate_id, reason, now_ms],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Reserve the complete bounded lifetime of one exact resource owner, or
+    /// retain a report-only advisory operation. This shares the existing
+    /// execution/directive accounts; no resource-specific balance exists.
+    pub fn reserve_resource_operation(
+        &self,
+        args: ReserveResourceOperationArgs<'_>,
+    ) -> Result<ResourceOperationReserveOutcome> {
+        HexDigest::new(args.operation_id.to_owned())
+            .map_err(anyhow::Error::msg)
+            .context("resource operation id is not a canonical digest")?;
+        HexDigest::new(args.request_digest.to_owned())
+            .map_err(anyhow::Error::msg)
+            .context("resource operation request digest is not canonical")?;
+        HexDigest::new(args.owner_incarnation.to_owned())
+            .map_err(anyhow::Error::msg)
+            .context("resource owner incarnation is not canonical")?;
+        HexDigest::new(args.owner_gate_id.to_owned())
+            .map_err(anyhow::Error::msg)
+            .context("resource owner gate id is not a canonical digest")?;
+        args.authority
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .context("resource accounting authority is invalid")?;
+
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "resource financial reservation", || {
+            let existing: Option<(
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                String,
+                String,
+                String,
+            )> = conn
+                .query_row(
+                    "SELECT request_digest, authority_digest, execution_budget_id,
+                            directive_budget_id, owner_incarnation, stable_resource_id, state,
+                            owner_gate_id
+                       FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![args.operation_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((
+                request,
+                authority,
+                execution,
+                directive,
+                owner,
+                resource,
+                state,
+                owner_gate,
+            )) = existing
+            {
+                if request != args.request_digest
+                    || authority != args.authority.authority_digest.as_str()
+                    || execution != args.execution_budget_id
+                    || directive.as_deref() != args.directive_budget_id
+                    || owner != args.owner_incarnation
+                    || resource != args.authority.stable_resource_id
+                    || owner_gate != args.owner_gate_id
+                {
+                    bail!("resource operation coordinate was reused with different authority");
+                }
+                return match ResourceBudgetState::parse(&state) {
+                    Some(ResourceBudgetState::ReservationDenied) => {
+                        Ok(ResourceOperationReserveOutcome::Denied { replayed: true })
+                    }
+                    Some(ResourceBudgetState::AdvisoryPending)
+                    | Some(ResourceBudgetState::AdvisoryIssued)
+                    | Some(ResourceBudgetState::AdvisoryReconciled) => {
+                        Ok(ResourceOperationReserveOutcome::Advisory { replayed: true })
+                    }
+                    Some(ResourceBudgetState::ReleasedUnissued)
+                    | Some(ResourceBudgetState::AdvisoryReleasedUnissued) => {
+                        Ok(ResourceOperationReserveOutcome::ReleasedUnissued { replayed: true })
+                    }
+                    Some(_) => Ok(ResourceOperationReserveOutcome::Reserved { replayed: true }),
+                    None => bail!("resource operation has an invalid retained state"),
+                };
+            }
+
+            let gate = self
+                .load_resource_owner_gate(&conn, args.owner_gate_id)?
+                .ok_or_else(|| anyhow::anyhow!("resource owner accounting gate is absent"))?;
+            if gate.state != "open"
+                || gate.owner_incarnation != args.owner_incarnation
+                || gate.execution_budget_id != args.execution_budget_id
+                || gate.directive_budget_id.as_deref() != args.directive_budget_id
+                || gate.root_chain_id != args.root_chain_id
+                || gate.audit_chain_root_id != args.audit_chain_root_id
+            {
+                bail!("resource reservation authority differs from its exact open owner gate");
+            }
+            let conflicting: Option<String> = conn
+                .query_row(
+                    "SELECT operation_id FROM resource_financial_operation
+                      JOIN resource_owner_accounting_gate USING(owner_gate_id)
+                     WHERE stable_resource_id=?1
+                       AND resource_financial_operation.owner_incarnation<>?2
+                       AND resource_owner_accounting_gate.state IN ('open', 'liability_pending')
+                     LIMIT 1",
+                    rusqlite::params![args.authority.stable_resource_id, args.owner_incarnation],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if conflicting.is_some() {
+                bail!("execution resource is reserved by another live owner intent");
+            }
+
+            let execution =
+                self.require_active_account(&conn, "execution", args.execution_budget_id)?;
+            if execution.root_chain_id != args.root_chain_id {
+                bail!("resource operation root chain contradicts its execution account");
+            }
+            let mut accounts = vec![execution];
+            if let Some(directive_budget_id) = args.directive_budget_id {
+                accounts.push(self.require_active_account(
+                    &conn,
+                    "directive_item",
+                    directive_budget_id,
+                )?);
+            }
+            if args
+                .authority
+                .tariff
+                .expires_at_ms
+                .is_some_and(|expiry| expiry <= args.now_ms)
+            {
+                bail!("resource tariff expired before reservation");
+            }
+            let authority_json = canonical_json_string(&serde_json::to_value(args.authority)?)?;
+            let (state, reserved_nanos, denied) = match &args.authority.spend {
+                ResourceSpendAuthority::Advisory => {
+                    if accounts.iter().any(|account| account.limit_nanos.is_some()) {
+                        bail!(
+                            "advisory resource accounting cannot satisfy an applicable finite budget"
+                        );
+                    }
+                    (ResourceBudgetState::AdvisoryPending, 0_i64, false)
+                }
+                ResourceSpendAuthority::Bounded { maximum, .. } => {
+                    if !self.hard_admission_enabled() {
+                        bail!("hard-budget admission is disabled for resource reservation");
+                    }
+                    let maximum_nanos = maximum.as_nanos();
+                    let denied = accounts.iter().any(|account| {
+                        account.limit_nanos.is_some_and(|limit| {
+                            i128::from(limit)
+                                - i128::from(account.committed_nanos)
+                                - i128::from(account.held_nanos)
+                                - i128::from(account.transferred_out_nanos)
+                                < i128::from(maximum_nanos)
+                        })
+                    });
+                    (
+                        if denied {
+                            ResourceBudgetState::ReservationDenied
+                        } else {
+                            ResourceBudgetState::Reserved
+                        },
+                        maximum_nanos,
+                        denied,
+                    )
+                }
+            };
+            conn.execute(
+                "INSERT INTO resource_financial_operation (
+                    operation_id, request_digest, authority_digest,
+                    budget_authority_site_id, ledger_epoch, execution_budget_id,
+                    directive_budget_id, root_chain_id, audit_chain_root_id,
+                    thread_id, launch_generation, owner_incarnation,
+                    owner_gate_id, stable_resource_id, state, reserved_usd_nanos,
+                    budget_charge_usd_nanos, usage_json, rated_charge_json,
+                    created_at_ms, issued_at_ms, settled_at_ms, authority_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, NULL, NULL, NULL, ?17, NULL, NULL, ?18)",
+                rusqlite::params![
+                    args.operation_id,
+                    args.request_digest,
+                    args.authority.authority_digest.as_str(),
+                    self.site_id,
+                    self.epoch_i64(),
+                    args.execution_budget_id,
+                    args.directive_budget_id,
+                    args.root_chain_id,
+                    args.audit_chain_root_id,
+                    args.thread_id,
+                    args.launch_generation,
+                    args.owner_incarnation,
+                    args.owner_gate_id,
+                    args.authority.stable_resource_id,
+                    state.as_str(),
+                    reserved_nanos,
+                    args.now_ms,
+                    authority_json,
+                ],
+            )?;
+            if !denied && reserved_nanos > 0 {
+                for account in &accounts {
+                    let held = account
+                        .held_nanos
+                        .checked_add(reserved_nanos)
+                        .context("resource reservation hold overflow")?;
+                    conn.execute(
+                        "UPDATE budget_account SET held_usd_nanos=?1, updated_at_ms=?2
+                         WHERE account_id=?3",
+                        rusqlite::params![held, args.now_ms, account.account_id],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO resource_financial_debit (
+                            operation_id, account_id, held_usd_nanos, committed_usd_nanos
+                         ) VALUES (?1, ?2, ?3, 0)",
+                        rusqlite::params![args.operation_id, account.account_id, reserved_nanos],
+                    )?;
+                }
+            }
+            self.enqueue_resource_transition(
+                &conn,
+                args.operation_id,
+                1,
+                state,
+                None,
+                None,
+                args.now_ms,
+            )?;
+            Ok(match state {
+                ResourceBudgetState::ReservationDenied => {
+                    ResourceOperationReserveOutcome::Denied { replayed: false }
+                }
+                ResourceBudgetState::AdvisoryPending => {
+                    ResourceOperationReserveOutcome::Advisory { replayed: false }
+                }
+                ResourceBudgetState::Reserved => {
+                    ResourceOperationReserveOutcome::Reserved { replayed: false }
+                }
+                _ => unreachable!("fresh resource reservation state is closed"),
+            })
+        })
+    }
+
+    /// Prove that a reserved resource operation never crossed issue and return
+    /// its shared-account hold. This is the only pre-issue abort transition;
+    /// it is exact-idempotent and can never unwind an issued liability.
+    pub fn release_unissued_resource_operation(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        immediate_transaction(&conn, "release unissued resource operation", || {
+            self.release_unissued_resource_operation_in_transaction(
+                &conn,
+                operation_id,
+                request_digest,
+                now_ms,
+            )
+        })
+    }
+
+    fn release_unissued_resource_operation_in_transaction(
+        &self,
+        conn: &Connection,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let (stored_request, state, reserved_nanos): (String, String, i64) = conn
+            .query_row(
+                "SELECT request_digest, state, reserved_usd_nanos
+                       FROM resource_financial_operation WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .context("load resource operation for unissued release")?;
+        if stored_request != request_digest {
+            bail!("resource unissued release contradicts its request digest");
+        }
+        let state = ResourceBudgetState::parse(&state)
+            .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+        if matches!(
+            state,
+            ResourceBudgetState::ReleasedUnissued | ResourceBudgetState::AdvisoryReleasedUnissued
+        ) {
+            return Ok(true);
+        }
+        let next_state = match state {
+            ResourceBudgetState::Reserved => ResourceBudgetState::ReleasedUnissued,
+            ResourceBudgetState::AdvisoryPending => ResourceBudgetState::AdvisoryReleasedUnissued,
+            _ => bail!(
+                "resource operation cannot release unissued from {}",
+                state.as_str()
+            ),
+        };
+        if reserved_nanos > 0 {
+            let mut statement = conn.prepare(
+                "SELECT account_id, held_usd_nanos
+                       FROM resource_financial_debit
+                      WHERE operation_id=?1 ORDER BY account_id",
+            )?;
+            let debits = statement
+                .query_map(rusqlite::params![operation_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(statement);
+            if debits.is_empty() {
+                bail!("bounded resource release has no financial debits");
+            }
+            for (account_id, held) in debits {
+                if held != reserved_nanos {
+                    bail!("resource debit hold diverges from its reservation");
+                }
+                let account_held: i64 = conn.query_row(
+                    "SELECT held_usd_nanos FROM budget_account WHERE account_id=?1",
+                    rusqlite::params![account_id],
+                    |row| row.get(0),
+                )?;
+                let next_held = account_held
+                    .checked_sub(reserved_nanos)
+                    .context("resource unissued release account hold underflow")?;
+                conn.execute(
+                    "UPDATE budget_account SET held_usd_nanos=?2, updated_at_ms=?3
+                          WHERE account_id=?1",
+                    rusqlite::params![account_id, next_held, now_ms],
+                )?;
+                conn.execute(
+                    "UPDATE resource_financial_debit SET held_usd_nanos=0
+                          WHERE operation_id=?1 AND account_id=?2",
+                    rusqlite::params![operation_id, account_id],
+                )?;
+            }
+        }
+        conn.execute(
+            "UPDATE resource_financial_operation SET state=?2, settled_at_ms=?3
+                  WHERE operation_id=?1",
+            rusqlite::params![operation_id, next_state.as_str(), now_ms],
+        )?;
+        self.enqueue_resource_transition(conn, operation_id, 2, next_state, None, None, now_ms)?;
+        Ok(false)
+    }
+
+    /// Consume request leases abandoned by a daemon crash only after the
+    /// exact resident process has been proved cleaned. This is deliberately
+    /// separate from ordinary request completion: process cleanup, not a new
+    /// daemon generation, is the authority for clearing an in-flight lease.
+    pub fn mark_resource_owner_cleanup_proved(
+        &self,
+        owner_gate_id: &str,
+        owner_incarnation: &str,
+        release_capacity: bool,
+        now_ms: i64,
+    ) -> Result<()> {
+        HexDigest::new(owner_gate_id.to_owned()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(owner_incarnation.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let changed = conn.execute(
+            "UPDATE resource_owner_accounting_gate
+                SET active_request_count=0,
+                    state=CASE WHEN ?3 THEN 'cleanup_proved' ELSE 'liability_pending' END,
+                    updated_at_ms=?4
+              WHERE owner_gate_id=?1 AND owner_incarnation=?2 AND state!='fenced'",
+            rusqlite::params![owner_gate_id, owner_incarnation, release_capacity, now_ms],
+        )?;
+        if changed != 1 {
+            let gate = self
+                .load_resource_owner_gate(&conn, owner_gate_id)?
+                .context("resource owner accounting gate is absent")?;
+            if gate.owner_incarnation != owner_incarnation || gate.state != "fenced" {
+                bail!("cleaned resource owner lost its cleanup-proof CAS");
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit issue for the exact retained owner before its billable release.
+    /// Replaying `Issued` proves only historical financial issue; callers must
+    /// separately consume the current live-owner release fence.
+    pub fn issue_resource_operation(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        now_ms: i64,
+    ) -> Result<ResourceOperationIssueOutcome> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        HexDigest::new(request_digest.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let (outcome, action) = immediate_transaction(&conn, "resource financial issue", || {
+            let (
+                stored_request,
+                state,
+                authority_json,
+                authority_digest,
+                owner_gate_id,
+                owner_incarnation,
+                execution_budget_id,
+                directive_budget_id,
+                audit_chain_root_id,
+            ): (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+            ) = conn
+                .query_row(
+                    "SELECT request_digest, state, authority_json, authority_digest,
+                                owner_gate_id, owner_incarnation, execution_budget_id,
+                                directive_budget_id, audit_chain_root_id
+                           FROM resource_financial_operation WHERE operation_id=?1",
+                    rusqlite::params![operation_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                        ))
+                    },
+                )
+                .context("load resource operation for issue")?;
+            if stored_request != request_digest {
+                bail!("resource issue contradicts its reservation request digest");
+            }
+            let state = ResourceBudgetState::parse(&state)
+                .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+            if matches!(
+                state,
+                ResourceBudgetState::Issued
+                    | ResourceBudgetState::Reconciled
+                    | ResourceBudgetState::ChargedReservedMaximum
+                    | ResourceBudgetState::ReservationBoundViolated
+            ) {
+                let sequence = conn
+                    .query_row(
+                        "SELECT financial_sequence FROM financial_transition_commitment
+                              WHERE attempt_id=?1 AND transition_kind='resource_issued'",
+                        rusqlite::params![operation_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .map(u64::try_from)
+                    .transpose()
+                    .context("stored resource issue sequence is invalid")?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("issued resource operation lacks its financial commitment")
+                    })?;
+                return Ok((
+                    ResourceOperationIssueOutcome {
+                        replayed: true,
+                        financial_sequence: Some(sequence),
+                    },
+                    AnchorAction::Cover { sequence },
+                ));
+            }
+            if matches!(
+                state,
+                ResourceBudgetState::AdvisoryIssued | ResourceBudgetState::AdvisoryReconciled
+            ) {
+                return Ok((
+                    ResourceOperationIssueOutcome {
+                        replayed: true,
+                        financial_sequence: None,
+                    },
+                    AnchorAction::None,
+                ));
+            }
+            if state == ResourceBudgetState::ReservationDenied {
+                bail!("denied resource reservation cannot be issued");
+            }
+            let gate = self
+                .load_resource_owner_gate(&conn, &owner_gate_id)?
+                .ok_or_else(|| anyhow::anyhow!("resource owner accounting gate is absent"))?;
+            if gate.state != "open"
+                || gate.owner_incarnation != owner_incarnation
+                || gate.execution_budget_id != execution_budget_id
+                || gate.audit_chain_root_id != audit_chain_root_id
+                || gate.directive_budget_id != directive_budget_id
+            {
+                bail!("resource issue authority differs from its exact open owner gate");
+            }
+            self.require_active_account(&conn, "execution", &execution_budget_id)?;
+            if let Some(directive_budget_id) = directive_budget_id.as_deref() {
+                self.require_active_account(&conn, "directive_item", directive_budget_id)?;
+            }
+            let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+            authority.validate().map_err(anyhow::Error::msg)?;
+            if authority.authority_digest.as_str() != authority_digest {
+                bail!("stored resource authority digest diverges from its payload");
+            }
+            if authority
+                .tariff
+                .expires_at_ms
+                .is_some_and(|expiry| expiry <= now_ms)
+            {
+                bail!("resource tariff expired before issue");
+            }
+            let next_state = match state {
+                ResourceBudgetState::Reserved => ResourceBudgetState::Issued,
+                ResourceBudgetState::AdvisoryPending => ResourceBudgetState::AdvisoryIssued,
+                _ => bail!(
+                    "resource operation cannot be issued from {}",
+                    state.as_str()
+                ),
+            };
+            conn.execute(
+                "UPDATE resource_financial_operation
+                        SET state=?2, issued_at_ms=?3 WHERE operation_id=?1 AND state=?4",
+                rusqlite::params![operation_id, next_state.as_str(), now_ms, state.as_str()],
+            )?;
+            let (_, fingerprint) = self.enqueue_resource_transition(
+                &conn,
+                operation_id,
+                2,
+                next_state,
+                None,
+                None,
+                now_ms,
+            )?;
+            if next_state == ResourceBudgetState::Issued {
+                let (sequence, digest) = self.commit_financial_transition(
+                    &conn,
+                    "resource_issued",
+                    Some(operation_id),
+                    Some(&authority_digest),
+                    &fingerprint,
+                    now_ms,
+                )?;
+                Ok((
+                    ResourceOperationIssueOutcome {
+                        replayed: false,
+                        financial_sequence: Some(sequence),
+                    },
+                    AnchorAction::Advance { sequence, digest },
+                ))
+            } else {
+                Ok((
+                    ResourceOperationIssueOutcome {
+                        replayed: false,
+                        financial_sequence: None,
+                    },
+                    AnchorAction::None,
+                ))
+            }
+        })?;
+        self.resolve_anchor_action(&conn, action)?;
+        Ok(outcome)
+    }
+
+    /// Settle one exact typed occupancy observation. Resource cleanup is a
+    /// separate lifecycle fact and may already have released the device; this
+    /// method only reconciles retained financial/evidence authority.
+    pub fn settle_resource_operation(
+        &self,
+        operation_id: &str,
+        usage: &ResourceUsageObservation,
+        now_ms: i64,
+    ) -> Result<ResourceOperationSettlement> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        if usage.operation_id != operation_id {
+            bail!("resource usage belongs to another financial operation");
+        }
+        let conn = self.lock_conn()?;
+        let (outcome, action) = immediate_transaction(
+            &conn,
+            "resource financial settlement",
+            || {
+                let (
+                    state,
+                    authority_json,
+                    owner_incarnation,
+                    reserved_nanos,
+                    retained_usage,
+                    retained_charge,
+                    retained_budget_charge,
+                ): (
+                    String,
+                    String,
+                    String,
+                    i64,
+                    Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                ) = conn
+                    .query_row(
+                        "SELECT state, authority_json, owner_incarnation,
+                                reserved_usd_nanos, usage_json, rated_charge_json,
+                                budget_charge_usd_nanos
+                           FROM resource_financial_operation WHERE operation_id=?1",
+                        rusqlite::params![operation_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
+                            ))
+                        },
+                    )
+                    .context("load resource operation for settlement")?;
+                let state = ResourceBudgetState::parse(&state)
+                    .ok_or_else(|| anyhow::anyhow!("resource operation has invalid state"))?;
+                if usage.owner_incarnation != owner_incarnation {
+                    bail!("resource usage belongs to another process incarnation");
+                }
+                let authority: ResourceAccountingAuthority = serde_json::from_str(&authority_json)?;
+                let charge =
+                    ResourceRatedCharge::derive(&authority, usage).map_err(anyhow::Error::msg)?;
+                let usage_json = canonical_json_string(&serde_json::to_value(usage)?)?;
+                let charge_json = canonical_json_string(&serde_json::to_value(&charge)?)?;
+
+                if state == ResourceBudgetState::ChargedReservedMaximum
+                    && usage.coverage == ResourceUsageCoverage::Complete
+                {
+                    if let Some(retained_usage) = retained_usage.as_deref() {
+                        let prior: ResourceUsageObservation = serde_json::from_str(retained_usage)?;
+                        let prior_charge: ResourceRatedCharge =
+                            serde_json::from_str(retained_charge.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "reserved-maximum partial evidence lacks its rated charge"
+                                )
+                            })?)?;
+                        validate_monotonic_resource_usage_completion(
+                            &prior,
+                            &prior_charge,
+                            usage,
+                            &charge,
+                        )?;
+                    }
+                    let charged_maximum = retained_budget_charge.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "reserved-maximum resource operation lacks its budget charge"
+                        )
+                    })?;
+                    if charged_maximum != reserved_nanos {
+                        bail!("reserved-maximum resource operation debit is not its reservation");
+                    }
+                    let rated_nanos = charge.amount.as_nanos();
+                    let (settled_state, budget_charge_nanos) = if rated_nanos > charged_maximum {
+                        let extra = rated_nanos
+                            .checked_sub(charged_maximum)
+                            .context("late resource charge delta underflow")?;
+                        let mut statement = conn.prepare(
+                            "SELECT account_id, committed_usd_nanos
+                               FROM resource_financial_debit
+                              WHERE operation_id=?1 ORDER BY account_id",
+                        )?;
+                        let debits = statement
+                            .query_map(rusqlite::params![operation_id], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                            })?
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        drop(statement);
+                        if debits.is_empty() {
+                            bail!("charged-maximum resource operation has no financial debits");
+                        }
+                        for (account_id, committed) in debits {
+                            if committed != charged_maximum {
+                                bail!("resource debit differs from its charged maximum");
+                            }
+                            let account_committed: i64 = conn.query_row(
+                                "SELECT committed_usd_nanos FROM budget_account WHERE account_id=?1",
+                                rusqlite::params![account_id],
+                                |row| row.get(0),
+                            )?;
+                            let next_committed = account_committed
+                                .checked_add(extra)
+                                .context("late resource charge commitment overflow")?;
+                            conn.execute(
+                                "UPDATE budget_account
+                                    SET committed_usd_nanos=?2, health='violated', updated_at_ms=?3
+                                  WHERE account_id=?1",
+                                rusqlite::params![account_id, next_committed, now_ms],
+                            )?;
+                            conn.execute(
+                                "UPDATE resource_financial_debit SET committed_usd_nanos=?2
+                                  WHERE operation_id=?1 AND account_id=?3",
+                                rusqlite::params![operation_id, rated_nanos, account_id],
+                            )?;
+                        }
+                        (ResourceBudgetState::ReservationBoundViolated, rated_nanos)
+                    } else {
+                        (ResourceBudgetState::Reconciled, charged_maximum)
+                    };
+                    conn.execute(
+                        "UPDATE resource_financial_operation
+                            SET state=?2, budget_charge_usd_nanos=?3, usage_json=?4,
+                                rated_charge_json=?5, settled_at_ms=?6
+                          WHERE operation_id=?1",
+                        rusqlite::params![
+                            operation_id,
+                            settled_state.as_str(),
+                            budget_charge_nanos,
+                            usage_json,
+                            charge_json,
+                            now_ms
+                        ],
+                    )?;
+                    persist_resource_usage_partition(
+                        &conn,
+                        usage,
+                        &charge,
+                        Some(budget_charge_nanos),
+                        now_ms,
+                    )?;
+                    let usage_digest = usage.digest().map_err(anyhow::Error::msg)?;
+                    let (_, fingerprint) = self.enqueue_resource_transition(
+                        &conn,
+                        operation_id,
+                        4,
+                        settled_state,
+                        Some(budget_charge_nanos),
+                        Some(usage_digest),
+                        now_ms,
+                    )?;
+                    let (sequence, digest) = self.commit_financial_transition(
+                        &conn,
+                        if settled_state == ResourceBudgetState::ReservationBoundViolated {
+                            "resource_reservation_bound_violated"
+                        } else {
+                            "resource_operation_corrected"
+                        },
+                        Some(operation_id),
+                        Some(authority.authority_digest.as_str()),
+                        &fingerprint,
+                        now_ms,
+                    )?;
+                    let action = AnchorAction::Advance { sequence, digest };
+                    return Ok((
+                        ResourceOperationSettlement {
+                            state: settled_state,
+                            charge,
+                            budget_charge: Some(
+                                UsdNanos::from_nanos(budget_charge_nanos)
+                                    .map_err(anyhow::Error::msg)?,
+                            ),
+                            replayed: false,
+                        },
+                        action,
+                    ));
+                }
+
+                if matches!(
+                    state,
+                    ResourceBudgetState::Reconciled
+                        | ResourceBudgetState::ChargedReservedMaximum
+                        | ResourceBudgetState::ReservationBoundViolated
+                        | ResourceBudgetState::AdvisoryReconciled
+                ) {
+                    if retained_usage.as_deref() != Some(usage_json.as_str())
+                        || retained_charge.as_deref() != Some(charge_json.as_str())
+                    {
+                        bail!("resource settlement replay contradicts retained usage");
+                    }
+                    persist_resource_usage_partition(
+                        &conn,
+                        usage,
+                        &charge,
+                        retained_budget_charge,
+                        now_ms,
+                    )?;
+                    let anchor_action = if state == ResourceBudgetState::AdvisoryReconciled {
+                        AnchorAction::None
+                    } else {
+                        let (sequence, _digest): (i64, String) = conn
+                            .query_row(
+                                "SELECT financial_sequence, chain_digest
+                                   FROM financial_transition_commitment
+                                  WHERE budget_authority_site_id=?1 AND ledger_epoch=?2
+                                    AND attempt_id=?3
+                                    AND transition_kind IN (
+                                        'resource_operation_settled',
+                                        'resource_operation_corrected',
+                                        'resource_reservation_bound_violated'
+                                    )
+                                  ORDER BY financial_sequence DESC LIMIT 1",
+                                rusqlite::params![self.site_id, self.epoch_i64(), operation_id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .context(
+                                "terminal resource settlement lacks its financial commitment",
+                            )?;
+                        AnchorAction::Cover {
+                            sequence: u64::try_from(sequence)
+                                .context("resource settlement sequence is invalid")?,
+                        }
+                    };
+                    return Ok((
+                        ResourceOperationSettlement {
+                            state,
+                            charge,
+                            budget_charge: retained_budget_charge
+                                .map(UsdNanos::from_nanos)
+                                .transpose()
+                                .map_err(anyhow::Error::msg)?,
+                            replayed: true,
+                        },
+                        anchor_action,
+                    ));
+                }
+
+                // An advisory observation with an unknown terminal coordinate
+                // is evidence, but it is not reconciliation. Retain the exact
+                // partial row and keep the operation conflict-fenced so later
+                // authoritative evidence can resolve the liability.
+                let advisory_usage_correction =
+                    state == ResourceBudgetState::AdvisoryIssued && retained_usage.is_some();
+                if advisory_usage_correction {
+                    if retained_usage.as_deref() == Some(usage_json.as_str())
+                        && retained_charge.as_deref() == Some(charge_json.as_str())
+                    {
+                        return Ok((
+                            ResourceOperationSettlement {
+                                state,
+                                charge,
+                                budget_charge: None,
+                                replayed: true,
+                            },
+                            AnchorAction::None,
+                        ));
+                    }
+                    let retained: ResourceUsageObservation =
+                        serde_json::from_str(retained_usage.as_deref().expect("checked above"))?;
+                    let retained_charge: ResourceRatedCharge =
+                        serde_json::from_str(retained_charge.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!("partial advisory evidence lacks its rated charge")
+                        })?)?;
+                    validate_monotonic_resource_usage_completion(
+                        &retained,
+                        &retained_charge,
+                        usage,
+                        &charge,
+                    )?;
+                }
+
+                let (settled_state, budget_charge_nanos) = match state {
+                    ResourceBudgetState::AdvisoryIssued => {
+                        if usage.coverage == ResourceUsageCoverage::Partial {
+                            (ResourceBudgetState::AdvisoryIssued, None)
+                        } else {
+                            (ResourceBudgetState::AdvisoryReconciled, None)
+                        }
+                    }
+                    ResourceBudgetState::Issued => {
+                        let actual = charge.amount.as_nanos();
+                        if usage.coverage == ResourceUsageCoverage::Partial {
+                            (
+                                ResourceBudgetState::ChargedReservedMaximum,
+                                Some(reserved_nanos),
+                            )
+                        } else if actual > reserved_nanos {
+                            (ResourceBudgetState::ReservationBoundViolated, Some(actual))
+                        } else {
+                            (ResourceBudgetState::Reconciled, Some(actual))
+                        }
+                    }
+                    _ => bail!("resource operation cannot settle from {}", state.as_str()),
+                };
+
+                if let Some(budget_charge_nanos) = budget_charge_nanos {
+                    let mut statement = conn.prepare(
+                        "SELECT account_id, held_usd_nanos
+                           FROM resource_financial_debit
+                          WHERE operation_id=?1 ORDER BY account_id",
+                    )?;
+                    let debits = statement
+                        .query_map(rusqlite::params![operation_id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    drop(statement);
+                    if debits.is_empty() {
+                        bail!("issued bounded resource operation has no financial debits");
+                    }
+                    for (account_id, held) in debits {
+                        if held != reserved_nanos {
+                            bail!("resource debit hold diverges from its reservation");
+                        }
+                        let (account_held, account_committed): (i64, i64) = conn.query_row(
+                            "SELECT held_usd_nanos, committed_usd_nanos
+                               FROM budget_account WHERE account_id=?1",
+                            rusqlite::params![account_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                        let next_held = account_held
+                            .checked_sub(reserved_nanos)
+                            .context("resource settlement account hold underflow")?;
+                        let next_committed = account_committed
+                            .checked_add(budget_charge_nanos)
+                            .context("resource settlement account commitment overflow")?;
+                        conn.execute(
+                            "UPDATE budget_account
+                                SET held_usd_nanos=?2, committed_usd_nanos=?3,
+                                    health=CASE
+                                        WHEN limit_usd_nanos IS NOT NULL
+                                         AND ?3 > limit_usd_nanos THEN 'violated'
+                                        ELSE health END,
+                                    updated_at_ms=?4
+                              WHERE account_id=?1",
+                            rusqlite::params![account_id, next_held, next_committed, now_ms],
+                        )?;
+                        conn.execute(
+                            "UPDATE resource_financial_debit
+                                SET held_usd_nanos=0, committed_usd_nanos=?2
+                              WHERE operation_id=?1 AND account_id=?3",
+                            rusqlite::params![operation_id, budget_charge_nanos, account_id],
+                        )?;
+                    }
+                }
+
+                conn.execute(
+                    "UPDATE resource_financial_operation
+                        SET state=?2, budget_charge_usd_nanos=?3, usage_json=?4,
+                            rated_charge_json=?5, settled_at_ms=?6
+                      WHERE operation_id=?1",
+                    rusqlite::params![
+                        operation_id,
+                        settled_state.as_str(),
+                        budget_charge_nanos,
+                        usage_json,
+                        charge_json,
+                        (settled_state != ResourceBudgetState::AdvisoryIssued).then_some(now_ms),
+                    ],
+                )?;
+                persist_resource_usage_partition(
+                    &conn,
+                    usage,
+                    &charge,
+                    budget_charge_nanos,
+                    now_ms,
+                )?;
+                let usage_digest = usage.digest().map_err(anyhow::Error::msg)?;
+                let (_, fingerprint) = self.enqueue_resource_transition(
+                    &conn,
+                    operation_id,
+                    if advisory_usage_correction { 4 } else { 3 },
+                    settled_state,
+                    budget_charge_nanos,
+                    (settled_state != ResourceBudgetState::ChargedReservedMaximum)
+                        .then_some(usage_digest),
+                    now_ms,
+                )?;
+                let action = if budget_charge_nanos.is_some() {
+                    let (sequence, digest) = self.commit_financial_transition(
+                        &conn,
+                        if settled_state == ResourceBudgetState::ReservationBoundViolated {
+                            "resource_reservation_bound_violated"
+                        } else {
+                            "resource_operation_settled"
+                        },
+                        Some(operation_id),
+                        Some(authority.authority_digest.as_str()),
+                        &fingerprint,
+                        now_ms,
+                    )?;
+                    AnchorAction::Advance { sequence, digest }
+                } else {
+                    AnchorAction::None
+                };
+                Ok((
+                    ResourceOperationSettlement {
+                        state: settled_state,
+                        charge,
+                        budget_charge: budget_charge_nanos
+                            .map(UsdNanos::from_nanos)
+                            .transpose()
+                            .map_err(anyhow::Error::msg)?,
+                        replayed: false,
+                    },
+                    action,
+                ))
+            },
+        )?;
+        self.resolve_anchor_action(&conn, action)?;
+        Ok(outcome)
+    }
+
     /// Journaled birth of a directive-item account under an existing
     /// execution account. The frozen `root_chain_id` is copied from the
     /// execution account row, never reconstructed from thread topology.
@@ -2621,7 +5287,11 @@ impl AccountingDb {
             }
         }
         if gate_was_open {
-            let gate = gate.as_ref().expect("gate_was_open implies a gate row");
+            let gate = gate.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "launch accounting gate was classified open but its authoritative row is absent"
+                )
+            })?;
             self.insert_fact(
                 conn,
                 "launch_gate_fenced",
@@ -2745,6 +5415,9 @@ impl AccountingDb {
                  OR EXISTS(SELECT 1 FROM provider_attempt_reservation
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND execution_budget_id = ?3)
+                 OR EXISTS(SELECT 1 FROM resource_financial_operation
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND execution_budget_id = ?3)
                  OR EXISTS(SELECT 1 FROM accounting_operational_fact
                      WHERE execution_budget_id = ?3)",
                 rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
@@ -2763,6 +5436,9 @@ impl AccountingDb {
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND account_kind = 'directive_item' AND scope_id = ?3)
                  OR EXISTS(SELECT 1 FROM provider_attempt_reservation
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND directive_budget_id = ?3)
+                 OR EXISTS(SELECT 1 FROM resource_financial_operation
                      WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                        AND directive_budget_id = ?3)",
                 rusqlite::params![self.site_id, self.epoch_i64(), directive_budget_id],
@@ -4650,23 +7326,23 @@ enum SettleAnchoring {
 
 impl AccountingDb {
     /// Claim the next publishable outbox row under a lease. Only the lowest
-    /// unpublished transition sequence per attempt is claimable, and a live
+    /// unpublished transition sequence per typed operation is claimable, and a live
     /// lease excludes concurrent claimants.
     pub fn claim_next_unpublished(&self, now_ms: i64, lease_ms: i64) -> Result<Option<OutboxRow>> {
         let conn = self.lock_conn()?;
         immediate_transaction(&conn, "accounting outbox claim", || {
             let claimed = conn
                 .query_row(
-                    "SELECT o.outbox_seq, o.attempt_id, o.audit_chain_root_id,
-                            o.transition_sequence, o.transition_id, o.payload,
-                            o.payload_fingerprint
+                    "SELECT o.outbox_seq, o.operation_id, o.audit_chain_root_id,
+                            o.transition_sequence, o.transition_id, o.event_type,
+                            o.payload, o.payload_fingerprint
                      FROM accounting_audit_outbox o
                      WHERE o.published_chain_seq IS NULL
                        AND (o.lease_expires_at_ms IS NULL OR o.lease_expires_at_ms <= ?1)
                        AND o.transition_sequence = (
                            SELECT MIN(i.transition_sequence)
                            FROM accounting_audit_outbox i
-                           WHERE i.attempt_id = o.attempt_id
+                           WHERE i.operation_id = o.operation_id
                              AND i.published_chain_seq IS NULL)
                      ORDER BY o.outbox_seq
                      LIMIT 1",
@@ -4680,6 +7356,7 @@ impl AccountingDb {
                             row.get::<_, String>(4)?,
                             row.get::<_, String>(5)?,
                             row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
                         ))
                     },
                 )
@@ -4687,10 +7364,11 @@ impl AccountingDb {
                 .context("select claimable outbox row")?;
             let Some((
                 outbox_seq,
-                attempt_id,
+                operation_id,
                 audit_chain_root_id,
                 transition_sequence,
                 transition_id,
+                event_type,
                 payload,
                 payload_fingerprint,
             )) = claimed
@@ -4706,11 +7384,12 @@ impl AccountingDb {
             .context("lease outbox row")?;
             Ok(Some(OutboxRow {
                 outbox_seq,
-                attempt_id,
+                operation_id,
                 audit_chain_root_id,
                 transition_sequence: u32::try_from(transition_sequence)
                     .context("stored transition sequence is not a valid u32")?,
                 transition_id,
+                event_type,
                 payload: serde_json::from_str(&payload).context("decode stored outbox payload")?,
                 payload_fingerprint,
             }))
@@ -4768,19 +7447,23 @@ impl AccountingDb {
         Ok((count as u64, oldest))
     }
 
-    /// Unpublished financial testimony for provider attempts owned by one
-    /// placement.  Checkpointing uses this exact fence instead of blocking on
-    /// unrelated node-wide accounting activity.
+    /// Unpublished provider or resource testimony owned by one placement.
+    /// Checkpointing uses this exact fence instead of blocking on unrelated
+    /// node-wide accounting activity.
     pub fn unpublished_outbox_for_thread(&self, thread_id: &str) -> Result<u64> {
         let conn = self.lock_conn()?;
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*)
-                 FROM accounting_audit_outbox AS outbox
-                 JOIN provider_attempt_reservation AS attempt
-                   ON attempt.attempt_id = outbox.attempt_id
-                 WHERE outbox.published_chain_seq IS NULL
-                   AND attempt.thread_id = ?1",
+                "SELECT COUNT(*) FROM accounting_audit_outbox AS outbox
+                  WHERE outbox.published_chain_seq IS NULL
+                    AND (
+                        EXISTS(SELECT 1 FROM provider_attempt_reservation AS attempt
+                                WHERE attempt.attempt_id=outbox.operation_id
+                                  AND attempt.thread_id=?1)
+                     OR EXISTS(SELECT 1 FROM resource_financial_operation AS resource
+                                WHERE resource.operation_id=outbox.operation_id
+                                  AND resource.thread_id=?1)
+                    )",
                 [thread_id],
                 |row| row.get(0),
             )
@@ -4796,8 +7479,15 @@ impl AccountingDb {
         let (count, held, oldest): (i64, i64, Option<i64>) = conn
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(reserved_usd_nanos), 0), MIN(created_at_ms)
-                 FROM provider_attempt_reservation
-                 WHERE state IN ('reserved', 'issued')",
+                   FROM (
+                     SELECT reserved_usd_nanos, created_at_ms
+                       FROM provider_attempt_reservation
+                      WHERE state IN ('reserved', 'issued')
+                     UNION ALL
+                     SELECT reserved_usd_nanos, created_at_ms
+                       FROM resource_financial_operation
+                      WHERE state IN ('reserved', 'issued')
+                   )",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -5133,17 +7823,37 @@ impl AccountingDb {
                 "handoff allowance has an unsettled, unrepresentable, or quarantined provider liability"
             );
         }
+        let open_resource_liabilities: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM resource_financial_operation
+              WHERE execution_budget_id=?1
+                AND state IN ('reserved', 'issued', 'advisory_pending', 'advisory_issued')",
+            rusqlite::params![scope.execution_budget_id],
+            |row| row.get(0),
+        )?;
+        if open_resource_liabilities != 0 {
+            bail!("handoff allowance has an unsettled resource-owner liability");
+        }
         let unpublished: i64 = conn.query_row(
             "SELECT COUNT(*) FROM accounting_audit_outbox o
              WHERE o.published_chain_seq IS NULL AND EXISTS(
                  SELECT 1 FROM provider_attempt_debit d
-                 WHERE d.attempt_id = o.attempt_id
+                 WHERE d.attempt_id = o.operation_id
                    AND (d.account_id = ?1 OR d.account_id = ?2))",
             rusqlite::params![execution.account_id, directive_account_id],
             |row| row.get(0),
         )?;
         if unpublished != 0 {
             bail!("handoff allowance has unpublished provider-attempt testimony");
+        }
+        let unpublished_resources: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM accounting_audit_outbox o
+              JOIN resource_financial_operation r ON r.operation_id=o.operation_id
+             WHERE o.published_chain_seq IS NULL AND r.execution_budget_id=?1",
+            rusqlite::params![scope.execution_budget_id],
+            |row| row.get(0),
+        )?;
+        if unpublished_resources != 0 {
+            bail!("handoff allowance has unpublished resource-operation testimony");
         }
 
         let execution_available = self.account_available(conn, &execution)?;
@@ -5491,6 +8201,18 @@ impl AccountingDb {
                             .transpose()?,
                     ],
                 )?;
+                let live_resource_owners: i64 = conn.query_row(
+                    "SELECT COUNT(*)
+                       FROM resource_owner_accounting_gate
+                      WHERE execution_budget_id=?1 AND state!='fenced'",
+                    rusqlite::params![expected.source_scope.execution_budget_id],
+                    |row| row.get(0),
+                )?;
+                if live_resource_owners != 0 {
+                    bail!(
+                        "accounting handoff requires every live resource owner to be drained and settled"
+                    );
+                }
                 if let Some(directive) = directive {
                     conn.execute(
                         "INSERT INTO accounting_handoff_debit (
@@ -5980,6 +8702,16 @@ impl AccountingDb {
                 "aggregate execution budget integrity failed: {error:#}"
             ));
         }
+        if let Err(error) = validate_resource_financial_operations(&conn) {
+            reasons.push(format!(
+                "resource financial operation integrity failed: {error:#}"
+            ));
+        }
+        if let Err(error) = validate_resource_usage_partitions(&conn) {
+            reasons.push(format!(
+                "resource usage partition integrity failed: {error:#}"
+            ));
+        }
 
         // Per-account invariants: sum of debit holds == held and sum of
         // debit commitments == committed, for every account.
@@ -6006,6 +8738,35 @@ impl AccountingDb {
                 .context("collect debit aggregates")?;
             for (account_id, held, committed) in rows {
                 debit_sums.insert(account_id, (held, committed));
+            }
+        }
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT account_id, COALESCE(SUM(held_usd_nanos), 0),
+                            COALESCE(SUM(committed_usd_nanos), 0)
+                     FROM resource_financial_debit GROUP BY account_id",
+                )
+                .context("prepare resource debit aggregate scan")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (account_id, held, committed) in rows {
+                let entry = debit_sums.entry(account_id).or_insert((0, 0));
+                entry.0 = entry
+                    .0
+                    .checked_add(held)
+                    .ok_or_else(|| anyhow::anyhow!("combined debit hold overflow"))?;
+                entry.1 = entry
+                    .1
+                    .checked_add(committed)
+                    .ok_or_else(|| anyhow::anyhow!("combined debit commitment overflow"))?;
             }
         }
         let handoff_integrity = (|| -> Result<()> {
@@ -7047,10 +9808,11 @@ impl AccountingDb {
         let fingerprint = lillux::cas::sha256_hex(canonical.as_bytes());
         conn.execute(
             "INSERT INTO accounting_audit_outbox (
-                attempt_id, audit_chain_root_id, transition_sequence, transition_id,
+                operation_id, audit_chain_root_id, transition_sequence, transition_id,
                 transition, payload_fingerprint, payload, published_chain_seq,
-                created_at_ms, lease_expires_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL)",
+                created_at_ms, lease_expires_at_ms, event_type
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL,
+                      'provider_attempt_budget_transition_v1')",
             rusqlite::params![
                 row.attempt_id,
                 row.audit_chain_root_id,
@@ -7063,6 +9825,108 @@ impl AccountingDb {
             ],
         )
         .context("enqueue audit transition")?;
+        Ok((conn.last_insert_rowid(), fingerprint))
+    }
+
+    fn enqueue_resource_transition(
+        &self,
+        conn: &Connection,
+        operation_id: &str,
+        sequence: u32,
+        state: ResourceBudgetState,
+        budget_charge_nanos: Option<i64>,
+        usage_digest: Option<HexDigest>,
+        occurred_at_ms: i64,
+    ) -> Result<(i64, String)> {
+        let (
+            execution_budget_id,
+            root_chain_id,
+            audit_chain_root_id,
+            thread_id,
+            launch_generation,
+            owner_incarnation,
+            stable_resource_id,
+            authority_digest,
+            reserved_nanos,
+        ): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT execution_budget_id, root_chain_id, audit_chain_root_id,
+                        thread_id, launch_generation, owner_incarnation,
+                        stable_resource_id, authority_digest, reserved_usd_nanos
+                   FROM resource_financial_operation WHERE operation_id=?1",
+                rusqlite::params![operation_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .context("load resource operation for audit transition")?;
+        let event = ResourceBudgetTransitionV1 {
+            version: ryeos_accounting::RESOURCE_BUDGET_TRANSITION_VERSION,
+            transition_id: transition_id(operation_id, sequence),
+            transition_sequence: sequence,
+            operation_id: operation_id.to_owned(),
+            budget_authority_site_id: self.site_id.clone(),
+            ledger_epoch: self.epoch,
+            execution_budget_id,
+            root_chain_id,
+            audit_chain_root_id: audit_chain_root_id.clone(),
+            thread_id,
+            launch_generation,
+            owner_incarnation,
+            stable_resource_id,
+            authority_digest: HexDigest::new(authority_digest).map_err(anyhow::Error::msg)?,
+            transition: state,
+            reserved_usd_nanos: u64::try_from(reserved_nanos)
+                .context("resource reservation is negative")?,
+            budget_charge_usd_nanos: budget_charge_nanos
+                .map(u64::try_from)
+                .transpose()
+                .context("resource charge is negative")?,
+            usage_digest,
+            occurred_at_ms,
+        };
+        event.validate().map_err(anyhow::Error::msg)?;
+        let payload = serde_json::to_value(&event)?;
+        let canonical = canonical_json_string(&payload)?;
+        let fingerprint = lillux::cas::sha256_hex(canonical.as_bytes());
+        conn.execute(
+            "INSERT INTO accounting_audit_outbox (
+                operation_id, audit_chain_root_id, transition_sequence, transition_id,
+                transition, payload_fingerprint, payload, published_chain_seq,
+                created_at_ms, lease_expires_at_ms, event_type
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL,
+                       'resource_budget_transition_v1')",
+            rusqlite::params![
+                operation_id,
+                audit_chain_root_id,
+                i64::from(sequence),
+                event.transition_id,
+                state.as_str(),
+                fingerprint,
+                canonical,
+                occurred_at_ms,
+            ],
+        )?;
         Ok((conn.last_insert_rowid(), fingerprint))
     }
 
@@ -7807,12 +10671,17 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version before migration")?;
-    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2) {
+    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5) {
         return Ok(());
     }
     let predecessor_sql = match version {
         1 => SCHEMA_V1_SQL.to_string(),
         2 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}"),
+        3 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}"),
+        4 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}"),
+        5 => format!(
+            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}"
+        ),
         _ => unreachable!("version domain checked above"),
     };
     sqlite_schema::assert_complete_schema_sql(conn, &predecessor_sql, path).with_context(|| {
@@ -7838,9 +10707,24 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
             )
             .context("materialize exact v1 execution-only launch-gate bindings")?;
         }
-        conn.execute_batch(SCHEMA_V3_SQL)
-            .context("apply accounting v3 aggregate-resource schema")?;
-        backfill_unlimited_execution_resource_budgets(conn)?;
+        if version < 3 {
+            conn.execute_batch(SCHEMA_V3_SQL)
+                .context("apply accounting v3 aggregate-resource schema")?;
+            backfill_unlimited_execution_resource_budgets(conn)?;
+        }
+        if version < 4 {
+            conn.execute_batch(SCHEMA_V4_SQL)
+                .context("apply accounting v4 resource-financial schema")?;
+        }
+        if version < 5 {
+            conn.execute_batch(SCHEMA_V5_SQL)
+                .context("apply accounting v5 resource-attribution schema")?;
+        }
+        conn.execute_batch(SCHEMA_V6_SQL)
+            .context("apply accounting v6 resource-owner gate schema")?;
+        backfill_resource_owner_accounting_gates(conn)?;
+        backfill_accounting_outbox_event_types(conn)?;
+        backfill_resource_usage_partitions(conn)?;
         assert_current(conn, path).context("validate migrated accounting schema before commit")?;
         Ok(())
     })();
@@ -7853,6 +10737,150 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
             Err(error)
         }
     }
+}
+
+fn backfill_resource_owner_accounting_gates(conn: &Connection) -> Result<()> {
+    let mut nonterminal = conn.prepare(
+        "SELECT operation_id, state FROM resource_financial_operation ORDER BY operation_id",
+    )?;
+    let rows = nonterminal
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(nonterminal);
+    for (operation_id, state) in rows {
+        let state = ResourceBudgetState::parse(&state).with_context(|| {
+            format!("legacy resource operation {operation_id} has invalid state")
+        })?;
+        if !state.is_terminal() {
+            bail!(
+                "accounting migration cannot prove cleanup for nonterminal legacy resource operation {operation_id} in state {}; retire or settle the exact owner before upgrading",
+                state.as_str()
+            );
+        }
+    }
+    let mut statement = conn.prepare(
+        "SELECT budget_authority_site_id, ledger_epoch, owner_incarnation,
+                execution_budget_id, directive_budget_id,
+                root_chain_id, audit_chain_root_id, MIN(created_at_ms)
+         FROM resource_financial_operation
+         GROUP BY budget_authority_site_id, ledger_epoch, owner_incarnation,
+                  execution_budget_id, directive_budget_id,
+                  root_chain_id, audit_chain_root_id
+         ORDER BY owner_incarnation",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (site_id, epoch, owner, execution, directive, root, audit_root, created_at) in rows {
+        let gate_id = HexDigest::of_canonical_json(&serde_json::json!({
+            "kind": "resource_owner_accounting_gate",
+            "version": 1,
+            "budget_authority_site_id": site_id,
+            "ledger_epoch": u64::try_from(epoch).context("accounting epoch is negative")?,
+            "execution_budget_id": execution,
+            "directive_budget_id": directive,
+            "root_chain_id": root,
+            "audit_chain_root_id": audit_root,
+            "owner_incarnation": owner,
+        }))
+        .map_err(anyhow::Error::msg)?;
+        conn.execute(
+            "INSERT INTO resource_owner_accounting_gate (
+                owner_gate_id, owner_incarnation, budget_authority_site_id,
+                ledger_epoch, execution_budget_id, directive_budget_id,
+                root_chain_id, audit_chain_root_id, owner_recovery_json,
+                state, active_request_count, fenced_reason,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, 0, ?10, ?11, ?11)",
+            rusqlite::params![
+                gate_id.as_str(),
+                owner,
+                site_id,
+                epoch,
+                execution,
+                directive,
+                root,
+                audit_root,
+                "fenced",
+                Some("migrated_without_owner_recovery"),
+                created_at,
+            ],
+        )?;
+        conn.execute(
+            "UPDATE resource_financial_operation SET owner_gate_id=?1
+             WHERE owner_incarnation=?2 AND execution_budget_id=?3
+               AND directive_budget_id IS ?4 AND root_chain_id=?5 AND audit_chain_root_id=?6",
+            rusqlite::params![
+                gate_id.as_str(),
+                owner,
+                execution,
+                directive,
+                root,
+                audit_root
+            ],
+        )?;
+    }
+    let missing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_financial_operation WHERE owner_gate_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing != 0 {
+        bail!("resource-owner gate migration left {missing} operation(s) unbound");
+    }
+    Ok(())
+}
+
+fn backfill_accounting_outbox_event_types(conn: &Connection) -> Result<()> {
+    let mut statement = conn
+        .prepare("SELECT outbox_seq, payload FROM accounting_audit_outbox ORDER BY outbox_seq")
+        .context("prepare accounting outbox event-type backfill")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("read accounting outbox rows for event-type backfill")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("decode accounting outbox rows for event-type backfill")?;
+    drop(statement);
+
+    for (outbox_seq, payload) in rows {
+        let value: serde_json::Value = serde_json::from_str(&payload)
+            .with_context(|| format!("decode accounting outbox row {outbox_seq}"))?;
+        let provider =
+            serde_json::from_value::<ProviderAttemptBudgetTransitionV1>(value.clone()).is_ok();
+        let resource = serde_json::from_value::<ResourceBudgetTransitionV1>(value).is_ok();
+        let event_type = match (provider, resource) {
+            (true, false) => "provider_attempt_budget_transition_v1",
+            (false, true) => "resource_budget_transition_v1",
+            (true, true) => bail!(
+                "accounting outbox row {outbox_seq} is ambiguously both provider and resource"
+            ),
+            (false, false) => bail!(
+                "accounting outbox row {outbox_seq} is neither a provider nor resource transition"
+            ),
+        };
+        conn.execute(
+            "UPDATE accounting_audit_outbox SET event_type=?1 WHERE outbox_seq=?2",
+            rusqlite::params![event_type, outbox_seq],
+        )
+        .with_context(|| format!("backfill accounting outbox row {outbox_seq} event type"))?;
+    }
+    Ok(())
 }
 
 /// Executions retained from before aggregate limits existed had exactly no
@@ -7876,6 +10904,37 @@ fn backfill_unlimited_execution_resource_budgets(conn: &Connection) -> Result<()
         rusqlite::params![limits_json, limits_digest, now_ms],
     )
     .context("backfill unlimited aggregate authority for predecessor executions")?;
+    Ok(())
+}
+
+fn backfill_resource_usage_partitions(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT operation_id, usage_json, rated_charge_json, settled_at_ms
+           FROM resource_financial_operation
+          WHERE usage_json IS NOT NULL AND rated_charge_json IS NOT NULL
+          ORDER BY operation_id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (_operation_id, usage, charge, settled_at_ms) in rows {
+        let usage: ResourceUsageObservation = serde_json::from_str(&usage)?;
+        let charge: ResourceRatedCharge = serde_json::from_str(&charge)?;
+        let budget_charge: Option<i64> = conn.query_row(
+            "SELECT budget_charge_usd_nanos FROM resource_financial_operation WHERE operation_id=?1",
+            rusqlite::params![usage.operation_id],
+            |row| row.get(0),
+        )?;
+        persist_resource_usage_partition(conn, &usage, &charge, budget_charge, settled_at_ms)?;
+    }
     Ok(())
 }
 
@@ -8189,6 +11248,97 @@ mod tests {
         }
     }
 
+    fn resource_authority(spend: ResourceSpendAuthority) -> ResourceAccountingAuthority {
+        let clock_contract_digest = digest_of("occupancy-clock");
+        let meter = ryeos_accounting::ResourceMeterContract {
+            version: ryeos_accounting::RESOURCE_METER_CONTRACT_VERSION,
+            kind: ryeos_accounting::ResourceMeterKind::OccupancyDuration,
+            clock_contract_digest,
+            contract_digest: digest_of("placeholder-meter"),
+        }
+        .sealed()
+        .unwrap();
+        ResourceAccountingAuthority {
+            version: ryeos_accounting::RESOURCE_ACCOUNTING_AUTHORITY_VERSION,
+            authority_digest: digest_of("placeholder-resource-authority"),
+            stable_resource_id: "gpu-0".to_string(),
+            resource_class: "accelerator".to_string(),
+            observation_contract_digest: digest_of("resource-observation"),
+            meter,
+            tariff: ryeos_accounting::ResourceTariffDocument {
+                version: ryeos_accounting::RESOURCE_TARIFF_VERSION,
+                currency: Currency::Usd,
+                pricing_generation: "gpu-rate-1".to_string(),
+                charge_class: ryeos_accounting::ResourceChargeClass::InternalAllocation,
+                rate_per_million_milliseconds: usd("1"),
+                billing_quantum_milliseconds: 1_000,
+                minimum_billable_milliseconds: 1_000,
+                expires_at_ms: None,
+            },
+            spend,
+        }
+        .sealed()
+        .unwrap()
+    }
+
+    fn bounded_resource_authority() -> ResourceAccountingAuthority {
+        let tariff = resource_authority(ResourceSpendAuthority::Advisory).tariff;
+        let maximum = tariff.charge_for_nanoseconds(10_000_000_000).unwrap();
+        resource_authority(ResourceSpendAuthority::Bounded {
+            maximum_occupancy_milliseconds: 10_000,
+            maximum,
+        })
+    }
+
+    fn resource_usage(
+        operation_id: &str,
+        owner_incarnation: &str,
+        authority: &ResourceAccountingAuthority,
+        coverage: ResourceUsageCoverage,
+    ) -> ResourceUsageObservation {
+        ResourceUsageObservation {
+            version: ryeos_accounting::RESOURCE_USAGE_OBSERVATION_VERSION,
+            operation_id: operation_id.to_string(),
+            owner_incarnation: owner_incarnation.to_owned(),
+            stable_resource_id: authority.stable_resource_id.clone(),
+            clock_incarnation_digest: digest_of("boot-a"),
+            meter_contract_digest: authority.meter.contract_digest.clone(),
+            clock_contract_digest: authority.meter.clock_contract_digest.clone(),
+            coverage,
+            intervals: vec![ryeos_accounting::ResourceUsageInterval {
+                start_tick_ns: 10,
+                end_tick_ns: 1_500_000_010,
+            }],
+        }
+    }
+
+    fn resource_binding(
+        owner_gate_id: &str,
+        operation_id: &str,
+        request_digest: &str,
+        owner_incarnation: &str,
+        authority: &ResourceAccountingAuthority,
+    ) -> ryeos_accounting::ResourceOperationBinding {
+        ryeos_accounting::ResourceOperationBinding {
+            version: ryeos_accounting::RESOURCE_OPERATION_BINDING_VERSION,
+            owner_gate_id: HexDigest::new(owner_gate_id.to_owned()).unwrap(),
+            operation_id: HexDigest::new(operation_id.to_owned()).unwrap(),
+            request_digest: HexDigest::new(request_digest.to_owned()).unwrap(),
+            owner_incarnation: HexDigest::new(owner_incarnation.to_owned()).unwrap(),
+            stable_resource_id: authority.stable_resource_id.clone(),
+            authority_digest: authority.authority_digest.clone(),
+            meter_contract_digest: authority.meter.contract_digest.clone(),
+            clock_contract_digest: authority.meter.clock_contract_digest.clone(),
+            maximum_occupancy_milliseconds: match authority.spend {
+                ResourceSpendAuthority::Bounded {
+                    maximum_occupancy_milliseconds,
+                    ..
+                } => Some(maximum_occupancy_milliseconds),
+                ResourceSpendAuthority::Advisory => None,
+            },
+        }
+    }
+
     fn open_gate(db: &AccountingDb, thread: &str, generation: &str, exec: &str) {
         let directive = db
             .account_snapshot(exec)
@@ -8205,6 +11355,835 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    fn open_resource_owner_gate(db: &AccountingDb) -> (String, String) {
+        open_resource_owner_gate_for_pid(db, 101)
+    }
+
+    fn open_resource_owner_gate_for_pid(db: &AccountingDb, pid: i64) -> (String, String) {
+        let identity = crate::process::ExecutionProcessIdentity {
+            schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_owned(),
+            target_pid: pid,
+            target_start_time_ticks: 11,
+            group_leader_pid: pid,
+            group_leader_start_time_ticks: 11,
+            process_scope: None,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        };
+        let owner = identity.owner_incarnation_digest().unwrap();
+        let gate = db
+            .open_resource_owner_accounting_gate(
+                &identity,
+                EXEC,
+                None,
+                "root-chain",
+                "audit-chain",
+                NOW,
+            )
+            .unwrap()
+            .as_str()
+            .to_owned();
+        (owner, gate)
+    }
+
+    #[test]
+    fn bounded_resource_operation_uses_shared_account_and_exact_usage() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        db.startup_verify().unwrap();
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("resource-operation").as_str().to_string();
+        let request_digest = digest_of("resource-request").as_str().to_string();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        assert!(
+            db.resource_owner_gate_eligible(&owner_gate_id, &owner, NOW)
+                .unwrap()
+        );
+        let args = || ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        };
+        assert_eq!(
+            db.reserve_resource_operation(args()).unwrap(),
+            ResourceOperationReserveOutcome::Reserved { replayed: false }
+        );
+        assert_eq!(
+            db.reserve_resource_operation(args()).unwrap(),
+            ResourceOperationReserveOutcome::Reserved { replayed: true }
+        );
+        let maximum = match authority.spend {
+            ResourceSpendAuthority::Bounded { maximum, .. } => maximum,
+            ResourceSpendAuthority::Advisory => unreachable!(),
+        };
+        let account = db.account_snapshot(EXEC).unwrap().remove(0);
+        assert_eq!(account.held, maximum);
+
+        let issued = db
+            .issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        assert!(!issued.replayed);
+        assert!(issued.financial_sequence.is_some());
+        let replay = db
+            .issue_resource_operation(&operation_id, &request_digest, NOW + 2)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.financial_sequence, issued.financial_sequence);
+
+        let attribution = |label: &str, thread_id: &str, start_tick_ns, end_tick_ns| {
+            ResourceRequestAttribution {
+                version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+                attribution_id: digest_of(label),
+                operation_id: HexDigest::new(operation_id.clone()).unwrap(),
+                thread_id: thread_id.to_owned(),
+                request_digest: digest_of(&format!("{label}-request")),
+                interval: ryeos_accounting::ResourceUsageInterval {
+                    start_tick_ns,
+                    end_tick_ns,
+                },
+            }
+            .sealed()
+            .unwrap()
+        };
+        let request_a = attribution(
+            "resource-attribution-a",
+            "T-resource-request-a",
+            100_000_010,
+            700_000_010,
+        );
+        let request_b = attribution(
+            "resource-attribution-b",
+            "T-resource-request-b",
+            700_000_010,
+            1_000_000_010,
+        );
+        db.record_resource_request_attributions(&[request_a.clone(), request_b.clone()], NOW + 2)
+            .unwrap();
+        db.record_resource_request_attributions(&[request_a, request_b], NOW + 2)
+            .unwrap();
+
+        let usage = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let settled = db
+            .settle_resource_operation(&operation_id, &usage, NOW + 3)
+            .unwrap();
+        assert_eq!(settled.state, ResourceBudgetState::Reconciled);
+        assert_eq!(settled.budget_charge, Some(usd("0.002")));
+        assert!(!settled.replayed);
+        let account = db.account_snapshot(EXEC).unwrap().remove(0);
+        assert_eq!(account.held, UsdNanos::ZERO);
+        assert_eq!(account.committed, usd("0.002"));
+        let partition = db.resource_usage_partition(&operation_id).unwrap().unwrap();
+        assert_eq!(partition.attributed.len(), 2);
+        assert_eq!(
+            partition
+                .attributed
+                .iter()
+                .map(|share| share.observed_nanoseconds)
+                .sum::<u64>(),
+            900_000_000
+        );
+        assert_eq!(partition.overhead_nanoseconds, 600_000_000);
+        assert_eq!(
+            partition
+                .attributed
+                .iter()
+                .map(|share| share.allocated_usd_nanos)
+                .sum::<u64>()
+                + partition.overhead_usd_nanos,
+            partition.rated_charge_usd_nanos
+        );
+        let owner_sample = db.thread_resource_cost_sample(THREAD).unwrap();
+        let request_a_sample = db
+            .thread_resource_cost_sample("T-resource-request-a")
+            .unwrap();
+        let request_b_sample = db
+            .thread_resource_cost_sample("T-resource-request-b")
+            .unwrap();
+        assert_eq!(owner_sample.operation_count, 1);
+        assert_eq!(owner_sample.pending_operation_count, 0);
+        assert_eq!(owner_sample.attributed_usd_nanos, 0);
+        assert_eq!(request_a_sample.owned_overhead_usd_nanos, 0);
+        assert_eq!(request_b_sample.owned_overhead_usd_nanos, 0);
+        assert_eq!(request_a_sample.operation_count, 1);
+        assert_eq!(request_b_sample.operation_count, 1);
+        assert_eq!(owner_sample.components.len(), 1);
+        let owner_component = &owner_sample.components[0];
+        assert_eq!(owner_component.operation_id, operation_id);
+        assert_eq!(owner_component.owner_gate_id, owner_gate_id);
+        assert_eq!(
+            owner_component.charge_class,
+            ryeos_accounting::ResourceChargeClass::InternalAllocation
+        );
+        assert_eq!(owner_component.state, ResourceBudgetState::Reconciled);
+        assert_eq!(
+            owner_component.coverage,
+            Some(ResourceUsageCoverage::Complete)
+        );
+        assert_eq!(owner_component.committed_spend.as_deref(), Some("0.002"));
+        assert_eq!(
+            owner_component.allocation,
+            ResourceCostAllocation::OwnerOverhead
+        );
+        assert!(owner_component.partition_digest.is_some());
+        assert_eq!(request_a_sample.components.len(), 1);
+        assert_eq!(
+            request_a_sample.components[0].allocation,
+            ResourceCostAllocation::RequestAttribution
+        );
+        assert_eq!(
+            request_a_sample.components[0].partition_digest,
+            owner_component.partition_digest
+        );
+        assert_eq!(
+            owner_sample.owned_overhead_usd_nanos
+                + request_a_sample.attributed_usd_nanos
+                + request_b_sample.attributed_usd_nanos,
+            partition.rated_charge_usd_nanos
+        );
+        assert!(
+            db.settle_resource_operation(&operation_id, &usage, NOW + 4)
+                .unwrap()
+                .replayed
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resource_owner_release_requires_the_exact_live_binding() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("release-authority-operation").as_str().to_owned();
+        let request_digest = digest_of("release-authority-request").as_str().to_owned();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        let binding = resource_binding(
+            &owner_gate_id,
+            &operation_id,
+            &request_digest,
+            &owner,
+            &authority,
+        );
+        assert!(
+            db.authorize_resource_owner_release(std::slice::from_ref(&binding), NOW + 1)
+                .is_err(),
+            "a merely reserved operation is not live release authority"
+        );
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        db.authorize_resource_owner_release(std::slice::from_ref(&binding), NOW + 2)
+            .unwrap();
+
+        let mut changed = binding.clone();
+        changed.clock_contract_digest = digest_of("another-clock-contract");
+        assert!(
+            db.authorize_resource_owner_release(&[changed], NOW + 2)
+                .is_err()
+        );
+        let mut changed = binding;
+        changed.maximum_occupancy_milliseconds = Some(9_999);
+        assert!(
+            db.authorize_resource_owner_release(&[changed], NOW + 2)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn advisory_resource_operation_records_evidence_without_financial_hold() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = resource_authority(ResourceSpendAuthority::Advisory);
+        let operation_id = digest_of("advisory-resource-operation")
+            .as_str()
+            .to_string();
+        let request_digest = digest_of("advisory-resource-request").as_str().to_string();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        assert_eq!(
+            db.reserve_resource_operation(ReserveResourceOperationArgs {
+                owner_gate_id: &owner_gate_id,
+                operation_id: &operation_id,
+                request_digest: &request_digest,
+                execution_budget_id: EXEC,
+                directive_budget_id: None,
+                root_chain_id: "root-chain",
+                audit_chain_root_id: "audit-chain",
+                thread_id: THREAD,
+                launch_generation: GENERATION,
+                owner_incarnation: &owner,
+                authority: &authority,
+                now_ms: NOW,
+            })
+            .unwrap(),
+            ResourceOperationReserveOutcome::Advisory { replayed: false }
+        );
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        let pending = db.thread_resource_cost_sample(THREAD).unwrap();
+        assert_eq!(pending.pending_operation_count, 1);
+        assert_eq!(pending.components.len(), 1);
+        assert_eq!(
+            pending.components[0].state,
+            ResourceBudgetState::AdvisoryIssued
+        );
+        assert_eq!(pending.components[0].rated_spend, None);
+        assert_eq!(pending.components[0].committed_spend, None);
+        let usage = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let settled = db
+            .settle_resource_operation(&operation_id, &usage, NOW + 2)
+            .unwrap();
+        assert_eq!(settled.state, ResourceBudgetState::AdvisoryReconciled);
+        assert_eq!(settled.budget_charge, None);
+        let account = db.account_snapshot(EXEC).unwrap().remove(0);
+        assert_eq!(account.held, UsdNanos::ZERO);
+        assert_eq!(account.committed, UsdNanos::ZERO);
+        let sample = db.thread_resource_cost_sample(THREAD).unwrap();
+        assert_eq!(sample.pending_operation_count, 0);
+        assert_eq!(sample.components.len(), 1);
+        assert_eq!(sample.components[0].committed_spend, None);
+        assert_eq!(sample.components[0].allocated_spend, "0");
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn advisory_partial_usage_retains_pending_attribution_then_refines_exactly() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = resource_authority(ResourceSpendAuthority::Advisory);
+        let operation_id = digest_of("advisory-partial-resource-operation")
+            .as_str()
+            .to_owned();
+        let request_digest = digest_of("advisory-partial-resource-request")
+            .as_str()
+            .to_owned();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        let attribution = ResourceRequestAttribution {
+            version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+            attribution_id: digest_of("advisory-partial-attribution"),
+            operation_id: HexDigest::new(operation_id.clone()).unwrap(),
+            thread_id: "T-advisory-request".to_owned(),
+            request_digest: digest_of("advisory-partial-attribution-request"),
+            interval: ryeos_accounting::ResourceUsageInterval {
+                start_tick_ns: 100_000_010,
+                end_tick_ns: 700_000_010,
+            },
+        }
+        .sealed()
+        .unwrap();
+        db.record_resource_request_attribution(&attribution, NOW + 2)
+            .unwrap();
+
+        let mut partial = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Partial,
+        );
+        partial.intervals.clear();
+        let pending = db
+            .settle_resource_operation(&operation_id, &partial, NOW + 3)
+            .unwrap();
+        assert_eq!(pending.state, ResourceBudgetState::AdvisoryIssued);
+        assert!(
+            db.resource_usage_partition(&operation_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.settle_resource_operation(&operation_id, &partial, NOW + 4)
+                .unwrap()
+                .replayed
+        );
+
+        let complete = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let corrected = db
+            .settle_resource_operation(&operation_id, &complete, NOW + 5)
+            .unwrap();
+        assert_eq!(corrected.state, ResourceBudgetState::AdvisoryReconciled);
+        assert!(!corrected.replayed);
+        assert_eq!(
+            db.resource_usage_partition(&operation_id)
+                .unwrap()
+                .unwrap()
+                .attributed
+                .len(),
+            1
+        );
+        assert!(
+            db.settle_resource_operation(&operation_id, &complete, NOW + 6)
+                .unwrap()
+                .replayed
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resource_tariff_expiry_applies_to_advisory_and_bounded_admission() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        for (label, mut authority) in [
+            (
+                "advisory",
+                resource_authority(ResourceSpendAuthority::Advisory),
+            ),
+            ("bounded", bounded_resource_authority()),
+        ] {
+            authority.tariff.expires_at_ms = Some(NOW);
+            authority = authority.sealed().unwrap();
+            let error = db
+                .reserve_resource_operation(ReserveResourceOperationArgs {
+                    owner_gate_id: &owner_gate_id,
+                    operation_id: digest_of(&format!("expired-{label}-operation")).as_str(),
+                    request_digest: digest_of(&format!("expired-{label}-request")).as_str(),
+                    execution_budget_id: EXEC,
+                    directive_budget_id: None,
+                    root_chain_id: "root-chain",
+                    audit_chain_root_id: "audit-chain",
+                    thread_id: THREAD,
+                    launch_generation: GENERATION,
+                    owner_incarnation: &owner,
+                    authority: &authority,
+                    now_ms: NOW,
+                })
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("tariff expired"),
+                "unexpected refusal: {error:#}"
+            );
+        }
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resident_request_lease_serializes_scope_expiry_and_owner_fencing() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        let resource_budget = db
+            .ensure_execution_resource_budget(
+                EXEC,
+                &AggregateExecutionLimits {
+                    duration_seconds: 1,
+                    ..AggregateExecutionLimits::default()
+                },
+            )
+            .unwrap();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+
+        db.begin_resource_owner_request(&owner_gate_id, &owner, NOW)
+            .unwrap();
+        assert!(
+            db.fence_resource_owner_accounting_gate(&owner_gate_id, "retire", NOW + 1)
+                .is_err()
+        );
+        db.finish_resource_owner_request(&owner_gate_id, &owner, NOW + 2)
+            .unwrap();
+        db.fence_resource_owner_accounting_gate(&owner_gate_id, "retire", NOW + 3)
+            .unwrap();
+        assert!(
+            db.begin_resource_owner_request(&owner_gate_id, &owner, NOW + 4)
+                .is_err()
+        );
+
+        let (other_owner, other_gate) = open_resource_owner_gate_for_pid(&db, 102);
+        let deadline = resource_budget.deadline_at_ms.unwrap();
+        assert!(
+            db.begin_resource_owner_request(&other_gate, &other_owner, deadline)
+                .is_err()
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resource_intent_is_exclusive_before_runtime_owner_attachment() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("2"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let (first_owner, first_gate) = open_resource_owner_gate_for_pid(&db, 101);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &first_gate,
+            operation_id: digest_of("first-exclusive-operation").as_str(),
+            request_digest: digest_of("first-exclusive-request").as_str(),
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &first_owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+
+        let (second_owner, second_gate) = open_resource_owner_gate_for_pid(&db, 102);
+        let error = db
+            .reserve_resource_operation(ReserveResourceOperationArgs {
+                owner_gate_id: &second_gate,
+                operation_id: digest_of("second-exclusive-operation").as_str(),
+                request_digest: digest_of("second-exclusive-request").as_str(),
+                execution_budget_id: EXEC,
+                directive_budget_id: None,
+                root_chain_id: "root-chain",
+                audit_chain_root_id: "audit-chain",
+                thread_id: THREAD,
+                launch_generation: GENERATION,
+                owner_incarnation: &second_owner,
+                authority: &authority,
+                now_ms: NOW,
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("another live owner intent"));
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn unissued_resource_release_returns_hold_and_cannot_be_reissued() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("unissued-resource-operation")
+            .as_str()
+            .to_string();
+        let request_digest = digest_of("unissued-resource-request").as_str().to_string();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        let args = || ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        };
+        assert_eq!(
+            db.reserve_resource_operation(args()).unwrap(),
+            ResourceOperationReserveOutcome::Reserved { replayed: false }
+        );
+        assert!(
+            !db.release_unissued_resource_operation(&operation_id, &request_digest, NOW + 1)
+                .unwrap()
+        );
+        assert!(
+            db.release_unissued_resource_operation(&operation_id, &request_digest, NOW + 2)
+                .unwrap()
+        );
+        assert_eq!(
+            db.reserve_resource_operation(args()).unwrap(),
+            ResourceOperationReserveOutcome::ReleasedUnissued { replayed: true }
+        );
+        assert!(
+            db.issue_resource_operation(&operation_id, &request_digest, NOW + 3)
+                .is_err()
+        );
+        let account = db.account_snapshot(EXEC).unwrap().remove(0);
+        assert_eq!(account.held, UsdNanos::ZERO);
+        assert_eq!(account.committed, UsdNanos::ZERO);
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn resource_reserve_and_fresh_issue_require_the_exact_open_owner_gate() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        let first_operation = digest_of("gated-resource-operation").as_str().to_string();
+        let first_request = digest_of("gated-resource-request").as_str().to_string();
+        let reserve = |operation_id: &str, request_digest: &str| {
+            db.reserve_resource_operation(ReserveResourceOperationArgs {
+                owner_gate_id: &owner_gate_id,
+                operation_id,
+                request_digest,
+                execution_budget_id: EXEC,
+                directive_budget_id: None,
+                root_chain_id: "root-chain",
+                audit_chain_root_id: "audit-chain",
+                thread_id: THREAD,
+                launch_generation: GENERATION,
+                owner_incarnation: &owner,
+                authority: &authority,
+                now_ms: NOW,
+            })
+        };
+        assert_eq!(
+            reserve(&first_operation, &first_request).unwrap(),
+            ResourceOperationReserveOutcome::Reserved { replayed: false }
+        );
+        db.fence_launch_gate_and_close_attempts(
+            THREAD,
+            GENERATION,
+            ReconciliationReason::OwnerGenerationFenced,
+            NOW + 1,
+        )
+        .unwrap();
+        db.issue_resource_operation(&first_operation, &first_request, NOW + 2)
+            .unwrap();
+        db.fence_resource_owner_accounting_gate(&owner_gate_id, "test_complete", NOW + 3)
+            .unwrap();
+        assert!(
+            !db.resource_owner_gate_eligible(&owner_gate_id, &owner, NOW + 3)
+                .unwrap()
+        );
+        let second_operation = digest_of("post-fence-resource-operation")
+            .as_str()
+            .to_string();
+        let second_request = digest_of("post-fence-resource-request")
+            .as_str()
+            .to_string();
+        assert!(reserve(&second_operation, &second_request).is_err());
+        let mut usage = resource_usage(
+            &first_operation,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        usage.owner_incarnation.clone_from(&owner);
+        db.settle_resource_operation(&first_operation, &usage, NOW + 4)
+            .unwrap();
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn fenced_resource_owner_accepts_cleanup_usage_without_fabricating_charge() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("fenced-issued-resource").as_str().to_string();
+        let request_digest = digest_of("fenced-issued-request").as_str().to_string();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        db.fence_resource_owner_accounting_gate(&owner_gate_id, "cleanup_started", NOW + 2)
+            .unwrap();
+        assert_eq!(
+            db.resource_operation_state(&operation_id).unwrap(),
+            ResourceBudgetState::Issued
+        );
+        db.startup_verify().unwrap();
+        let usage = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let settled = db
+            .settle_resource_operation(&operation_id, &usage, NOW + 3)
+            .unwrap();
+        assert_eq!(settled.state, ResourceBudgetState::Reconciled);
+        assert!(!settled.replayed);
+        assert!(
+            db.settle_resource_operation(&operation_id, &usage, NOW + 4)
+                .unwrap()
+                .replayed
+        );
+        let account = db.account_snapshot(EXEC).unwrap().remove(0);
+        assert_eq!(account.held, UsdNanos::ZERO);
+        assert_eq!(account.committed, usd("0.002"));
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn partial_maximum_settlement_refines_to_complete_and_advances_the_anchor() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("1"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("partial-resource-operation").as_str().to_owned();
+        let request_digest = digest_of("partial-resource-request").as_str().to_owned();
+        let (owner, owner_gate_id) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &owner_gate_id,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        let attribution = ResourceRequestAttribution {
+            version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+            attribution_id: digest_of("partial-maximum-attribution"),
+            operation_id: HexDigest::new(operation_id.clone()).unwrap(),
+            thread_id: "T-partial-maximum-request".to_owned(),
+            request_digest: digest_of("partial-maximum-attribution-request"),
+            interval: ryeos_accounting::ResourceUsageInterval {
+                start_tick_ns: 100_000_010,
+                end_tick_ns: 700_000_010,
+            },
+        }
+        .sealed()
+        .unwrap();
+        db.record_resource_request_attribution(&attribution, NOW + 1)
+            .unwrap();
+        let after_issue = db.anchor().read_valid().unwrap().financial_high_water;
+
+        let mut partial = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Partial,
+        );
+        partial.intervals.clear();
+        let maximum = db
+            .settle_resource_operation(&operation_id, &partial, NOW + 2)
+            .unwrap();
+        assert_eq!(maximum.state, ResourceBudgetState::ChargedReservedMaximum);
+        let pending_owner = db.thread_resource_cost_sample(THREAD).unwrap();
+        assert_eq!(pending_owner.pending_operation_count, 1);
+        assert_eq!(pending_owner.components.len(), 1);
+        assert_eq!(
+            pending_owner.components[0].state,
+            ResourceBudgetState::ChargedReservedMaximum
+        );
+        assert_eq!(
+            pending_owner.components[0].committed_spend.as_deref(),
+            Some("0.01")
+        );
+        assert_eq!(pending_owner.components[0].allocated_spend, "0");
+        let pending_request = db
+            .thread_resource_cost_sample("T-partial-maximum-request")
+            .unwrap();
+        assert_eq!(pending_request.pending_operation_count, 1);
+        assert_eq!(
+            pending_request.components[0].committed_spend.as_deref(),
+            Some("0.01")
+        );
+        let after_partial = db.anchor().read_valid().unwrap().financial_high_water;
+        assert_eq!(after_partial, after_issue + 1);
+        assert!(
+            db.resource_usage_partition(&operation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        let complete = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let corrected = db
+            .settle_resource_operation(&operation_id, &complete, NOW + 3)
+            .unwrap();
+        assert_eq!(corrected.state, ResourceBudgetState::Reconciled);
+        assert!(!corrected.replayed);
+        assert_eq!(
+            db.resource_usage_partition(&operation_id)
+                .unwrap()
+                .unwrap()
+                .attributed
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.anchor().read_valid().unwrap().financial_high_water,
+            after_partial + 1
+        );
+        assert!(
+            db.settle_resource_operation(&operation_id, &complete, NOW + 4)
+                .unwrap()
+                .replayed
+        );
+        assert_healthy_verify(&db);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8634,6 +12613,9 @@ mod tests {
             )
             .unwrap();
         source.activate_account(EXEC, "execution", EXEC).unwrap();
+        source
+            .ensure_execution_resource_budget(EXEC, &AggregateExecutionLimits::default())
+            .unwrap();
         let (source_site, source_epoch) = source.site_identity();
         let source_scope = ryeos_state::objects::AdmittedAccountingScope {
             budget_authority_site_id: source_site,
@@ -9058,6 +13040,9 @@ mod tests {
             .unwrap();
         source.activate_account(EXEC, "execution", EXEC).unwrap();
         source
+            .ensure_execution_resource_budget(EXEC, &AggregateExecutionLimits::default())
+            .unwrap();
+        source
             .create_directive_account_prepared(
                 EXEC,
                 DIRECTIVE,
@@ -9289,6 +13274,201 @@ mod tests {
         );
         migrate_accounting_schema(&conn, &path).unwrap();
         assert_current(&conn, &path).unwrap();
+    }
+
+    #[test]
+    fn exact_v4_migration_classifies_provider_and_resource_outbox_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounting-v4.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}"
+        ))
+        .unwrap();
+        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
+            .unwrap();
+
+        let provider = ProviderAttemptBudgetTransitionV1 {
+            version: PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
+            transition_id: transition_id("A-migration", 1),
+            transition_sequence: 1,
+            attempt_id: "A-migration".to_string(),
+            budget_authority_site_id: "S-site".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "B-execution".to_string(),
+            root_chain_id: "T-root".to_string(),
+            audit_chain_root_id: "T-root".to_string(),
+            directive_budget_id: None,
+            thread_id: "T-provider".to_string(),
+            turn: 1,
+            attempt_number: 1,
+            transition: AttemptBudgetState::Reserved,
+            observation: false,
+            config_hash: "c".repeat(64),
+            provider_id: "provider".to_string(),
+            model: "model".to_string(),
+            profile: None,
+            reserved_usd_nanos: 1,
+            budget_charge_usd_nanos: None,
+            provider_actual_usd_nanos: None,
+            released_usd_nanos: None,
+            charge_basis: None,
+            occurred_at_ms: 1,
+            reason: None,
+        };
+        provider.validate().unwrap();
+        let resource = ResourceBudgetTransitionV1 {
+            version: ryeos_accounting::RESOURCE_BUDGET_TRANSITION_VERSION,
+            transition_id: transition_id("R-migration", 1),
+            transition_sequence: 1,
+            operation_id: "R-migration".to_string(),
+            budget_authority_site_id: "S-site".to_string(),
+            ledger_epoch: 1,
+            execution_budget_id: "B-execution".to_string(),
+            root_chain_id: "T-root".to_string(),
+            audit_chain_root_id: "T-root".to_string(),
+            thread_id: "T-resource".to_string(),
+            launch_generation: "G-launch".to_string(),
+            owner_incarnation: "I-process".to_string(),
+            stable_resource_id: "gpu-0".to_string(),
+            authority_digest: HexDigest::new("d".repeat(64)).unwrap(),
+            transition: ResourceBudgetState::Reserved,
+            reserved_usd_nanos: 2,
+            budget_charge_usd_nanos: None,
+            usage_digest: None,
+            occurred_at_ms: 2,
+        };
+        resource.validate().unwrap();
+        for (attempt_id, sequence, transition_id, transition, payload, created_at_ms) in [
+            (
+                provider.attempt_id.as_str(),
+                provider.transition_sequence,
+                provider.transition_id.as_str(),
+                provider.transition.as_str(),
+                canonical_json_string(&serde_json::to_value(&provider).unwrap()).unwrap(),
+                provider.occurred_at_ms,
+            ),
+            (
+                resource.operation_id.as_str(),
+                resource.transition_sequence,
+                resource.transition_id.as_str(),
+                resource.transition.as_str(),
+                canonical_json_string(&serde_json::to_value(&resource).unwrap()).unwrap(),
+                resource.occurred_at_ms,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO accounting_audit_outbox (
+                    attempt_id, audit_chain_root_id, transition_sequence,
+                    transition_id, transition, payload_fingerprint, payload,
+                    published_chain_seq, created_at_ms, lease_expires_at_ms
+                 ) VALUES (?1, 'T-root', ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)",
+                rusqlite::params![
+                    attempt_id,
+                    i64::from(sequence),
+                    transition_id,
+                    transition,
+                    lillux::sha256_hex(payload.as_bytes()),
+                    payload,
+                    created_at_ms,
+                ],
+            )
+            .unwrap();
+        }
+
+        migrate_accounting_schema(&conn, &path).unwrap();
+        assert_current(&conn, &path).unwrap();
+        let mut statement = conn
+            .prepare("SELECT event_type FROM accounting_audit_outbox ORDER BY outbox_seq")
+            .unwrap();
+        let event_types = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            event_types,
+            vec![
+                "provider_attempt_budget_transition_v1".to_string(),
+                "resource_budget_transition_v1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_v5_migration_refuses_nonterminal_resource_owners_without_recovery_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accounting-v5.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}"
+        ))
+        .unwrap();
+        conn.pragma_update(None, "application_id", ACCOUNTING_APP_ID)
+            .unwrap();
+
+        let owner = digest_of("legacy-owner").as_str().to_owned();
+        for (operation_id, state) in [
+            (digest_of("legacy-issued").as_str().to_owned(), "issued"),
+            (
+                digest_of("legacy-charged-maximum").as_str().to_owned(),
+                "charged_reserved_maximum",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO resource_financial_operation (
+                    operation_id, request_digest, authority_digest,
+                    budget_authority_site_id, ledger_epoch, execution_budget_id,
+                    directive_budget_id, root_chain_id, audit_chain_root_id,
+                    thread_id, launch_generation, owner_incarnation,
+                    stable_resource_id, state, reserved_usd_nanos,
+                    budget_charge_usd_nanos, usage_json, rated_charge_json,
+                    created_at_ms, issued_at_ms, settled_at_ms, authority_json
+                 ) VALUES (?1, ?2, ?3, 'S-legacy', 1, 'B-legacy', NULL,
+                           'T-root', 'T-audit', 'T-thread', 'G-launch', ?4,
+                           'gpu-0', ?5, 1, NULL, NULL, NULL, 10, 11, NULL, '{}')",
+                rusqlite::params![
+                    operation_id,
+                    digest_of(&format!("{state}-request")).as_str(),
+                    digest_of("legacy-authority").as_str(),
+                    owner,
+                    state,
+                ],
+            )
+            .unwrap();
+        }
+
+        let error = migrate_accounting_schema(&conn, &path).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("cannot prove cleanup for nonterminal legacy resource operation"),
+            "{error:#}"
+        );
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+
+        conn.execute(
+            "UPDATE resource_financial_operation
+                SET state='released_unissued', issued_at_ms=NULL, settled_at_ms=12",
+            [],
+        )
+        .unwrap();
+        migrate_accounting_schema(&conn, &path).unwrap();
+        assert_current(&conn, &path).unwrap();
+        let gate: (String, Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT state, owner_recovery_json, active_request_count, fenced_reason
+                   FROM resource_owner_accounting_gate",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(gate.0, "fenced");
+        assert_eq!(gate.1, None);
+        assert_eq!(gate.2, 0);
+        assert_eq!(gate.3.as_deref(), Some("migrated_without_owner_recovery"));
     }
 
     #[test]
@@ -10700,7 +14880,7 @@ mod tests {
         // and a live lease excludes other claimants.
         let first = db.claim_next_unpublished(0, 1_000).unwrap().unwrap();
         assert_eq!(first.transition_sequence, 1);
-        assert_eq!(first.attempt_id, attempt_id);
+        assert_eq!(first.operation_id, attempt_id);
         assert_eq!(first.transition_id, transition_id(&attempt_id, 1));
         assert!(db.claim_next_unpublished(0, 1_000).unwrap().is_none());
         // An expired lease makes the same row claimable again.

@@ -138,7 +138,31 @@ fn draw_layout_node(
             chrome_hidden,
             background_transparent,
             input,
+            tabs,
+            ..
         } => {
+            let rect = if tabs.len() > 1 && rect.h > 1 {
+                let labels = tabs
+                    .iter()
+                    .map(|tab| {
+                        if tab.active {
+                            format!("[{}]", tab.title)
+                        } else {
+                            tab.title.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                surface.draw_text(
+                    rect.x as usize,
+                    rect.y as usize,
+                    &truncate(&labels, rect.w as usize),
+                    theme::style_fg(),
+                );
+                Rect::new(rect.x, rect.y + 1, rect.w, rect.h - 1)
+            } else {
+                rect
+            };
             if *chrome_hidden && input.is_none() {
                 if !background_transparent {
                     primitives::fill_rect(surface, rect, theme::style_fg());

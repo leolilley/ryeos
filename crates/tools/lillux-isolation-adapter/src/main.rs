@@ -228,6 +228,33 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
             Ok((authority.inherited_fd, channel.target_fd))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let character_devices = request
+        .plan
+        .character_devices
+        .iter()
+        .map(|device| {
+            let authority = authorities
+                .get(&device.source)
+                .ok_or_else(|| "character-device authority disappeared".to_string())?;
+            if authority.purpose != IsolationAuthorityPurpose::CharacterDevice {
+                return Err("character-device authority has the wrong purpose".to_string());
+            }
+            Ok(lillux::LinuxSandboxCharacterDevice {
+                source_fd: authority.inherited_fd,
+                destination: PathBuf::from(device.destination.as_str()),
+                access: match device.access {
+                    ryeos_isolation_protocol::IsolationCharacterDeviceAccess::ReadOnly => {
+                        lillux::CharacterDeviceAccess::ReadOnly
+                    }
+                    ryeos_isolation_protocol::IsolationCharacterDeviceAccess::ReadWrite => {
+                        lillux::CharacterDeviceAccess::ReadWrite
+                    }
+                },
+                major: device.major,
+                minor: device.minor,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let lifecycle = match request.lifecycle {
         AdapterLaunchLifecycle::Run => lillux::LinuxSandboxLifecycle::Run,
         AdapterLaunchLifecycle::AwaitAttachment {
@@ -286,6 +313,7 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
             }
         },
         minimal_devices: true,
+        character_devices,
         target_channels,
         lifecycle,
         contain_process_group: request.plan.shared_process_group,
@@ -538,6 +566,9 @@ fn supported_capabilities(
     }
     if inspection.minimal_devices {
         capabilities.insert(IsolationCapability::DevicesMinimal);
+    }
+    if inspection.character_devices {
+        capabilities.insert(IsolationCapability::DevicesCharacterGrant);
     }
     if inspection.exact_environment {
         capabilities.insert(IsolationCapability::EnvironmentExact);

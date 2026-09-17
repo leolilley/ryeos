@@ -201,6 +201,23 @@ impl ExactProcessIdentity {
         }
         Ok(())
     }
+
+    /// Portable opaque digest for this exact process occurrence. Application
+    /// layers may bind evidence to the digest without interpreting kernel
+    /// birth coordinates or reproducing their platform-specific semantics.
+    pub fn incarnation_digest(&self) -> Result<String, String> {
+        self.validate()?;
+        let value = serde_json::json!({
+            "version": 1,
+            "boot_identity": self.boot_id,
+            "target_pid": self.target_pid,
+            "target_birth": self.target_start_time_ticks,
+            "group_leader_pid": self.group_leader_pid,
+            "group_leader_birth": self.group_leader_start_time_ticks,
+        });
+        let canonical = crate::canonical_json(&value).map_err(|error| error.to_string())?;
+        Ok(crate::sha256_hex(canonical.as_bytes()))
+    }
 }
 
 /// Prepare this controller for the existing exact process-group lifecycle.

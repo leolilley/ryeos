@@ -881,7 +881,13 @@ fn build_engine_for_roots_with_isolation(
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)
         .with_launch_preparers(launch_preparers)
-        .with_host_env(execution_policy.host_env_bindings()?);
+        .with_host_env(execution_policy.host_env_bindings()?)
+        .with_execution_resource_policy(
+            execution_policy
+                .resource_authority
+                .as_ref()
+                .map(|policy| policy.admission.clone()),
+        );
 
     Ok((engine, isolation))
 }

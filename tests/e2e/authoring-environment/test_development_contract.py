@@ -490,6 +490,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
 
     def test_python_runtime_uses_admitted_prefix_not_protected_environment(self):
         runtime = load(".ai/tools/ryeos/development/authoring-environment-production/runtime.yaml")
+        self.assertEqual(runtime["source_scope"]["load_roots"], ["item_directory"])
         for environment in (runtime["config"]["env"], runtime["env_config"]["env"],
                             runtime["env_config"]["env_paths"]):
             self.assertNotIn("PYTHONHOME", environment)

@@ -972,6 +972,9 @@ mod tests {
             persistent_sessions: Arc::new(
                 ryeos_app::persistent_session::PersistentSessionPool::new(),
             ),
+            execution_resources: Arc::new(
+                ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
+            ),
         };
         (tmpdir, state)
     }

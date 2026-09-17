@@ -542,6 +542,9 @@ mod tests {
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                 network_authority_ceiling:
                     ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                target_requirement: None,
+                resource_authority_ceiling:
+                    ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
                 runtime_data: Default::default(),
                 required_secrets: Vec::new(),
                 runtime_facts: Default::default(),
@@ -750,6 +753,9 @@ mod tests {
                         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                     network_authority_ceiling:
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                    target_requirement: None,
+                    resource_authority_ceiling:
+                        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
@@ -782,6 +788,9 @@ mod tests {
                         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                     network_authority_ceiling:
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                    target_requirement: None,
+                    resource_authority_ceiling:
+                        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
@@ -807,6 +816,9 @@ mod tests {
                         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                     network_authority_ceiling:
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                    target_requirement: None,
+                    resource_authority_ceiling:
+                        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
                     runtime_data: Default::default(),
                     required_secrets: Vec::new(),
                     runtime_facts: Default::default(),
@@ -841,6 +853,9 @@ mod tests {
                     ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
                 network_authority_ceiling:
                     ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
+                target_requirement: None,
+                resource_authority_ceiling:
+                    ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
                 runtime_data,
                 required_secrets: vec![super::super::launch_preparation::PreparedSecret {
                     name: "DO_NOT_LOG_SECRET_NAME".to_string(),

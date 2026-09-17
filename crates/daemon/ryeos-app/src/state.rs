@@ -134,6 +134,10 @@ pub struct AppState {
     pub accounting: Option<Arc<crate::accounting_db::AccountingDb>>,
     /// Meaning-blind daemon ownership for admitted persistent subprocesses.
     pub persistent_sessions: Arc<crate::persistent_session::PersistentSessionPool>,
+    /// Immutable observation of the resources admitted by the retained node
+    /// policy generation. Allocation remains owned by exact durable process
+    /// occurrences, not by this selection catalog.
+    pub execution_resources: Arc<crate::execution_resources::ExecutionResourcePool>,
 }
 
 #[derive(Debug, Serialize)]

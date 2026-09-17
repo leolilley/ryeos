@@ -146,7 +146,7 @@ for image in "${daemon_images[@]}"; do
     fi
 done
 
-for stage in ryeos-standard ryeos-central-host ryeos-hosted-workflow; do
+for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow; do
     final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
     if ! grep -Eqi '^run .*apt-get .*install .*tini([[:space:]]|$)|^copy .* /usr/bin/tini([[:space:]]|$)' <<<"$final_stage"; then
         # The named final stages inherit the separately asserted runtime base.
@@ -216,6 +216,7 @@ assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.central-host central-host
 assert_runtime_bundle_inventory Dockerfile.release standard ryeos-standard
 assert_runtime_bundle_inventory Dockerfile.release central-host ryeos-central-host
+assert_runtime_bundle_inventory Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_bundle_inventory Dockerfile.release hosted-workflow ryeos-hosted-workflow
 
 assert_runtime_init_profile() {
@@ -248,6 +249,7 @@ assert_runtime_init_profile Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_init_profile Dockerfile.central-host central-host
 assert_runtime_init_profile Dockerfile.release standard ryeos-standard
 assert_runtime_init_profile Dockerfile.release central-host ryeos-central-host
+assert_runtime_init_profile Dockerfile.release local-inference ryeos-local-inference
 assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-workflow
 
 # The shared entrypoint consumes only a generic selector and must not infer
@@ -336,7 +338,7 @@ for image in "${daemon_images[@]}"; do
         exit 1
     fi
 done
-for stage in ryeos-standard ryeos-central-host ryeos-hosted-workflow; do
+for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hosted-workflow; do
     final_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" "$stage")"
     runtime_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" workflow-runtime)"
     [[ "$stage" == ryeos-hosted-workflow ]] && \
@@ -367,7 +369,7 @@ if grep -Fq 'uses: docker/build-push-action@' "$release_workflow" \
     echo "release workflow contains an independent image or archive build" >&2
     exit 1
 fi
-for target in bundle-artifact standard central-host hosted-workflow; do
+for target in bundle-artifact standard central-host local-inference hosted-workflow; do
     grep -Fq "target \"$target\"" "$release_bake" || {
         echo "release Bake contract is missing target $target" >&2
         exit 1

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T03:41:16Z:ca6f19195c96cd11c7171f201b78e9bc90a24d88fc08deb5347fdfe72f6990d8:A6x4hMTTcuDB4cqP1PEx53Yx4dSCsbnsKST3isJF0i+cxbIMbBgnnc2mgv1KupaENIYa+An93wiF94SfXDmlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T07:27:13Z:762f64b7b1736a7231bd78c76bf5434fd830bed832e9d7f5354d03e865bcb089:uiSbMTdnlQ6/yYcavxJs4HntUo1axQ1684rdeytSzk37JwwpaZrpz8lqipNCVrglNMNMpjcDD150qJDJUqcHAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 

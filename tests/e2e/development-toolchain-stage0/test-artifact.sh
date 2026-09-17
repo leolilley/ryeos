@@ -30,7 +30,7 @@ done
 
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 inputs="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
-producer="$root/.ai/tools/ryeos/development/stage0-platform-production/produce.sh"
+producer="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh"
 verifier="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

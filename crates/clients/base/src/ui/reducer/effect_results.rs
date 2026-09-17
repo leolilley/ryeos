@@ -976,10 +976,14 @@ mod tests {
                 "sources": { "default": { "ref": "service:test/detail", "params": {}, "collection": "rows" } }
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec {
-            view_ref: "view:test/detail".to_string(),
-        });
-        let instance_key = core.workspace.tiles[&tile_id].instance_key.clone();
+        let tile_id = core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec {
+                view_ref: "view:test/detail".to_string(),
+            })
+            .expect("fixture layout accepts view");
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+            .instance_key
+            .clone();
         let key =
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "default")
                 .encode();
@@ -1065,10 +1069,14 @@ mod tests {
                 ]
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec {
-            view_ref: "view:test/detail".to_string(),
-        });
-        let instance_key = core.workspace.tiles[&tile_id].instance_key.clone();
+        let tile_id = core.workspaces[core.active_workspace]
+            .add_tile(ViewSpec {
+                view_ref: "view:test/detail".to_string(),
+            })
+            .expect("fixture layout accepts view");
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+            .instance_key
+            .clone();
         let k0 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "a")
             .encode();
         let k1 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key, "b").encode();

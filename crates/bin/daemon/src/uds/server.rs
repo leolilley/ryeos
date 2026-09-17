@@ -2073,6 +2073,9 @@ mod tests {
             persistent_sessions: Arc::new(
                 ryeos_app::persistent_session::PersistentSessionPool::new(),
             ),
+            execution_resources: Arc::new(
+                ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
+            ),
         };
 
         (tmpdir, state)
@@ -3435,6 +3438,12 @@ mod tests {
                     target_start_time_ticks: 10,
                     group_leader_pid: 424242,
                     group_leader_start_time_ticks: 10,
+                    resource_selections: Vec::new(),
+                    resource_operations: Vec::new(),
+                    resource_allocation_limit: None,
+                    resource_occupancy_start: None,
+                    resource_occupancy_limit: None,
+                    resource_cleanup_allowance_ms: None,
                 }),
                 metadata: None,
                 launch_metadata: Default::default(),

@@ -6,7 +6,7 @@ root="$(cd "$(dirname "$0")/../../.." && pwd)"
 contract="$root/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml"
 helper="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/runtime.sh"
 verifier="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh"
-producer="$root/.ai/tools/ryeos/development/stage0-platform-production/produce.sh"
+producer="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

@@ -1181,6 +1181,7 @@ pub(super) async fn start(
         boot_epoch,
         lifecycle_generation: credential_generation,
         control_channel_identity,
+        accounting_scope: cap.accounting_scope.clone(),
     };
     let workload_client_channel = match super::workload_client::prepare_for_dedicated_boot(
         state, cap, &identity,

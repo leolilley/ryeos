@@ -881,6 +881,11 @@ pub struct Engine {
     /// compatibility.
     pub host_env: crate::runtime::HostEnvBindings,
 
+    /// Immutable node-owned ceiling for constrained resources. Absence is
+    /// deny-all for resource-bearing targets, while ordinary CPU-only plans
+    /// remain admissible.
+    pub execution_resource_policy: Option<crate::contracts::ExecutionResourceAdmissionPolicy>,
+
     /// System bundle roots (parents of `AI_DIR`)
     pub bundle_roots: Vec<PathBuf>,
 
@@ -1048,6 +1053,7 @@ impl Engine {
             launch_preparers: LaunchPreparerRegistry::default(),
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
+            execution_resource_policy: None,
             bundle_roots,
             registered_bundle_roots: Vec::new(),
             node_config_root: None,
@@ -1711,6 +1717,49 @@ impl Engine {
     pub fn with_host_env(mut self, host_env: crate::runtime::HostEnvBindings) -> Self {
         self.host_env = host_env;
         self
+    }
+
+    pub fn with_execution_resource_policy(
+        mut self,
+        policy: Option<crate::contracts::ExecutionResourceAdmissionPolicy>,
+    ) -> Self {
+        self.execution_resource_policy = policy;
+        self
+    }
+
+    pub fn admit_execution_target(
+        &self,
+        target: Option<&crate::contracts::ExecutionTargetRequirement>,
+        authority: crate::contracts::ExecutionResourceAuthorityCeiling,
+    ) -> Result<(), EngineError> {
+        authority
+            .admits(target)
+            .map_err(|error| EngineError::IsolationPolicyRefused {
+                reason: error.to_string(),
+            })?;
+        if let Some(target) = target {
+            if target.requests_resources() {
+                self.execution_resource_policy
+                    .as_ref()
+                    .ok_or_else(|| EngineError::IsolationPolicyRefused {
+                        reason: "node execution resource authority is disabled for a resource-bearing target"
+                            .to_owned(),
+                    })?
+                    .admit(target)
+                    .map_err(|error| EngineError::IsolationPolicyRefused {
+                        reason: error.to_string(),
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_plan_resources(&self, plan: ExecutionPlan) -> Result<ExecutionPlan, EngineError> {
+        self.admit_execution_target(
+            plan.target_requirement.as_ref(),
+            plan.resource_authority_ceiling,
+        )?;
+        Ok(plan)
     }
 
     /// Resolve a canonical ref to a concrete item.
@@ -3193,7 +3242,7 @@ impl Engine {
             &ctx.subject_resolution_authority,
         )?;
 
-        crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+        let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
             item,
             root_source: None,
             parameters,
@@ -3209,7 +3258,8 @@ impl Engine {
             filesystem_authority_ceiling,
             project_authority: None,
             sealed_content,
-        })
+        })?;
+        self.admit_plan_resources(plan)
     }
 
     /// Compile a direct plan from an engine-verified subject carrier while
@@ -3238,7 +3288,7 @@ impl Engine {
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
             )?;
-            crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+            let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
                 root_source: Some(root_source),
                 parameters,
@@ -3254,7 +3304,8 @@ impl Engine {
                 filesystem_authority_ceiling,
                 project_authority: None,
                 sealed_content,
-            })
+            })?;
+            self.admit_plan_resources(plan)
         })
     }
 
@@ -3280,7 +3331,7 @@ impl Engine {
                 None,
                 &crate::contracts::SubjectResolutionAuthority::Projectless,
             )?;
-            crate::plan_builder::build_bundle_plan_with_logical_project_root(
+            let plan = crate::plan_builder::build_bundle_plan_with_logical_project_root(
                 crate::plan_builder::BuildPlanInput {
                     item,
                     root_source: Some(root_source),
@@ -3299,7 +3350,8 @@ impl Engine {
                     sealed_content,
                 },
                 logical_project_root,
-            )
+            )?;
+            self.admit_plan_resources(plan)
         })
     }
 
@@ -3354,7 +3406,7 @@ impl Engine {
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
             let roots = self.resolution_roots(Some(project_root.to_path_buf()));
             let project_content = admitted.project_content_for_root(project_root)?;
-            crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+            let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
                 root_source: None,
                 parameters,
@@ -3370,7 +3422,8 @@ impl Engine {
                 filesystem_authority_ceiling,
                 project_authority: Some((project_root, project_content)),
                 sealed_content,
-            })
+            })?;
+            self.admit_plan_resources(plan)
         })
     }
 
@@ -3482,6 +3535,19 @@ impl Engine {
         })
     }
 
+    pub fn spawn_plan_with_resources(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: Option<&lillux::CharacterDeviceSet>,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            tracing::debug!(plan_id = %plan.plan_id, "spawning plan with selected resources");
+            crate::dispatch::spawn_plan_with_resources(plan, ctx, selections, devices)
+        })
+    }
+
     /// Spawn through a scope already retained by the caller's durable launch
     /// owner. It is not selected by
     /// executable name, kind, or a fallback after ordinary spawn fails.
@@ -3493,6 +3559,25 @@ impl Engine {
     ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
         self.checked_bundle_generation(|| {
             crate::dispatch::spawn_plan_with_scope(plan, ctx, Some(scope))
+        })
+    }
+
+    pub fn spawn_plan_in_scope_with_resources(
+        &self,
+        ctx: &EngineContext,
+        plan: &ExecutionPlan,
+        scope: lillux::ProcessScope,
+        selections: &[crate::contracts::ExecutionResourceSelection],
+        devices: Option<&lillux::CharacterDeviceSet>,
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::dispatch::spawn_plan_with_scope_and_resources(
+                plan,
+                ctx,
+                Some(scope),
+                selections,
+                devices,
+            )
         })
     }
 

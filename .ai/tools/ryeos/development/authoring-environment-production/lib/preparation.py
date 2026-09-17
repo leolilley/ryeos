@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T07:00:11Z:51406f3257b7a995b224bb8ad344c55b85a825d4274ece7b11f43d12f692a327:a/zU+WhE57J3zMHHDSgGO3SqHstkxUM8TeXnlxsbZsqb5SRuk1DfbzhmaUshm0B+p1XkdpHutnjk2/B92sdrBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:51406f3257b7a995b224bb8ad344c55b85a825d4274ece7b11f43d12f692a327:i76q7oNxpTw9XbJWnJBkf6v1lYOI7s2csg3hFJQidhleQF6DppmL+GzgXuhv8/KKXg9qMQDOpfbnoB7gFTMoCQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Select admitted archives into the existing, independently authored input contract.
 
 No downloads, container access, host tool discovery, signing or publication.

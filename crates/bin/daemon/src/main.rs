@@ -1135,6 +1135,14 @@ async fn run(
             } else {
                 ryeos_app::persistent_session::PersistentSessionPool::disabled()
             };
+            let execution_policy = node_policy_snapshot.require::<
+                ryeos_app::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
+            >()?;
+            let execution_resources =
+                ryeos_app::execution_resources::ExecutionResourcePool::observe(
+                    execution_policy.resource_authority.as_ref(),
+                )
+                .context("observe node execution resources")?;
             let ignore_matcher = Arc::new(
                 node_policy_snapshot
                     .require::<ryeos_app::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
@@ -1204,6 +1212,7 @@ async fn run(
                 },
                 accounting,
                 persistent_sessions: Arc::new(persistent_sessions),
+                execution_resources: Arc::new(execution_resources),
             };
             // This is a generation cut, not a periodic repair. Settle every
             // attempt owned by the dead predecessor before any startup
@@ -3512,6 +3521,9 @@ async fn run_service_standalone(
         accounting: None,
         persistent_sessions: Arc::new(
             ryeos_app::persistent_session::PersistentSessionPool::disabled(),
+        ),
+        execution_resources: Arc::new(
+            ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
         ),
     };
 

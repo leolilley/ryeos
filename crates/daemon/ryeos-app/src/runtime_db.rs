@@ -91,6 +91,11 @@ pub struct RuntimeInfo {
     /// service response; callers only need the existing pid/pgid accounting.
     #[serde(skip_serializing)]
     pub process_identity: Option<ExecutionProcessIdentity>,
+    /// One-shot permission to release an exact held resource owner. Financial
+    /// issue is historical authority; only this live lifecycle fence can be
+    /// consumed to cross the current process occurrence's release boundary.
+    #[serde(skip_serializing)]
+    pub process_release_fence: Option<ProcessReleaseFenceState>,
     #[serde(skip_serializing)]
     pub process_dead_observed_at_ms: Option<i64>,
     #[serde(skip_serializing)]
@@ -108,6 +113,574 @@ pub struct RuntimeInfo {
     #[serde(skip_serializing)]
     pub incompatible_launch_metadata: Option<IncompatibleLaunchMetadata>,
     pub recovery_wait: Option<RecoveryWaitDisposition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessReleaseFenceState {
+    Pending,
+    Consumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessResourceOwnerRecord {
+    pub owner_incarnation: String,
+    pub owner_kind: String,
+    pub owner_coordinate: String,
+    pub process_identity: ExecutionProcessIdentity,
+    pub cleanup_proved: bool,
+    pub cleanup_evidence: Option<ProcessResourceCleanupEvidence>,
+}
+
+/// Durable pre-contact reservation for one resource-bearing process launch.
+///
+/// The allocation intent is committed before Lillux creates the process
+/// scope.  The concrete recovery identity is then bound before a held child
+/// can be spawned.  Attachment atomically consumes this row into
+/// `process_resource_owner`; recovery may only retire/discard it, never use it
+/// to launch again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessResourceReservationRecord {
+    pub owner_kind: String,
+    pub owner_coordinate: String,
+    pub daemon_generation_id: String,
+    pub selections: Vec<ryeos_engine::contracts::ExecutionResourceSelection>,
+    pub allocation_limit: u32,
+    pub scope_allocation: lillux::ProcessScopeAllocation,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
+}
+
+impl ProcessResourceReservationRecord {
+    fn validate(&self) -> Result<()> {
+        validate_bounded_runtime_text(
+            "resource reservation owner coordinate",
+            &self.owner_coordinate,
+            256,
+        )?;
+        if !matches!(
+            self.owner_kind.as_str(),
+            "thread" | "pooled_session" | "dedicated_worker"
+        ) {
+            bail!("resource reservation owner kind is not admitted");
+        }
+        if self.daemon_generation_id.is_empty() || self.selections.is_empty() {
+            bail!("resource reservation lacks an exact generation or selection");
+        }
+        if self.allocation_limit == 0
+            || usize::try_from(self.allocation_limit)? < self.selections.len()
+        {
+            bail!("resource reservation exceeds its allocation ceiling");
+        }
+        self.scope_allocation
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+        if self
+            .scope_recovery
+            .as_ref()
+            .is_some_and(|recovery| !recovery.matches_allocation(&self.scope_allocation))
+        {
+            bail!("resource reservation scope binding contradicts its allocation");
+        }
+        let mut ids = BTreeSet::new();
+        for selection in &self.selections {
+            selection.validate()?;
+            if !ids.insert(selection.stable_id.as_str()) {
+                bail!("resource reservation repeats a selected resource");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessResourceCleanupEvidence {
+    pub version: u32,
+    pub occupancy_end: Option<lillux::time::OccupancyCoordinate>,
+}
+
+impl ProcessResourceCleanupEvidence {
+    pub const VERSION: u32 = 1;
+
+    pub fn capture(process_identity: &ExecutionProcessIdentity) -> Result<Self> {
+        let occupancy_end = if process_identity.resource_operations.is_empty() {
+            None
+        } else {
+            lillux::time::occupancy_now().ok()
+        };
+        let evidence = Self {
+            version: Self::VERSION,
+            occupancy_end,
+        };
+        evidence.validate(process_identity)?;
+        Ok(evidence)
+    }
+
+    /// Record cleanup whose terminal meter coordinate was not observed.
+    /// Startup recovery uses this when the exact owner was already absent at
+    /// first inspection: daemon restart time is not process exit time and
+    /// must never be promoted into complete occupancy evidence.
+    pub fn capture_unobserved_terminal(
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<Self> {
+        let evidence = Self {
+            version: Self::VERSION,
+            occupancy_end: None,
+        };
+        evidence.validate(process_identity)?;
+        Ok(evidence)
+    }
+
+    fn validate(&self, process_identity: &ExecutionProcessIdentity) -> Result<()> {
+        if self.version != Self::VERSION {
+            bail!("unsupported process resource cleanup evidence version");
+        }
+        if let Some(end) = &self.occupancy_end {
+            let start = process_identity
+                .resource_occupancy_start
+                .as_ref()
+                .ok_or_else(|| anyhow!("resource cleanup evidence has no occupancy start"))?;
+            end.elapsed_nanoseconds_since(start)
+                .map_err(anyhow::Error::msg)
+                .context("resource cleanup evidence differs from its occupancy incarnation")?;
+        }
+        Ok(())
+    }
+}
+
+fn process_resource_reservation_id(
+    reservation: &ProcessResourceReservationRecord,
+) -> Result<String> {
+    reservation.validate()?;
+    // Binding the concrete scope is an allowed one-shot state transition, not
+    // a new allocation identity. Keep the primary key stable across it.
+    let mut allocation_identity = reservation.clone();
+    allocation_identity.scope_recovery = None;
+    let canonical = lillux::canonical_json(&serde_json::to_value(allocation_identity)?)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
+fn reserve_process_resources(
+    conn: &Connection,
+    reservation: &ProcessResourceReservationRecord,
+) -> Result<()> {
+    reservation.validate()?;
+    let reservation_id = process_resource_reservation_id(reservation)?;
+    let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
+    let requested_ids = reservation
+        .selections
+        .iter()
+        .map(|selection| selection.stable_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut attached = 0_u32;
+
+    let mut owner_statement = conn.prepare(
+        "SELECT owner_kind, owner_coordinate, process_identity
+           FROM process_resource_owner
+          WHERE cleanup_state='owned'
+          ORDER BY owner_kind, owner_coordinate",
+    )?;
+    let owner_rows = owner_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(owner_statement);
+    for (kind, coordinate, identity) in owner_rows {
+        let owner: ExecutionProcessIdentity = serde_json::from_str(&identity)
+            .with_context(|| format!("decode {kind} resource owner `{coordinate}`"))?;
+        validate_execution_process_identity_shape(&owner)?;
+        if owner
+            .resource_selections
+            .iter()
+            .any(|selection| requested_ids.contains(selection.stable_id.as_str()))
+        {
+            bail!("requested execution resource is already attached to {kind} `{coordinate}`");
+        }
+        attached = attached
+            .checked_add(u32::try_from(owner.resource_selections.len())?)
+            .context("exclusive allocation count overflow")?;
+    }
+
+    let mut reservation_statement = conn.prepare(
+        "SELECT reservation FROM process_resource_reservation ORDER BY owner_kind, owner_coordinate",
+    )?;
+    let reservation_rows = reservation_statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(reservation_statement);
+    for retained in reservation_rows {
+        let retained: ProcessResourceReservationRecord = serde_json::from_str(&retained)
+            .context("decode retained process resource reservation")?;
+        retained.validate()?;
+        if retained
+            .selections
+            .iter()
+            .any(|selection| requested_ids.contains(selection.stable_id.as_str()))
+        {
+            bail!("requested execution resource already has a pre-contact reservation");
+        }
+        attached = attached
+            .checked_add(u32::try_from(retained.selections.len())?)
+            .context("exclusive allocation count overflow")?;
+    }
+    let total = attached
+        .checked_add(u32::try_from(reservation.selections.len())?)
+        .context("exclusive allocation count overflow")?;
+    if total > reservation.allocation_limit {
+        bail!(
+            "exclusive resource allocation count {total} exceeds node-policy ceiling {}",
+            reservation.allocation_limit
+        );
+    }
+    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    conn.execute(
+        "INSERT INTO process_resource_reservation (
+            reservation_id, owner_kind, owner_coordinate, reservation, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![
+            reservation_id,
+            reservation.owner_kind,
+            reservation.owner_coordinate,
+            encoded,
+            now_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn consume_process_resource_reservation(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_coordinate: &str,
+    process_identity: &ExecutionProcessIdentity,
+) -> Result<()> {
+    if process_identity.resource_selections.is_empty() {
+        return Ok(());
+    }
+    let encoded: String = conn
+        .query_row(
+            "SELECT reservation FROM process_resource_reservation
+              WHERE owner_kind=?1 AND owner_coordinate=?2",
+            params![owner_kind, owner_coordinate],
+            |row| row.get(0),
+        )
+        .context("resource-bearing process has no pre-contact reservation")?;
+    let reservation: ProcessResourceReservationRecord = serde_json::from_str(&encoded)?;
+    reservation.validate()?;
+    if reservation.daemon_generation_id != daemon_generation_id()
+        || reservation.selections != process_identity.resource_selections
+        || Some(reservation.allocation_limit) != process_identity.resource_allocation_limit
+        || reservation.scope_recovery.as_ref() != process_identity.process_scope.as_ref()
+        || reservation.scope_recovery.is_none()
+    {
+        bail!("held process identity differs from its pre-contact resource reservation");
+    }
+    let changed = conn.execute(
+        "DELETE FROM process_resource_reservation
+          WHERE reservation_id=?1 AND owner_kind=?2 AND owner_coordinate=?3 AND reservation=?4",
+        params![
+            process_resource_reservation_id(&reservation)?,
+            owner_kind,
+            owner_coordinate,
+            encoded,
+        ],
+    )?;
+    if changed != 1 {
+        bail!("resource reservation was not consumed exactly once");
+    }
+    Ok(())
+}
+
+fn attach_process_resource_owner(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_coordinate: &str,
+    process_identity: &ExecutionProcessIdentity,
+) -> Result<()> {
+    if process_identity.resource_selections.is_empty() {
+        return Ok(());
+    }
+    validate_execution_process_identity_shape(process_identity)?;
+    validate_bounded_runtime_text("resource owner coordinate", owner_coordinate, 256)?;
+    if !matches!(owner_kind, "thread" | "pooled_session" | "dedicated_worker") {
+        bail!("resource owner kind is not admitted");
+    }
+    let owner_incarnation = process_identity.owner_incarnation_digest()?;
+    let allocation_limit = process_identity
+        .resource_allocation_limit
+        .ok_or_else(|| anyhow!("resource-bearing process identity has no allocation ceiling"))?;
+    let encoded =
+        serde_json::to_string(process_identity).context("encode exact process resource owner")?;
+    let existing: Option<(String, String, String, i64, String, String)> = conn
+        .query_row(
+            "SELECT owner_kind, owner_coordinate, process_identity, allocation_limit,
+                    cleanup_state, release_fence
+               FROM process_resource_owner WHERE owner_incarnation=?1",
+            params![owner_incarnation],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((kind, coordinate, identity, limit, cleanup, release_fence)) = existing {
+        if kind != owner_kind
+            || coordinate != owner_coordinate
+            || identity != encoded
+            || limit != i64::from(allocation_limit)
+            || cleanup != "owned"
+            || release_fence != "pending"
+        {
+            bail!("exact resource owner occurrence was reused with different authority");
+        }
+        return Ok(());
+    }
+
+    consume_process_resource_reservation(conn, owner_kind, owner_coordinate, process_identity)?;
+    let requested_ids = process_identity
+        .resource_selections
+        .iter()
+        .map(|selection| selection.stable_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut statement = conn.prepare(
+        "SELECT owner_kind, owner_coordinate, process_identity
+           FROM process_resource_owner
+          WHERE cleanup_state='owned'
+          ORDER BY owner_kind, owner_coordinate",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut attached = 0_u32;
+    for (kind, coordinate, identity) in rows {
+        let owner: ExecutionProcessIdentity = serde_json::from_str(&identity)
+            .with_context(|| format!("decode {kind} resource owner `{coordinate}`"))?;
+        validate_execution_process_identity_shape(&owner)
+            .with_context(|| format!("validate {kind} resource owner `{coordinate}`"))?;
+        for selection in &owner.resource_selections {
+            if requested_ids.contains(selection.stable_id.as_str()) {
+                bail!(
+                    "execution resource `{}` is already owned by {kind} `{coordinate}`",
+                    selection.stable_id
+                );
+            }
+        }
+        attached = attached
+            .checked_add(u32::try_from(owner.resource_selections.len())?)
+            .context("exclusive allocation count overflow")?;
+    }
+    let total = attached
+        .checked_add(u32::try_from(process_identity.resource_selections.len())?)
+        .context("exclusive allocation count overflow")?;
+    if total > allocation_limit {
+        bail!(
+            "exclusive resource allocation count {total} exceeds node-policy ceiling {allocation_limit}"
+        );
+    }
+    let now_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    conn.execute(
+        "INSERT INTO process_resource_owner (
+            owner_incarnation, owner_kind, owner_coordinate, process_identity,
+            allocation_limit, cleanup_state, release_fence, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'owned', 'pending', ?6, ?6)",
+        params![
+            owner_incarnation,
+            owner_kind,
+            owner_coordinate,
+            encoded,
+            i64::from(allocation_limit),
+            now_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+fn clear_process_resource_owner(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_coordinate: &str,
+    process_identity: &ExecutionProcessIdentity,
+) -> Result<()> {
+    if process_identity.resource_selections.is_empty() {
+        return Ok(());
+    }
+    let owner_incarnation = process_identity.owner_incarnation_digest()?;
+    let encoded = serde_json::to_string(process_identity)?;
+    let changed = conn.execute(
+        "DELETE FROM process_resource_owner
+          WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
+            AND process_identity=?4 AND cleanup_state='cleanup_proved'",
+        params![owner_incarnation, owner_kind, owner_coordinate, encoded],
+    )?;
+    if changed != 1 {
+        bail!("exact resource owner cleanup authority is absent or contradictory");
+    }
+    clear_scope_lifetime_fence_if_settled(conn)?;
+    Ok(())
+}
+
+fn clear_scope_lifetime_fence_if_settled(conn: &Connection) -> Result<()> {
+    let unsettled: i64 = conn.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM process_resource_reservation)
+          + (SELECT COUNT(*) FROM process_resource_owner
+               WHERE cleanup_state='owned'
+                 AND json_type(process_identity, '$.process_scope') IS NOT 'null')
+          + (SELECT COUNT(*) FROM dedicated_session s
+               WHERE (s.worker_scope IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM worker_process w
+                  WHERE w.placement_thread_id=s.placement_thread_id
+                    AND json_type(w.process_identity, '$.process_scope') IS NOT 'null'))
+                 AND COALESCE(json_extract(s.scope_retirement, '$.state'), '') != 'retired')",
+        [],
+        |row| row.get(0),
+    )?;
+    if unsettled == 0 {
+        conn.execute(
+            "UPDATE execution_lifetime_fence SET host_lifetime=NULL WHERE singleton=1",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn prove_process_resource_owner_cleanup(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_coordinate: &str,
+    process_identity: &ExecutionProcessIdentity,
+    evidence: &ProcessResourceCleanupEvidence,
+) -> Result<ProcessResourceCleanupEvidence> {
+    if process_identity.resource_selections.is_empty() {
+        return Ok(evidence.clone());
+    }
+    let owner_incarnation = process_identity.owner_incarnation_digest()?;
+    let encoded = serde_json::to_string(process_identity)?;
+    evidence.validate(process_identity)?;
+    let encoded_evidence = serde_json::to_string(evidence)?;
+    let changed = conn.execute(
+        "UPDATE process_resource_owner
+            SET cleanup_state='cleanup_proved', cleanup_evidence=?5, updated_at_ms=?6
+          WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
+            AND process_identity=?4 AND cleanup_state='owned'",
+        params![
+            owner_incarnation,
+            owner_kind,
+            owner_coordinate,
+            encoded,
+            encoded_evidence,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(evidence.clone());
+    }
+    let retained: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT cleanup_state, cleanup_evidence FROM process_resource_owner
+              WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
+                AND process_identity=?4",
+            params![owner_incarnation, owner_kind, owner_coordinate, encoded],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((state, Some(retained))) = retained else {
+        bail!("exact resource owner cleanup proof is absent or contradictory");
+    };
+    if state != "cleanup_proved" {
+        bail!("exact resource owner cleanup proof is absent or contradictory");
+    }
+    let retained: ProcessResourceCleanupEvidence = serde_json::from_str(&retained)?;
+    retained.validate(process_identity)?;
+    Ok(retained)
+}
+
+fn consume_resource_owner_release_fence(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_coordinate: &str,
+    process_identity: &ExecutionProcessIdentity,
+) -> Result<()> {
+    if process_identity.resource_selections.is_empty() {
+        return Ok(());
+    }
+    let owner_incarnation = process_identity.owner_incarnation_digest()?;
+    let encoded = serde_json::to_string(process_identity)
+        .context("encode process identity for owner release-fence consumption")?;
+    let changed = conn.execute(
+        "UPDATE process_resource_owner SET release_fence='consumed', updated_at_ms=?5
+          WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
+            AND process_identity=?4 AND cleanup_state='owned' AND release_fence='pending'",
+        params![
+            owner_incarnation,
+            owner_kind,
+            owner_coordinate,
+            encoded,
+            i64::try_from(lillux::time::timestamp_millis())?,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    let retained: Option<(String, String)> = conn
+        .query_row(
+            "SELECT cleanup_state, release_fence FROM process_resource_owner
+              WHERE owner_incarnation=?1 AND owner_kind=?2 AND owner_coordinate=?3
+                AND process_identity=?4",
+            params![owner_incarnation, owner_kind, owner_coordinate, encoded],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match retained
+        .as_ref()
+        .map(|(cleanup, fence)| (cleanup.as_str(), fence.as_str()))
+    {
+        Some(("owned", "consumed")) => bail!(
+            "resource-owner release fence was already consumed for {owner_kind} `{owner_coordinate}`"
+        ),
+        Some((cleanup, fence)) => bail!(
+            "resource owner {owner_kind} `{owner_coordinate}` cannot be released from cleanup={cleanup}, fence={fence}"
+        ),
+        None => bail!(
+            "resource owner {owner_kind} `{owner_coordinate}` has no matching live release fence"
+        ),
+    }
+}
+
+impl ProcessReleaseFenceState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Consumed => "consumed",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "consumed" => Ok(Self::Consumed),
+            _ => bail!("invalid process release fence state `{raw}`"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1139,6 +1712,9 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     launch_metadata TEXT,
     resume_attempts INTEGER NOT NULL DEFAULT 0,
     process_identity TEXT,
+    process_release_fence TEXT CHECK (
+        process_release_fence IS NULL OR process_release_fence IN ('pending', 'consumed')
+    ),
     process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT,
@@ -1158,6 +1734,43 @@ CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_workspace_view
     ON thread_runtime(workspace_id, workspace_view_identity, thread_id);
+
+-- One serialized allocation index over every exact resource-bearing process
+-- occurrence. Operational thread/session tables retain their own lifecycle
+-- state, but none of them independently infer device availability.
+CREATE TABLE IF NOT EXISTS process_resource_owner (
+    owner_incarnation TEXT PRIMARY KEY,
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('thread', 'pooled_session', 'dedicated_worker')),
+    owner_coordinate TEXT NOT NULL,
+    process_identity TEXT NOT NULL,
+    allocation_limit INTEGER NOT NULL CHECK (allocation_limit > 0),
+    cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('owned', 'cleanup_proved', 'unproved')),
+    release_fence TEXT NOT NULL CHECK (release_fence IN ('pending', 'consumed')),
+    cleanup_evidence TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(owner_kind, owner_coordinate),
+    CHECK ((cleanup_state='cleanup_proved') = (cleanup_evidence IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_resource_owner_coordinate
+    ON process_resource_owner(owner_kind, owner_coordinate);
+
+-- Pre-contact allocation and process-scope authority. This row is the atomic
+-- contention boundary before kernel resource creation. Attachment consumes it
+-- into process_resource_owner in the same transaction.
+CREATE TABLE IF NOT EXISTS process_resource_reservation (
+    reservation_id TEXT PRIMARY KEY,
+    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('thread', 'pooled_session', 'dedicated_worker')),
+    owner_coordinate TEXT NOT NULL,
+    reservation TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE(owner_kind, owner_coordinate)
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_resource_reservation_coordinate
+    ON process_resource_reservation(owner_kind, owner_coordinate);
 
 CREATE TABLE IF NOT EXISTS in_process_handler_reservation (
     thread_id TEXT PRIMARY KEY,
@@ -1756,7 +2369,17 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 35 makes a followed child's exact product-selection batch part of its
 // durable specification and recovery resume authority. Epoch 34 rows cannot
 // prove that newly required child authority and are never reinterpreted.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 35;
+// Epoch 37 introduces the sole durable allocation index shared by ordinary,
+// pooled-session and dedicated-worker process owners. Epoch 36 stores those
+// owners in disjoint lifecycle tables and cannot prove cross-path exclusivity.
+// Epoch 38 gives every resource owner in that shared index one exact durable
+// release fence. An issued financial operation is historical evidence, never
+// live permission to release a held process after shutdown or retirement wins.
+// Epoch 39 moves exclusive admission before kernel contact: every
+// resource-bearing launch retains an exact Lillux scope allocation and the
+// selected resource set, then atomically converts that reservation into the
+// durable process owner on attachment.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 39;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -1844,6 +2467,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "process_release_fence",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "process_dead_observed_at_ms",
                         col_type: "INTEGER",
                         pk: false,
@@ -1878,6 +2507,112 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "process_resource_owner",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_incarnation",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_coordinate",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "allocation_limit",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cleanup_state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "release_fence",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "cleanup_evidence",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "process_resource_reservation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_kind",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner_coordinate",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
                     },
                 ],
             },
@@ -3480,6 +4215,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_thread_runtime_workspace_view",
                 table: "thread_runtime",
                 columns: &["workspace_id", "workspace_view_identity", "thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_process_resource_owner_coordinate",
+                table: "process_resource_owner",
+                columns: &["owner_kind", "owner_coordinate"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_process_resource_reservation_coordinate",
+                table: "process_resource_reservation",
+                columns: &["owner_kind", "owner_coordinate"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -10183,6 +10930,12 @@ impl RuntimeDb {
         };
         let process_identity = serde_json::to_string(&record.process_identity)
             .context("serialize worker process identity")?;
+        attach_process_resource_owner(
+            &tx,
+            "dedicated_worker",
+            &record.worker_instance_id,
+            &record.process_identity,
+        )?;
         tx.execute(
             "INSERT INTO worker_process (
                 worker_instance_id, boot_identity_hash, session_capsule_hash,
@@ -10556,6 +11309,21 @@ impl RuntimeDb {
             bail!("abandoned worker fence lost its session-epoch CAS");
         }
         if cleanup_state == "reaped" {
+            let worker_identity: String = tx.query_row(
+                "SELECT process_identity FROM worker_process
+                  WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
+                    AND state='dead' AND cleanup_state='reaped'",
+                params![worker_instance_id, placement_thread_id, epoch],
+                |row| row.get(0),
+            )?;
+            let worker_identity: ExecutionProcessIdentity = serde_json::from_str(&worker_identity)
+                .context("decode reaped dedicated resource owner")?;
+            clear_process_resource_owner(
+                &tx,
+                "dedicated_worker",
+                worker_instance_id,
+                &worker_identity,
+            )?;
             tx.execute(
                 "UPDATE execution_workspace SET state='ready', process_identity=NULL, updated_at_ms=?2
                   WHERE workspace_id=(SELECT workspace_id FROM dedicated_session WHERE placement_thread_id=?1)
@@ -10702,6 +11470,31 @@ impl RuntimeDb {
             )?;
             if !retry {
                 bail!("worker settlement lost its session epoch");
+            }
+        }
+        if cleanup_state == "reaped" {
+            let worker_identity: String = tx.query_row(
+                "SELECT process_identity FROM worker_process
+                  WHERE worker_instance_id=?1 AND placement_thread_id=?2 AND boot_epoch=?3
+                    AND state='dead' AND cleanup_state='reaped'",
+                params![worker_instance_id, placement_thread_id, epoch],
+                |row| row.get(0),
+            )?;
+            let worker_identity: ExecutionProcessIdentity = serde_json::from_str(&worker_identity)
+                .context("decode settled dedicated resource owner")?;
+            let owner_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM process_resource_owner
+                  WHERE owner_kind='dedicated_worker' AND owner_coordinate=?1)",
+                [worker_instance_id],
+                |row| row.get(0),
+            )?;
+            if owner_exists {
+                clear_process_resource_owner(
+                    &tx,
+                    "dedicated_worker",
+                    worker_instance_id,
+                    &worker_identity,
+                )?;
             }
         }
         tx.commit()?;
@@ -13685,7 +14478,8 @@ impl RuntimeDb {
         let identity = serde_json::to_string(identity)?;
         Ok(self.conn.execute(
             "UPDATE thread_runtime
-                SET pid=NULL, pgid=NULL, process_identity=NULL, process_dead_observed_at_ms=NULL,
+                SET pid=NULL, pgid=NULL, process_identity=NULL, process_release_fence=NULL,
+                    process_dead_observed_at_ms=NULL,
                     workspace_id=NULL, workspace_view_identity=NULL, workspace_borrower_launch_owner=NULL
               WHERE thread_id=?1 AND workspace_id=?2 AND workspace_view_identity=?3
                 AND workspace_borrower_launch_owner=?4 AND process_identity=?5
@@ -14254,7 +15048,7 @@ impl RuntimeDb {
         } else {
             "?1 IS NULL"
         };
-        let value: i64 = self.conn.query_row(
+        let dedicated: i64 = self.conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM dedicated_session s
              WHERE {selection}
@@ -14267,7 +15061,50 @@ impl RuntimeDb {
             [chain_root_id],
             |row| row.get(0),
         )?;
-        u64::try_from(value).context("negative process-scope obligation count")
+        let reservations: i64 = if chain_root_id.is_some() {
+            // Ordinary thread coordinates are thread ids; pooled and
+            // dedicated reservations are not chain-addressable and therefore
+            // remain global recovery pins until their exact owners settle.
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM process_resource_reservation
+                  WHERE owner_kind!='thread' OR owner_coordinate IN (
+                    SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1)",
+                [chain_root_id],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM process_resource_reservation",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        let owners: i64 = if chain_root_id.is_some() {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM process_resource_owner
+                  WHERE cleanup_state='owned'
+                    AND json_type(process_identity, '$.process_scope') IS NOT 'null'
+                    AND (owner_kind!='thread' OR owner_coordinate IN (
+                      SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1))",
+                [chain_root_id],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM process_resource_owner
+                  WHERE cleanup_state='owned'
+                    AND json_type(process_identity, '$.process_scope') IS NOT 'null'",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        u64::try_from(
+            dedicated
+                .checked_add(reservations)
+                .and_then(|v| v.checked_add(owners))
+                .context("process-scope obligation count overflow")?,
+        )
+        .context("negative process-scope obligation count")
     }
 
     pub fn inspect_chain_recovery_pins(
@@ -14859,31 +15696,48 @@ impl RuntimeDb {
             bail!("refusing to attach over unverified pid/pgid residue for thread {thread_id}");
         }
 
+        let release_fence = (!process_identity.resource_selections.is_empty())
+            .then_some(ProcessReleaseFenceState::Pending.as_str());
+
+        let tx = self.conn.unchecked_transaction()?;
+        attach_process_resource_owner(&tx, "thread", thread_id, process_identity)?;
+
         // Preserve seeded launch metadata. A self-attach over UDS sends only
         // thread identity, so its internal `launch_metadata` stays empty; do
         // NOT let that clobber metadata already seeded on the row at spawn
         // (resume context / continuation spec). Update only pid/pgid in that case.
         let Some(merged_launch_metadata) = merged_launch_metadata else {
-            let updated = self.conn.execute(
+            let updated = tx.execute(
                 "UPDATE thread_runtime
                     SET pid = ?2, pgid = ?3, process_identity = ?4,
-                        resume_attempts = CASE WHEN ?5 THEN 0 ELSE resume_attempts END
+                        process_release_fence = ?5,
+                        resume_attempts = CASE WHEN ?6 THEN 0 ELSE resume_attempts END
                   WHERE thread_id = ?1
                     AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                     AND stop_requested_at_ms IS NULL",
-                params![thread_id, pid, pgid, identity_json, rearm_resume_budget],
+                params![
+                    thread_id,
+                    pid,
+                    pgid,
+                    identity_json,
+                    release_fence,
+                    rearm_resume_budget
+                ],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
             }
+            tx.commit()
+                .context("commit thread resource-owner attachment")?;
             return Ok(());
         };
         let lm_json = encode_current_launch_metadata(&merged_launch_metadata)
             .context("failed to encode launch_metadata")?;
-        let updated = self.conn.execute(
+        let updated = tx.execute(
             "UPDATE thread_runtime
                 SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5,
-                    resume_attempts = CASE WHEN ?6 THEN 0 ELSE resume_attempts END
+                    process_release_fence = ?6,
+                    resume_attempts = CASE WHEN ?7 THEN 0 ELSE resume_attempts END
               WHERE thread_id = ?1
                 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
                 AND stop_requested_at_ms IS NULL",
@@ -14893,12 +15747,354 @@ impl RuntimeDb {
                 pgid,
                 lm_json,
                 identity_json,
+                release_fence,
                 rearm_resume_budget
             ],
         )?;
         if updated == 0 {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
         }
+        tx.commit()
+            .context("commit thread resource-owner attachment")?;
+        Ok(())
+    }
+
+    /// Atomically attach a pooled process occurrence to the same durable
+    /// allocation index used by ordinary and dedicated executions.
+    pub fn attach_pooled_resource_owner(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        attach_process_resource_owner(&tx, "pooled_session", owner_coordinate, process_identity)?;
+        tx.commit()
+            .context("commit pooled resource-owner attachment")
+    }
+
+    pub fn reserve_process_resource_launch(
+        &self,
+        reservation: &ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        let lifetime = reservation
+            .scope_allocation
+            .host_lifetime()
+            .map_err(anyhow::Error::msg)?;
+        let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
+            if incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
+                bail!(
+                    "resource scope reservation requires retirement of the previous host-lifetime fence"
+                );
+            }
+        }
+        tx.execute(
+            "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
+            [&encoded_lifetime],
+        )?;
+        reserve_process_resources(&tx, reservation)?;
+        tx.commit().context("commit process resource reservation")
+    }
+
+    pub fn bind_process_resource_scope(
+        &self,
+        owner_kind: &str,
+        owner_coordinate: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let mut reservation = self
+            .process_resource_reservation(owner_kind, owner_coordinate)?
+            .ok_or_else(|| anyhow!("process resource scope binding has no allocation intent"))?;
+        if reservation.scope_recovery.is_some()
+            || reservation.daemon_generation_id != daemon_generation_id()
+            || !recovery.matches_allocation(&reservation.scope_allocation)
+        {
+            bail!("process resource scope binding lost its original allocation");
+        }
+        let expected = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
+        reservation.scope_recovery = Some(recovery.clone());
+        reservation.validate()?;
+        let bound = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
+        let changed = self.conn.execute(
+            "UPDATE process_resource_reservation SET reservation=?4, updated_at_ms=?5
+              WHERE owner_kind=?1 AND owner_coordinate=?2 AND reservation=?3",
+            params![
+                owner_kind,
+                owner_coordinate,
+                expected,
+                bound,
+                i64::try_from(lillux::time::timestamp_millis())?,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("process resource scope binding was not committed exactly once");
+        }
+        Ok(())
+    }
+
+    pub fn process_resource_reservation(
+        &self,
+        owner_kind: &str,
+        owner_coordinate: &str,
+    ) -> Result<Option<ProcessResourceReservationRecord>> {
+        let encoded: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT reservation FROM process_resource_reservation
+                  WHERE owner_kind=?1 AND owner_coordinate=?2",
+                params![owner_kind, owner_coordinate],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|encoded| {
+                let reservation: ProcessResourceReservationRecord = serde_json::from_str(&encoded)?;
+                reservation.validate()?;
+                if lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
+                    bail!("retained process resource reservation is not canonical");
+                }
+                Ok(reservation)
+            })
+            .transpose()
+    }
+
+    pub fn process_resource_reservations(&self) -> Result<Vec<ProcessResourceReservationRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT reservation FROM process_resource_reservation ORDER BY owner_kind, owner_coordinate",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|encoded| {
+                let reservation: ProcessResourceReservationRecord = serde_json::from_str(&encoded)?;
+                reservation.validate()?;
+                if lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
+                    bail!("retained process resource reservation is not canonical");
+                }
+                Ok(reservation)
+            })
+            .collect()
+    }
+
+    pub fn clear_process_resource_reservation(
+        &self,
+        reservation: &ProcessResourceReservationRecord,
+    ) -> Result<()> {
+        reservation.validate()?;
+        let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM process_resource_reservation
+              WHERE reservation_id=?1 AND owner_kind=?2 AND owner_coordinate=?3 AND reservation=?4",
+            params![
+                process_resource_reservation_id(reservation)?,
+                reservation.owner_kind,
+                reservation.owner_coordinate,
+                encoded,
+            ],
+        )?;
+        if changed != 1 {
+            bail!("exact process resource reservation is absent or contradictory");
+        }
+        clear_scope_lifetime_fence_if_settled(&tx)?;
+        tx.commit().context("clear process resource reservation")
+    }
+
+    /// Clear an owner only after its exact process occurrence was proved
+    /// cleaned. Unknown or contradictory identity never releases capacity.
+    pub fn clear_pooled_resource_owner(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        clear_process_resource_owner(
+            &self.conn,
+            "pooled_session",
+            owner_coordinate,
+            process_identity,
+        )
+    }
+
+    /// Record that the exact process occurrence can no longer use its
+    /// allocation. This releases it from admission contention while retaining
+    /// the identity needed to retry financial settlement after a crash.
+    pub fn prove_pooled_resource_owner_cleanup(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &ExecutionProcessIdentity,
+        evidence: &ProcessResourceCleanupEvidence,
+    ) -> Result<ProcessResourceCleanupEvidence> {
+        prove_process_resource_owner_cleanup(
+            &self.conn,
+            "pooled_session",
+            owner_coordinate,
+            process_identity,
+            evidence,
+        )
+    }
+
+    pub fn prove_thread_resource_owner_cleanup(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        evidence: &ProcessResourceCleanupEvidence,
+    ) -> Result<ProcessResourceCleanupEvidence> {
+        prove_process_resource_owner_cleanup(
+            &self.conn,
+            "thread",
+            thread_id,
+            process_identity,
+            evidence,
+        )
+    }
+
+    pub fn prove_dedicated_resource_owner_cleanup(
+        &self,
+        worker_instance_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        evidence: &ProcessResourceCleanupEvidence,
+    ) -> Result<ProcessResourceCleanupEvidence> {
+        prove_process_resource_owner_cleanup(
+            &self.conn,
+            "dedicated_worker",
+            worker_instance_id,
+            process_identity,
+            evidence,
+        )
+    }
+
+    pub fn consume_pooled_resource_owner_release_fence(
+        &self,
+        owner_coordinate: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        consume_resource_owner_release_fence(
+            &self.conn,
+            "pooled_session",
+            owner_coordinate,
+            process_identity,
+        )
+    }
+
+    pub fn consume_dedicated_resource_owner_release_fence(
+        &self,
+        worker_instance_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        consume_resource_owner_release_fence(
+            &self.conn,
+            "dedicated_worker",
+            worker_instance_id,
+            process_identity,
+        )
+    }
+
+    pub fn process_resource_owners(&self) -> Result<Vec<ProcessResourceOwnerRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT owner_incarnation, owner_kind, owner_coordinate, process_identity,
+                    cleanup_state, cleanup_evidence
+             FROM process_resource_owner
+             ORDER BY owner_kind, owner_coordinate",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    owner_incarnation,
+                    owner_kind,
+                    owner_coordinate,
+                    encoded,
+                    cleanup_state,
+                    cleanup_evidence,
+                )| {
+                    let process_identity: ExecutionProcessIdentity = serde_json::from_str(&encoded)
+                        .context("decode durable process resource owner")?;
+                    validate_execution_process_identity_shape(&process_identity)?;
+                    if process_identity.owner_incarnation_digest()? != owner_incarnation {
+                        bail!("durable process resource owner incarnation is contradictory");
+                    }
+                    let cleanup_evidence = cleanup_evidence
+                        .map(|encoded| {
+                            let evidence: ProcessResourceCleanupEvidence =
+                                serde_json::from_str(&encoded)
+                                    .context("decode durable resource cleanup evidence")?;
+                            evidence.validate(&process_identity)?;
+                            Ok::<_, anyhow::Error>(evidence)
+                        })
+                        .transpose()?;
+                    if (cleanup_state == "cleanup_proved") != cleanup_evidence.is_some() {
+                        bail!("durable resource cleanup state and evidence disagree");
+                    }
+                    Ok(ProcessResourceOwnerRecord {
+                        owner_incarnation,
+                        owner_kind,
+                        owner_coordinate,
+                        process_identity,
+                        cleanup_proved: cleanup_state == "cleanup_proved",
+                        cleanup_evidence,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Consume the sole release capability for one exact attached resource
+    /// owner. This lives with process ownership—not financial history—so an
+    /// idempotent `Issued` replay can never release a replacement occurrence.
+    pub fn consume_process_release_fence(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        if process_identity.resource_selections.is_empty() {
+            return Ok(());
+        }
+        let identity_json = serde_json::to_string(process_identity)
+            .context("encode process identity for release-fence consumption")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE thread_runtime SET process_release_fence='consumed'
+              WHERE thread_id=?1 AND process_identity=?2
+                AND process_release_fence='pending'",
+            params![thread_id, identity_json],
+        )?;
+        if changed != 1 {
+            let retained: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT process_release_fence FROM thread_runtime
+                      WHERE thread_id=?1 AND process_identity=?2",
+                    params![thread_id, identity_json],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match retained.flatten().as_deref() {
+                Some("consumed") => bail!(
+                    "resource-bearing process release fence was already consumed for thread {thread_id}"
+                ),
+                Some(other) => bail!(
+                    "resource-bearing process has invalid release fence `{other}` for thread {thread_id}"
+                ),
+                None => bail!(
+                    "resource-bearing process has no matching live release fence for thread {thread_id}"
+                ),
+            }
+        }
+        consume_resource_owner_release_fence(&tx, "thread", thread_id, process_identity)?;
+        tx.commit()
+            .context("commit exact thread and resource-owner release fences")?;
         Ok(())
     }
 
@@ -14936,15 +16132,24 @@ impl RuntimeDb {
     ) -> Result<bool> {
         let identity_json = serde_json::to_string(process_identity)
             .context("failed to encode process_identity for compare-and-clear")?;
-        Ok(self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE thread_runtime
                 SET pid = NULL, pgid = NULL, process_identity = NULL,
-                    process_dead_observed_at_ms = NULL
+                    process_release_fence = NULL, process_dead_observed_at_ms = NULL
               WHERE thread_id = ?1 AND process_identity = ?2
                 AND workspace_id IS NULL AND workspace_view_identity IS NULL
                 AND workspace_borrower_launch_owner IS NULL",
             params![thread_id, identity_json],
-        )? > 0)
+        )?;
+        if changed == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        clear_process_resource_owner(&tx, "thread", thread_id, process_identity)?;
+        tx.commit()
+            .context("commit exact thread resource-owner cleanup")?;
+        Ok(true)
     }
 
     /// Persist the first live-sweep observation that one exact attached
@@ -15024,7 +16229,8 @@ impl RuntimeDb {
             .conn
             .query_row(
                 "SELECT pid, pgid, launch_metadata, process_identity,
-                        process_dead_observed_at_ms, stop_requested_at_ms, stop_intent
+                        process_release_fence, process_dead_observed_at_ms,
+                        stop_requested_at_ms, stop_intent
                    FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
@@ -15032,14 +16238,16 @@ impl RuntimeDb {
                     let pgid: Option<i64> = row.get(1)?;
                     let lm_text: Option<String> = row.get(2)?;
                     let identity_text: Option<String> = row.get(3)?;
-                    let process_dead_observed_at_ms: Option<i64> = row.get(4)?;
-                    let stop_requested_at_ms: Option<i64> = row.get(5)?;
-                    let stop_intent: Option<String> = row.get(6)?;
+                    let process_release_fence: Option<String> = row.get(4)?;
+                    let process_dead_observed_at_ms: Option<i64> = row.get(5)?;
+                    let stop_requested_at_ms: Option<i64> = row.get(6)?;
+                    let stop_intent: Option<String> = row.get(7)?;
                     Ok((
                         pid,
                         pgid,
                         lm_text,
                         identity_text,
+                        process_release_fence,
                         process_dead_observed_at_ms,
                         stop_requested_at_ms,
                         stop_intent,
@@ -15052,6 +16260,7 @@ impl RuntimeDb {
             pgid,
             lm_text,
             identity_text,
+            process_release_fence,
             process_dead_observed_at_ms,
             stop_requested_at_ms,
             stop_intent,
@@ -15109,6 +16318,16 @@ impl RuntimeDb {
         if process_dead_observed_at_ms.is_some() && process_identity.is_none() {
             bail!("thread {thread_id} has a dead-process observation without an attached identity");
         }
+        let process_release_fence = process_release_fence
+            .as_deref()
+            .map(ProcessReleaseFenceState::parse)
+            .transpose()?;
+        let resource_bearing = process_identity
+            .as_ref()
+            .is_some_and(|identity| !identity.resource_selections.is_empty());
+        if resource_bearing != process_release_fence.is_some() {
+            bail!("thread {thread_id} process release fence contradicts its resource ownership");
+        }
         let stop_intent = stop_intent.as_deref().map(StopIntent::parse).transpose()?;
         if stop_requested_at_ms.is_some() != stop_intent.is_some() {
             bail!(
@@ -15120,6 +16339,7 @@ impl RuntimeDb {
             pid,
             pgid,
             process_identity,
+            process_release_fence,
             process_dead_observed_at_ms,
             stop_requested_at_ms,
             stop_intent,
@@ -23695,7 +24915,108 @@ mod tests {
             target_start_time_ticks: 10,
             group_leader_pid: pgid,
             group_leader_start_time_ticks: 20,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         }
+    }
+
+    fn resource_process_identity(
+        pid: i64,
+        pgid: i64,
+        stable_id: &str,
+        allocation_limit: u32,
+    ) -> ExecutionProcessIdentity {
+        let mut identity = fake_process_identity(pid, pgid);
+        let owner_incarnation = identity.owner_incarnation_digest().unwrap();
+        let occupancy_start = lillux::time::occupancy_now().unwrap();
+        let occupancy_limit =
+            lillux::time::OccupancyLimit::new(occupancy_start.clone(), 60_000_000_000).unwrap();
+        identity
+            .bind_execution_resources(
+                vec![ryeos_engine::contracts::ExecutionResourceSelection {
+                    stable_id: stable_id.to_owned(),
+                    class: "accelerator".to_owned(),
+                    matched_facts: std::collections::BTreeMap::new(),
+                    observation_contract_digest: "a".repeat(64),
+                    device_binding_digest: "b".repeat(64),
+                    access: ryeos_engine::contracts::ExecutionResourceAccess::DeploymentVisible,
+                    enforcement:
+                        ryeos_engine::contracts::ExecutionResourceEnforcement::DeploymentVisible,
+                    character_devices: Vec::new(),
+                }],
+                vec![ryeos_accounting::ResourceOperationBinding {
+                    version: ryeos_accounting::RESOURCE_OPERATION_BINDING_VERSION,
+                    owner_gate_id: ryeos_accounting::HexDigest::new("9".repeat(64)).unwrap(),
+                    operation_id: ryeos_accounting::HexDigest::new("c".repeat(64)).unwrap(),
+                    request_digest: ryeos_accounting::HexDigest::new("d".repeat(64)).unwrap(),
+                    owner_incarnation: ryeos_accounting::HexDigest::new(owner_incarnation).unwrap(),
+                    stable_resource_id: stable_id.to_owned(),
+                    authority_digest: ryeos_accounting::HexDigest::new("e".repeat(64)).unwrap(),
+                    meter_contract_digest: ryeos_accounting::HexDigest::new("f".repeat(64))
+                        .unwrap(),
+                    clock_contract_digest: ryeos_accounting::HexDigest::new(
+                        occupancy_start.contract_digest.clone(),
+                    )
+                    .unwrap(),
+                    maximum_occupancy_milliseconds: Some(60_000),
+                }],
+                Some(allocation_limit),
+                Some(occupancy_start),
+                Some(occupancy_limit),
+                Some(1_000),
+            )
+            .unwrap();
+        identity
+    }
+
+    fn reserve_test_resource_process(
+        db: &RuntimeDb,
+        owner_kind: &str,
+        owner_coordinate: &str,
+        identity: &mut ExecutionProcessIdentity,
+    ) -> Result<()> {
+        let host =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        identity.boot_id = host["backend"]["boot_id"].as_str().unwrap().to_owned();
+        let owner_incarnation =
+            ryeos_accounting::HexDigest::new(identity.owner_incarnation_digest()?)
+                .map_err(anyhow::Error::msg)?;
+        for operation in &mut identity.resource_operations {
+            operation.owner_incarnation = owner_incarnation.clone();
+        }
+        let name = format!("test-{}", identity.target_pid);
+        let planned = serde_json::json!({
+            "version": 2,
+            "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": host["backend"]["boot_id"],
+                "parent": {"containing_device": 1, "inode": 2}, "name": name}
+        });
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(planned.clone()).unwrap();
+        let mut bound = planned;
+        bound["version"] = 4.into();
+        bound["backend"]["directory"] =
+            serde_json::json!({"containing_device": 1, "inode": identity.target_pid});
+        let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
+        identity.process_scope = Some(recovery.clone());
+        let reservation = ProcessResourceReservationRecord {
+            owner_kind: owner_kind.to_owned(),
+            owner_coordinate: owner_coordinate.to_owned(),
+            daemon_generation_id: daemon_generation_id().to_owned(),
+            selections: identity.resource_selections.clone(),
+            allocation_limit: identity.resource_allocation_limit.unwrap(),
+            scope_allocation: allocation,
+            scope_recovery: Some(recovery),
+        };
+        db.reserve_process_resource_launch(&reservation)
     }
 
     #[test]
@@ -23714,6 +25035,287 @@ mod tests {
         assert_eq!(info.pgid, Some(5678));
         let back = info.launch_metadata.expect("launch_metadata");
         assert_eq!(back.cancellation_mode, lm.cancellation_mode);
+    }
+
+    #[test]
+    fn durable_process_identity_exclusively_owns_selected_resource() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.insert_thread_runtime("t2", "c2").unwrap();
+        let mut first = resource_process_identity(101, 101, "gpu-0", 2);
+        let mut second = resource_process_identity(202, 202, "gpu-0", 2);
+        reserve_test_resource_process(&db, "thread", "t1", &mut first).unwrap();
+        db.attach_new_process("t1", 101, 101, &first, &RuntimeLaunchMetadata::default())
+            .unwrap();
+
+        // The competing reservation fails before a second process can exist.
+        assert!(reserve_test_resource_process(&db, "thread", "t2", &mut second).is_err());
+        let error = db
+            .attach_new_process("t2", 202, 202, &second, &RuntimeLaunchMetadata::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("pre-contact reservation"));
+        assert!(
+            db.get_runtime_info("t2")
+                .unwrap()
+                .unwrap()
+                .process_identity
+                .is_none()
+        );
+
+        let evidence = ProcessResourceCleanupEvidence::capture(&first).unwrap();
+        db.prove_thread_resource_owner_cleanup("t1", &first, &evidence)
+            .unwrap();
+        assert!(db.clear_process_if_matches("t1", &first).unwrap());
+        reserve_test_resource_process(&db, "thread", "t2", &mut second).unwrap();
+        db.attach_new_process("t2", 202, 202, &second, &RuntimeLaunchMetadata::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn process_resource_reservation_binds_once_and_is_consumed_by_exact_attachment() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let mut identity = resource_process_identity(101, 101, "gpu-0", 1);
+        let host =
+            serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        identity.boot_id = host["backend"]["boot_id"].as_str().unwrap().to_owned();
+        let owner_incarnation =
+            ryeos_accounting::HexDigest::new(identity.owner_incarnation_digest().unwrap()).unwrap();
+        for operation in &mut identity.resource_operations {
+            operation.owner_incarnation = owner_incarnation.clone();
+        }
+        let planned = serde_json::json!({
+            "version": 2,
+            "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": host["backend"]["boot_id"],
+                "parent": {"containing_device": 1, "inode": 2},
+                "name": "test-101"}
+        });
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(planned.clone()).unwrap();
+        let reservation = ProcessResourceReservationRecord {
+            owner_kind: "thread".to_owned(),
+            owner_coordinate: "t1".to_owned(),
+            daemon_generation_id: daemon_generation_id().to_owned(),
+            selections: identity.resource_selections.clone(),
+            allocation_limit: 1,
+            scope_allocation: allocation,
+            scope_recovery: None,
+        };
+        db.reserve_process_resource_launch(&reservation).unwrap();
+        assert_eq!(
+            db.process_resource_reservation("thread", "t1")
+                .unwrap()
+                .unwrap()
+                .scope_recovery,
+            None
+        );
+
+        let mut bound = planned;
+        bound["version"] = 4.into();
+        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
+        let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
+        db.bind_process_resource_scope("thread", "t1", &recovery)
+            .unwrap();
+        assert_eq!(
+            db.process_resource_reservation("thread", "t1")
+                .unwrap()
+                .unwrap()
+                .scope_recovery,
+            Some(recovery.clone())
+        );
+        assert!(
+            db.bind_process_resource_scope("thread", "t1", &recovery)
+                .is_err(),
+            "a concrete scope may be bound only once"
+        );
+
+        identity.process_scope = Some(recovery);
+        db.attach_new_process(
+            "t1",
+            identity.target_pid,
+            identity.group_leader_pid,
+            &identity,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            db.process_resource_reservation("thread", "t1")
+                .unwrap()
+                .is_none(),
+            "the exact held-process attachment consumes its pre-contact reservation"
+        );
+        assert_eq!(
+            db.get_runtime_info("t1").unwrap().unwrap().process_identity,
+            Some(identity)
+        );
+    }
+
+    #[test]
+    fn pooled_and_thread_processes_share_one_resource_owner_index() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let mut pooled = resource_process_identity(101, 101, "gpu-0", 2);
+        let mut thread = resource_process_identity(202, 202, "gpu-0", 2);
+        reserve_test_resource_process(&db, "pooled_session", "pool-occurrence", &mut pooled)
+            .unwrap();
+        db.attach_pooled_resource_owner("pool-occurrence", &pooled)
+            .unwrap();
+
+        let error = db
+            .attach_new_process("t1", 202, 202, &thread, &RuntimeLaunchMetadata::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("pre-contact reservation"));
+        assert!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_identity
+                .is_none()
+        );
+
+        let wrong = resource_process_identity(303, 303, "gpu-0", 2);
+        assert!(
+            db.clear_pooled_resource_owner("pool-occurrence", &wrong)
+                .is_err()
+        );
+        let evidence = ProcessResourceCleanupEvidence::capture(&pooled).unwrap();
+        db.prove_pooled_resource_owner_cleanup("pool-occurrence", &pooled, &evidence)
+            .unwrap();
+        db.clear_pooled_resource_owner("pool-occurrence", &pooled)
+            .unwrap();
+        reserve_test_resource_process(&db, "thread", "t1", &mut thread).unwrap();
+        db.attach_new_process("t1", 202, 202, &thread, &RuntimeLaunchMetadata::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn proved_pooled_cleanup_releases_capacity_but_retains_settlement_identity() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let mut pooled = resource_process_identity(101, 101, "gpu-0", 2);
+        let mut thread = resource_process_identity(202, 202, "gpu-0", 2);
+        reserve_test_resource_process(&db, "pooled_session", "pool-occurrence", &mut pooled)
+            .unwrap();
+        db.attach_pooled_resource_owner("pool-occurrence", &pooled)
+            .unwrap();
+
+        let proposed = ProcessResourceCleanupEvidence::capture(&pooled).unwrap();
+        db.prove_pooled_resource_owner_cleanup("pool-occurrence", &pooled, &proposed)
+            .unwrap();
+        let retained = db.process_resource_owners().unwrap();
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].cleanup_proved);
+        assert_eq!(retained[0].process_identity, pooled);
+
+        reserve_test_resource_process(&db, "thread", "t1", &mut thread).unwrap();
+        db.attach_new_process("t1", 202, 202, &thread, &RuntimeLaunchMetadata::default())
+            .unwrap();
+        let wrong = resource_process_identity(303, 303, "gpu-0", 2);
+        assert!(
+            db.clear_pooled_resource_owner("pool-occurrence", &wrong)
+                .is_err()
+        );
+        db.clear_pooled_resource_owner("pool-occurrence", &pooled)
+            .unwrap();
+        assert!(
+            db.process_resource_owners()
+                .unwrap()
+                .iter()
+                .all(|owner| owner.owner_coordinate != "pool-occurrence")
+        );
+    }
+
+    #[test]
+    fn resource_process_release_fence_is_exact_and_one_shot() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "t1").unwrap();
+        let mut identity = resource_process_identity(101, 101, "gpu-0", 1);
+        reserve_test_resource_process(&db, "thread", "t1", &mut identity).unwrap();
+        db.attach_new_process("t1", 101, 101, &identity, &RuntimeLaunchMetadata::default())
+            .unwrap();
+        assert_eq!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_release_fence,
+            Some(ProcessReleaseFenceState::Pending)
+        );
+        db.consume_process_release_fence("t1", &identity).unwrap();
+        assert_eq!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_release_fence,
+            Some(ProcessReleaseFenceState::Consumed)
+        );
+        assert!(db.consume_process_release_fence("t1", &identity).is_err());
+    }
+
+    #[test]
+    fn persistent_resource_release_fences_are_exact_and_one_shot() {
+        let (_tmp, db) = fresh_db();
+        let mut pooled = resource_process_identity(101, 101, "gpu-0", 2);
+        reserve_test_resource_process(&db, "pooled_session", "pool-occurrence", &mut pooled)
+            .unwrap();
+        db.attach_pooled_resource_owner("pool-occurrence", &pooled)
+            .unwrap();
+        db.consume_pooled_resource_owner_release_fence("pool-occurrence", &pooled)
+            .unwrap();
+        assert!(
+            db.consume_pooled_resource_owner_release_fence("pool-occurrence", &pooled)
+                .is_err()
+        );
+        let wrong = resource_process_identity(102, 102, "gpu-0", 2);
+        assert!(
+            db.consume_pooled_resource_owner_release_fence("pool-occurrence", &wrong)
+                .is_err()
+        );
+
+        let mut dedicated = resource_process_identity(202, 202, "gpu-1", 2);
+        reserve_test_resource_process(&db, "dedicated_worker", "worker-occurrence", &mut dedicated)
+            .unwrap();
+        attach_process_resource_owner(
+            &db.conn,
+            "dedicated_worker",
+            "worker-occurrence",
+            &dedicated,
+        )
+        .unwrap();
+        db.consume_dedicated_resource_owner_release_fence("worker-occurrence", &dedicated)
+            .unwrap();
+        assert!(
+            db.consume_dedicated_resource_owner_release_fence("worker-occurrence", &dedicated)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn durable_process_attachment_enforces_node_allocation_ceiling() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.insert_thread_runtime("t2", "c2").unwrap();
+        let mut first = resource_process_identity(101, 101, "gpu-0", 1);
+        let mut second = resource_process_identity(202, 202, "gpu-1", 1);
+        reserve_test_resource_process(&db, "thread", "t1", &mut first).unwrap();
+        db.attach_new_process("t1", 101, 101, &first, &RuntimeLaunchMetadata::default())
+            .unwrap();
+
+        let error = reserve_test_resource_process(&db, "thread", "t2", &mut second)
+            .unwrap_err()
+            .to_string();
+        assert!(error.to_string().contains("exceeds node-policy ceiling 1"));
+        assert!(
+            db.get_runtime_info("t2")
+                .unwrap()
+                .unwrap()
+                .process_identity
+                .is_none()
+        );
     }
 
     #[test]
@@ -25489,6 +27091,12 @@ mod tests {
             target_start_time_ticks: 10,
             group_leader_pid: 12345,
             group_leader_start_time_ticks: 10,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
         };
         db.attach_workspace_creator("workspace", "T-creator", &claim.claimed_by, &identity)
             .unwrap();
@@ -25641,6 +27249,12 @@ mod tests {
                 target_start_time_ticks: 10,
                 group_leader_pid: 12345,
                 group_leader_start_time_ticks: 10,
+                resource_selections: Vec::new(),
+                resource_operations: Vec::new(),
+                resource_allocation_limit: None,
+                resource_occupancy_start: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
             },
         )
         .unwrap();

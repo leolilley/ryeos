@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T09:19:47Z:ed2e52467700ba47bcbc329cc9cbbbe4f413f97e835a3f83aeacba23eea64086:fgKIeyPKSpwfnmW8UtzeAKb1XPgc/mrraLEBj4VcCaGtCTe4fFAZYFWzeecCeRoy2HoyfPyZkCCmvVcgYS1UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-16T22:32:47Z:145f04b9faff5e1aa9fdfa5174607798ac7079cbb6a408361f7741fbc78e8678:iXKYowsOUymaFpP3/sVSBE16N0x1axHdPeg1St3a/ozsYwFlpLapE1mxvGDmo8sS4DSeYfWMmtoze/iSf+ZgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -23,7 +23,7 @@ runtime_authority:
   - create
 isolation_backends:
 - id: linux-lillux
-  protocol: ryeos.isolation-adapter/v10
+  protocol: ryeos.isolation-adapter/v11
   targets:
   - x86_64-unknown-linux-gnu
   - aarch64-unknown-linux-gnu
@@ -40,6 +40,7 @@ isolation_backends:
   - filesystem.private_tmp
   - filesystem.pid_namespace_proc
   - devices.minimal
+  - devices.character_grant
   - environment.exact
   - network.host
   - network.isolated

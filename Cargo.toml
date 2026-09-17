@@ -36,6 +36,7 @@ members = [
     "crates/host-adapters/lillux-oci-hook",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
+    "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]

@@ -1,5 +1,6 @@
 pub mod atomic_fs;
 pub mod cas;
+pub mod character_device;
 pub mod crypto;
 pub mod exec;
 pub mod host_service;
@@ -7,6 +8,7 @@ pub mod identity;
 pub mod json;
 pub mod local_ipc;
 pub mod locks;
+pub mod platform;
 pub mod process_control;
 pub mod sandbox;
 pub mod secure_fs;
@@ -14,6 +16,10 @@ pub mod signature;
 pub mod time;
 pub mod vault;
 
+pub use character_device::{
+    CharacterDeviceAccess, CharacterDeviceAuthority, CharacterDeviceIdentity, CharacterDeviceSet,
+    CharacterDeviceSpec, resource_observation_contract_digest,
+};
 pub use exec::InheritedReadonlyDocument;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
@@ -96,13 +102,14 @@ pub use secure_fs::{
 pub use sandbox::{
     LinuxOverlayMutation, LinuxOverlayMutationKind, LinuxOverlayTemplate,
     LinuxOverlayWorkspaceObservation, LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
-    LinuxSandboxExit, LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle,
-    LinuxSandboxMount, LinuxSandboxMountAccess, LinuxSandboxNetwork, LinuxSandboxOverlay,
-    LinuxSandboxOverlayDescendantMount, LinuxSandboxProcFilesystem, LinuxSandboxProcess,
-    LinuxSandboxRequest, create_linux_overlay_template, exit_with_linux_sandbox_status,
-    inspect_linux_sandbox, launch_linux_sandbox, operate_linux_overlay_workspace,
-    read_sealed_inherited_descriptor, validate_connected_unix_stream_descriptor,
-    validate_current_executable_descriptor, write_inherited_descriptor,
+    LinuxSandboxCharacterDevice, LinuxSandboxExit, LinuxSandboxFixedParentView,
+    LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount, LinuxSandboxMountAccess,
+    LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
+    LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest,
+    create_linux_overlay_template, exit_with_linux_sandbox_status, inspect_linux_sandbox,
+    launch_linux_sandbox, operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
+    validate_connected_unix_stream_descriptor, validate_current_executable_descriptor,
+    write_inherited_descriptor,
 };
 
 pub use identity::envelope::{

@@ -1,13 +1,12 @@
-//! Workspace — ordered center tiles + tiling algorithm, tile state, focus.
+//! Workspace — canonical layout tree, view state and focus.
 //!
-//! The workspace never stores a layout tree. It holds an ordered tile
-//! list and the surface-declared `TilingSpec`; `compute_layout` derives
-//! the `LayoutTree` renderers consume. Zero tiles means an empty center:
-//! the center renders nothing and the backdrop scene shows behind it.
+//! The tree owns placement. The surface's tiling recipe seeds an arrangement;
+//! it must never flatten a nested layout on an ordinary open/close/move edit.
+//! Traversal order is derived, not a second mutable placement authority.
 
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
-use crate::surface::{ArrangeSpec, InsertSpec, SideSpec, TilingModeSpec, TilingSpec};
+use crate::surface::{ArrangeSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -250,7 +249,7 @@ pub fn compute_layout(tiling: &TilingSpec, tiles: &[TileId]) -> Option<LayoutTre
 fn master_stack_layout(tiling: &TilingSpec, tiles: &[TileId]) -> Option<LayoutTree> {
     match tiles {
         [] => None,
-        [only] => Some(LayoutTree::Leaf(*only)),
+        [only] => Some(LayoutTree::single(*only)),
         _ => {
             let count = tiling.master.count.clamp(1, tiles.len());
             let (masters, stack) = tiles.split_at(count);
@@ -287,13 +286,18 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
     };
     match ids {
         [] => None,
-        [only] => Some(LayoutTree::Leaf(*only)),
-        [first, rest @ ..] => Some(LayoutTree::Split {
-            axis,
-            ratio: 1.0 / ids.len() as f32,
-            first: Box::new(LayoutTree::Leaf(*first)),
-            second: Box::new(arrange_region(rest, arrange)?),
-        }),
+        [only] => Some(LayoutTree::single(*only)),
+        _ => {
+            // Balanced subdivisions retain equal allocation without producing
+            // an arbitrarily deep tree or sub-minimum split ratios.
+            let middle = ids.len() / 2;
+            Some(LayoutTree::Split {
+                axis,
+                ratio: middle as f32 / ids.len() as f32,
+                first: Box::new(arrange_region(&ids[..middle], arrange)?),
+                second: Box::new(arrange_region(&ids[middle..], arrange)?),
+            })
+        }
     }
 }
 
@@ -326,11 +330,22 @@ pub struct LensFrame {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
+    /// Presentation identity, independent of tab order or authored label.
+    pub id: crate::ids::WorkspaceId,
+    pub title: String,
+    /// Placement and editor ephemera belong to this workspace, not to the
+    /// shell. Switching workspaces must not retarget another workspace's draft.
+    pub docks: crate::ui::model::RyeOsDockState,
+    pub dock_local: BTreeMap<RyeOsViewInstanceKey, ViewLocalState>,
+    pub focus_target: Option<crate::ui::model::RyeOsFocusTarget>,
+    /// Layout-neutral InputBufferKey values; never execution authority.
+    pub input_buffers: BTreeMap<String, crate::ui::model::RyeOsInputState>,
+    pub field_query_editing: Option<RyeOsViewInstanceKey>,
     /// The tiling algorithm (from the surface).
     pub tiling: TilingSpec,
-    /// Ordered center tiles — the single ordering authority. The layout
-    /// tree is computed from this list, never stored.
-    pub center_tiles: Vec<TileId>,
+    /// Canonical placement authority. Ordering is derived from this tree;
+    /// never add a separately mutable ordered tile list alongside it.
+    pub root: Option<LayoutTree>,
     /// Per-tile view + local state.
     pub tiles: HashMap<TileId, TileState>,
     /// Focused tile. Dangling when the center is empty.
@@ -354,8 +369,10 @@ impl Workspace {
     pub fn from_tiling(tiling: TilingSpec, views: Vec<ViewSpec>) -> Self {
         let mut center_tiles = Vec::with_capacity(views.len());
         let mut tiles = HashMap::new();
-        for (index, view) in views.into_iter().enumerate() {
-            let id = TileId::new(index as u64 + 1);
+        for view in views {
+            // Initial mounts and later opens share one identity allocator.
+            // Reusing 1..N per workspace aliases source and input coordinates.
+            let id = Self::next_tile_id();
             center_tiles.push(id);
             tiles.insert(
                 id,
@@ -366,13 +383,24 @@ impl Workspace {
                 },
             );
         }
+        let root = compute_layout(&tiling, &center_tiles);
         let focused_tile = center_tiles
             .first()
             .copied()
             .unwrap_or_else(|| TileId::new(0));
         Self {
+            id: {
+                static COUNTER: AtomicU64 = AtomicU64::new(1);
+                crate::ids::WorkspaceId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
+            },
+            title: String::new(),
+            docks: crate::ui::model::RyeOsDockState::default(),
+            dock_local: BTreeMap::new(),
+            focus_target: None,
+            input_buffers: BTreeMap::new(),
+            field_query_editing: None,
             tiling,
-            center_tiles,
+            root,
             tiles,
             focused_tile,
             lens_stack: Vec::new(),
@@ -407,28 +435,189 @@ impl Workspace {
         self.lens_stack.len()
     }
 
-    /// The computed layout tree. None when the center is empty.
+    /// A projection of the canonical layout. None when the center is empty.
     pub fn layout(&self) -> Option<LayoutTree> {
-        compute_layout(&self.tiling, &self.center_tiles)
+        self.root.clone()
+    }
+
+    /// An explicit arrange action is the only operation that reconstructs
+    /// all geometry from a tiling recipe. Ordinary edits preserve nesting.
+    pub fn arrange(&mut self, tiling: TilingSpec) -> bool {
+        let root = compute_layout(&tiling, &self.tile_ids());
+        if root.as_ref().is_some_and(|tree| tree.validate().is_err()) {
+            return false;
+        }
+        self.root = root;
+        self.tiling = tiling;
+        true
+    }
+
+    /// Relocate an existing view beside another one. Only geometry changes:
+    /// the original instance, draft key and local state are retained.
+    pub fn move_tile_beside(&mut self, tile: TileId, target: TileId, edge: FocusDirection) -> bool {
+        if tile == target {
+            return false;
+        }
+        let Some(root) = &self.root else {
+            return false;
+        };
+        if root.validate().is_err() || !root.tile_ids().contains(&tile) {
+            return false;
+        }
+        let Some(mut next) = root.clone().without_tile(tile) else {
+            return false;
+        };
+        let (axis, before) = match edge {
+            FocusDirection::Left => (SplitAxis::Horizontal, true),
+            FocusDirection::Right => (SplitAxis::Horizontal, false),
+            FocusDirection::Up => (SplitAxis::Vertical, true),
+            FocusDirection::Down => (SplitAxis::Vertical, false),
+        };
+        if !next.split_tile(target, tile, axis, before, 0.5) {
+            return false;
+        }
+        self.root = Some(next);
+        self.focus_tile(tile);
+        true
+    }
+
+    pub fn move_tile_to_group(&mut self, tile: TileId, target: TileId, index: usize) -> bool {
+        if !self
+            .root
+            .as_mut()
+            .is_some_and(|tree| tree.move_to_group(tile, target, index))
+        {
+            return false;
+        }
+        self.focus_tile(tile);
+        true
+    }
+
+    /// Transfer a mounted centre view, not a new copy of its definition. Stage
+    /// both trees first so a full/deep target leaves the source untouched.
+    pub fn move_tile_to_workspace(&mut self, destination: &mut Self, tile: TileId) -> bool {
+        if self.id == destination.id || destination.tiles.contains_key(&tile) {
+            return false;
+        }
+        let Some(state) = self.tiles.get(&tile) else {
+            return false;
+        };
+        let instance = state.instance_key.clone();
+        if self.input_buffers.keys().any(|key| {
+            crate::ui::model::InputBufferKey::storage_key_belongs_to(key, &instance)
+                && destination.input_buffers.contains_key(key)
+        }) {
+            return false;
+        }
+        let Some(source_root) = self.root.as_ref() else {
+            return false;
+        };
+        if !source_root.tile_ids().contains(&tile) {
+            return false;
+        }
+        let mut target_root = destination.root.clone();
+        if let Some(root) = &mut target_root {
+            let Some(target) = root.tile_ids().last().copied() else {
+                return false;
+            };
+            let axis = match destination.tiling.stack.arrange {
+                ArrangeSpec::Horizontal => SplitAxis::Horizontal,
+                ArrangeSpec::Vertical => SplitAxis::Vertical,
+            };
+            if !root.split_tile(target, tile, axis, false, 0.5) {
+                return false;
+            }
+        } else {
+            target_root = Some(LayoutTree::single(tile));
+        }
+        let next_source = source_root.clone().without_tile(tile);
+        let state = self.tiles.remove(&tile).expect("staged mounted view");
+        self.root = next_source;
+        destination.root = target_root;
+        destination.tiles.insert(tile, state);
+        let keys: Vec<_> = self
+            .input_buffers
+            .keys()
+            .filter(|key| crate::ui::model::InputBufferKey::storage_key_belongs_to(key, &instance))
+            .cloned()
+            .collect();
+        for key in keys {
+            destination.input_buffers.insert(
+                key.clone(),
+                self.input_buffers.remove(&key).expect("collected input"),
+            );
+        }
+        if self.field_query_editing.as_ref() == Some(&instance) {
+            destination.field_query_editing = self.field_query_editing.take();
+        }
+        if self.focused_tile == tile {
+            if let Some(next) = self
+                .root
+                .as_ref()
+                .and_then(|root| root.active_tile_ids().first().copied())
+            {
+                self.focus_tile(next);
+            } else {
+                self.focused_tile = TileId::new(0);
+                self.focus_target = None;
+            }
+        }
+        destination.focus_tile(tile);
+        true
+    }
+
+    /// Select the containing group as well as focus. Renderers must not
+    /// address a hidden tab while the model projects another member.
+    pub fn focus_tile(&mut self, tile: TileId) -> bool {
+        if !self.root.as_mut().is_some_and(|tree| tree.select_tab(tile)) {
+            return false;
+        }
+        self.focused_tile = tile;
+        self.focus_target = Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
+            tile_id: tile.0.to_string(),
+        });
+        true
+    }
+
+    pub fn cycle_view_tab(&mut self, forward: bool) -> bool {
+        let Some(tabs) = self
+            .root
+            .as_ref()
+            .and_then(|tree| tree.group_tabs(self.focused_tile))
+        else {
+            return false;
+        };
+        if tabs.len() < 2 {
+            return false;
+        }
+        let Some(index) = tabs.iter().position(|id| *id == self.focused_tile) else {
+            return false;
+        };
+        let target = tabs[wrap_index(index, if forward { 1 } else { -1 }, tabs.len())];
+        self.focus_tile(target)
     }
 
     /// Ordered center tile ids.
     pub fn tile_ids(&self) -> Vec<TileId> {
-        self.center_tiles.clone()
+        self.root
+            .as_ref()
+            .map(LayoutTree::tile_ids)
+            .unwrap_or_default()
     }
 
     /// An empty center: no tiles. The backdrop scene shows behind the
     /// (empty) center; closing the last tile returns here. There is no
-    /// "home" mode — this is a derived query over the tile list.
+    /// "home" mode — this is a query over the canonical layout.
     pub fn center_is_empty(&self) -> bool {
-        self.center_tiles.is_empty()
+        self.root.is_none()
     }
 
     /// Clear the center back to empty.
     pub fn reset_to_empty(&mut self) {
-        self.center_tiles.clear();
+        self.root = None;
         self.tiles.clear();
         self.focused_tile = TileId::new(0);
+        self.focus_target = None;
     }
 
     /// Get the focused tile's view spec.
@@ -457,17 +646,25 @@ impl Workspace {
 
     /// Allocate a fresh TileId.
     fn next_tile_id() -> TileId {
-        static COUNTER: AtomicU64 = AtomicU64::new(100);
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
         TileId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Add a center tile per the tiling's insert policy (`end` appends:
-    /// the new tile lands at the bottom of the stack region), then
-    /// focuses it. The layout recomputes implicitly.
-    pub fn add_tile(&mut self, view: ViewSpec) -> TileId {
+    /// Open alongside the last region without rearranging existing splits.
+    /// Explicit arrange operations, not ordinary insertion, own full reflow.
+    pub fn add_tile(&mut self, view: ViewSpec) -> Option<TileId> {
         let id = Self::next_tile_id();
-        match self.tiling.insert {
-            InsertSpec::End => self.center_tiles.push(id),
+        if let Some(root) = &mut self.root {
+            let target = *root.tile_ids().last().expect("nonempty tree");
+            let axis = match self.tiling.stack.arrange {
+                ArrangeSpec::Horizontal => SplitAxis::Horizontal,
+                ArrangeSpec::Vertical => SplitAxis::Vertical,
+            };
+            if !root.split_tile(target, id, axis, false, 0.5) {
+                return None;
+            }
+        } else {
+            self.root = Some(LayoutTree::single(id));
         }
         self.tiles.insert(
             id,
@@ -477,25 +674,29 @@ impl Workspace {
                 view,
             },
         );
-        self.focused_tile = id;
-        id
+        self.focus_tile(id);
+        Some(id)
     }
 
     /// Close a tile by id, keeping the remaining order. Returns false if
     /// the tile is not in the center. Closing the last tile empties the
     /// center.
     pub fn close_tile(&mut self, tile_id: TileId) -> bool {
-        let Some(position) = self.center_tiles.iter().position(|id| *id == tile_id) else {
+        let ids = self.tile_ids();
+        let Some(position) = ids.iter().position(|id| *id == tile_id) else {
             return false;
         };
-        self.center_tiles.remove(position);
+        self.root = self.root.take().and_then(|root| root.without_tile(tile_id));
         self.tiles.remove(&tile_id);
         if self.focused_tile == tile_id {
             self.focused_tile = self
-                .center_tiles
-                .get(position.min(self.center_tiles.len().saturating_sub(1)))
+                .tile_ids()
+                .get(position.min(ids.len().saturating_sub(2)))
                 .copied()
                 .unwrap_or_else(|| TileId::new(0));
+            if !self.focus_tile(self.focused_tile) {
+                self.focus_target = None;
+            }
         }
         true
     }
@@ -507,19 +708,19 @@ impl Workspace {
 
     /// Focus next tile in center order.
     pub fn focus_next(&mut self) {
-        let ids = &self.center_tiles;
+        let ids = self.tile_ids();
         if let Some(pos) = ids.iter().position(|id| *id == self.focused_tile) {
             let next = (pos + 1) % ids.len();
-            self.focused_tile = ids[next];
+            self.focus_tile(ids[next]);
         }
     }
 
     /// Focus previous tile in center order.
     pub fn focus_prev(&mut self) {
-        let ids = &self.center_tiles;
+        let ids = self.tile_ids();
         if let Some(pos) = ids.iter().position(|id| *id == self.focused_tile) {
             let prev = if pos == 0 { ids.len() - 1 } else { pos - 1 };
-            self.focused_tile = ids[prev];
+            self.focus_tile(ids[prev]);
         }
     }
 
@@ -561,27 +762,30 @@ impl Workspace {
         let Some(tile_id) = best else {
             return false;
         };
-        self.focused_tile = tile_id;
+        self.focus_tile(tile_id);
         true
     }
 
-    /// Move a tile within the ordered list (wrapping). Order is the
-    /// single authority: position decides master/stack membership.
+    /// Move a placement in traversal order while preserving nested geometry.
     pub fn move_tile_in_stack(&mut self, tile_id: TileId, delta: i32) -> bool {
-        let len = self.center_tiles.len();
+        let mut ids = self.tile_ids();
+        let len = ids.len();
         if len <= 1 {
             return false;
         }
-        let Some(index) = self.center_tiles.iter().position(|id| *id == tile_id) else {
+        let Some(index) = ids.iter().position(|id| *id == tile_id) else {
             return false;
         };
         let new_index = wrap_index(index, delta, len);
         if new_index == index {
             return false;
         }
-        let moved = self.center_tiles.remove(index);
-        self.center_tiles.insert(new_index, moved);
-        self.focused_tile = tile_id;
+        let moved = ids.remove(index);
+        ids.insert(new_index, moved);
+        if !self.root.as_mut().is_some_and(|root| root.reorder(&ids)) {
+            return false;
+        }
+        self.focus_tile(tile_id);
         true
     }
 
@@ -592,20 +796,24 @@ impl Workspace {
     /// Zoom: promote a tile to the front of the order (into the master
     /// region). If it already leads, swap it with the next tile.
     pub fn zoom_tile(&mut self, tile_id: TileId) -> bool {
-        let len = self.center_tiles.len();
+        let mut ids = self.tile_ids();
+        let len = ids.len();
         if len <= 1 {
             return false;
         }
-        let Some(index) = self.center_tiles.iter().position(|id| *id == tile_id) else {
+        let Some(index) = ids.iter().position(|id| *id == tile_id) else {
             return false;
         };
         if index == 0 {
-            self.center_tiles.swap(0, 1);
+            ids.swap(0, 1);
         } else {
-            let moved = self.center_tiles.remove(index);
-            self.center_tiles.insert(0, moved);
+            let moved = ids.remove(index);
+            ids.insert(0, moved);
         }
-        self.focused_tile = tile_id;
+        if !self.root.as_mut().is_some_and(|root| root.reorder(&ids)) {
+            return false;
+        }
+        self.focus_tile(tile_id);
         true
     }
 
@@ -613,25 +821,17 @@ impl Workspace {
         self.zoom_tile(self.focused_tile)
     }
 
-    /// Resize the master/stack boundary: left/right move the boundary in
-    /// screen space regardless of which side the master sits on.
-    pub fn resize_master(&mut self, direction: FocusDirection) -> bool {
-        if self.center_tiles.len() <= 1 {
-            return false;
-        }
-        let toward_master_growth = match (direction, self.tiling.master.side) {
-            (FocusDirection::Left, SideSpec::Left) => -0.04,
-            (FocusDirection::Left, SideSpec::Right) => 0.04,
-            (FocusDirection::Right, SideSpec::Left) => 0.04,
-            (FocusDirection::Right, SideSpec::Right) => -0.04,
-            (FocusDirection::Up | FocusDirection::Down, _) => return false,
+    /// Resize the nearest matching split around the focused region.
+    pub fn resize_focused_split(&mut self, direction: FocusDirection) -> bool {
+        let (axis, delta) = match direction {
+            FocusDirection::Left => (SplitAxis::Horizontal, -0.04),
+            FocusDirection::Right => (SplitAxis::Horizontal, 0.04),
+            FocusDirection::Up => (SplitAxis::Vertical, -0.04),
+            FocusDirection::Down => (SplitAxis::Vertical, 0.04),
         };
-        let next = (self.tiling.master.ratio + toward_master_growth).clamp(0.1, 0.9);
-        if (next - self.tiling.master.ratio).abs() < f32::EPSILON {
-            return false;
-        }
-        self.tiling.master.ratio = next;
-        true
+        self.root
+            .as_mut()
+            .is_some_and(|root| root.resize_nearest(self.focused_tile, axis, delta))
     }
 
     /// Move cursor up in the focused list view.
@@ -718,6 +918,59 @@ mod tests {
     }
 
     #[test]
+    fn cross_workspace_move_retains_instance_local_state_and_all_subject_drafts() {
+        use crate::ui::model::{InputBufferKey, RyeOsInputState};
+        let mut source = workspace_with(1);
+        let mut target = workspace_with(1);
+        let tile = source.focused_tile;
+        let instance = source.tiles[&tile].instance_key.clone();
+        let key = InputBufferKey::new(instance.clone(), "view:test/v0", "message").storage_key();
+        source.input_buffers.insert(
+            key.clone(),
+            RyeOsInputState {
+                text: "unsent".into(),
+                ..Default::default()
+            },
+        );
+        source.field_query_editing = Some(instance.clone());
+        assert!(source.move_tile_to_workspace(&mut target, tile));
+        assert!(source.root.is_none());
+        assert!(source.focus_target.is_none());
+        assert!(source.input_buffers.is_empty());
+        assert_eq!(target.focused_tile, tile);
+        assert_eq!(target.tiles[&tile].instance_key, instance);
+        assert_eq!(target.field_query_editing, Some(instance));
+        assert_eq!(target.input_buffers[&key].text, "unsent");
+        assert!(target.root.as_ref().unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn cross_workspace_move_into_full_layout_is_atomic() {
+        let mut source = workspace_with(1);
+        let mut target = workspace_with(crate::layout::MAX_LAYOUT_TILES);
+        let source_before = source.root.clone();
+        let target_before = target.root.clone();
+        let tile = source.focused_tile;
+        assert!(!source.move_tile_to_workspace(&mut target, tile));
+        assert_eq!(source.root, source_before);
+        assert_eq!(target.root, target_before);
+        assert!(source.tiles.contains_key(&tile));
+        assert!(!target.tiles.contains_key(&tile));
+    }
+
+    #[test]
+    fn initial_workspaces_and_later_opens_have_disjoint_instance_identities() {
+        let mut first = workspace_with(128);
+        let second = workspace_with(128);
+        let second_ids = second.tile_ids();
+        assert!(first.tile_ids().iter().all(|id| !second_ids.contains(id)));
+        let added = first.add_tile(bound("later")).unwrap();
+        assert!(!second_ids.contains(&added));
+        assert_eq!(first.tiles.len(), 129);
+        assert_eq!(first.root.as_ref().unwrap().validate(), Ok(()));
+    }
+
+    #[test]
     fn compute_layout_empty_center_has_no_tree() {
         assert_eq!(compute_layout(&TilingSpec::default(), &[]), None);
     }
@@ -725,7 +978,7 @@ mod tests {
     #[test]
     fn compute_layout_single_tile_is_monocle() {
         let tree = compute_layout(&TilingSpec::default(), &ids(&[7])).unwrap();
-        assert_eq!(tree, LayoutTree::Leaf(TileId::new(7)));
+        assert_eq!(tree, LayoutTree::single(TileId::new(7)));
         let rects = layout_rects(&tree, Rect::new(0, 0, 120, 40));
         assert_eq!(rects[&TileId::new(7)], Rect::new(0, 0, 120, 40));
     }
@@ -746,7 +999,7 @@ mod tests {
         assert_eq!(axis, SplitAxis::Horizontal);
         // Master takes 0.6 on the right → the stack region is first at 0.4.
         assert!((ratio - 0.4).abs() < 1e-6);
-        assert_eq!(second.as_ref(), &LayoutTree::Leaf(TileId::new(1)));
+        assert_eq!(second.as_ref(), &LayoutTree::single(TileId::new(1)));
         // The two stack tiles sit side-by-side left-to-right.
         let LayoutTree::Split {
             axis: stack_axis,
@@ -758,8 +1011,8 @@ mod tests {
             panic!("expected stack split");
         };
         assert_eq!(*stack_axis, SplitAxis::Horizontal);
-        assert_eq!(s1.as_ref(), &LayoutTree::Leaf(TileId::new(2)));
-        assert_eq!(s2.as_ref(), &LayoutTree::Leaf(TileId::new(3)));
+        assert_eq!(s1.as_ref(), &LayoutTree::single(TileId::new(2)));
+        assert_eq!(s2.as_ref(), &LayoutTree::single(TileId::new(3)));
     }
 
     #[test]
@@ -776,7 +1029,7 @@ mod tests {
             panic!("expected root split");
         };
         // Stack region (1 tile) first, master region second (side right).
-        assert_eq!(first.as_ref(), &LayoutTree::Leaf(TileId::new(3)));
+        assert_eq!(first.as_ref(), &LayoutTree::single(TileId::new(3)));
         let LayoutTree::Split {
             axis: master_axis,
             first: m1,
@@ -788,8 +1041,8 @@ mod tests {
         };
         // Vertical arrangement: stacked top-to-bottom.
         assert_eq!(*master_axis, SplitAxis::Vertical);
-        assert_eq!(m1.as_ref(), &LayoutTree::Leaf(TileId::new(1)));
-        assert_eq!(m2.as_ref(), &LayoutTree::Leaf(TileId::new(2)));
+        assert_eq!(m1.as_ref(), &LayoutTree::single(TileId::new(1)));
+        assert_eq!(m2.as_ref(), &LayoutTree::single(TileId::new(2)));
     }
 
     #[test]
@@ -806,7 +1059,7 @@ mod tests {
             panic!("expected root split");
         };
         assert!((ratio - 0.6).abs() < 1e-6);
-        assert_eq!(first.as_ref(), &LayoutTree::Leaf(TileId::new(1)));
+        assert_eq!(first.as_ref(), &LayoutTree::single(TileId::new(1)));
     }
 
     #[test]
@@ -830,7 +1083,9 @@ mod tests {
     fn add_tile_appends_to_end_and_focuses() {
         let mut ws = workspace_with(2);
         let order_before = ws.tile_ids();
-        let new_id = ws.add_tile(bound("new"));
+        let new_id = ws
+            .add_tile(bound("new"))
+            .expect("fixture layout accepts view");
         let order = ws.tile_ids();
         assert_eq!(order.len(), 3);
         assert_eq!(order[..2], order_before[..]);
@@ -875,9 +1130,11 @@ mod tests {
         let mut ws = Workspace::from_tiling(TilingSpec::default(), Vec::new());
         assert!(ws.center_is_empty());
         assert!(ws.layout().is_none());
-        let id = ws.add_tile(bound("solo"));
+        let id = ws
+            .add_tile(bound("solo"))
+            .expect("fixture layout accepts view");
         assert!(!ws.center_is_empty());
-        assert_eq!(ws.layout(), Some(LayoutTree::Leaf(id)));
+        assert_eq!(ws.layout(), Some(LayoutTree::single(id)));
     }
 
     #[test]
@@ -914,6 +1171,7 @@ mod tests {
     fn focus_next_cycles_center_order() {
         let mut ws = workspace_with(3);
         let order = ws.tile_ids();
+        ws.focused_tile = order[0];
         assert_eq!(ws.focused_tile, order[0]);
         ws.focus_next();
         assert_eq!(ws.focused_tile, order[1]);
@@ -951,26 +1209,49 @@ mod tests {
     }
 
     #[test]
-    fn resize_master_moves_boundary_in_screen_space() {
+    fn resize_changes_geometry_not_the_authored_arrange_recipe() {
         let mut ws = workspace_with(2);
-        let before = ws.tiling.master.ratio;
-        // Master defaults to the right: moving the boundary left grows it.
-        assert!(ws.resize_master(FocusDirection::Left));
-        assert!(ws.tiling.master.ratio > before);
-        assert!(ws.resize_master(FocusDirection::Right));
-        assert!((ws.tiling.master.ratio - before).abs() < 1e-6);
-        assert!(!ws.resize_master(FocusDirection::Up));
+        let recipe = ws.tiling.clone();
+        let before = ws.layout().unwrap();
+        assert!(ws.resize_focused_split(FocusDirection::Left));
+        assert_ne!(ws.layout().unwrap(), before);
+        assert_eq!(ws.tiling, recipe);
+        assert!(ws.resize_focused_split(FocusDirection::Right));
+        assert_eq!(ws.layout().unwrap(), before);
+        assert!(!ws.resize_focused_split(FocusDirection::Up));
     }
 
     #[test]
     fn focus_in_direction_uses_computed_geometry() {
-        // Two tiles: first is master (right), second is stack (left).
+        // Traversal is geometric: the left placement precedes the right.
         let mut ws = workspace_with(2);
         let order = ws.tile_ids();
         ws.focused_tile = order[0];
-        assert!(ws.focus_in_direction(FocusDirection::Left));
-        assert_eq!(ws.focused_tile, order[1]);
         assert!(ws.focus_in_direction(FocusDirection::Right));
+        assert_eq!(ws.focused_tile, order[1]);
+        assert!(ws.focus_in_direction(FocusDirection::Left));
         assert_eq!(ws.focused_tile, order[0]);
+    }
+
+    #[test]
+    fn nested_move_retains_view_state_and_rejects_invalid_destination_atomically() {
+        let mut ws = workspace_with(3);
+        let ids = ws.tile_ids();
+        let key = ws.tiles[&ids[0]].instance_key.clone();
+        ws.tiles.get_mut(&ids[0]).unwrap().local = ViewLocalState::None;
+        assert!(ws.move_tile_beside(ids[0], ids[2], FocusDirection::Down));
+        assert_eq!(ws.tiles[&ids[0]].instance_key, key);
+        assert_eq!(ws.tiles[&ids[0]].local, ViewLocalState::None);
+        ws.root.as_ref().unwrap().validate().unwrap();
+        let before = serde_json::to_value(&ws).unwrap();
+        assert!(!ws.move_tile_beside(ids[0], TileId::new(999), FocusDirection::Up));
+        assert!(!ws.move_tile_beside(ids[0], ids[0], FocusDirection::Up));
+        assert_eq!(serde_json::to_value(&ws).unwrap(), before);
+    }
+
+    #[test]
+    fn arranged_large_region_is_bounded_and_even() {
+        let ws = workspace_with(crate::layout::MAX_LAYOUT_TILES);
+        ws.root.as_ref().unwrap().validate().unwrap();
     }
 }

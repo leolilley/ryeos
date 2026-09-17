@@ -344,17 +344,21 @@ jobs:
           CANDIDATE_SUFFIX="candidate-${VERSION}-${SOURCE_SHA}-${BUILD_DATE_KEY}"
           STANDARD_VERSION="ghcr.io/leolilley/ryeos-standard:${VERSION}"
           CENTRAL_VERSION="ghcr.io/leolilley/ryeos-central-host:${VERSION}"
+          LOCAL_INFERENCE_VERSION="ghcr.io/leolilley/ryeos-local-inference:${VERSION}"
           HOSTED_WORKFLOW_VERSION="ghcr.io/leolilley/ryeos-hosted-workflow:${VERSION}"
           STANDARD_CANDIDATE="ghcr.io/leolilley/ryeos-standard:${CANDIDATE_SUFFIX}"
           CENTRAL_CANDIDATE="ghcr.io/leolilley/ryeos-central-host:${CANDIDATE_SUFFIX}"
+          LOCAL_INFERENCE_CANDIDATE="ghcr.io/leolilley/ryeos-local-inference:${CANDIDATE_SUFFIX}"
           HOSTED_WORKFLOW_CANDIDATE="ghcr.io/leolilley/ryeos-hosted-workflow:${CANDIDATE_SUFFIX}"
           {
             echo "standard_candidate_tag=$STANDARD_CANDIDATE"
             echo "central_candidate_tag=$CENTRAL_CANDIDATE"
+            echo "local_inference_candidate_tag=$LOCAL_INFERENCE_CANDIDATE"
             echo "hosted_workflow_candidate_tag=$HOSTED_WORKFLOW_CANDIDATE"
           } >> "$GITHUB_OUTPUT"
           resolve_tag "$STANDARD_VERSION" standard
           resolve_tag "$CENTRAL_VERSION" central
+          resolve_tag "$LOCAL_INFERENCE_VERSION" local_inference
           resolve_tag "$HOSTED_WORKFLOW_VERSION" hosted_workflow
 
       - name: Plan one release construction solve
@@ -364,6 +368,7 @@ jobs:
           WORKLOAD_CLIENT_ARCHIVE_EXISTS: ${{ steps.workload-client-assets.outputs.archive_exists }}
           STANDARD_EXISTS: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTS: ${{ steps.resolve-images.outputs.central_exists }}
+          LOCAL_INFERENCE_EXISTS: ${{ steps.resolve-images.outputs.local_inference_exists }}
           HOSTED_WORKFLOW_EXISTS: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
         run: |
           targets=()
@@ -371,6 +376,7 @@ jobs:
           [[ "$WORKLOAD_CLIENT_ARCHIVE_EXISTS" == true ]] || targets+=(workload-client-artifact)
           [[ "$STANDARD_EXISTS" == true ]] || targets+=(standard)
           [[ "$CENTRAL_EXISTS" == true ]] || targets+=(central-host)
+          [[ "$LOCAL_INFERENCE_EXISTS" == true ]] || targets+=(local-inference)
           [[ "$HOSTED_WORKFLOW_EXISTS" == true ]] || targets+=(hosted-workflow)
           TARGETS="$(IFS=,; printf '%s' "${targets[*]}")"
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
@@ -400,6 +406,7 @@ jobs:
             WORKLOAD_CLIENT_ARTIFACT_DIR=${{ runner.temp }}/ryeos-workload-client-artifacts
             STANDARD_TAG=${{ steps.resolve-images.outputs.standard_candidate_tag }}
             CENTRAL_HOST_TAG=${{ steps.resolve-images.outputs.central_candidate_tag }}
+            LOCAL_INFERENCE_TAG=${{ steps.resolve-images.outputs.local_inference_candidate_tag }}
             HOSTED_WORKFLOW_TAG=${{ steps.resolve-images.outputs.hosted_workflow_candidate_tag }}
 
       - name: Resolve newly baked candidate digests
@@ -412,6 +419,7 @@ jobs:
           {
             echo "standard=$(jq -r '.standard["containerimage.digest"] // empty' <<<"$METADATA")"
             echo "central=$(jq -r '.["central-host"]["containerimage.digest"] // empty' <<<"$METADATA")"
+            echo "local_inference=$(jq -r '.["local-inference"]["containerimage.digest"] // empty' <<<"$METADATA")"
             echo "hosted_workflow=$(jq -r '.["hosted-workflow"]["containerimage.digest"] // empty' <<<"$METADATA")"
           } >> "$GITHUB_OUTPUT"
 
@@ -424,11 +432,13 @@ jobs:
           COSIGN_EXPERIMENTAL: "true"
           STANDARD_DIGEST: ${{ steps.baked-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.baked-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.baked-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.baked-digests.outputs.hosted_workflow }}
         run: |
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
             "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-local-inference $LOCAL_INFERENCE_DIGEST" \
             "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
@@ -530,24 +540,31 @@ jobs:
           PUSHED_STANDARD: ${{ steps.baked-digests.outputs.standard }}
           EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
           PUSHED_CENTRAL: ${{ steps.baked-digests.outputs.central }}
+          EXISTING_LOCAL_INFERENCE: ${{ steps.resolve-images.outputs.local_inference_digest }}
+          PUSHED_LOCAL_INFERENCE: ${{ steps.baked-digests.outputs.local_inference }}
           EXISTING_HOSTED_WORKFLOW: ${{ steps.resolve-images.outputs.hosted_workflow_digest }}
           PUSHED_HOSTED_WORKFLOW: ${{ steps.baked-digests.outputs.hosted_workflow }}
         run: |
           STANDARD_DIGEST="${EXISTING_STANDARD:-$PUSHED_STANDARD}"
           CENTRAL_DIGEST="${EXISTING_CENTRAL:-$PUSHED_CENTRAL}"
+          LOCAL_INFERENCE_DIGEST="${EXISTING_LOCAL_INFERENCE:-$PUSHED_LOCAL_INFERENCE}"
           HOSTED_WORKFLOW_DIGEST="${EXISTING_HOSTED_WORKFLOW:-$PUSHED_HOSTED_WORKFLOW}"
           [[ "$STANDARD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$CENTRAL_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$LOCAL_INFERENCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$HOSTED_WORKFLOW_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ -z "$EXISTING_STANDARD" ]] && STANDARD_CURRENT=true || STANDARD_CURRENT=false
           [[ -z "$EXISTING_CENTRAL" ]] && CENTRAL_CURRENT=true || CENTRAL_CURRENT=false
+          [[ -z "$EXISTING_LOCAL_INFERENCE" ]] && LOCAL_INFERENCE_CURRENT=true || LOCAL_INFERENCE_CURRENT=false
           [[ -z "$EXISTING_HOSTED_WORKFLOW" ]] && HOSTED_WORKFLOW_CURRENT=true || HOSTED_WORKFLOW_CURRENT=false
           {
             echo "standard=$STANDARD_DIGEST"
             echo "central=$CENTRAL_DIGEST"
+            echo "local_inference=$LOCAL_INFERENCE_DIGEST"
             echo "hosted_workflow=$HOSTED_WORKFLOW_DIGEST"
             echo "standard_current=$STANDARD_CURRENT"
             echo "central_current=$CENTRAL_CURRENT"
+            echo "local_inference_current=$LOCAL_INFERENCE_CURRENT"
             echo "hosted_workflow_current=$HOSTED_WORKFLOW_CURRENT"
           } >> "$GITHUB_OUTPUT"
 
@@ -556,9 +573,11 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           STANDARD_CURRENT: ${{ steps.release-digests.outputs.standard_current }}
           CENTRAL_CURRENT: ${{ steps.release-digests.outputs.central_current }}
+          LOCAL_INFERENCE_CURRENT: ${{ steps.release-digests.outputs.local_inference_current }}
           HOSTED_WORKFLOW_CURRENT: ${{ steps.release-digests.outputs.hosted_workflow_current }}
           CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
           TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
@@ -585,18 +604,21 @@ jobs:
           }
           authenticate_recovered "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}" "$STANDARD_CURRENT"
           authenticate_recovered "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}" "$CENTRAL_CURRENT"
+          authenticate_recovered "ghcr.io/leolilley/ryeos-local-inference@${LOCAL_INFERENCE_DIGEST}" "$LOCAL_INFERENCE_CURRENT"
           authenticate_recovered "ghcr.io/leolilley/ryeos-hosted-workflow@${HOSTED_WORKFLOW_DIGEST}" "$HOSTED_WORKFLOW_CURRENT"
 
       - name: Verify release image provenance and SBOM attestations
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
         run: |
           for spec in \
             "standard ryeos-standard $STANDARD_DIGEST" \
             "central ryeos-central-host $CENTRAL_DIGEST" \
+            "local-inference ryeos-local-inference $LOCAL_INFERENCE_DIGEST" \
             "hosted-workflow ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r label image digest <<<"$spec"
@@ -616,6 +638,7 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
           TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
@@ -637,6 +660,7 @@ jobs:
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
             "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-local-inference $LOCAL_INFERENCE_DIGEST" \
             "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
@@ -653,9 +677,11 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
           STANDARD_EXISTED: ${{ steps.resolve-images.outputs.standard_exists }}
           CENTRAL_EXISTED: ${{ steps.resolve-images.outputs.central_exists }}
+          LOCAL_INFERENCE_EXISTED: ${{ steps.resolve-images.outputs.local_inference_exists }}
           HOSTED_WORKFLOW_EXISTED: ${{ steps.resolve-images.outputs.hosted_workflow_exists }}
         run: |
           promote_immutable() {
@@ -682,6 +708,7 @@ jobs:
           }
           promote_immutable ryeos-standard "$STANDARD_DIGEST" "$STANDARD_EXISTED"
           promote_immutable ryeos-central-host "$CENTRAL_DIGEST" "$CENTRAL_EXISTED"
+          promote_immutable ryeos-local-inference "$LOCAL_INFERENCE_DIGEST" "$LOCAL_INFERENCE_EXISTED"
           promote_immutable ryeos-hosted-workflow "$HOSTED_WORKFLOW_DIGEST" "$HOSTED_WORKFLOW_EXISTED"
 
       - name: Verify immutable tag bindings
@@ -689,11 +716,13 @@ jobs:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
         run: |
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
             "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-local-inference $LOCAL_INFERENCE_DIGEST" \
             "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"
@@ -712,6 +741,7 @@ jobs:
         env:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          LOCAL_INFERENCE_DIGEST: ${{ steps.release-digests.outputs.local_inference }}
           HOSTED_WORKFLOW_DIGEST: ${{ steps.release-digests.outputs.hosted_workflow }}
         run: |
           resolve_latest() {
@@ -755,6 +785,7 @@ jobs:
           }
           PREVIOUS_STANDARD="$(resolve_latest ryeos-standard)"
           PREVIOUS_CENTRAL="$(resolve_latest ryeos-central-host)"
+          PREVIOUS_LOCAL_INFERENCE="$(resolve_latest ryeos-local-inference)"
           PREVIOUS_HOSTED_WORKFLOW="$(resolve_latest ryeos-hosted-workflow)"
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-standard:latest \
@@ -785,9 +816,30 @@ jobs:
             echo "::error::Previous hosted-workflow latest digest was ${PREVIOUS_HOSTED_WORKFLOW:-absent}"
             exit 1
           fi
+          if ! docker buildx imagetools create \
+              --tag ghcr.io/leolilley/ryeos-local-inference:latest \
+              "ghcr.io/leolilley/ryeos-local-inference@${LOCAL_INFERENCE_DIGEST}"; then
+            ROLLBACK_FAILED=false
+            restore_latest ryeos-standard "$PREVIOUS_STANDARD" || ROLLBACK_FAILED=true
+            restore_latest ryeos-central-host "$PREVIOUS_CENTRAL" || ROLLBACK_FAILED=true
+            restore_latest ryeos-hosted-workflow "$PREVIOUS_HOSTED_WORKFLOW" || \
+              ROLLBACK_FAILED=true
+            if [[ -n "$PREVIOUS_LOCAL_INFERENCE" ]]; then
+              restore_latest ryeos-local-inference "$PREVIOUS_LOCAL_INFERENCE" || \
+                ROLLBACK_FAILED=true
+            fi
+            if [[ "$ROLLBACK_FAILED" == true ]]; then
+              echo "::error::Local-inference latest promotion failed and prior latest rollback was incomplete"
+            else
+              echo "::error::Local-inference latest promotion failed; prior latest tags were restored"
+            fi
+            echo "::error::Previous local-inference latest digest was ${PREVIOUS_LOCAL_INFERENCE:-absent}"
+            exit 1
+          fi
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
             "ryeos-central-host $CENTRAL_DIGEST" \
+            "ryeos-local-inference $LOCAL_INFERENCE_DIGEST" \
             "ryeos-hosted-workflow $HOSTED_WORKFLOW_DIGEST"
           do
             read -r image digest <<<"$spec"

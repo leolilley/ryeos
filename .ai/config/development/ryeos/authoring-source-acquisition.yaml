@@ -1,0 +1,33 @@
+# ryeos:signed:2026-09-17T05:41:43Z:b2ee75325e2c368b6c3196adf6d0ac480fe946592ee6c6ec21bfb9a374abb0c3:E9q5JjigLeT7pP/qp4o8+cTs3CoPoC9kB+WJrHYAcLtcVpUdXMjhuc9PqNGnys7VlW26mJaDk3RCj3mMDGN2DQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+category: development/ryeos
+name: authoring-source-acquisition
+version: "2.0.0"
+description: Exact publisher inputs for the raw authoring-environment source realization
+schema: ryeos.publisher_authoring_source.v1
+source_date_epoch: 1788566400
+artifact:
+  release_tag: ryeos-development-runtime-inputs-v1
+  archive: ryeos-authoring-source-inputs-v2.tar.gz
+  prefix: ryeos-authoring-source-inputs-v2
+  manifest_digest: c66ac1c984e0793416106cd2fefa1a45d1b00c17b5865ff751e41594a3d39857
+  entries: 55
+  total_bytes: 247886376
+bootstrap_archives:
+  - name: ryeos-authoring-tools-1.0.0-x86_64-linux-musl.tar.gz
+    url: https://github.com/leolilley/ryeos/releases/download/ryeos-development-runtime-inputs-v1/ryeos-authoring-tools-1.0.0-x86_64-linux-musl.tar.gz
+    bytes: 4798026
+    sha256: aefc06b7c85c136e398cb572c66a8f6bd48e6a0e21382f5baacdc0cc5bf5e070
+  - name: ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz
+    url: https://github.com/leolilley/ryeos/releases/download/ryeos-development-runtime-inputs-v1/ryeos-authoring-tools-1.0.0-x86_64-linux-musl-sources.tar.gz
+    bytes: 82635244
+    sha256: 560c0197ffe8a6952cb2c6e0ffd70bf3e5ab84984870df1092b7462cc6955af2
+workload_package:
+  name: codex-package-x86_64-unknown-linux-musl.tar.gz
+  url: https://releases.openai.com/codex/releases/0.147.0/codex-package-x86_64-unknown-linux-musl.tar.gz
+  bytes: 119166922
+  sha256: bd758d53d56e41dc65e045f4589df79a038ed197a011adcb52a258e6ad64cfda
+elf_authoring_package:
+  name: patchelf_0.18.0-1.4_amd64.deb
+  url: https://deb.debian.org/debian/pool/main/p/patchelf/patchelf_0.18.0-1.4_amd64.deb
+  bytes: 99720
+  sha256: 1d39a7973504a4a5eb4101293cca142b83055a5a0f94e1d4286ded2563289b92

@@ -1,0 +1,69 @@
+{
+  "schema": "ryeos.local_inference_model_source.v1",
+  "model_id": "qwen3-4b-bf16",
+  "repository": "Qwen/Qwen3-4B",
+  "revision": "3101254bbe4169895668a0e7653c3fd1f313576e",
+  "source": "https://huggingface.co/Qwen/Qwen3-4B",
+  "license": {
+    "spdx": "Apache-2.0",
+    "evidence_path": "README.md"
+  },
+  "tensor_payload_bytes": 8044936192,
+  "selected_file_bytes": 8056463813,
+  "files": [
+    {
+      "path": "config.json",
+      "role": "model_config",
+      "bytes": 726,
+      "sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a"
+    },
+    {
+      "path": "generation_config.json",
+      "role": "generation_config",
+      "bytes": 239,
+      "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "role": "weight_index",
+      "bytes": 32819,
+      "sha256": "6dc0981b8829fead746441f68f38f24c5ca4a3a66351f652c26c6df0efc43ab2"
+    },
+    {
+      "path": "model-00001-of-00003.safetensors",
+      "role": "weight_shard",
+      "bytes": 3957900840,
+      "sha256": "328a91d3122359d5547f9d79521205bc0a46e1f79a792dfe650e99fc2d651223"
+    },
+    {
+      "path": "model-00002-of-00003.safetensors",
+      "role": "weight_shard",
+      "bytes": 3987450520,
+      "sha256": "6cd087b316306a68c562436b5492edbcf6e16c6dba3a1308279caa5a58e21ca5"
+    },
+    {
+      "path": "model-00003-of-00003.safetensors",
+      "role": "weight_shard",
+      "bytes": 99630640,
+      "sha256": "e4bf436957184f4eeb86a80e9db394503f1f56446b2e6b7edeac5b81470f4ca1"
+    },
+    {
+      "path": "tokenizer.json",
+      "role": "tokenizer",
+      "bytes": 11422654,
+      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "role": "tokenizer_config",
+      "bytes": 9675,
+      "sha256": "5a7303fcb1a27ede63134a2cbd61d5282c247ca6d769ce4746d4ffa124aedd63"
+    },
+    {
+      "path": "README.md",
+      "role": "license_evidence",
+      "bytes": 15700,
+      "sha256": "6dada6f226a84a23a53bddefa85ae1fd5c979ca7013606f945029aeaeb9d7a61"
+    }
+  ]
+}

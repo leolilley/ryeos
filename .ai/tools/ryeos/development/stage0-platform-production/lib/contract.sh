@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-13T08:57:58Z:48454233da9c74f51eec0dd41fb53936c86189e9a93ec9c5c465b60624ebb319:fxpHlLvCgDwJD+nFleW5CoNPBbB1FY4ldt18g4ywNyQy2lBZ9DLaEajekJvVpDG3og0v9E9kTrWulTRGO1vIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:48454233da9c74f51eec0dd41fb53936c86189e9a93ec9c5c465b60624ebb319:uOAfuJh/5Gp26QNgfthWDVocxp9Cv26C85K8jBbNCcnOqGOLlnNBuZxV7hLkiI+QPU3yhcOrP3L2zNBPVfiGBg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 
 # Canonical parser for the deliberately flat Stage0 input Config. Acquisition
 # and offline production share this owner. Final artifact verification remains

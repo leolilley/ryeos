@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::canonical_ref::CanonicalRef;
 
 mod execution_plan;
+mod execution_target;
 mod runtime_decorations;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_plan::{
@@ -20,6 +21,14 @@ pub use execution_plan::{
     PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
     PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
     SubjectResolutionAuthority,
+};
+pub use execution_target::{
+    ExecutionResourceAccess, ExecutionResourceAdmissionPolicy, ExecutionResourceAllocation,
+    ExecutionResourceAuthorityCeiling, ExecutionResourceEnforcement, ExecutionResourceFactValue,
+    ExecutionResourceRequirement, ExecutionResourceSelection, ExecutionTargetLimits,
+    ExecutionTargetRequirement, MAX_EXECUTION_RESOURCE_COUNT,
+    MAX_EXECUTION_RESOURCE_FACT_KEY_BYTES, MAX_EXECUTION_RESOURCE_FACT_VALUE_BYTES,
+    MAX_EXECUTION_RESOURCE_FACTS, MAX_EXECUTION_TARGET_REQUIREMENTS,
 };
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,

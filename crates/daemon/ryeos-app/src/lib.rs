@@ -30,6 +30,7 @@ pub mod execution_history_reset;
 pub mod execution_identity_probe;
 pub mod execution_policy;
 pub mod execution_provenance;
+pub mod execution_resources;
 pub mod extension_state;
 pub mod external_content_admission;
 pub mod federated_follow;

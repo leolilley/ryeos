@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v10";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v11";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -152,7 +152,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v10")]
+    #[serde(rename = "ryeos.isolation-adapter/v11")]
     Current,
 }
 
@@ -210,6 +210,8 @@ pub enum IsolationCapability {
     FilesystemPidNamespaceProc,
     #[serde(rename = "devices.minimal")]
     DevicesMinimal,
+    #[serde(rename = "devices.character_grant")]
+    DevicesCharacterGrant,
     #[serde(rename = "environment.exact")]
     EnvironmentExact,
     #[serde(rename = "network.host")]
@@ -358,6 +360,7 @@ pub enum IsolationAuthorityPurpose {
     WorkspaceView,
     WorkspaceViewDescendant,
     TargetDuplexChannel,
+    CharacterDevice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,6 +527,24 @@ pub enum IsolationDeviceSurface {
     Minimal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationCharacterDeviceAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationCharacterDevice {
+    pub source: IsolationAuthorityId,
+    pub role: String,
+    pub destination: IsolationPath,
+    pub access: IsolationCharacterDeviceAccess,
+    pub major: u32,
+    pub minor: u32,
+}
+
 /// Finite node-owned process-filesystem surface, never an arbitrary host
 /// mount. PID-only procfs requires an isolated PID namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,6 +584,7 @@ pub struct IsolationPlan {
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     pub devices: IsolationDeviceSurface,
+    pub character_devices: Vec<IsolationCharacterDevice>,
     pub private_tmp: bool,
     pub proc_filesystem: IsolationProcFilesystem,
     pub pid_namespace: IsolationPidNamespace,
@@ -837,6 +859,49 @@ impl IsolationPlan {
                 ));
             }
         }
+        if self.character_devices.len() > MAX_AUTHORITIES {
+            return Err(ProtocolValidationError::new(
+                "too many character-device grants",
+            ));
+        }
+        let mut previous_role: Option<&str> = None;
+        let mut device_sources = BTreeSet::new();
+        for device in &self.character_devices {
+            validate_identifier("character-device role", &device.role)?;
+            if previous_role.is_some_and(|previous| previous >= device.role.as_str())
+                || !device_sources.insert(device.source.clone())
+            {
+                return Err(ProtocolValidationError::new(
+                    "character-device grants must be role-sorted with unique authorities",
+                ));
+            }
+            previous_role = Some(&device.role);
+            if authority_ids.get(&device.source)
+                != Some(&IsolationAuthorityPurpose::CharacterDevice)
+            {
+                return Err(ProtocolValidationError::new(
+                    "character-device authority is missing or has the wrong purpose",
+                ));
+            }
+            let destination = std::path::Path::new(device.destination.as_str());
+            if !destination.starts_with("/dev")
+                || destination == std::path::Path::new("/dev")
+                || !destinations.insert(&device.destination)
+                || self.mounts.iter().any(|mount| {
+                    let mount = std::path::Path::new(mount.destination.as_str());
+                    destination.starts_with(mount) || mount.starts_with(destination)
+                })
+                || self.project_workspace.as_ref().is_some_and(|workspace| {
+                    let workspace = std::path::Path::new(workspace.destination.as_str());
+                    destination.starts_with(workspace) || workspace.starts_with(destination)
+                })
+            {
+                return Err(ProtocolValidationError::new(
+                    "character-device destination conflicts with another namespace authority",
+                ));
+            }
+            used_authorities.insert(device.source.clone());
+        }
         if self.target_channels.len() > MAX_AUTHORITIES {
             return Err(ProtocolValidationError::new("too many target channels"));
         }
@@ -947,6 +1012,9 @@ impl IsolationPlan {
         }
         if !self.fixed_parent_views.is_empty() {
             capabilities.insert(IsolationCapability::FilesystemFixedParentViews);
+        }
+        if !self.character_devices.is_empty() {
+            capabilities.insert(IsolationCapability::DevicesCharacterGrant);
         }
         if !self.target_channels.is_empty() {
             capabilities.insert(IsolationCapability::IpcTargetUnixStream);
@@ -1741,6 +1809,7 @@ mod tests {
                 },
                 network: IsolationNetwork::Isolated,
                 devices: IsolationDeviceSurface::Minimal,
+                character_devices: Vec::new(),
                 private_tmp: true,
                 proc_filesystem: IsolationProcFilesystem::Empty,
                 pid_namespace: IsolationPidNamespace::Host,
@@ -2132,8 +2201,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v10","protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v11","protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2142,7 +2211,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2150,7 +2219,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v10","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2809,7 +2878,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v10");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v11");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()

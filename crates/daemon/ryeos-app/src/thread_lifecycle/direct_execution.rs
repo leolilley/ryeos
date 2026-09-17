@@ -28,6 +28,7 @@ fn persistent_session_spawn_error(error: ryeos_engine::error::EngineError) -> an
 pub enum SpawnItemFailureDisposition {
     BeforeContact,
     AbortedBeforeAttachment(lillux::AbortedProcess),
+    ScopeRetiredBeforeAttachment,
     ContactUncertain,
 }
 
@@ -81,6 +82,24 @@ impl SpawnItemFailure {
         }
     }
 
+    fn after_scope_cleanup(
+        error: ryeos_engine::error::EngineError,
+        cleanup: anyhow::Result<()>,
+    ) -> Self {
+        match cleanup {
+            Ok(()) => Self {
+                error: anyhow::Error::new(error).context("spawn item"),
+                disposition: SpawnItemFailureDisposition::ScopeRetiredBeforeAttachment,
+            },
+            Err(cleanup) => Self {
+                error: anyhow::Error::new(error)
+                    .context("spawn item")
+                    .context(format!("resource scope cleanup failed: {cleanup:#}")),
+                disposition: SpawnItemFailureDisposition::ContactUncertain,
+            },
+        }
+    }
+
     pub fn disposition(&self) -> SpawnItemFailureDisposition {
         self.disposition
     }
@@ -107,6 +126,23 @@ impl std::error::Error for SpawnItemFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.error.as_ref())
     }
+}
+
+fn abort_spawned_with_resource_reservation(
+    state: &crate::state::AppState,
+    reservation: Option<&crate::runtime_db::ProcessResourceReservationRecord>,
+    spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
+) -> std::result::Result<lillux::AbortedProcess, ryeos_engine::error::EngineError> {
+    let proof = spawned.abort_and_reap()?;
+    if let Some(reservation) = reservation {
+        crate::execution_resources::cleanup_process_resource_reservation(state, reservation)
+            .map_err(|error| {
+                ryeos_engine::error::EngineError::Internal(format!(
+                    "held process was reaped but resource reservation cleanup failed: {error:#}"
+                ))
+            })?;
+    }
+    Ok(proof)
 }
 
 /// Stable target-side root for project-relative paths retained in a direct
@@ -187,16 +223,28 @@ pub struct SpawnedItemAwaitingAttachment {
     /// pid/pgid so the daemon shutdown / cancel paths can route
     /// termination without re-loading the spec.
     pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
+    state: crate::state::AppState,
+    resource_reservation: Option<crate::runtime_db::ProcessResourceReservationRecord>,
     spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
 impl SpawnedItemAwaitingAttachment {
     pub fn release_after_attachment(self) -> Result<RunningItem> {
-        let running = self
-            .spawned
-            .release_after_attachment()
-            .map_err(anyhow::Error::new)
-            .context("release item after durable attachment")?;
+        let running = match (
+            self.process_identity.resource_occupancy_limit.clone(),
+            self.process_identity.resource_cleanup_allowance_ms,
+        ) {
+            (Some(limit), Some(cleanup_ms)) => {
+                self.spawned.release_after_attachment_with_occupancy(
+                    limit,
+                    std::time::Duration::from_millis(cleanup_ms),
+                )
+            }
+            (None, None) => self.spawned.release_after_attachment(),
+            _ => return Err(anyhow!("resource occupancy release contract is incomplete")),
+        }
+        .map_err(anyhow::Error::new)
+        .context("release item after durable attachment")?;
         Ok(RunningItem {
             process_identity: self.process_identity,
             launch_metadata: self.launch_metadata,
@@ -208,7 +256,30 @@ impl SpawnedItemAwaitingAttachment {
         self.spawned
             .abort_and_reap()
             .map(|_| ())
-            .map_err(|error| anyhow!("abort item awaiting attachment: {error}"))
+            .map_err(|error| anyhow!("abort item awaiting attachment: {error}"))?;
+        if let Some(reservation) = self.resource_reservation
+            && self
+                .state
+                .state_store
+                .process_resource_reservation(
+                    &reservation.owner_kind,
+                    &reservation.owner_coordinate,
+                )?
+                .is_some()
+        {
+            let evidence =
+                crate::runtime_db::ProcessResourceCleanupEvidence::capture(&self.process_identity)?;
+            crate::execution_resources::settle_process_resource_operations_after_cleanup(
+                &self.state,
+                &self.process_identity,
+                &evidence,
+            )?;
+            crate::execution_resources::cleanup_process_resource_reservation(
+                &self.state,
+                &reservation,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -225,22 +296,58 @@ pub struct RunningItem {
 /// attach ownership to their in-memory pool and release immediately.
 pub struct SpawnedPersistentSessionAwaitingAttachment {
     pub process_identity: crate::process::ExecutionProcessIdentity,
+    state: crate::state::AppState,
+    resource_reservation: Option<crate::runtime_db::ProcessResourceReservationRecord>,
     spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
 impl SpawnedPersistentSessionAwaitingAttachment {
     pub fn release_after_attachment(self) -> Result<ryeos_engine::dispatch::RunningExecution> {
-        self.spawned
-            .release_after_attachment()
-            .map_err(anyhow::Error::new)
-            .context("release daemon-owned persistent session")
+        match (
+            self.process_identity.resource_occupancy_limit.clone(),
+            self.process_identity.resource_cleanup_allowance_ms,
+        ) {
+            (Some(limit), Some(cleanup_ms)) => {
+                self.spawned.release_after_attachment_with_occupancy(
+                    limit,
+                    std::time::Duration::from_millis(cleanup_ms),
+                )
+            }
+            (None, None) => self.spawned.release_after_attachment(),
+            _ => return Err(anyhow!("resource occupancy release contract is incomplete")),
+        }
+        .map_err(anyhow::Error::new)
+        .context("release daemon-owned persistent session")
     }
 
     pub fn abort_and_reap(self) -> Result<()> {
         self.spawned
             .abort_and_reap()
             .map(|_| ())
-            .map_err(|error| anyhow!("abort persistent session awaiting attachment: {error}"))
+            .map_err(|error| anyhow!("abort persistent session awaiting attachment: {error}"))?;
+        if let Some(reservation) = self.resource_reservation
+            && self
+                .state
+                .state_store
+                .process_resource_reservation(
+                    &reservation.owner_kind,
+                    &reservation.owner_coordinate,
+                )?
+                .is_some()
+        {
+            let evidence =
+                crate::runtime_db::ProcessResourceCleanupEvidence::capture(&self.process_identity)?;
+            crate::execution_resources::settle_process_resource_operations_after_cleanup(
+                &self.state,
+                &self.process_identity,
+                &evidence,
+            )?;
+            crate::execution_resources::cleanup_process_resource_reservation(
+                &self.state,
+                &reservation,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -257,11 +364,20 @@ impl RunningItem {
 
     /// Block until subprocess completes.
     pub fn wait(self) -> ExecutionCompletion {
-        self.running.wait()
+        let limit = self.process_identity.resource_occupancy_limit.clone();
+        let cleanup = self.process_identity.resource_cleanup_allowance_ms;
+        self.running.wait_interruptible(move || {
+            crate::process::resource_service_window_exhausted(limit.as_ref(), cleanup)
+        })
     }
 
-    pub fn wait_interruptible(self, interrupted: impl FnMut() -> bool) -> ExecutionCompletion {
-        self.running.wait_interruptible(interrupted)
+    pub fn wait_interruptible(self, mut interrupted: impl FnMut() -> bool) -> ExecutionCompletion {
+        let limit = self.process_identity.resource_occupancy_limit.clone();
+        let cleanup = self.process_identity.resource_cleanup_allowance_ms;
+        self.running.wait_interruptible(move || {
+            interrupted()
+                || crate::process::resource_service_window_exhausted(limit.as_ref(), cleanup)
+        })
     }
 
     pub fn wait_with_stdout<T: Send, E: Send>(
@@ -271,7 +387,12 @@ impl RunningItem {
         ExecutionCompletion,
         std::result::Result<T, lillux::ProcessObservationError<E>>,
     ) {
-        self.running.wait_with_stdout(observe)
+        let limit = self.process_identity.resource_occupancy_limit.clone();
+        let cleanup = self.process_identity.resource_cleanup_allowance_ms;
+        self.running
+            .wait_with_stdout_interruptible(observe, move || {
+                crate::process::resource_service_window_exhausted(limit.as_ref(), cleanup)
+            })
     }
 }
 
@@ -328,6 +449,12 @@ impl PreparedRealizationCommand {
 }
 
 impl PreparedItemPlan {
+    pub fn target_requirement(
+        &self,
+    ) -> Option<&ryeos_engine::contracts::ExecutionTargetRequirement> {
+        self.plan.target_requirement.as_ref()
+    }
+
     pub fn execution_plan(&self) -> &ExecutionPlan {
         &self.plan
     }
@@ -339,11 +466,14 @@ impl PreparedItemPlan {
         &mut self,
         filesystem: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
         network: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
+        resources: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     ) {
         self.plan.filesystem_authority_ceiling =
             self.plan.filesystem_authority_ceiling.intersect(filesystem);
         self.plan.network_authority_ceiling =
             self.plan.network_authority_ceiling.intersect(network);
+        self.plan.resource_authority_ceiling =
+            self.plan.resource_authority_ceiling.intersect(resources);
     }
 
     /// A private admitted-input root intentionally omits ambient project
@@ -1381,6 +1511,11 @@ impl PreparedItemPlan {
         network_authority: ryeos_engine::protocols::descriptor::PersistentSessionNetworkAuthority,
         state_root: Option<&Path>,
         session_identity: &str,
+        accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
+        funding_owner: &str,
+        resource_owner_kind: &str,
+        resource_owner_coordinate: &str,
+        process_scope_allocation: Option<&lillux::ProcessScopeAllocation>,
         process_scope: Option<lillux::ProcessScope>,
     ) -> Result<SpawnedPersistentSessionAwaitingAttachment> {
         if session_identity.is_empty() || session_identity.len() > 128 {
@@ -1420,6 +1555,34 @@ impl PreparedItemPlan {
         {
             bail!("persistent-session spawn would narrow an incorrectly sealed plan");
         }
+        let selected_resources = state
+            .execution_resources
+            .select(self.plan.target_requirement.as_ref())?;
+        let mut prepared_scope = None;
+        let resource_reservation = match (process_scope.as_ref(), process_scope_allocation) {
+            (Some(scope), Some(allocation)) => {
+                crate::execution_resources::reserve_bound_process_resource_scope(
+                    state,
+                    &selected_resources,
+                    resource_owner_kind,
+                    resource_owner_coordinate,
+                    allocation,
+                    scope.recovery(),
+                )?
+            }
+            (None, None) => {
+                prepared_scope = crate::execution_resources::prepare_process_resource_scope(
+                    state,
+                    &selected_resources,
+                    resource_owner_kind,
+                    resource_owner_coordinate,
+                )?;
+                prepared_scope
+                    .as_ref()
+                    .map(|prepared| prepared.reservation().clone())
+            }
+            _ => bail!("persistent-session process scope authority is incomplete"),
+        };
         let context = EngineContext {
             app_root: state.config.app_root.clone(),
             isolation: state.isolation.clone(),
@@ -1469,33 +1632,128 @@ impl PreparedItemPlan {
             project_context: ProjectContext::None,
             launch_mode: LaunchMode::Wait,
         };
-        let spawned = match process_scope {
-            Some(scope) => state
-                .engine
-                .spawn_plan_in_scope(&context, &self.plan, scope),
-            None => state.engine.spawn_plan(&context, &self.plan),
-        }
-        .map_err(persistent_session_spawn_error)?;
-        #[cfg(target_os = "linux")]
-        let identity_result = crate::process::capture_execution_process_identity_from_pidfd(
-            spawned.pid() as i64,
-            Some(spawned.pgid()),
-            spawned.pidfd(),
-        )
-        .context("capture held persistent-session identity from Lillux pidfd");
-        #[cfg(not(target_os = "linux"))]
-        let identity_result = crate::process::capture_execution_process_identity(
-            spawned.pid() as i64,
-            Some(spawned.pgid()),
-        )
-        .context("capture held persistent-session identity");
+        let effective_scope = match process_scope {
+            Some(scope) => Some(scope),
+            None => prepared_scope
+                .as_mut()
+                .map(crate::execution_resources::PreparedProcessResourceScope::take_scope)
+                .transpose()?,
+        };
+        let spawned_result = match effective_scope {
+            Some(scope) => state.engine.spawn_plan_in_scope_with_resources(
+                &context,
+                &self.plan,
+                scope,
+                selected_resources.selections(),
+                selected_resources.devices().map(Arc::as_ref),
+            ),
+            None => state.engine.spawn_plan_with_resources(
+                &context,
+                &self.plan,
+                selected_resources.selections(),
+                selected_resources.devices().map(Arc::as_ref),
+            ),
+        };
+        let spawned = match spawned_result {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                let error = persistent_session_spawn_error(error);
+                if let Some(reservation) = resource_reservation.as_ref() {
+                    return Err(
+                        match crate::execution_resources::cleanup_process_resource_reservation(
+                            state,
+                            reservation,
+                        ) {
+                            Ok(()) => error,
+                            Err(cleanup) => error.context(format!(
+                                "persistent-session resource scope cleanup failed: {cleanup:#}"
+                            )),
+                        },
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let identity_result = spawned
+            .exact_process_identity()
+            .map_err(anyhow::Error::from)
+            .and_then(|identity| {
+                crate::process::execution_process_identity_from_lillux(
+                    identity,
+                    spawned.scope_recovery().cloned(),
+                )
+            })
+            .context("capture held persistent-session identity through Lillux");
         let process_identity = match identity_result {
             Ok(mut identity) => {
                 identity.process_scope = spawned.scope_recovery().cloned();
+                let financial =
+                    match crate::execution_resources::reserve_process_resource_operations(
+                        state,
+                        &selected_resources,
+                        accounting_scope,
+                        session_identity,
+                        session_identity,
+                        funding_owner,
+                        &identity,
+                    ) {
+                        Ok(financial) => financial,
+                        Err(error) => {
+                            let cleanup = abort_spawned_with_resource_reservation(
+                                state,
+                                resource_reservation.as_ref(),
+                                spawned,
+                            )
+                            .err();
+                            return Err(match cleanup {
+                            Some(cleanup) => error.context(format!(
+                                "persistent-session resource reservation cleanup failed: {cleanup}"
+                            )),
+                            None => error,
+                        });
+                        }
+                    };
+                if let Err(error) = identity.bind_execution_resources(
+                    selected_resources.selections().to_vec(),
+                    financial.bindings().to_vec(),
+                    selected_resources.max_concurrent_exclusive_allocations(),
+                    financial.occupancy_start(),
+                    financial.occupancy_limit(),
+                    financial.cleanup_allowance_ms(),
+                ) {
+                    let financial_cleanup =
+                        crate::execution_resources::abandon_prepared_process_resource_operations(
+                            state,
+                            financial.bindings(),
+                        );
+                    let cleanup = abort_spawned_with_resource_reservation(
+                        state,
+                        resource_reservation.as_ref(),
+                        spawned,
+                    )
+                    .err();
+                    let error = match financial_cleanup {
+                        Ok(()) => error,
+                        Err(financial_cleanup) => error.context(format!(
+                            "persistent-session resource binding reservation cleanup failed: {financial_cleanup:#}"
+                        )),
+                    };
+                    return Err(match cleanup {
+                        Some(cleanup) => error.context(format!(
+                            "held persistent-session resource binding cleanup failed: {cleanup}"
+                        )),
+                        None => error,
+                    });
+                }
                 identity
             }
             Err(error) => {
-                let cleanup = spawned.abort_and_reap().err();
+                let cleanup = abort_spawned_with_resource_reservation(
+                    state,
+                    resource_reservation.as_ref(),
+                    spawned,
+                )
+                .err();
                 return Err(match cleanup {
                     Some(cleanup) => {
                         // Failure before identity capture is still process
@@ -1512,6 +1770,8 @@ impl PreparedItemPlan {
         };
         Ok(SpawnedPersistentSessionAwaitingAttachment {
             process_identity,
+            state: state.clone(),
+            resource_reservation,
             spawned,
         })
     }
@@ -2090,12 +2350,17 @@ fn captured_plan_isolation_ceilings(
 /// `RYEOS_RESUME=1` is also injected so replay-aware tools can branch
 /// on cold-start vs. resume.
 pub struct SpawnItemParams<'a> {
+    pub state: &'a crate::state::AppState,
     pub engine: &'a Engine,
     pub resolved: &'a ResolvedExecutionRequest,
     /// Exact verified plan used to derive callback credential lifetime.
     pub prepared_plan: PreparedItemPlan,
     pub thread_id: &'a str,
     pub chain_root_id: &'a str,
+    /// Canonical durable owner of this exact launch attempt. Resource
+    /// operations retain it as their launch-generation fence.
+    pub launch_owner: &'a str,
+    pub accounting_scope: Option<&'a ryeos_state::objects::AdmittedAccountingScope>,
     pub vault_bindings: std::collections::HashMap<String, String>,
     /// Exact signed-protocol environment, with each injection retaining its
     /// typed vocabulary source through final composition.
@@ -2136,6 +2401,9 @@ pub struct SpawnItemParams<'a> {
     /// (`provenance.state_root_override()`), persisted on the resume
     /// context so a resumed run keeps the same state/callback anchor.
     pub state_root: Option<&'a std::path::Path>,
+    /// Exact node-selected launch authority. Selection has already crossed
+    /// replay/admission; this owner binds it to the held process before release.
+    pub selected_resources: crate::execution_resources::SelectedExecutionResources,
 }
 
 #[tracing::instrument(
@@ -2155,13 +2423,27 @@ pub fn spawn_item(
     // This bounded region only prepares the already-admitted item, environment,
     // and filesystem inputs. It must never launch a process or run isolation
     // setup. Crossing engine.spawn_plan below ends its no-contact guarantee.
-    let (engine, engine_ctx, plan, launch_metadata) = (|| -> Result<_> {
+    let (
+        state,
+        engine,
+        engine_ctx,
+        plan,
+        launch_metadata,
+        selected_resources,
+        chain_root_id,
+        thread_id,
+        launch_owner,
+        accounting_scope,
+    ) = (|| -> Result<_> {
         let SpawnItemParams {
+            state,
             engine,
             resolved,
             prepared_plan,
             thread_id,
             chain_root_id,
+            launch_owner,
+            accounting_scope,
             vault_bindings,
             protocol_env_bindings,
             roots,
@@ -2181,6 +2463,7 @@ pub fn spawn_item(
             is_resume,
             original_snapshot_hash: _,
             state_root,
+            selected_resources,
         } = params;
         let app_root = roots
             .app_root
@@ -2429,31 +2712,134 @@ pub fn spawn_item(
         if let Some(ckpt) = allocated_checkpoint_dir {
             launch_metadata = launch_metadata.with_checkpoint_dir(ckpt);
         }
-        Ok((engine, engine_ctx, plan, launch_metadata))
+        Ok((
+            state,
+            engine,
+            engine_ctx,
+            plan,
+            launch_metadata,
+            selected_resources,
+            chain_root_id,
+            thread_id,
+            launch_owner,
+            accounting_scope,
+        ))
     })()
     .map_err(SpawnItemFailure::before_contact)?;
-    let spawned = engine
-        .spawn_plan(&engine_ctx, &plan)
-        .map_err(SpawnItemFailure::engine)?;
-    #[cfg(target_os = "linux")]
-    let process_identity_result = crate::process::capture_execution_process_identity_from_pidfd(
-        spawned.pid() as i64,
-        Some(spawned.pgid()),
-        spawned.pidfd(),
+    let mut resource_scope = crate::execution_resources::prepare_process_resource_scope(
+        state,
+        &selected_resources,
+        "thread",
+        thread_id,
     )
-    .context("capture held spawned target identity from Lillux pidfd");
-    #[cfg(not(target_os = "linux"))]
-    let process_identity_result = crate::process::capture_execution_process_identity(
-        spawned.pid() as i64,
-        Some(spawned.pgid()),
-    )
-    .context("capture held spawned target identity");
+    .map_err(SpawnItemFailure::before_contact)?;
+    let spawned_result = match resource_scope.as_mut() {
+        Some(prepared) => engine.spawn_plan_in_scope_with_resources(
+            &engine_ctx,
+            &plan,
+            prepared
+                .take_scope()
+                .map_err(SpawnItemFailure::before_contact)?,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+        None => engine.spawn_plan_with_resources(
+            &engine_ctx,
+            &plan,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+    };
+    let spawned = match spawned_result {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            let cleanup = match resource_scope.as_ref() {
+                Some(prepared) => crate::execution_resources::cleanup_process_resource_reservation(
+                    state,
+                    prepared.reservation(),
+                ),
+                None => return Err(SpawnItemFailure::engine(error)),
+            };
+            return Err(SpawnItemFailure::after_scope_cleanup(error, cleanup));
+        }
+    };
+    let process_identity_result = spawned
+        .exact_process_identity()
+        .map_err(anyhow::Error::from)
+        .and_then(|identity| {
+            crate::process::execution_process_identity_from_lillux(
+                identity,
+                spawned.scope_recovery().cloned(),
+            )
+        })
+        .context("capture held spawned target identity through Lillux");
     let process_identity = match process_identity_result {
-        Ok(identity) => identity,
+        Ok(mut identity) => {
+            let financial = match crate::execution_resources::reserve_process_resource_operations(
+                state,
+                &selected_resources,
+                accounting_scope,
+                chain_root_id,
+                thread_id,
+                launch_owner,
+                &identity,
+            ) {
+                Ok(financial) => financial,
+                Err(error) => {
+                    return Err(SpawnItemFailure::after_identity_failure(
+                        error,
+                        abort_spawned_with_resource_reservation(
+                            state,
+                            resource_scope
+                                .as_ref()
+                                .map(|prepared| prepared.reservation()),
+                            spawned,
+                        ),
+                    ));
+                }
+            };
+            if let Err(error) = identity.bind_execution_resources(
+                selected_resources.selections().to_vec(),
+                financial.bindings().to_vec(),
+                selected_resources.max_concurrent_exclusive_allocations(),
+                financial.occupancy_start(),
+                financial.occupancy_limit(),
+                financial.cleanup_allowance_ms(),
+            ) {
+                let financial_cleanup =
+                    crate::execution_resources::abandon_prepared_process_resource_operations(
+                        state,
+                        financial.bindings(),
+                    );
+                let error = match financial_cleanup {
+                    Ok(()) => error,
+                    Err(cleanup) => error.context(format!(
+                        "resource binding failed and reservation cleanup failed: {cleanup:#}"
+                    )),
+                };
+                return Err(SpawnItemFailure::after_identity_failure(
+                    error,
+                    abort_spawned_with_resource_reservation(
+                        state,
+                        resource_scope
+                            .as_ref()
+                            .map(|prepared| prepared.reservation()),
+                        spawned,
+                    ),
+                ));
+            }
+            identity
+        }
         Err(error) => {
             return Err(SpawnItemFailure::after_identity_failure(
                 error,
-                spawned.abort_and_reap(),
+                abort_spawned_with_resource_reservation(
+                    state,
+                    resource_scope
+                        .as_ref()
+                        .map(|prepared| prepared.reservation()),
+                    spawned,
+                ),
             ));
         }
     };
@@ -2464,6 +2850,10 @@ pub fn spawn_item(
         pgid: spawned.pgid(),
         process_identity,
         launch_metadata,
+        state: state.clone(),
+        resource_reservation: resource_scope
+            .as_ref()
+            .map(|prepared| prepared.reservation().clone()),
         spawned,
     })
 }
@@ -2835,6 +3225,8 @@ mod tests {
             "materialization_requirements": [],
             "network_authority_ceiling": "node_policy",
             "filesystem_authority_ceiling": "node_policy",
+            "target_requirement": null,
+            "resource_authority_ceiling": "node_policy",
             "cache_key": "test",
             "thread_kind": "tool",
             "executor_chain": ["tool:test/run", "tool:test/runtime"],

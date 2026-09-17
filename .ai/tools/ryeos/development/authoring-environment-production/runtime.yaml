@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T06:46:10Z:ac52e74f2cf9b4abbaf01fed20003a785f78d610911cd24f332ed5a886d91497:v5kOO5MEg/L4kUzOomERrrf8tvwLCJvHdXAh9egArMgHR4uiS49LNvlGdALd2vVGGT7nK7GsZt2+BSnpIJPkDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:33:50Z:46bd70ffbe79bfda85868c50b6507ee6edf1f94e05745266cf3e887529448534:qhoZ/bLlsakKMry/VZa1O62so313iLbkKh2yufweSXiaprlJqYvqBrLd8Pv5hVGf82PsPeGSpNqdzO0N8eJoBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: ryeos/development/authoring-environment-production
 name: runtime
 version: "1.0.0"
@@ -10,7 +10,7 @@ filesystem_authority: captured_execution
 network_authority: isolated
 source_scope:
   location: item_namespace
-  load_roots: [item_directory, namespace_root, namespace_lib]
+  load_roots: [item_directory]
   materialization: read_only
 env_config:
   # PATH authority belongs to the existing typed path composer, not config.env.

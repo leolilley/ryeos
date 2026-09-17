@@ -273,6 +273,19 @@ mod tests {
 
     fn input_vm(route_label: &str) -> RyeOsInputVm {
         RyeOsInputVm {
+            address: ryeos_client_base::ui::model::RyeOsInputAddress {
+                session_id: "fixture".into(),
+                binding_digest: "fixture".into(),
+                workspace_index: 0,
+                workspace_id: ryeos_client_base::ids::WorkspaceId::new(1),
+                buffer: ryeos_client_base::ui::model::InputBufferKey::new(
+                    ryeos_client_base::ids::RyeOsViewInstanceKey::workspace_tile(
+                        ryeos_client_base::ids::TileId::new(1),
+                    ),
+                    "view:test/input",
+                    "line",
+                ),
+            },
             cursor: 0,
             focused: false,
             route_label: route_label.to_string(),

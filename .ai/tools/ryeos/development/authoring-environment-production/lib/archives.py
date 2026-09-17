@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T10:38:22Z:6414b540a5c2bbe4075356fe425841a3fc96642051af2b5dc19bbd8c46e3cde3:XCBxJJ10sAql6I21jzVHNeXVH36R2zTj9rSKDqBkFwlh9ktR/7DnAa+2Tu2bZylrd9VY3aXk4caZICWERzpWCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:6414b540a5c2bbe4075356fe425841a3fc96642051af2b5dc19bbd8c46e3cde3:iG6QX60QNKh6I90OsOl5126rvB1ODalZszcl2+NWZJsYt+OpUbrcFA2kMSif8ZXeAbU1Ro8v/kA5I6JDInC0Ag==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Bounded selection from admitted source archives; no filesystem extraction."""
 
 from __future__ import annotations
