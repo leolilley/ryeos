@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T23:32:50Z:91441ed8893468a1bfc4d4787d353557cf5aa37778911c212917c6174d04515a:qJUDwYQ+cfBIRvteOV7dpbe3R7fE+cVuOoanHFUFK/JkVVNmCr6BIAY2NNQs98zWCqUdGbGsvtQoKKz053mzCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T03:41:16Z:ca6f19195c96cd11c7171f201b78e9bc90a24d88fc08deb5347fdfe72f6990d8:A6x4hMTTcuDB4cqP1PEx53Yx4dSCsbnsKST3isJF0i+cxbIMbBgnnc2mgv1KupaENIYa+An93wiF94SfXDmlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -74,7 +74,12 @@ class CodexContractTests(unittest.TestCase):
     def test_runtime_realizations_never_write_project_mountpoints(self) -> None:
         # These are process dependencies, not project data. Creating their
         # mountpoints in a writable project overlay contaminates frozen source.
-        for path in (WORKER_PATH, WORKER_PATH.with_name("hosted-authoring.yaml"), ENVIRONMENT_PATH):
+        for path in (
+            WORKER_PATH,
+            WORKER_PATH.with_name("hosted-authoring.yaml"),
+            WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
+            ENVIRONMENT_PATH,
+        ):
             definition = yaml.safe_load(path.read_text())
             self.assertTrue(definition["external_content"])
             for realization in definition["external_content"]:
@@ -83,19 +88,57 @@ class CodexContractTests(unittest.TestCase):
         for name in ("structured-session.profile.json", "authoring.profile.json"):
             profile = json.loads((SOURCE / name).read_text())
             baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
-            argument = next(arg for arg in profile["workload_args"] if arg.startswith("permissions="))
-            self.assertEqual(tomllib.loads(argument)["permissions"], baseline["permissions"])
-            filesystem = baseline["permissions"]["ryeos-workspace-only"]["filesystem"]
-            worker_path = WORKER_PATH if name == "structured-session.profile.json" else WORKER_PATH.with_name("hosted-authoring.yaml")
-            worker = yaml.safe_load(worker_path.read_text())
-            for realization in worker["external_content"]:
-                self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
             if name == "structured-session.profile.json":
+                argument = next(
+                    arg
+                    for arg in profile["workload_args"]
+                    if arg.startswith("permissions=")
+                )
+                self.assertEqual(
+                    tomllib.loads(argument)["permissions"], baseline["permissions"]
+                )
+                filesystem = baseline["permissions"]["ryeos-workspace-only"][
+                    "filesystem"
+                ]
+                worker = yaml.safe_load(WORKER_PATH.read_text())
+                for realization in worker["external_content"]:
+                    self.assertEqual(
+                        filesystem["/ryeos/realizations/" + realization["mount"]],
+                        "read",
+                    )
                 environment = yaml.safe_load(ENVIRONMENT_PATH.read_text())
                 for realization in environment["external_content"]:
                     self.assertEqual(filesystem["/ryeos/realizations/" + realization["mount"]], "read")
-            self.assertEqual(filesystem[":root"], "deny")
-            self.assertFalse(baseline["permissions"]["ryeos-workspace-only"]["network"]["enabled"])
+                self.assertEqual(filesystem[":root"], "deny")
+                self.assertFalse(
+                    baseline["permissions"]["ryeos-workspace-only"]["network"][
+                        "enabled"
+                    ]
+                )
+            else:
+                self.assertEqual(baseline["default_permissions"], "danger-full-access")
+                self.assertEqual(baseline["approval_policy"], "never")
+                self.assertFalse(
+                    any(
+                        arg.startswith("permissions=")
+                        for arg in profile["workload_args"]
+                    )
+                )
+                routes = {route["id"]: route for route in profile["routes"]}
+                for route_id in ("session.start", "session.resume"):
+                    predicates = routes[route_id]["response_predicates"]
+                    self.assertIn({
+                        "pointer": "/response/result/activePermissionProfile/id",
+                        "equals": "danger-full-access",
+                    }, predicates)
+                    self.assertIn({
+                        "pointer": "/response/result/approvalPolicy",
+                        "equals": "never",
+                    }, predicates)
+                    self.assertIn({
+                        "pointer": "/response/result/sandbox/networkAccess",
+                        "equals": True,
+                    }, predicates)
             expected_code_mode_host = name == "authoring.profile.json"
             self.assertEqual(
                 baseline["features"]["code_mode_host"], expected_code_mode_host
@@ -610,7 +653,11 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(selectors["tmp/**"]["class"], "rebuildable_cache")
 
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
-        for path in (WORKER_PATH, WORKER_PATH.with_name("hosted-authoring.yaml")):
+        for path in (
+            WORKER_PATH,
+            WORKER_PATH.with_name("hosted-authoring.yaml"),
+            WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
+        ):
             worker = path.read_text(encoding="utf-8")
             source = worker[worker.index("\nsource:\n") :]
             match = re.search(r'(?m)^  digest: "([0-9a-f]{64})"$', source)

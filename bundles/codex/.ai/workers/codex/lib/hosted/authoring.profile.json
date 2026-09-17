@@ -18,19 +18,17 @@
     "-c",
     "check_for_update_on_startup=false",
     "-c",
-    "approval_policy=\"on-request\"",
+    "approval_policy=\"never\"",
     "-c",
     "approvals_reviewer=\"user\"",
     "-c",
-    "default_permissions=\"ryeos-workspace-only\"",
+    "default_permissions=\"danger-full-access\"",
     "-c",
     "web_search=\"disabled\"",
     "-c",
     "allow_login_shell=false",
     "-c",
     "shell_environment_policy={ inherit=\"all\", ignore_default_excludes=false, filters={ \"PATH\"=\"include\", \"LANG\"=\"include\", \"LC_ALL\"=\"include\", \"LC_CTYPE\"=\"include\", \"TERM\"=\"include\", \"TZ\"=\"include\", \"TMPDIR\"=\"include\", \"GIT_CONFIG_NOSYSTEM\"=\"include\", \"GIT_CONFIG_GLOBAL\"=\"include\", \"GIT_PAGER\"=\"include\", \"HOME\"=\"exclude\", \"CODEX_HOME\"=\"exclude\", \"DBUS_*\"=\"exclude\", \"SSH_*\"=\"exclude\", \"*PROXY\"=\"exclude\" } }",
-    "-c",
-    "permissions={ ryeos-workspace-only={ extends=\":workspace\", filesystem={ \":root\"=\"deny\", \":minimal\"=\"read\", \":tmpdir\"=\"write\", \":slash_tmp\"=\"deny\", \"/ryeos/realizations/authoring-tools\"=\"read\", \"/ryeos/realizations/codex\"=\"read\", \"/ryeos/realizations/codex-code-mode-host\"=\"read\", \"/ryeos/realizations/codex-resources/bwrap\"=\"read\", \"/ryeos/realizations/codex-resources/zsh/bin/zsh\"=\"read\", \"/ryeos/realizations/codex-path/rg\"=\"read\", \":workspace_roots\"={ \".ai/cache/ryeos-runtime\"=\"read\" } }, network={ enabled=false } } }",
     "-c",
     "agents={ enabled=false }",
     "-c",
@@ -571,7 +569,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "ryeos-workspace-only"
+          "equals": "danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -579,11 +577,11 @@
         },
         {
           "pointer": "/response/result/approvalPolicy",
-          "equals": "on-request"
+          "equals": "never"
         },
         {
           "pointer": "/response/result/sandbox/networkAccess",
-          "equals": false
+          "equals": true
         }
       ]
     },
@@ -666,7 +664,7 @@
       "response_predicates": [
         {
           "pointer": "/response/result/activePermissionProfile/id",
-          "equals": "ryeos-workspace-only"
+          "equals": "danger-full-access"
         },
         {
           "pointer": "/response/result/approvalsReviewer",
@@ -674,11 +672,11 @@
         },
         {
           "pointer": "/response/result/approvalPolicy",
-          "equals": "on-request"
+          "equals": "never"
         },
         {
           "pointer": "/response/result/sandbox/networkAccess",
-          "equals": false
+          "equals": true
         }
       ]
     },

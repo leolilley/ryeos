@@ -27,11 +27,13 @@ pub struct ProcessScopeReadiness {
     pub ordinary_subprocess: ProtocolProcessControlReadiness,
     pub pooled_requests: ProtocolProcessControlReadiness,
     pub exclusive_session: ProtocolProcessControlReadiness,
+    pub trusted_exclusive_session: ProtocolProcessControlReadiness,
 }
 
 impl ProcessScopeReadiness {
     pub(crate) fn classify(
         policy: IsolationProcessScopePolicy,
+        trusted_process_group_sessions: bool,
         authority_digest: Option<String>,
         qualified_capabilities: BTreeSet<lillux::ProcessScopeCapability>,
     ) -> Self {
@@ -86,6 +88,14 @@ impl ProcessScopeReadiness {
                 reason: ProcessControlReadinessReason::NotRequired,
             },
             exclusive_session: ProtocolProcessControlReadiness { ready, reason },
+            trusted_exclusive_session: ProtocolProcessControlReadiness {
+                ready: trusted_process_group_sessions,
+                reason: if trusted_process_group_sessions {
+                    ProcessControlReadinessReason::TrustedProcessGroup
+                } else {
+                    ProcessControlReadinessReason::PolicyUnconfigured
+                },
+            },
         }
     }
 }
@@ -113,6 +123,7 @@ pub enum ProcessControlReadinessReason {
     PolicyUnconfigured,
     ProtectedAuthorityAbsent,
     RequiredCapabilitiesMissing,
+    TrustedProcessGroup,
 }
 
 impl ProcessControlReadinessReason {
@@ -123,6 +134,7 @@ impl ProcessControlReadinessReason {
             Self::PolicyUnconfigured => "policy_unconfigured",
             Self::ProtectedAuthorityAbsent => "protected_authority_absent",
             Self::RequiredCapabilitiesMissing => "required_capabilities_missing",
+            Self::TrustedProcessGroup => "trusted_process_group",
         }
     }
 }
@@ -202,6 +214,7 @@ mod tests {
     fn protected_authority_does_not_override_unconfigured_policy() {
         let readiness = ProcessScopeReadiness::classify(
             IsolationProcessScopePolicy::Unconfigured {},
+            false,
             Some(format!("sha256:{}", "a".repeat(64))),
             BTreeSet::new(),
         );
@@ -223,7 +236,8 @@ mod tests {
 
     #[test]
     fn required_policy_without_protected_authority_is_not_ready() {
-        let readiness = ProcessScopeReadiness::classify(required_policy(), None, BTreeSet::new());
+        let readiness =
+            ProcessScopeReadiness::classify(required_policy(), false, None, BTreeSet::new());
         assert_eq!(readiness.authority, ProcessScopeAuthorityStatus::Absent);
         assert!(!readiness.exclusive_session.ready);
         assert_eq!(
@@ -236,6 +250,7 @@ mod tests {
     fn required_policy_and_qualified_authority_are_ready() {
         let readiness = ProcessScopeReadiness::classify(
             required_policy(),
+            false,
             Some(format!("sha256:{}", "b".repeat(64))),
             complete_capabilities(),
         );
@@ -248,6 +263,22 @@ mod tests {
     }
 
     #[test]
+    fn trusted_process_group_readiness_is_explicit_and_distinct() {
+        let readiness = ProcessScopeReadiness::classify(
+            IsolationProcessScopePolicy::Unconfigured {},
+            true,
+            None,
+            BTreeSet::new(),
+        );
+        assert!(readiness.trusted_exclusive_session.ready);
+        assert_eq!(
+            readiness.trusted_exclusive_session.reason,
+            ProcessControlReadinessReason::TrustedProcessGroup
+        );
+        assert!(!readiness.exclusive_session.ready);
+    }
+
+    #[test]
     fn readiness_reason_text_matches_its_wire_value() {
         for reason in [
             ProcessControlReadinessReason::NotRequired,
@@ -255,6 +286,7 @@ mod tests {
             ProcessControlReadinessReason::PolicyUnconfigured,
             ProcessControlReadinessReason::ProtectedAuthorityAbsent,
             ProcessControlReadinessReason::RequiredCapabilitiesMissing,
+            ProcessControlReadinessReason::TrustedProcessGroup,
         ] {
             assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
         }

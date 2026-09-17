@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-12T04:00:24Z:722b59d3ebbbe95bd5899a693da2bb852a1ecba541232153b56099a35d854a62:Rwc/Hb7ipGosV7/RbjwrzFYwoxWKIlVEqamIyplbFo9R5DQgk5dCRXdqstihnsnW/u3A6L/Un9I6IlJiBTryAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T04:06:11Z:9c8ffce90f0bb1a86d10dca1165b6af80c3c48bccf924e6fec75c32702cce5bb:ymegtqeU5P9vIIAVJPmIt7XqLfDhpXAXemefBVfcsJ5v68xRU4Crbj6W/Gy0nMSljcmD+983wPknSlsH7V+CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -192,20 +192,24 @@ configured-operator forwarding route to inspect profiles on a remote node.
 
    Ordinary shell/editing commands remain Codex commands. The Codex profiles
    mount their executable resources and command tools in the existing immutable
-   execution-runtime namespace, not under the editable project. Their finite
-   nested-sandbox read permissions cover these exact pinned inputs. Runtime
-   mountpoint setup must not become source edits in a frozen candidate; inspect
-   the complete candidate diff independently of the task-specific evaluator.
+   execution-runtime namespace, not under the editable project. The minimal
+   hosted profile admits only those inputs through its nested sandbox. The
+   unattended authoring profile instead selects `danger-full-access`; a
+   hard-contained node relies on its qualified Lillux process/filesystem
+   boundary, while a trusted disposable node explicitly accepts the broader
+   container boundary. Runtime mountpoint setup must not become source edits in
+   a frozen candidate; inspect the complete candidate diff independently of the
+   task-specific evaluator.
    Moving these mounts changes the admitted worker program and capsule, not
    installed-bundle literal binding identity (consumer ref and publisher).
    Revalidate exact retained manifests, bindings and current grants under the
    new signed source; do not infer that unchanged bytes need acquisition or
    that an old running capsule silently adopts the new program.
 
-   The Codex profiles
-   no longer expose `/tmp/.ryeos-wc` or its endpoint variable. Native CLI ingress
-   remains a separate RyeOS interface; connectivity from Codex's nested sandbox
-   is not qualified and must not be claimed from a protocol callback test.
+   The Codex profiles no longer expose `/tmp/.ryeos-wc` or its endpoint
+   variable. Native CLI ingress remains a separate RyeOS interface. Neither a
+   minimal-profile sandbox probe nor an authoring command from a trusted
+   placement establishes additional RyeOS authority.
 
    `turn.start` selects `turn/started` as request-correlated early progress.
    Its signed `/message/params/threadId` correlation must match the bound
@@ -219,8 +223,9 @@ configured-operator forwarding route to inspect profiles on a remote node.
    from its restoration and actual callback execution after resume.
    The authoring environment supplies `TMPDIR` through the existing typed
    runtime-view directory contract. Its profile requires that variable before
-   workload launch, permits only that scratch directory, and keeps general
-   `/tmp` denied. No host path or ambient tmp default is selected.
+   workload launch and directs ordinary temporary output to that scratch
+   directory. This is deterministic environment selection, not a filesystem
+   confinement claim for `danger-full-access` authoring commands.
 
    Both signed Codex profiles pass only PATH, selected locale/terminal
    variables, authored GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL/GIT_PAGER settings,
@@ -419,18 +424,14 @@ instead of claiming a stable subtree snapshot. RyeOS-owned paths such as the
 compatibility seed still require exact non-link types and atomic reset before a
 credential-bearing process generation is released.
 
-For pinned Codex 0.147 the `on-request` approval policy is inherited from
-immutable CLI configuration. Request-level `approvalPolicy` is forbidden;
-enabling the authoring profile's pinned `experimentalApi` capability for
-dynamic tools does not let callers override this baseline. The pinned exec
-boundary also rejects explicit sandbox escalation when the immutable policy
-uses the granular variant. Supported approval requests can become a
-durable RyeOS approval request. Every retained App Server approval class is
-nevertheless `deny_only`:
-RyeOS can deliver decline/cancel, but an accept decision is refused before
-upstream contact. Supporting accept later requires an upstream request class
-whose accepted effect is proven to remain inside the identical frozen
-permission profile.
+For pinned Codex 0.147 the minimal hosted profile inherits immutable
+`on-request` and the granular `ryeos-workspace-only` permission profile.
+Supported approval requests can become durable RyeOS approval requests, but
+every retained class remains `deny_only`: RyeOS can deliver decline/cancel and
+refuses accept before upstream contact. The authoring profile instead pins
+`approval_policy=never` and `danger-full-access`; request-level
+`approvalPolicy` remains forbidden, so callers cannot weaken or replace either
+baseline. Its signed `experimentalApi` capability enables dynamic tools only.
 
 App Server inherits a cleared minimal environment and no RyeOS control FD.
 When the selected signed environment contains a process-environment
@@ -438,11 +439,14 @@ contribution, the bridge deliberately resolves and installs only that
 capsule-bound map after clearing inheritance; the structured-session protocol
 authorizes the sealed relay by name. Codex cannot add variables or redirect a
 realization/runtime-view path through request payloads.
-Model commands receive the signed Codex permission profile and cannot access
-profile home, boot/capsule metadata, callback authority, DBus/keyring
-coordinates, or direct network through that contract. Without an enforced
-node-isolation backend this is not an OS-level hostile-workload containment
-claim. Codex's signed `session_resources` override is capped by the generic
+Minimal-profile model commands receive the signed granular permission profile.
+Authoring commands do not: `danger-full-access` can reach resources visible in
+their enclosing execution environment and can use its network. A qualified
+local-process-scope placement supplies the hard boundary outside Codex. A
+trusted disposable placement makes no containment or credential-secrecy claim,
+must contain no project signing, publication, submission, Kaggle, or deployment
+credential, and must be recycled after its retained candidate is imported.
+Codex's signed `session_resources` override is capped by the generic
 worker kind and frozen into the admitted capsule. Its finite `RLIMIT_NPROC` is
 shared by the daemon's real UID, not a per-worker process boundary; node policy
 and the persistent-session registry separately bound session groups and total

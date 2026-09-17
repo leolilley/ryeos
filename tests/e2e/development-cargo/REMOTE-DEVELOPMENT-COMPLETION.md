@@ -1,8 +1,10 @@
 # RyeOS remote development completion plan and live ledger
 
 Updated: 2026-09-17, Pacific/Auckland. Owner: this execution thread.
-Status: EXECUTING — G0a complete; G3a source correction is focused-tested.
-Canonical-node lifecycle reconciliation and G0b are next. No E2E pass claimed.
+Status: EXECUTING — G0a/G3a and both grant-refresh activation corrections are
+implemented and independently reviewed. Exact v0.5.88 daemon `ac4bea5bb65a` is
+built; its supported host installation awaits the user-terminal sudo step. No
+E2E pass claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -17,16 +19,21 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: commit the focused-tested G3a correction, then G0 lifecycle/G0b freeze
-of the accepted test generation. G1/G2 must follow that source review. G0a found and
-stopped obsolete `/tmp` daemons/restart loops without deleting retained evidence.
-No worker launch, node replacement, release or canonical-node lifecycle mutation
-until the G3a correction has focused coverage.
+Current gate: install committed daemon correction `ac4bea5bb` through the supported
+shared host package transaction. Source was stopped normally because both canonical
+services execute `/usr/bin/ryeosd`; target remains live on the predecessor. The
+user must run the exact installer command in the latest journal entry, after which
+restart source normally and retry the same exhausted producer-Python activation job
+against the already-frozen target snapshot. Do not create another node, push again,
+regenerate the grant, use a custom runner, copy the binary directly, or issue bare
+host-upgrade phases outside the audited installer.
 
-Latest committed fix: `7c4854045 Make installed native verifier projectless`.
-Preceding fix: `e829e913f Package native verifier product relationships`.
-Both are installed in current target bundles by a successful stopped-node init.
-Native verifier live success is NOT established. Last launch 52 failed before that fix.
+Latest committed fix: `ac4bea5bb Advance managed activation realizations safely`.
+It CAS-advances the portable activation head when verified grant-bound binding hashes
+change and narrowly reconciles an exhausted failed ledger from exact current binding
+or receipt authority. Cancellation and malformed authority remain terminal/fail
+closed. The 27-test activation suite and state-owner regression pass; two independent
+re-reviews approve. Native verifier live success is NOT established.
 
 Host-context audit at 2026-09-17T11:26:02+12:00: source 7423 and target 7445 are
 stopped. The obsolete GgHPTg target on 7444 and Sep-10 host-supervision daemon were
@@ -92,10 +99,10 @@ These are last-known coordinates; G0 must confirm them without mutation.
 | Target local operator | `3caf68dda07ecdf77fa07d5e33c52e32562688c81f7d17c26dda1083876826fd` |
 | Target vault identity | `dc60a9fba7956d4ac2bdaf6056b4da9f3b7f0220e08c07e0957d3340c447fdec` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
-| Last pushed snapshot, NOT yet reconciled | `baf02426e1bd15c095ab92ea614b8e5d6b32fa013bfe1994e4847b15ed31a19d` |
-| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.87, sha256 `811ef769…`; `/usr/bin/ryeosd` v0.5.87 revision `9f60c4bbeb28`, sha256 `a2100ac8…` |
-| Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` v0.5.87 revision `3a43ed50ee3e` |
-| Target daemon last known | canonical runit service `ryeos-08df80…`, currently down; installed bundles newer than daemon |
+| Frozen target snapshot / target HEAD | `24ec8029a1a78b99b27c71d42bf9430c203f77ae2a0b957532e66a48f514b21d`; tree `71d9dea4f94cd42ce9d0a66133072367804e80c5c3471e854d4bcfe537cc7a2d`; push thread `svc-1789605680099-4e72ff92` |
+| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.88, sha256 `e8f5ae94194a6788016d87e40717867343bcaf20079b66eb1b799f9987f04118`; `/usr/bin/ryeosd` v0.5.88 revision `8c0d738d5bf1`, sha256 `e512aa7d7386210804d7495539ba37318543048617b41a7dd21b8a13eafda444` |
+| Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` remains v0.5.87 revision `3a43ed50ee3e`, sha256 `263b937620543e2a72ef7e8d4d19225c48a4e40921c8c6b9a1af56e5080aa28b`; it is not the canonical target service image |
+| Target daemon last known | canonical runit service `ryeos-08df80…`, healthy on 7445 with v0.5.88 at 2026-09-17T12:23 NZST |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
 
 G0 must fill source/target binary revisions and digests, bundle identities, runtime
@@ -367,6 +374,16 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 17 | G0 audit | host read-only check | 7445 unavailable; v059 sudo authentication error | resume after plan reviews |
 | Sept 17 11:26 NZST | G0a | host process/service/config inventory | stopped obsolete 7444 and Sep-10 descriptor daemons plus four failed `want up` loops; canonical source/target remain stopped; `.tmp/remote-development-evidence-20260917/g0a-host-inventory.md` | retain fixture data; finish daemon-backed inventory after G3a |
 | Sept 17 11:36 NZST | G3a | recovery-qualified bounded-turn source correction | 12 preparer + 7 runtime + 17 bundle tests and focused API graph test passed; signed profile/graph/config | commit; reconcile supported target lifecycle, then freeze G0b |
+| Sept 17 12:26 NZST | G0 lifecycle | supported source `ryeos start` after repairing two exact artifacts left root-owned by the earlier sudo runner | source reached ready on 7423 with v0.5.88, then the unsupervised child was reaped when the host command session ended; target is healthy on 7445 | provision source with `ryeos node host setup --confirm` as `leo`; CLI-internal sudo needs an interactive password/cache refresh |
+| Sept 17 12:30 NZST | G0 lifecycle | attempted host setup first as root, then correctly as `leo` | root invocation refused the invalid root controller; ordinary invocation reached only the expected expired-sudo boundary | user runs `sudo -v`, then repeat ordinary host setup; no custom runner or node reset |
+| Sept 17 12:32 NZST | G0 lifecycle/inventory | source host setup completed by user; ordinary start; both daemon and remote checks | source 7423 and target 7445 healthy on v0.5.88 revision `8c0d738d5bf1`; authenticated route, pinned node/site/vault identities and target enforcement/exclusive-session recovery all match | finish credential/grant/products and freeze target HEAD |
+| Sept 17 12:34 NZST | G0 authority | sanitized credential read and exact public-grant audit | CLI `remote run --no-project` serializes obsolete `live_authority`; explicit current contract reached target but existing grant lacks `credential-profiles/get`. Grant also predates recovery worker, Cargo check/test, candidate qualification and registry/vendor producer scopes | authorization reviewer requires explicit user approval for the grouped exact-scope merge; merge will invalidate old grant-digest-bound consumer bindings, which must be rebound |
+| Sept 17 13:00 NZST | G0 authority/freeze | user-approved same-origin/same-class grant merge and single configured-operator push | grant expanded without dropped scopes; credential status reached target but `personal` is absent. Push thread `svc-1789605680099-4e72ff92` issued target snapshot `24ec8029…` / tree `71d9dea4…` (2815 entries, 78 uploaded, 5435 skipped) | snapshot is frozen; do not push again. Credential creation/login remains a later explicit authority/user-auth boundary |
+| Sept 17 13:20 NZST | G1 source correction | retry of producer-Python activation after grant refresh; `affd9c8db` | predecessor daemon rejected a completed activation whose receipt retained the stale consumer grant binding. Implemented structural validation plus safe reacquisition for missing/released/grant-mismatched bindings; corrupt binding/receipt/head still fail closed. 26 focused API tests, fmt and diff checks pass | install exact daemon and retry the same activation; no producer rebuild required |
+| Sept 17 13:45 NZST | G1 install checkpoint | stopped redundant second release build; verified `target/release/ryeosd` | staged v0.5.88 revision `affd9c8db1c1`, sha256 `8bb681d8c7557202544b81e0b760efc2367d8bdc939b7235e4aa157ef80e5660`; Git clean. Source stopped normally; target remains running predecessor `8c0d738d5bf1`. Audited installer attempt performed no mutation because `sudo -n` requires a password | user runs `sudo -v`; then `sudo -n scripts/pkg/install-local-direct.sh --app-root /tmp/ryeos-remote-e2e-v057.2nyR5o/target-node --trust-source-publishers --bundle-set full`; verify target image, restart source, retry activation |
+| Sept 17 14:30 NZST | G1 live retry / second correction | installed `affd9c8db`; retried exact activation `9deb5e9a…`, job `external-activation:0bb63d…` | consumer-binding contradiction was fixed, exposing a distinct portable-head contradiction. Three attempts safely exhausted; exact job is Failed, no duplicate job/push/grant. Implemented CAS head advancement plus exact exhausted-ledger reconciliation; fresh-store, cancelled, corrupt and mismatched-operation boundaries remain closed. 27 activation tests + state regression pass; authority and acceptance re-reviews approve | install `ac4bea5bb`, whose staged daemon sha256 is `4b58b0799bcee13d1684b97b86be0d01dc4649f9e0651646c04e4373f8220c93`; source is stopped, target remains live on `affd9c8db`. Run audited installer command, restart source, repeat exact activation to fold the same job |
+| Sept 17 15:00 NZST | G1 install / activation recovery | supported full installer after rebuilding the clean `next` CLI | first install safely stopped at a stale cross-worktree CLI expecting `persistent_session.cleanup_authority`; rebuilt `ryeos` sha256 `2ff0f831e8ae693eed45bf8585a3f662f8ac6921aaec1c5e930ba157d2b66232`. Installed daemon sha256 `4b58b0799bcee13d1684b97b86be0d01dc4649f9e0651646c04e4373f8220c93`, v0.5.88 revision `ac4bea5bb65a`. Exact activation `9deb5e9a…` completed on the same exhausted job with receipt `84c92061…`, phase `completed_from_current_bindings`, attempt count still 3 | activation correction is live-proved; no new acquisition, producer rebuild, push or identity replacement occurred |
+| Sept 17 15:06 NZST | G1 verifier composition / launch | composed exact current authoring-runtime and prepared-input bindings, then accepted launch `L-20260917000000000000000000000053` | composition thread `svc-1789613869182-f5ac2ba4`; bindings `01db730e…` and `d4ff9e…`. Verifier thread `T-5961667f-a21c-6438-b129-17dd84fdacf4` failed before PID/start with retained `engine_error`; admitted capsule `735e6bc5…` proves exact manifests `462135d8…`, `55027628…`, producer Python `800d4969…`, and correct projectless authority | do not reuse launch 53. Retained error is intentionally redacted and receipts add no process step; run one synchronous verifier request through the same origin-bound remote route so the spawn boundary is returned directly, then correct the generic isolation/spawn defect if confirmed |
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,

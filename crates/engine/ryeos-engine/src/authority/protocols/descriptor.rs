@@ -83,6 +83,28 @@ pub enum PersistentSessionProcessMode {
     ExclusiveSession,
 }
 
+/// Termination and recovery authority for a dedicated session process.
+///
+/// This is independent of session ownership. In particular, an externally
+/// fenced placement incarnation must never be represented as a qualified local
+/// process scope merely because both mechanisms serve one exclusive session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PersistentSessionCleanupAuthority {
+    /// A pooled process has no dedicated-session cleanup authority.
+    NotRequired,
+    /// Lillux owns a qualified, recoverable process scope on this node.
+    LocalProcessScope,
+    /// The signed node policy explicitly admits a trusted worker whose direct
+    /// process group is the cleanup boundary. This is an operational lane for
+    /// disposable, single-tenant placements; it is not containment and does
+    /// not imply descendant-death proof against a hostile worker.
+    TrustedProcessGroup,
+    /// A protected external supervisor owns one exact deployment occurrence.
+    /// This does not claim authority over the provider's physical host.
+    ExternalPlacementIncarnation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PersistentSessionWorkspaceAuthority {
@@ -123,6 +145,10 @@ impl PersistentSessionNetworkAuthority {
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionProtocol {
     pub process_mode: PersistentSessionProcessMode,
+    /// Explicit for every session. Admission validates the ownership pairing
+    /// before any workload contact; predecessor descriptors cannot acquire a
+    /// cleanup default by omission.
+    pub cleanup_authority: PersistentSessionCleanupAuthority,
     pub workspace_authority: PersistentSessionWorkspaceAuthority,
     pub network_authority: PersistentSessionNetworkAuthority,
     #[serde(default)]
@@ -207,6 +233,22 @@ pub fn validate_persistent_session_protocol(
         );
     }
     if session.channel != PersistentSessionChannel::InheritedUnixSocket
+        || !matches!(
+            (session.process_mode, session.cleanup_authority),
+            (
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::NotRequired
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::LocalProcessScope
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::ExternalPlacementIncarnation
+            )
+        )
         || session.channel_env.is_empty()
         || session.channel_env.len() > 128
         || !session
@@ -296,6 +338,51 @@ mod tests {
         }
     }
 
+    fn persistent_protocol(
+        mode: PersistentSessionProcessMode,
+        cleanup_authority: PersistentSessionCleanupAuthority,
+    ) -> ProtocolDescriptor {
+        ProtocolDescriptor {
+            kind: "protocol".to_owned(),
+            name: "session".to_owned(),
+            category: "example".to_owned(),
+            abi_version: "v1".to_owned(),
+            description: None,
+            stdin: ProtocolStdin {
+                shape: StdinShape::Opaque,
+            },
+            stdout: ProtocolStdout {
+                shape: StdoutShape::OpaqueBytes,
+                mode: StdoutMode::Terminal,
+            },
+            env_injections: Vec::new(),
+            capabilities: ProtocolCapabilities {
+                allows_pushed_head: false,
+                allows_target_site: false,
+                allows_detached: false,
+            },
+            lifecycle: ProtocolLifecycle {
+                mode: LifecycleMode::Managed,
+            },
+            callback_channel: CallbackChannel::None,
+            session: Some(PersistentSessionProtocol {
+                process_mode: mode,
+                cleanup_authority,
+                workspace_authority: PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
+                network_authority: PersistentSessionNetworkAuthority::NodePolicy,
+                runtime_env_allowlist: Vec::new(),
+                readiness_identity_env: Some("SESSION_BOOT_IDENTITY".to_owned()),
+                channel: PersistentSessionChannel::InheritedUnixSocket,
+                channel_env: "SESSION_FD".to_owned(),
+                framing: PersistentSessionFraming::U32BeJson,
+                wire_protocol: "example.session".to_owned(),
+                wire_version: 1,
+                max_frame_bytes: 4096,
+            }),
+            execution_evidence: None,
+        }
+    }
+
     #[test]
     fn method_protocol_requires_exact_callback_and_thread_auth_contract() {
         let mut descriptor = method_protocol();
@@ -311,5 +398,57 @@ mod tests {
         descriptor = method_protocol();
         descriptor.env_injections[0].name = "ALTERNATE_THREAD_AUTH_TOKEN".to_string();
         assert!(validate_method_runtime_protocol(&descriptor).is_err());
+    }
+
+    #[test]
+    fn persistent_session_cleanup_authority_matches_process_ownership() {
+        for cleanup in [
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+            PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+        ] {
+            assert!(
+                validate_persistent_session_protocol(&persistent_protocol(
+                    PersistentSessionProcessMode::ExclusiveSession,
+                    cleanup,
+                ))
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::NotRequired,
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::LocalProcessScope,
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::NotRequired,
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn persistent_session_cleanup_authority_has_no_omission_default() {
+        let descriptor = persistent_protocol(
+            PersistentSessionProcessMode::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        );
+        let mut value = serde_json::to_value(descriptor).unwrap();
+        value["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_authority");
+        assert!(serde_json::from_value::<ProtocolDescriptor>(value).is_err());
     }
 }
