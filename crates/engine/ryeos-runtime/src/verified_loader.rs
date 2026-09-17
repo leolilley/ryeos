@@ -999,7 +999,7 @@ impl VerifiedLoader {
                         "REJECTED: {} is unsigned. Strict mode requires a \
                          valid publisher signature for this config kind. \
                          Re-sign with: ./scripts/populate-bundles.sh \
-                         --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev",
+                         --key .dev-keys/PUBLISHER_DEV.pem --owner \"RyeOS Development\"",
                         path.display()
                     );
                 }

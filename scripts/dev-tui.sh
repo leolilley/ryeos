@@ -16,7 +16,7 @@
 # daemon with the same project path.
 #
 # Packaged acceptance afterwards:
-#   scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev --all
+#   scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner "RyeOS Development" --all
 #   scripts/pkg/install-local-direct.sh --trust-source-publishers
 #   ryeos tui
 

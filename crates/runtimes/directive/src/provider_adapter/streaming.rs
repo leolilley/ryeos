@@ -5158,7 +5158,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     const DEV_PUBLISHER_TRUST_TOML: &str = r#"
 public_key = "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk="
 fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
-owner = "ryeos-dev"
+owner = "RyeOS Development"
 "#;
 
     /// Build a VerifiedLoader rooted at the bundled standard, with a temp

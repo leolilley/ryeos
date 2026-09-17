@@ -85,7 +85,7 @@ pub struct PublisherTrustDoc {
     pub public_key: String,
     /// SHA-256 hex fingerprint of the raw 32-byte public key.
     pub fingerprint: String,
-    /// Informational owner label (e.g. "ryeos-official", "ryeos-dev").
+    /// Informational owner label (e.g. "ryeos-official", "RyeOS Development").
     pub owner: String,
 }
 
