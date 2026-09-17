@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T10:36:31Z:4601a10ca4a52ccf7df567f7596c86a0c4332cd4a5078a1e7c363d8e7e09795c:M0N/GIP92y2QY25BcL8bnHiUfirCnPm8S5ZS0ps6anV7LdMaZvJpGu7H3K9VZSXR7peOBoMHVLNuHhbFuD5tAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T05:41:43Z:b75493f55c40a2fe6c99120be6ed4eea7c2d0b2579bc82e24c0c0a5f69010549:+rYcu2oUbgpPUsF/XPwvG3JKBlj41OmxsrIdoYSnhLXq5q9ex1i1sCauryU1X+1cCDrGET/4ZfgzHgOfna0eDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
 #   version: "1.0.0"
@@ -40,7 +40,7 @@
 #     - id: source-inputs
 #       kind: tree
 #       mode: pinned
-#       digest: a6b454a400b503830c71767a91abf649d61979ad1031ffe9840277b3d06fb616
+#       digest: c66ac1c984e0793416106cd2fefa1a45d1b00c17b5865ff751e41594a3d39857
 #       mount_root: execution_runtime
 #       mount: authoring-source-inputs
 

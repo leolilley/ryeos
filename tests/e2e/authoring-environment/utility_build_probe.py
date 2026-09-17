@@ -43,7 +43,7 @@
 #     - id: source-inputs
 #       kind: tree
 #       mode: pinned
-#       digest: a6b454a400b503830c71767a91abf649d61979ad1031ffe9840277b3d06fb616
+#       digest: c66ac1c984e0793416106cd2fefa1a45d1b00c17b5865ff751e41594a3d39857
 #       mount_root: execution_runtime
 #       mount: authoring-source-inputs
 #     - id: authoring-tools

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T00:56:27Z:683ee50a089ee56f0f04682c2f3fcf04048d5f83d11c4912d09c3d9ea33460e3:Wt/Y+tD3dVwwMoxtMNDxZ1fSxiyHH68BGGenidBoBUdl+h3rbo7XFMwzszpIHFWRMU/AcmuZC+ySwTCsY9snAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T06:37:30Z:cb532edcb7cb9ff008fd939a1dff85f9d0e55bd3b80d70e255938d6f4f54086d:IRWFbhx0y4LSjmS9R3NMl7CZjw9YhSKuNYPxoEytLqP5OMVg7NoRS6H1dyyuIAHegBZch16aex32MK1S017MCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -615,7 +615,7 @@ directory. It does not clear the execution gate:
 ```bash
 bash .ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh \
   --inputs .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml \
-  --producer .ai/tools/ryeos/development/stage0-platform-production/produce.sh \
+  --producer .ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh \
   --archive "$stage0_archive" \
   --checksum "$stage0_archive.sha256" \
   --materialize "$named_root/stage0-toolchain"

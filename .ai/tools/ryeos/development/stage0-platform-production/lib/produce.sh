@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-13T08:57:58Z:89b5c955b74ffc559312446eecff190b5b3410023ee2fff2a7911fc925452602:ZvVXA4AQh+jxiRqO2Unmb+OssaPKetnE9TEkeqzCju2maU9l/bA4fcAKoLO5XImbNUoL6JGvYH6Oi59ANo3/Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:0d25531979d02157f556a5b3fd14f88e84ceb888b3e48a27254298cd69cf5ae3:VigclLaZua+bUZ/y8rUI1uWjRaSc+/DOCcdoE4dgGA52A3oNwwf8u45VLMKMw8CJgzkYXvqzbBVTJITob3xLBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 
 # Canonical offline producer for the exact Stage0 compiler platform. This file
 # owns transformation and archive production for both the pre-RyeOS publisher
@@ -38,8 +38,8 @@ for command in ar awk basename bash cat chmod cmp cp dirname find grep gzip \
 done
 
 producer_dir="$(cd "$(dirname "$0")" && pwd)"
-contract_helper="$producer_dir/lib/contract.sh"
-runtime_helper="$producer_dir/lib/runtime.sh"
+contract_helper="$producer_dir/contract.sh"
+runtime_helper="$producer_dir/runtime.sh"
 [[ -f "$contract_helper" && ! -L "$contract_helper" ]]
 [[ -f "$runtime_helper" && ! -L "$runtime_helper" ]]
 # shellcheck source=lib/contract.sh

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T10:38:22Z:f7c145f3256f9d83e46e35177a26df7eb4e6e6ad1967f588fa4227ec0dd95c06:/p9+leICQBM853xWJcaU6k+knkDebpU0LsSAFArwRe9HhNHz856wzLuuxRmY4iJpSt+jCrt3IyUCgTs9DgA9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-17T06:36:51Z:f7c145f3256f9d83e46e35177a26df7eb4e6e6ad1967f588fa4227ec0dd95c06:LTlk6I5+rmgCJgbf24CzH0dnE2WO3zFoBwFR/OgwOBRmN94KN5d0yaeiMrecwMMJdjDIoa/zriw8GGhmP3r/Cg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 """Finite GNU Python archive selection into a caller-owned private directory.
 
 No acquisition, interpreter execution, manifest publication, or host discovery.

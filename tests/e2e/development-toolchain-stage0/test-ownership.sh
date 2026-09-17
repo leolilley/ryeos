@@ -6,7 +6,7 @@ export LC_ALL=C
 
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 acquire="$root/scripts/release/acquire-development-toolchain-stage0.sh"
-producer="$root/.ai/tools/ryeos/development/stage0-platform-production/produce.sh"
+producer="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh"
 contract="$root/.ai/tools/ryeos/development/stage0-platform-production/lib/contract.sh"
 dockerfile="$root/Dockerfile.development-realizations"
 
@@ -24,7 +24,7 @@ fi
 grep -Fq 'stage0_contract_load' "$acquire"
 grep -Fq 'stage0_contract_load' "$producer"
 grep -Fq 'acquire-development-toolchain-stage0.sh' "$dockerfile"
-grep -Fq 'stage0-platform-production/produce.sh' "$dockerfile"
+grep -Fq 'stage0-platform-production/lib/produce.sh' "$dockerfile"
 grep -Fq -- '--input-root /publisher/acquired' "$dockerfile"
 if rg -n 'produce-development-toolchain-stage0\.sh' \
     "$root/Dockerfile.development-realizations" "$root/.ai" \

@@ -1,0 +1,24 @@
+# ryeos:signed:2026-09-17T06:38:02Z:d87eb7620b6dbb0cfd2b6837340ef23d08288cd882a318cbab0a6faefbac3b91:YnYikdgHbTWQlD1f3kc+OIlSqSAqvBZm7sVJqsqW4aMq8TIKFAJwCvegKzR1wZbpdzpSdDMpq0PBzMYYhG41AA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+category: development/ryeos
+schema: ryeos.external_content_activation.v3
+consumer_ref: tool:ryeos/environments/qualification/gnu-python-archives
+sources:
+  - id: gnu-python-archives-release
+    url: https://github.com/leolilley/ryeos/releases/download/ryeos-development-runtime-inputs-v1/ryeos-gnu-python-archives-v1.tar.gz
+    sha256: 40fb63279e7698a12099ecf3987f770add103d1321df65227721a1f6fb8fc79a
+    maximum_compressed_bytes: 164987716
+    maximum_expanded_bytes: 166123520
+    maximum_entries: 5
+    archive_format: tar_gzip
+components:
+  - id: gnu-python-archives
+    storage: large_content
+    shape:
+      kind: whole_archive_tree
+      source: gnu-python-archives-release
+      prefix: ryeos-gnu-python-archives-v1
+      bounds:
+        maximum_entries: 4
+        maximum_depth: 1
+        maximum_file_bytes: 127731089
+        maximum_total_bytes: 166112647
