@@ -15,16 +15,11 @@ from model_contract import (
     MAX_SAFETENSORS_HEADER_BYTES,
     QwenModelContract,
     identify_model_contract,
+    load_named_model_profile,
     load_weight_map,
     validate_safetensors_header,
 )
 
-
-# Retained for signed 0.6B fixture source callers. Runtime bounds come from
-# QwenModel.contract, never from these fixture constants.
-MODEL_ID = "qwen3-0.6b"
-MAX_CONTEXT = 2048
-MAX_OUTPUT_TOKENS = 256
 
 _SAFE_DTYPES = {"BF16": dtypes.bfloat16}
 
@@ -185,8 +180,10 @@ def _map_weight_name(name: str, contract: QwenModelContract) -> str:
 
 
 class QwenModel:
-    def __init__(self, model_root: Path):
-        self.contract = identify_model_contract(model_root)
+    def __init__(self, model_root: Path, profile_id: str):
+        self.contract = identify_model_contract(
+            model_root, load_named_model_profile(profile_id)
+        )
         # Weight preflight finishes before Transformer construction can
         # initialize the selected tinygrad backend or contact that device.
         self._mapped = ReadOnlyQwenWeights(model_root, self.contract)

@@ -339,6 +339,20 @@ class LocalInferenceContractTests(unittest.TestCase):
                 {"real_uid_process_limit": process_limit},
             )
 
+    def test_worker_selects_one_exact_runtime_and_model_product_closure(self) -> None:
+        for worker in self.workers.values():
+            self.assertEqual(
+                [item["id"] for item in worker["external_content"]],
+                ["runtime", "tinygrad", "toolchain", "model"],
+            )
+            self.assertTrue(
+                all(item["mode"] == "pinned" for item in worker["external_content"])
+            )
+            self.assertEqual(
+                worker["config"]["env"]["RYEOS_LOCAL_MODEL_PROFILE"],
+                "qwen3-0.6b",
+            )
+
     def test_profile_selection_is_signed_and_has_no_predecessor_alias(self) -> None:
         for profile, provider in self.providers.items():
             self.assertEqual(

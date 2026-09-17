@@ -89,6 +89,8 @@ class QwenModelContract:
     has_lm_head: bool
     weight_map_sha256: str | None
     sampler_id: str
+    chat_template_sha256: str
+    generation_config: dict[str, Any]
 
     @property
     def tensors(self) -> dict[str, TensorContract]:
@@ -140,26 +142,64 @@ class QwenModelContract:
         return tensors
 
 
-def _config(
-    *, hidden_size: int, intermediate_size: int, heads: int, layers: int
-) -> dict[str, Any]:
-    return {
-        "architectures": ["Qwen3ForCausalLM"],
+MODEL_PROFILE_SCHEMA = "ryeos.local_inference.qwen_profile.v1"
+MAX_MODEL_PROFILES = 8
+_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
+_REPOSITORY = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?/"
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?"
+)
+_HEX_40 = re.compile(r"[0-9a-f]{40}")
+_HEX_64 = re.compile(r"[0-9a-f]{64}")
+_CONFIG_KEYS = {
+    "architectures",
+    "attention_bias",
+    "attention_dropout",
+    "bos_token_id",
+    "eos_token_id",
+    "head_dim",
+    "hidden_act",
+    "hidden_size",
+    "initializer_range",
+    "intermediate_size",
+    "max_position_embeddings",
+    "max_window_layers",
+    "model_type",
+    "num_attention_heads",
+    "num_hidden_layers",
+    "num_key_value_heads",
+    "rms_norm_eps",
+    "rope_scaling",
+    "rope_theta",
+    "sliding_window",
+    "tie_word_embeddings",
+    "torch_dtype",
+    "transformers_version",
+    "use_cache",
+    "use_sliding_window",
+    "vocab_size",
+}
+
+
+def _positive_int(value: Any, field: str, maximum: int) -> int:
+    if type(value) is not int or not 0 < value <= maximum:
+        raise ValueError(f"Qwen profile {field} is outside its admitted bound")
+    return value
+
+
+def _validate_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _CONFIG_KEYS:
+        raise ValueError("Qwen profile configuration shape is not canonical")
+    if value["architectures"] != ["Qwen3ForCausalLM"]:
+        raise ValueError("Qwen profile architecture is unsupported")
+    exact_values = {
         "attention_bias": False,
-        "attention_dropout": 0.0,
         "bos_token_id": 151643,
         "eos_token_id": 151645,
         "head_dim": 128,
         "hidden_act": "silu",
-        "hidden_size": hidden_size,
-        "initializer_range": 0.02,
-        "intermediate_size": intermediate_size,
         "max_position_embeddings": 40960,
-        "max_window_layers": layers,
         "model_type": "qwen3",
-        "num_attention_heads": heads,
-        "num_hidden_layers": layers,
-        "num_key_value_heads": 8,
         "rms_norm_eps": 1e-6,
         "rope_scaling": None,
         "rope_theta": 1_000_000,
@@ -171,49 +211,185 @@ def _config(
         "use_sliding_window": False,
         "vocab_size": 151936,
     }
+    for field, expected in exact_values.items():
+        if type(value[field]) is not type(expected) or value[field] != expected:
+            raise ValueError(f"Qwen profile configuration field {field!r} changed")
+    for field, maximum in {
+        "hidden_size": 32768,
+        "intermediate_size": 131072,
+        "max_window_layers": 256,
+        "num_attention_heads": 256,
+        "num_hidden_layers": 256,
+        "num_key_value_heads": 256,
+    }.items():
+        _positive_int(value[field], field, maximum)
+    for field, expected in {"attention_dropout": 0.0, "initializer_range": 0.02}.items():
+        if type(value[field]) is not float or value[field] != expected:
+            raise ValueError(f"Qwen profile configuration field {field!r} changed")
+    if value["num_attention_heads"] % value["num_key_value_heads"] != 0:
+        raise ValueError("Qwen profile attention grouping is incoherent")
+    if value["max_window_layers"] != value["num_hidden_layers"]:
+        raise ValueError("Qwen profile window layer count is incoherent")
+    return value
 
 
-QWEN3_0_6B = QwenModelContract(
-    model_id="qwen3-0.6b",
-    upstream_repository="Qwen/Qwen3-0.6B",
-    upstream_revision="c1899de289a04d12100db370d81485cdf75e47ca",
-    config=_config(hidden_size=1024, intermediate_size=3072, heads=16, layers=28),
-    context_ceiling=2048,
-    output_ceiling=256,
-    tensor_bytes=1_503_264_768,
-    shard_names=("model.safetensors",),
-    has_lm_head=True,
-    weight_map_sha256=None,
-    sampler_id="tinygrad-full-vocabulary-gumbel-max-v1",
-)
+def load_model_profile(path: Path) -> QwenModelContract:
+    value = strict_json_file(path, maximum_bytes=128 * 1024)
+    expected_keys = {
+        "schema",
+        "model_id",
+        "upstream_repository",
+        "upstream_revision",
+        "config",
+        "context_ceiling",
+        "output_ceiling",
+        "tensor_bytes",
+        "shard_names",
+        "has_lm_head",
+        "weight_map_sha256",
+        "sampler_id",
+        "chat_template_sha256",
+        "generation_config",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("Qwen profile shape is not canonical")
+    model_id = value["model_id"]
+    if (
+        value["schema"] != MODEL_PROFILE_SCHEMA
+        or not isinstance(model_id, str)
+        or not _MODEL_ID.fullmatch(model_id)
+        or path.name != f"{model_id}.json"
+    ):
+        raise ValueError("Qwen profile identity is not canonical")
+    if not isinstance(value["upstream_repository"], str) or not _REPOSITORY.fullmatch(
+        value["upstream_repository"]
+    ):
+        raise ValueError("Qwen profile repository is not canonical")
+    if not isinstance(value["upstream_revision"], str) or not _HEX_40.fullmatch(
+        value["upstream_revision"]
+    ):
+        raise ValueError("Qwen profile revision is not canonical")
+    config = _validate_config(value["config"])
+    context_ceiling = _positive_int(value["context_ceiling"], "context_ceiling", 1_000_000)
+    output_ceiling = _positive_int(value["output_ceiling"], "output_ceiling", context_ceiling)
+    if context_ceiling > config["max_position_embeddings"]:
+        raise ValueError("Qwen profile context exceeds the model configuration")
+    tensor_bytes = _positive_int(value["tensor_bytes"], "tensor_bytes", 1 << 50)
+    shard_names = value["shard_names"]
+    if (
+        not isinstance(shard_names, list)
+        or not 1 <= len(shard_names) <= 32
+    ):
+        raise ValueError("Qwen profile shard set is not canonical")
+    if type(value["has_lm_head"]) is not bool:
+        raise ValueError("Qwen profile lm-head declaration is malformed")
+    weight_map_sha256 = value["weight_map_sha256"]
+    if weight_map_sha256 is not None and (
+        not isinstance(weight_map_sha256, str) or not _HEX_64.fullmatch(weight_map_sha256)
+    ):
+        raise ValueError("Qwen profile weight-map digest is malformed")
+    single_file = shard_names == ["model.safetensors"]
+    expected_shards = [
+        f"model-{index:05}-of-{len(shard_names):05}.safetensors"
+        for index in range(1, len(shard_names) + 1)
+    ]
+    if not single_file and shard_names != expected_shards:
+        raise ValueError("Qwen profile shard set is not canonical")
+    if single_file != (weight_map_sha256 is None):
+        raise ValueError("Qwen profile shard index contract is incoherent")
+    if value["sampler_id"] != "tinygrad-full-vocabulary-gumbel-max-v1":
+        raise ValueError("Qwen profile sampler is unsupported")
+    if not isinstance(value["chat_template_sha256"], str) or not _HEX_64.fullmatch(
+        value["chat_template_sha256"]
+    ):
+        raise ValueError("Qwen profile chat-template digest is malformed")
+    generation_config = value["generation_config"]
+    if not isinstance(generation_config, dict) or set(generation_config) != {
+        "bos_token_id",
+        "do_sample",
+        "eos_token_id",
+        "pad_token_id",
+        "temperature",
+        "top_k",
+        "top_p",
+        "transformers_version",
+    }:
+        raise ValueError("Qwen profile generation configuration is malformed")
+    token_ids = generation_config["eos_token_id"]
+    if (
+        type(generation_config["bos_token_id"]) is not int
+        or generation_config["bos_token_id"] != config["bos_token_id"]
+        or type(generation_config["do_sample"]) is not bool
+        or not isinstance(token_ids, list)
+        or not token_ids
+        or any(type(token_id) is not int or not 0 <= token_id < config["vocab_size"] for token_id in token_ids)
+        or len(set(token_ids)) != len(token_ids)
+        or config["eos_token_id"] not in token_ids
+        or type(generation_config["pad_token_id"]) is not int
+        or not 0 <= generation_config["pad_token_id"] < config["vocab_size"]
+        or type(generation_config["temperature"]) is not float
+        or not 0.0 < generation_config["temperature"] <= 2.0
+        or type(generation_config["top_k"]) is not int
+        or not 0 < generation_config["top_k"] <= config["vocab_size"]
+        or type(generation_config["top_p"]) is not float
+        or not 0.0 < generation_config["top_p"] <= 1.0
+        or generation_config["transformers_version"] != config["transformers_version"]
+    ):
+        raise ValueError("Qwen profile generation configuration is malformed")
+    contract = QwenModelContract(
+        model_id=model_id,
+        upstream_repository=value["upstream_repository"],
+        upstream_revision=value["upstream_revision"],
+        config=config,
+        context_ceiling=context_ceiling,
+        output_ceiling=output_ceiling,
+        tensor_bytes=tensor_bytes,
+        shard_names=tuple(shard_names),
+        has_lm_head=value["has_lm_head"],
+        weight_map_sha256=weight_map_sha256,
+        sampler_id=value["sampler_id"],
+        chat_template_sha256=value["chat_template_sha256"],
+        generation_config=generation_config,
+    )
+    if sum(tensor.byte_length for tensor in contract.tensors.values()) != tensor_bytes:
+        raise ValueError("Qwen profile tensor total is incoherent")
+    return contract
 
-QWEN3_4B = QwenModelContract(
-    model_id="qwen3-4b",
-    upstream_repository="Qwen/Qwen3-4B",
-    upstream_revision="3101254bbe4169895668a0e7653c3fd1f313576e",
-    config=_config(hidden_size=2560, intermediate_size=9728, heads=32, layers=36),
-    context_ceiling=32768,
-    output_ceiling=2048,
-    tensor_bytes=8_044_936_192,
-    shard_names=tuple(f"model-{index:05}-of-00003.safetensors" for index in range(1, 4)),
-    has_lm_head=False,
-    weight_map_sha256="9cb9c16d3bc213510f48d3aca6726c9ef875b0ed5c7e2a952a4a4f61c30e0cc8",
-    sampler_id="tinygrad-full-vocabulary-gumbel-max-v1",
-)
 
-MODEL_CONTRACTS = {contract.model_id: contract for contract in (QWEN3_0_6B, QWEN3_4B)}
+def load_model_profiles(
+    root: Path | None = None,
+) -> dict[str, QwenModelContract]:
+    profile_root = root or Path(__file__).resolve(strict=True).parent / "model-profiles"
+    if profile_root.is_symlink() or not profile_root.is_dir():
+        raise ValueError("Qwen profile root is not an admitted directory")
+    entries = sorted(profile_root.iterdir(), key=lambda path: path.name)
+    if not 1 <= len(entries) <= MAX_MODEL_PROFILES:
+        raise ValueError("Qwen profile set is outside its admitted bound")
+    contracts: dict[str, QwenModelContract] = {}
+    for path in entries:
+        contract = load_model_profile(path)
+        if contract.model_id in contracts:
+            raise ValueError("Qwen profile set repeats a model identity")
+        contracts[contract.model_id] = contract
+    return contracts
 
 
-def identify_model_contract(model_root: Path) -> QwenModelContract:
+def load_named_model_profile(model_id: str) -> QwenModelContract:
+    if not isinstance(model_id, str) or not _MODEL_ID.fullmatch(model_id):
+        raise ValueError("Qwen profile identity is not canonical")
+    root = Path(__file__).resolve(strict=True).parent / "model-profiles"
+    return load_model_profile(root / f"{model_id}.json")
+
+
+def identify_model_contract(
+    model_root: Path, contract: QwenModelContract
+) -> QwenModelContract:
     config = strict_json_file(model_root / "config.json", maximum_bytes=64 * 1024)
     if not isinstance(config, dict):
         raise ValueError("Qwen model configuration is not an object")
-    encoded = canonical_json(config)
-    for contract in MODEL_CONTRACTS.values():
-        expected = canonical_json(contract.config)
-        if encoded == expected:
-            return contract
-    raise ValueError("Qwen model configuration is not an admitted exact contract")
+    if canonical_json(config) != canonical_json(contract.config):
+        raise ValueError("Qwen model configuration is not the selected exact contract")
+    return contract
 
 
 def _canonical_shard_name(value: Any) -> str:

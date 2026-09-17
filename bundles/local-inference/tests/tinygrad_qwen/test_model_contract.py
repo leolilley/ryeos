@@ -12,6 +12,8 @@ import tempfile
 import unittest
 
 
+sys.dont_write_bytecode = True
+
 WORKER = (
     Path(__file__).resolve().parents[2]
     / ".ai/workers/local-inference/lib/local-tinygrad"
@@ -19,18 +21,66 @@ WORKER = (
 sys.path.insert(0, str(WORKER))
 
 from model_contract import (  # noqa: E402
-    QWEN3_0_6B,
-    QWEN3_4B,
     TensorContract,
     canonical_json,
     identify_model_contract,
+    load_model_profile,
+    load_model_profiles,
     load_weight_map,
     validate_safetensors_header,
 )
 from tokenizer import render_chat  # noqa: E402
 
 
+MODEL_PROFILES = load_model_profiles()
+QWEN3_0_6B = MODEL_PROFILES["qwen3-0.6b"]
+QWEN3_4B = MODEL_PROFILES["qwen3-4b"]
+
+
 class QwenModelContractTests(unittest.TestCase):
+    def test_model_profiles_are_strict_bounded_admitted_data(self) -> None:
+        source = WORKER / "model-profiles/qwen3-4b.json"
+        original = json.loads(source.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "qwen3-4b.json"
+
+            def write(value: object) -> None:
+                profile.write_text(json.dumps(value), encoding="utf-8")
+
+            write(original)
+            self.assertEqual(load_model_profile(profile), QWEN3_4B)
+
+            unknown = json.loads(json.dumps(original))
+            unknown["ambient_python"] = "/usr/bin/python"
+            write(unknown)
+            with self.assertRaisesRegex(ValueError, "shape is not canonical"):
+                load_model_profile(profile)
+
+            oversized = json.loads(json.dumps(original))
+            oversized["context_ceiling"] = 40961
+            write(oversized)
+            with self.assertRaisesRegex(ValueError, "context exceeds"):
+                load_model_profile(profile)
+
+            unsupported = json.loads(json.dumps(original))
+            unsupported["sampler_id"] = "ambient-provider-default"
+            write(unsupported)
+            with self.assertRaisesRegex(ValueError, "sampler is unsupported"):
+                load_model_profile(profile)
+
+            skipped_shard = json.loads(json.dumps(original))
+            skipped_shard["shard_names"][1] = "model-00003-of-00003.safetensors"
+            write(skipped_shard)
+            with self.assertRaisesRegex(ValueError, "shard set is not canonical"):
+                load_model_profile(profile)
+
+            malformed_generation = json.loads(json.dumps(original))
+            malformed_generation["generation_config"]["top_k"] = True
+            write(malformed_generation)
+            with self.assertRaisesRegex(ValueError, "generation configuration"):
+                load_model_profile(profile)
+
     def test_exact_model_coordinates_and_tensor_totals_are_frozen(self) -> None:
         self.assertEqual(
             QWEN3_4B.upstream_revision,
@@ -65,24 +115,33 @@ class QwenModelContractTests(unittest.TestCase):
             (root / "config.json").write_text(
                 json.dumps(QWEN3_4B.config), encoding="utf-8"
             )
-            self.assertEqual(identify_model_contract(root), QWEN3_4B)
+            self.assertEqual(identify_model_contract(root, QWEN3_4B), QWEN3_4B)
             moved = dict(QWEN3_4B.config)
             moved["num_hidden_layers"] = 35
             (root / "config.json").write_text(json.dumps(moved), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "not an admitted exact contract"):
-                identify_model_contract(root)
+            with self.assertRaisesRegex(ValueError, "not the selected exact contract"):
+                identify_model_contract(root, QWEN3_4B)
             wrong_type = dict(QWEN3_4B.config)
             wrong_type["attention_dropout"] = False
             (root / "config.json").write_text(
                 json.dumps(wrong_type), encoding="utf-8"
             )
-            with self.assertRaisesRegex(ValueError, "not an admitted exact contract"):
-                identify_model_contract(root)
+            with self.assertRaisesRegex(ValueError, "not the selected exact contract"):
+                identify_model_contract(root, QWEN3_4B)
             (root / "config.json").write_text(
                 '{"model_type":"qwen3","model_type":"qwen3"}', encoding="utf-8"
             )
             with self.assertRaisesRegex(ValueError, "duplicate JSON"):
-                identify_model_contract(root)
+                identify_model_contract(root, QWEN3_4B)
+
+    def test_signed_profile_identity_disambiguates_the_same_model_config(self) -> None:
+        derivative = replace(QWEN3_4B, model_id="arc3-qwen3-4b-adapter-v1")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text(
+                json.dumps(QWEN3_4B.config), encoding="utf-8"
+            )
+            self.assertEqual(identify_model_contract(root, derivative), derivative)
 
     def test_qwen3_4b_template_and_tool_history_golden(self) -> None:
         arguments = '{ "row": 2, "column": 1 }'

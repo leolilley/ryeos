@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T23:21:32Z:db95e253b2461df3a7e2b03218a67b68fedaf0d76f835baaf9fb3024a6d29f2a:QqXlQf/WXy0gyh9nNZFnAYf0GGCjvO41bjG08tUf2XMvZsshUifUmv0INemluBGxe1J8Rzd4785GFThXIKprDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-17T01:19:00Z:8f3b7c4140a3b6528c6a559f38399fc90845c759fdebf57cfcd4bcca89e86599:3GBv6k77HsWKjX+N3LvZ0lPnWpHTLOTVVr9RKClTj7Oqg2j0+gD14j421qOKzUuLpjHwySPLWfbFHoy2R4bRCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: "local-inference"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -18,7 +18,7 @@ session_resources:
 source:
   root: "lib/local-tinygrad"
   entry: "bootstrap.py"
-  digest: "e1860ca80b6c3bc6c29e59518e0267a972416fff95b660c8fab352ada9ddf71c"
+  digest: "a542c3e8eb15da23a346f18077d09bef1efa42debb0ac753805fe03d34eab5fb"
 
 external_content:
   - id: runtime
@@ -69,6 +69,7 @@ config:
     PYTHONUNBUFFERED: "1"
     PATH: ""
     DEV: "CPU"
+    RYEOS_LOCAL_MODEL_PROFILE: "qwen3-0.6b"
     CACHELEVEL: "0"
     CCACHE: "0"
     LANG: "C"

@@ -45,6 +45,15 @@ def _verify_loaded_module_origins(*roots: Path) -> None:
 
 def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     session_fd = os.environ.get("RYEOS_SESSION_FD")
+    tinygrad_device = os.environ.get("DEV")
+    model_profile = os.environ.get("RYEOS_LOCAL_MODEL_PROFILE")
+    if tinygrad_device not in {"CPU", "NV"}:
+        raise RuntimeError("local worker has no admitted tinygrad device selection")
+    if (
+        not isinstance(model_profile, str)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,63}", model_profile)
+    ):
+        raise RuntimeError("local worker has no admitted model-profile selection")
     workspace = Path.cwd().resolve()
     worker_root = Path(__file__).resolve(strict=True).parent
     if workspace not in worker_root.parents:
@@ -65,7 +74,11 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
         "PYTHONHASHSEED": "0",
         "PYTHONSAFEPATH": "1",
         "PATH": "",
-        "DEV": "CPU",
+        # DEV is owned by the signed concrete worker profile. RyeOS selects
+        # and grants resources generically; this worker owns tinygrad's name
+        # for the backend that consumes that already-admitted access.
+        "DEV": tinygrad_device,
+        "RYEOS_LOCAL_MODEL_PROFILE": model_profile,
         "CACHELEVEL": "0",
         "CCACHE": "0",
         "LANG": "C",
@@ -109,7 +122,7 @@ from compiler import install_admitted_compiler  # noqa: E402
 
 install_admitted_compiler(Path.cwd())
 
-from model import MAX_CONTEXT, MAX_OUTPUT_TOKENS, MODEL_ID, QwenModel  # noqa: E402
+from model import QwenModel  # noqa: E402
 from tokenizer import QwenTokenizer, render_chat  # noqa: E402
 
 _verify_loaded_module_origins(RUNTIME_ROOT, WORKER_ROOT, TINYGRAD_ROOT)
@@ -295,8 +308,8 @@ class OutputRouter:
 def _validate_request(
     outer: dict[str, Any],
     *,
-    expected_model: str = MODEL_ID,
-    output_ceiling: int = MAX_OUTPUT_TOKENS,
+    expected_model: str,
+    output_ceiling: int,
 ) -> tuple[dict[str, Any], int, float, int]:
     if set(outer) != {"request_body", "request_body_sha256", "requested_output_ceiling"}:
         raise ValueError("local worker envelope shape is not canonical")
@@ -414,10 +427,13 @@ def _parse_tools(raw: str, request_id: str) -> tuple[list[dict[str, Any]], str]:
 class Worker:
     def __init__(self, *, load_model: bool = False):
         self.model_root = Path("model")
+        self.profile_id = os.environ["RYEOS_LOCAL_MODEL_PROFILE"]
         # Tokenizer/template/generation bytes are device-independent preflight.
         # Validate them before model construction may touch Device.DEFAULT.
-        self.tokenizer = QwenTokenizer(self.model_root) if load_model else None
-        self.model = QwenModel(self.model_root) if load_model else None
+        self.tokenizer = (
+            QwenTokenizer(self.model_root, self.profile_id) if load_model else None
+        )
+        self.model = QwenModel(self.model_root, self.profile_id) if load_model else None
 
     def _execute_in_process(
         self,

@@ -23,6 +23,9 @@ WORKSPACE = Path(os.environ["RYEOS_LOCAL_WORKER_TEST_WORKSPACE"]).resolve(strict
 RUN_MODEL_GOLDENS = os.environ.get("RYEOS_RUN_MODEL_GOLDENS") == "1"
 os.environ["REGEN"] = "1"
 os.environ["DEVICE"] = "HOST-SHOULD-NOT-SELECT-A-BACKEND"
+# The fixture worker's signed descriptor selects this tinygrad backend.
+os.environ["DEV"] = "CPU"
+os.environ["RYEOS_LOCAL_MODEL_PROFILE"] = "qwen3-0.6b"
 os.chdir(WORKSPACE)
 sys.path[:0] = [str(WORKSPACE / "worker"), str(WORKSPACE / "tinygrad")]
 
@@ -32,7 +35,7 @@ from session import (  # noqa: E402
     Worker,
     _parse_tools,
     _read_frame,
-    _validate_request,
+    _validate_request as _validate_request_impl,
 )
 from model import (  # noqa: E402
     QwenModel,
@@ -41,13 +44,26 @@ from model import (  # noqa: E402
 )
 from tinygrad import Tensor  # noqa: E402
 from tokenizer import QwenTokenizer, render_chat  # noqa: E402
+from model_contract import load_model_profiles  # noqa: E402
+
+
+TEST_PROFILE = load_model_profiles()["qwen3-0.6b"]
+
+
+def _validate_request(outer: dict, **overrides: object):
+    arguments = {
+        "expected_model": TEST_PROFILE.model_id,
+        "output_ceiling": TEST_PROFILE.output_ceiling,
+        **overrides,
+    }
+    return _validate_request_impl(outer, **arguments)
 
 
 class WorkerContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.model_root = WORKSPACE / "model"
-        cls.tokenizer = QwenTokenizer(cls.model_root)
+        cls.tokenizer = QwenTokenizer(cls.model_root, TEST_PROFILE.model_id)
 
     def test_worker_source_root_is_derived_from_the_admitted_entrypoint(self) -> None:
         self.assertEqual(WORKER_ROOT, Path(__import__("session").__file__).resolve().parent)
@@ -326,6 +342,9 @@ class WorkerContractTests(unittest.TestCase):
         self.assertNotIn("REGEN", os.environ)
         self.assertNotIn("DEVICE", os.environ)
         self.assertEqual(os.environ.get("DEV"), "CPU")
+        self.assertEqual(
+            os.environ.get("RYEOS_LOCAL_MODEL_PROFILE"), "qwen3-0.6b"
+        )
 
     def test_all_shards_validate_before_any_tensor_materialization(self) -> None:
         events: list[str] = []
@@ -385,7 +404,7 @@ class WorkerContractTests(unittest.TestCase):
         "enable the targeted model golden explicitly",
     )
     def test_model_mapping_is_complete_and_strict(self) -> None:
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         self.assertEqual(len(model._mapped.tensors), 311)
         self.assertEqual(len(model._model.blk), 28)
 
@@ -397,7 +416,7 @@ class WorkerContractTests(unittest.TestCase):
         prompt = self.tokenizer.encode(
             render_chat([{"role": "user", "content": "Reply OK."}], [])
         )
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         embedded = model._model.token_embd(Tensor([prompt])).float()
         for block in model._model.blk:
             embedded = block(embedded, 0)
@@ -504,7 +523,7 @@ class WorkerContractTests(unittest.TestCase):
         prompt = self.tokenizer.encode(
             render_chat([{"role": "user", "content": "Name one color."}], [])
         )
-        model = QwenModel(self.model_root)
+        model = QwenModel(self.model_root, TEST_PROFILE.model_id)
         first = list(model.generate(prompt, 6, 0.7, 4242))
         second = list(model.generate(prompt, 6, 0.7, 4242))
         self.assertEqual(first, second)

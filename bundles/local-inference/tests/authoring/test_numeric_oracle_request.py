@@ -10,6 +10,8 @@ import sys
 import unittest
 
 
+sys.dont_write_bytecode = True
+
 HERE = Path(__file__).resolve().parent
 BUNDLE = HERE.parent.parent
 REQUEST = (
@@ -21,7 +23,10 @@ SOURCE_CONTRACT = (
 )
 WORKER_SOURCE = BUNDLE / ".ai/workers/local-inference/lib/local-tinygrad"
 sys.path.insert(0, str(WORKER_SOURCE))
-from model_contract import QWEN3_4B  # noqa: E402
+from model_contract import load_model_profiles  # noqa: E402
+
+
+QWEN3_4B = load_model_profiles()["qwen3-4b"]
 from tokenizer import render_chat  # noqa: E402
 
 

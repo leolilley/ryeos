@@ -43,6 +43,18 @@ the independent reference procedure and comparison policy only; it contains no
 observations and grants no activation, publication, qualification, or ARC
 acceptance authority. Focused authoring tests live in `tests/authoring/`.
 
+An executable local-model profile is the signed worker composition, not a
+model name selected by Python code. It binds exact immutable products for the
+Python runtime, tinygrad source, compiler/toolchain and model/tokenizer, plus
+the admitted worker source and its backend, numeric and resource contract.
+The source-owned Qwen-family semantics are bounded data under
+`lib/local-tinygrad/model-profiles/`; they do not resolve products or grant
+activation. A project such as ARC selects one already-qualified provider and
+worker profile as a unit. It does not independently choose ambient Python,
+tinygrad, toolchain or model versions, and it cannot combine an ARC-trained
+derivative with a different execution closure without new qualification and
+promotion.
+
 On the default trusted single-user node, RyeOS delivers the exact signed source
 and external realizations through a daemon-owned private workspace and runs the
 persistent worker under disabled OS isolation. Explicit node policy may select

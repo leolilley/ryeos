@@ -11,27 +11,18 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
-from model_contract import canonical_json, identify_model_contract, strict_json_file
+from model_contract import (
+    canonical_json,
+    identify_model_contract,
+    load_named_model_profile,
+    strict_json_file,
+)
 
 
 EXPECTED_SPLIT_PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| "
     r"?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 )
-EXPECTED_CHAT_TEMPLATE_SHA256 = {
-    "qwen3-0.6b": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
-    "qwen3-4b": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
-}
-EXPECTED_GENERATION_CONFIG = {
-    "bos_token_id": 151_643,
-    "do_sample": True,
-    "eos_token_id": [151_645, 151_643],
-    "pad_token_id": 151_643,
-    "temperature": 0.6,
-    "top_k": 20,
-    "top_p": 0.95,
-    "transformers_version": "4.51.0",
-}
 # These bytes are pinned artifact metadata, not the worker's sampler defaults.
 # Execution uses the contract's pinned tinygrad full-vocabulary Gumbel-max
 # sampler with explicit request temperature and seed; top-k/top-p are not
@@ -55,8 +46,10 @@ def _category_ranges(prefix: str) -> str:
 
 
 class QwenTokenizer:
-    def __init__(self, model_root: Path):
-        contract = identify_model_contract(model_root)
+    def __init__(self, model_root: Path, profile_id: str):
+        contract = identify_model_contract(
+            model_root, load_named_model_profile(profile_id)
+        )
         self.model_id = contract.model_id
         tokenizer_config = strict_json_file(
             model_root / "tokenizer_config.json", maximum_bytes=64 * 1024
@@ -67,13 +60,13 @@ class QwenTokenizer:
         if (
             not isinstance(template, str)
             or hashlib.sha256(template.encode("utf-8")).hexdigest()
-            != EXPECTED_CHAT_TEMPLATE_SHA256[self.model_id]
+            != contract.chat_template_sha256
         ):
             raise ValueError("Qwen chat template changed")
         generation_config = strict_json_file(
             model_root / "generation_config.json", maximum_bytes=64 * 1024
         )
-        if canonical_json(generation_config) != canonical_json(EXPECTED_GENERATION_CONFIG):
+        if canonical_json(generation_config) != canonical_json(contract.generation_config):
             raise ValueError("Qwen generation configuration changed")
         raw = strict_json_file(
             model_root / "tokenizer.json", maximum_bytes=16 * 1024 * 1024
