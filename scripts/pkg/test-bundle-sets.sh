@@ -72,7 +72,8 @@ done
 ! ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]} development" ]]
+[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]} contained-workflow development" ]]
+[[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set development)" == "full" ]]
 ! ryeos_node_init_profile_bundle_set release-artifacts
 ! ryeos_node_init_profile_bundle_set unknown

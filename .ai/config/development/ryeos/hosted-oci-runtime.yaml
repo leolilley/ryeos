@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-17T00:52:58Z:e5496b9d97b717c7e868ce32873fbe63de1b82b9fe436d63d326274e9806c58f:SaV8VE2MqZnHYJFuZ1BhJCHjixyvIv34mz8hLHcqojiNUlWQ3TtfpFwG2ja/dUTtkFBaAwplvykLe2CLpqoYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+name: hosted-oci-runtime
+version: "1.0.0"
+schema: ryeos.development.hosted-oci-runtime.v1
+description: Qualification contract for administrator-installed hard-contained OCI workers
+runtime_product:
+  image_target: ryeos-contained-workflow
+  node_profile: contained-workflow
+topology:
+  lifecycle_scope: C
+  controller_scope: R
+  invariant: R is a strict descendant of C for the same observed kernel incarnation
+lifecycle:
+  daemon_restart: preserves C, R, protected binding, node identity, and provider generation
+  container_replacement: ends C and invalidates R, the protected binding, and provider generation
+  volume_reuse: requires host-side proof that the preceding C is dead and has no live descendants
+required_capabilities:
+  - exact_lifecycle_identity
+  - strict_controller_descendant
+  - non_root_controller_transition
+  - scope_quiescence
+  - scope_termination
+  - scope_recovery
+  - detached_descendant_control
+  - nested_descendant_control
+  - host_observed_cleanup_before_reuse
+required_refusals:
+  - missing_delegation
+  - read_only_delegation
+  - wrong_delegation_owner
+  - replaced_delegation
+  - wrong_node_identity
+  - replaced_app_root
+  - wrong_controller_account
+  - stale_binding
+claim_classes:
+  - structural_smoke
+  - source_contract
+  - installed_qualification
+limits:
+  max_observations: 256
+  max_evidence_bytes: 262144

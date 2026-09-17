@@ -1,0 +1,39 @@
+# ryeos:signed:2026-09-17T00:43:57Z:7ccb14613997a247d2982e7f9653196fa89a64c836b0900e57b37a054bba8482:KCUmEptxFo6AYAGcplKFLQStk2+8/w2LH0etPHu6mZ/7z7N4aIVg0Gz0nbe+x+JSYpoehYBEN8mEC2SGW1lYAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Validate bounded hard-contained OCI qualification evidence without provisioning a host
+effects: recorded
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/development/hosted-oci-runtime/verify
+config:
+  start: verify
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      evidence: {type: object}
+    required: [evidence]
+    additionalProperties: false
+  nodes:
+    verify:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/hosted-oci-runtime/verify
+        ref_bindings: {}
+        params:
+          evidence: "${config.evidence}"
+        thread: inline
+      assign:
+        qualification: "${result}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output:
+        qualification: "${state.qualification}"

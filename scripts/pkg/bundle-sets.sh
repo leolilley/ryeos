@@ -46,7 +46,7 @@ ryeos_bundle_set_names() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard hosted-node hosted-workflow development
+  printf '%s\n' full central-host standard hosted-node hosted-workflow contained-workflow development
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -55,6 +55,7 @@ ryeos_node_init_profile_names() {
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
     full|central-host|standard|hosted-node|hosted-workflow) printf '%s\n' "$1" ;;
+    contained-workflow) printf '%s\n' hosted-workflow ;;
     development) printf '%s\n' full ;;
     *) return 1 ;;
   esac
