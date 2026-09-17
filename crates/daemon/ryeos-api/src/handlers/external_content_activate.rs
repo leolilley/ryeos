@@ -574,6 +574,26 @@ fn validate_completed_activation_with_authority(
     job_id: &str,
     response: &Response,
 ) -> Result<()> {
+    if !completed_activation_receipt_is_reusable(
+        authority, activation, operation, job_id, response,
+    )? {
+        bail!("completed managed activation receipt no longer owns the active consumer bindings");
+    }
+    Ok(())
+}
+
+/// Validate the immutable receipt authority and report whether its exact
+/// consumer bindings are still current. A grant-generation change legitimately
+/// replaces those bindings without changing the portable activation identity;
+/// callers starting a new operation must reacquire instead of treating that
+/// stale receipt as corruption or folding it into the new durable job.
+fn completed_activation_receipt_is_reusable(
+    authority: ActivationReceiptAuthority<'_>,
+    activation: &ResolvedManagedExternalContentActivation,
+    operation: &ManagedActivationJobOperation,
+    job_id: &str,
+    response: &Response,
+) -> Result<bool> {
     let Some(receipt_hash) = response.receipt_hash.as_deref() else {
         bail!("completed managed activation result has no receipt hash");
     };
@@ -638,36 +658,33 @@ fn validate_completed_activation_with_authority(
             activation.document.consumer_ref.clone(),
             activation.publisher_fingerprint.clone(),
         )?;
-        let binding = ryeos_app::operator_external_content::require_active_binding_from_store(
+        let Some((_, binding)) = ryeos_app::operator_external_content::active_binding_from_store(
             authority.state_store,
             &cas,
             &component.expected_manifest_hash,
             &consumer,
             &authority.node_fingerprint,
-        )
-        .with_context(|| {
-            format!(
-                "completed managed activation component `{}` is no longer active",
-                component.recipe.id
-            )
-        })?;
+        )?
+        else {
+            return Ok(false);
+        };
         let receipt_component = receipt
             .components
             .iter()
             .find(|candidate| candidate.id == component.recipe.id)
             .expect("component set equality checked above");
         let binding_hash = ryeos_state::objects::canonical_value_digest(&binding.to_value()?)?;
-        if binding_hash != receipt_component.binding_hash
-            || binding.manifest_kind != component.expected_manifest_kind
+        if binding.manifest_kind != component.expected_manifest_kind {
+            bail!("completed managed activation component manifest kind changed");
+        }
+        if binding.authorizer_grant_digest != operation.operator_authority_digest
+            || binding_hash != receipt_component.binding_hash
         {
-            bail!(
-                "completed managed activation component `{}` contradicts its receipt or consumer storage grant",
-                component.recipe.id
-            );
+            return Ok(false);
         }
     }
     state_authority.ensure_guard(&guard)?;
-    Ok(())
+    Ok(true)
 }
 
 fn complete_job_from_current_receipt(
@@ -695,9 +712,11 @@ fn complete_job_from_current_receipt(
         state: "completed".to_owned(),
         idempotent: true,
     };
-    validate_completed_activation_with_authority(
+    if !completed_activation_receipt_is_reusable(
         authority, activation, operation, job_id, &response,
-    )?;
+    )? {
+        return Ok(None);
+    }
     let result = serde_json::to_value(&response)?;
     authority.state_store.with_state_db(|db| {
         db.update_sync_job(
@@ -743,9 +762,11 @@ fn complete_claimed_attempt_from_current_receipt(
         state: "completed".to_owned(),
         idempotent: true,
     };
-    validate_completed_activation_with_authority(
+    if !completed_activation_receipt_is_reusable(
         authority, activation, operation, job_id, &response,
-    )?;
+    )? {
+        return Ok(None);
+    }
     let result = serde_json::to_value(&response)?;
     authority.state_store.with_state_db(|db| {
         db.finish_sync_job_attempt_and_update_job(
@@ -2836,7 +2857,7 @@ mod tests {
             vec![
                 ryeos_state::objects::ExternalContentActivationComponentReceipt {
                     id: activation.components[0].recipe.id.clone(),
-                    binding_hash,
+                    binding_hash: binding_hash.clone(),
                 },
             ],
             operator_fingerprint,
@@ -2884,6 +2905,72 @@ mod tests {
             .unwrap();
         assert_eq!(existing.state, ryeos_state::SyncJobState::Retryable);
         assert_eq!(existing.attempt_count, existing.max_attempts);
+
+        let refreshed_binding = ryeos_state::objects::ExternalContentBinding::active(
+            activation.components[0].expected_manifest_hash.clone(),
+            ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+                activation.document.consumer_ref.clone(),
+                activation.publisher_fingerprint.clone(),
+            )
+            .unwrap(),
+            identity.fingerprint().to_owned(),
+            operation.operator_fingerprint.clone(),
+            "a".repeat(64),
+        )
+        .unwrap();
+        let refreshed_binding_hash = cas
+            .put_object(&refreshed_binding.to_value().unwrap())
+            .unwrap()
+            .hash;
+        let guard = state_authority.acquire_shared_guard().unwrap();
+        state_store
+            .with_state_db(|db| {
+                db.advance_generic_head_ref(
+                    ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+                    &refreshed_binding.binding_subject_id,
+                    &refreshed_binding_hash,
+                    Some(&binding_hash),
+                    &head_signer,
+                    &guard,
+                )
+            })
+            .unwrap();
+        drop(guard);
+
+        assert!(
+            complete_job_from_current_receipt(
+                ActivationReceiptAuthority {
+                    state_store: &state_store,
+                    write_barrier: &write_barrier,
+                    node_fingerprint: identity.fingerprint(),
+                },
+                CurrentActivationAuthority {
+                    activation: &activation,
+                    operation: &operation,
+                },
+                &job_id,
+                &existing,
+            )
+            .unwrap()
+            .is_none(),
+            "a refreshed grant-bound consumer binding must force reacquisition"
+        );
+
+        let guard = state_authority.acquire_shared_guard().unwrap();
+        state_store
+            .with_state_db(|db| {
+                db.advance_generic_head_ref(
+                    ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+                    &binding.binding_subject_id,
+                    &binding_hash,
+                    Some(&refreshed_binding_hash),
+                    &head_signer,
+                    &guard,
+                )
+            })
+            .unwrap();
+        drop(guard);
 
         let response = complete_job_from_current_receipt(
             ActivationReceiptAuthority {
