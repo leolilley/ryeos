@@ -25,6 +25,24 @@ assets. Disabled-isolation activation and replay are functional/recovery
 conformance evidence over bytes the RyeOS publisher has already chosen to
 trust; same-UID observations are not evidence that adversarial code is safe.
 
+Bundle-specific publisher authoring lives under `authoring/`, not in RyeOS's
+generic release scripts and not in the admitted `.ai` runtime closure. The
+reviewed Qwen3-4B source contract can be materialized from its immutable
+upstream revision with:
+
+```text
+python3 bundles/local-inference/authoring/author_model.py \
+  --contract bundles/local-inference/authoring/contracts/qwen3-4b-bf16-model-source-v1.json \
+  --cache /path/to/digest-cache \
+  --output /absent/output/qwen3-4b
+```
+
+The pre-observation numeric reference contract is
+`authoring/contracts/qwen3-4b-bf16-numeric-oracle-request-v1.json`. It freezes
+the independent reference procedure and comparison policy only; it contains no
+observations and grants no activation, publication, qualification, or ARC
+acceptance authority. Focused authoring tests live in `tests/authoring/`.
+
 On the default trusted single-user node, RyeOS delivers the exact signed source
 and external realizations through a daemon-owned private workspace and runs the
 persistent worker under disabled OS isolation. Explicit node policy may select
