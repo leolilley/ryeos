@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-16T03:49:18Z:fc6f84c2a2095dabb36c940b2888645e3b50a08fc4f7acd035b74d2c9887a761:MjH3plrTEc1Jttyce+5SNot5t98XyxixTI9KvK/GHeu0ZGHqa2ipKPsdx8uIgD6ZpVyB+dSOaV6tOkk3cnXMAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-17T01:03:00Z:efbaa4dfdaba67228b6cfc899cd0d78b2caaa180dd24f65d976e79364ba30380:5JGiKb5VG2tDau+5JHmtaniOsN1MfLgwNMRD+PajDM8y6LifXxL5wktaCp6rs7btGa7oyj4LyZjTcWGFEIjqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
-schema: ryeos.remote_worker_workflow.v2
+schema: ryeos.remote_worker_workflow.v3
 driver: graph:ryeos/development/remote-worker
 target_requirements:
   process_control: exclusive_session
+  cleanup_authority: local_process_scope
   filesystem_mode: enforce
   network_mode: host
 ref_bindings: {}
