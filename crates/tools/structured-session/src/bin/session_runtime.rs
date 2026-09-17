@@ -47,6 +47,8 @@ enum WorkerExecutionMode {
         session_start_route: String,
         turn_start_route: String,
         max_uncontacted_attempts: u32,
+        #[serde(default)]
+        require_post_completion_recovery: bool,
     },
 }
 
@@ -474,6 +476,7 @@ async fn run_session(
             session_start_route,
             turn_start_route,
             max_uncontacted_attempts,
+            require_post_completion_recovery,
         },
         Some(goal),
     ) = (&config.mode, bounded_goal)
@@ -485,6 +488,7 @@ async fn run_session(
             session_start_route,
             turn_start_route,
             *max_uncontacted_attempts,
+            *require_post_completion_recovery,
             goal,
             deadline,
         )
@@ -595,6 +599,7 @@ async fn run_bounded_turn(
     session_start_route: &str,
     turn_start_route: &str,
     max_uncontacted_attempts: u32,
+    require_post_completion_recovery: bool,
     goal: BoundedTurnGoal,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<RuntimeResult> {
@@ -724,6 +729,9 @@ async fn run_bounded_turn(
                 )
                 .await;
             };
+            if require_post_completion_recovery {
+                await_post_completion_recovery(client, thread_id, &completion, deadline).await?;
+            }
             let mut terminal = client
                 .terminate_completed_dedicated_session(DedicatedSessionCompletedTerminateRequest {
                     thread_id: thread_id.to_owned(),
@@ -829,6 +837,67 @@ async fn run_bounded_turn(
             .await
             .map_err(|error| anyhow!(error.to_string()))?;
     }
+}
+
+async fn await_post_completion_recovery(
+    client: &UdsRuntimeClient,
+    thread_id: &str,
+    completion: &HostedCommandCompletionFence,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    loop {
+        let session = client
+            .dedicated_session_status(thread_id)
+            .await
+            .map_err(|error| anyhow!(error.to_string()))?;
+        if post_completion_recovery_satisfied(&session, thread_id, completion)? {
+            return Ok(());
+        }
+        if deadline.has_elapsed() {
+            bail!("bounded worker expired while awaiting required post-completion recovery");
+        }
+        if !matches!(
+            session.get("state").and_then(Value::as_str),
+            Some("idle" | "turn_running")
+        ) {
+            bail!("completed bounded turn entered an invalid pre-recovery session state");
+        }
+        let observed_updated_at_ms = session
+            .get("updated_at_ms")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("post-completion session has no update sequence"))?;
+        let remaining = deadline.remaining();
+        let wait = remaining.min(lillux::time::Duration::from_secs(300));
+        client
+            .wait_dedicated_session(ryeos_runtime::callback::DedicatedSessionWaitRequest {
+                thread_id: thread_id.to_owned(),
+                observed_updated_at_ms,
+                timeout_ms: u64::try_from(wait.as_millis()).unwrap_or(300_000).max(1),
+            })
+            .await
+            .map_err(|error| anyhow!(error.to_string()))?;
+    }
+}
+
+fn post_completion_recovery_satisfied(
+    session: &Value,
+    thread_id: &str,
+    completion: &HostedCommandCompletionFence,
+) -> Result<bool> {
+    if session.get("placement_thread_id").and_then(Value::as_str) != Some(thread_id)
+        || session.get("admitted_capsule_hash").and_then(Value::as_str)
+            != Some(completion.admitted_capsule_hash.as_str())
+    {
+        bail!("post-completion recovery changed bounded placement authority");
+    }
+    let worker_boot_epoch = session
+        .get("worker_boot_epoch")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("post-completion recovery has no attached worker epoch"))?;
+    if worker_boot_epoch < completion.worker_boot_epoch {
+        bail!("post-completion recovery regressed the bounded worker epoch");
+    }
+    Ok(worker_boot_epoch > completion.worker_boot_epoch)
 }
 
 async fn load_bounded_turn_observation(
@@ -1178,6 +1247,7 @@ mod tests {
                 session_start_route: "session.start".to_owned(),
                 turn_start_route: "turn.start".to_owned(),
                 max_uncontacted_attempts: 3,
+                require_post_completion_recovery: false,
             },
             candidate_disposition: "retained_for_review".to_owned(),
             workload_client_delegation_caps: vec!["ryeos.execute.tool.*".to_owned()],
@@ -1187,6 +1257,25 @@ mod tests {
         let mut owner_decision = config;
         owner_decision.candidate_disposition = "owner_decision".to_owned();
         assert!(validate_runtime_mode_policy(&owner_decision).is_err());
+    }
+
+    #[test]
+    fn post_completion_recovery_requires_same_authority_at_a_newer_epoch() {
+        let completion = completed_observation().completion_fence.unwrap();
+        let session = |epoch| {
+            json!({
+                "placement_thread_id":"T-worker",
+                "admitted_capsule_hash":"a".repeat(64),
+                "worker_boot_epoch":epoch,
+            })
+        };
+        assert!(!post_completion_recovery_satisfied(&session(3), "T-worker", &completion).unwrap());
+        assert!(post_completion_recovery_satisfied(&session(4), "T-worker", &completion).unwrap());
+        assert!(post_completion_recovery_satisfied(&session(2), "T-worker", &completion).is_err());
+
+        let mut changed = session(4);
+        changed["admitted_capsule_hash"] = json!("f".repeat(64));
+        assert!(post_completion_recovery_satisfied(&changed, "T-worker", &completion).is_err());
     }
 
     #[test]

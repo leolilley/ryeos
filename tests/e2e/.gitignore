@@ -104,6 +104,7 @@ __pycache__/
 !development-cargo/qualification.json
 !development-cargo/remote-environment-preparation.json
 !development-cargo/README.md
+!development-cargo/REMOTE-DEVELOPMENT-COMPLETION.md
 !development-cargo/candidate-task.md
 !development-cargo/strict-json-key-amendment.txt
 !development-cargo/test_candidate_evaluation.py

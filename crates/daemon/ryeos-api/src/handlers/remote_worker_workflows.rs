@@ -28,19 +28,26 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 use ryeos_engine::contracts::SubjectResolutionAuthority;
 use ryeos_engine::engine::{EffectiveItemRequest, Engine};
+use ryeos_engine::protocols::PersistentSessionCleanupAuthority;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::{NewSyncJob, SyncJobRecord, SyncJobState, SyncJobUpdate};
 
 const OPERATION_TYPE: &str = "remote_worker_workflow_start";
-const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v5";
-const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v4";
-const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v4";
-const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v2";
+const OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v6";
+const HISTORICAL_OPERATION_SCHEMA: &str = "ryeos.remote_worker_workflow_operation.v5";
+const PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v5";
+const HISTORICAL_PROGRESS_SCHEMA: &str = "ryeos.remote_worker_workflow_progress.v4";
+const RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v5";
+const HISTORICAL_RESPONSE_SCHEMA: &str = "ryeos.remote_worker_workflow_receipt.v4";
+const WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v3";
+const HISTORICAL_WORKFLOW_SCHEMA: &str = "ryeos.remote_worker_workflow.v2";
 const DRIVE_INTENT_EVENT: &str = "remote_worker_workflow.drive_intent";
 const DRIVE_SETTLED_EVENT: &str = "remote_worker_workflow.drive_settled";
 const LAUNCH_ACCEPTED_EVENT: &str = "remote_worker_workflow.launch_accepted";
 const DRIVE_FACT_SCHEMA: &str = "ryeos.remote_worker_workflow_drive_fact.v1";
-const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v2";
+const LAUNCH_ACCEPTANCE_SCHEMA: &str = "ryeos.remote_worker_workflow_launch_acceptance.v3";
+const HISTORICAL_LAUNCH_ACCEPTANCE_SCHEMA: &str =
+    "ryeos.remote_worker_workflow_launch_acceptance.v2";
 const MAX_TASK_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
 const LAUNCH_CONTACT_TIMEOUT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
@@ -225,6 +232,7 @@ struct CompiledWorkflow {
 #[serde(deny_unknown_fields)]
 struct TargetRuntimeRequirements {
     process_control: TargetProcessControl,
+    cleanup_authority: PersistentSessionCleanupAuthority,
     filesystem_mode: ryeos_engine::isolation::IsolationMode,
     network_mode: ryeos_engine::isolation::IsolationNetworkMode,
 }
@@ -265,16 +273,191 @@ impl Progress {
         }
     }
 
-    fn from_job(job: &SyncJobRecord) -> Result<Self> {
-        let value = job.result.clone().unwrap_or_else(|| {
+    fn from_job(job: &SyncJobRecord, family: RecoveryFamily) -> Result<Self> {
+        let mut value = job.result.clone().unwrap_or_else(|| {
             serde_json::to_value(Self::new()).expect("progress serialization is infallible")
         });
+        upgrade_historical_evidence(
+            &mut value,
+            HISTORICAL_PROGRESS_SCHEMA,
+            PROGRESS_SCHEMA,
+            family,
+        )?;
         let progress: Self = serde_json::from_value(value)
             .context("parse retained remote-worker workflow progress")?;
         if progress.schema != PROGRESS_SCHEMA {
             bail!("retained remote-worker workflow progress schema is not current");
         }
         Ok(progress)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryFamily {
+    PreCleanupField,
+    ExplicitLocalCleanupBridge,
+    Current,
+}
+
+fn recovery_family(operation: &Operation, retained: &Value) -> Result<RecoveryFamily> {
+    match operation.schema.as_str() {
+        OPERATION_SCHEMA => Ok(RecoveryFamily::Current),
+        HISTORICAL_OPERATION_SCHEMA => match retained.get("schema").and_then(Value::as_str) {
+            Some(HISTORICAL_PROGRESS_SCHEMA | HISTORICAL_RESPONSE_SCHEMA) => {
+                Ok(RecoveryFamily::PreCleanupField)
+            }
+            Some(PROGRESS_SCHEMA | RESPONSE_SCHEMA) => {
+                Ok(RecoveryFamily::ExplicitLocalCleanupBridge)
+            }
+            _ => bail!("historical remote-worker operation has no coherent evidence family"),
+        },
+        _ => bail!("remote-worker workflow operation schema is unsupported"),
+    }
+}
+
+fn historical_cleanup_authority(process_control: &str) -> Result<&'static str> {
+    match process_control {
+        "ordinary_subprocess" | "pooled_requests" => Ok("not_required"),
+        "exclusive_session" => Ok("local_process_scope"),
+        _ => bail!("historical workflow has an unknown process-control mode"),
+    }
+}
+
+fn insert_historical_cleanup_authority(requirements: &mut Value) -> Result<()> {
+    let requirements = requirements
+        .as_object_mut()
+        .context("historical target requirements are not an object")?;
+    if requirements.contains_key("cleanup_authority") {
+        bail!("historical target requirements unexpectedly declare cleanup authority");
+    }
+    let process_control = requirements
+        .get("process_control")
+        .and_then(Value::as_str)
+        .context("historical target requirements omit process control")?
+        .to_owned();
+    requirements.insert(
+        "cleanup_authority".to_owned(),
+        Value::String(historical_cleanup_authority(&process_control)?.to_owned()),
+    );
+    Ok(())
+}
+
+fn upgrade_historical_evidence(
+    value: &mut Value,
+    historical_schema: &str,
+    current_schema: &str,
+    family: RecoveryFamily,
+) -> Result<()> {
+    let schema = value.get("schema").and_then(Value::as_str);
+    match family {
+        RecoveryFamily::PreCleanupField if schema == Some(historical_schema) => {}
+        RecoveryFamily::ExplicitLocalCleanupBridge | RecoveryFamily::Current
+            if schema == Some(current_schema) =>
+        {
+            return Ok(());
+        }
+        _ => bail!("retained remote-worker evidence contradicts its recovery family"),
+    }
+    let object = value
+        .as_object_mut()
+        .context("historical remote-worker evidence is not an object")?;
+    object.insert(
+        "schema".to_owned(),
+        Value::String(current_schema.to_owned()),
+    );
+    if let Some(readiness) = object.get_mut("target_readiness")
+        && !readiness.is_null()
+    {
+        let requirements = readiness
+            .get_mut("requirements")
+            .context("historical target readiness omits requirements")?;
+        insert_historical_cleanup_authority(requirements)?;
+    }
+    Ok(())
+}
+
+fn decode_receipt(mut value: Value, family: RecoveryFamily) -> Result<Receipt> {
+    upgrade_historical_evidence(
+        &mut value,
+        HISTORICAL_RESPONSE_SCHEMA,
+        RESPONSE_SCHEMA,
+        family,
+    )?;
+    serde_json::from_value(value).context("parse retained remote-worker workflow receipt")
+}
+
+fn decode_workflow_config(mut value: Value, family: RecoveryFamily) -> Result<WorkflowConfig> {
+    let schema = value.get("schema").and_then(Value::as_str);
+    if family == RecoveryFamily::PreCleanupField && schema == Some(HISTORICAL_WORKFLOW_SCHEMA) {
+        let object = value
+            .as_object_mut()
+            .context("historical remote-worker workflow Config is not an object")?;
+        object.insert(
+            "schema".to_owned(),
+            Value::String(WORKFLOW_SCHEMA.to_owned()),
+        );
+        insert_historical_cleanup_authority(
+            object
+                .get_mut("target_requirements")
+                .context("historical workflow Config omits target requirements")?,
+        )?;
+    } else if schema != Some(WORKFLOW_SCHEMA) || family == RecoveryFamily::PreCleanupField {
+        bail!("remote-worker workflow Config contradicts its recovery family");
+    }
+    let config: WorkflowConfig =
+        serde_json::from_value(value).context("parse remote-worker workflow Config")?;
+    if config.schema != WORKFLOW_SCHEMA {
+        bail!("remote-worker workflow Config schema is not current");
+    }
+    validate_target_runtime_requirements(&config.target_requirements)?;
+    Ok(config)
+}
+
+fn retained_evidence_value<T: Serialize>(
+    evidence: &T,
+    family: RecoveryFamily,
+    historical_schema: &str,
+) -> Result<Value> {
+    let mut value = serde_json::to_value(evidence)?;
+    if family != RecoveryFamily::PreCleanupField {
+        return Ok(value);
+    }
+    let object = value
+        .as_object_mut()
+        .context("remote-worker retained evidence is not an object")?;
+    object.insert(
+        "schema".to_owned(),
+        Value::String(historical_schema.to_owned()),
+    );
+    if let Some(readiness) = object.get_mut("target_readiness")
+        && !readiness.is_null()
+    {
+        readiness
+            .get_mut("requirements")
+            .and_then(Value::as_object_mut)
+            .context("remote-worker retained readiness omits requirements")?
+            .remove("cleanup_authority");
+    }
+    Ok(value)
+}
+
+fn validate_target_runtime_requirements(requirements: &TargetRuntimeRequirements) -> Result<()> {
+    match (requirements.process_control, requirements.cleanup_authority) {
+        (
+            TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        )
+        | (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+        ) => Ok(()),
+        (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+        ) => bail!(
+            "external placement-incarnation cleanup is not activated without a protected lifecycle binding and closed-tool qualification"
+        ),
+        _ => bail!("target runtime requirements pair incompatible process and cleanup authority"),
     }
 }
 
@@ -424,15 +607,27 @@ async fn drive_operation(
     }
     validate_recorded_owner(&state, &operation)?;
     let operation_digest = operation_digest(&operation)?;
+    let retained = job
+        .result
+        .as_ref()
+        .context("remote-worker workflow projection omitted retained evidence")?;
+    let recovery_family = recovery_family(&operation, retained)?;
     if job.state == SyncJobState::Completed {
-        let receipt: Receipt = serde_json::from_value(
+        let receipt = decode_receipt(
             job.result
                 .context("completed workflow projection omitted receipt")?,
+            recovery_family,
         )?;
-        authoritative_receipt(&state, &operation, &receipt, &operation_digest)?;
+        authoritative_receipt(
+            &state,
+            &operation,
+            &receipt,
+            &operation_digest,
+            recovery_family,
+        )?;
         return Ok(serde_json::to_value(receipt)?);
     }
-    let mut progress = Progress::from_job(&job)?;
+    let mut progress = Progress::from_job(&job, recovery_family)?;
     let Some(mut attempt) = WorkflowAttempt::begin(state.clone(), &job_id)? else {
         return Ok(in_progress_response(&operation, &job, &progress));
     };
@@ -440,9 +635,13 @@ async fn drive_operation(
         let prior_drive_root_id = progress.drive_root_id.clone();
         if let Some(prior_drive_root_id) = prior_drive_root_id.as_deref() {
             validate_drive_intent(&state, prior_drive_root_id, &operation, &operation_digest)?;
-            if let Some(receipt) =
-                read_settlement_fact(&state, prior_drive_root_id, &operation, &operation_digest)?
-            {
+            if let Some(receipt) = read_settlement_fact(
+                &state,
+                prior_drive_root_id,
+                &operation,
+                &operation_digest,
+                recovery_family,
+            )? {
                 return Ok(DriveOutcome::Completed(receipt));
             }
         }
@@ -464,6 +663,7 @@ async fn drive_operation(
             &operation.task,
             &operation.credential_profile_id,
             &operation.target_product_selections,
+            recovery_family,
         )?;
         let had_launch_contact = progress.target_request_digest.is_some();
         if progress
@@ -504,6 +704,7 @@ async fn drive_operation(
             &request_digest,
             &compiled.target_requirements,
             &mut progress,
+            recovery_family,
         )?;
         progress.drive_root_id = Some(drive_root_id.to_owned());
         update_progress(
@@ -511,6 +712,7 @@ async fn drive_operation(
             &job_id,
             "reserved",
             &progress,
+            recovery_family,
             vec![operation.source_snapshot_hash.clone()],
         )?;
 
@@ -524,6 +726,7 @@ async fn drive_operation(
                     &job_id,
                     "completion_observing",
                     &progress,
+                    recovery_family,
                     vec![snapshot_hash.to_owned()],
                 )?;
                 let Some(receipt) = observe_target_completion(
@@ -550,6 +753,7 @@ async fn drive_operation(
                         &job_id,
                         "completion_pending",
                         &progress,
+                        recovery_family,
                         vec![snapshot_hash.to_owned()],
                     )?;
                     return Ok(DriveOutcome::CompletionPending);
@@ -560,6 +764,7 @@ async fn drive_operation(
                     &operation,
                     &operation_digest,
                     &receipt,
+                    recovery_family,
                 )?;
                 return Ok(DriveOutcome::Completed(receipt));
             }
@@ -592,6 +797,7 @@ async fn drive_operation(
                 &job_id,
                 "target_ready",
                 &progress,
+                recovery_family,
                 vec![snapshot_hash.to_owned()],
             )?;
         }
@@ -602,6 +808,7 @@ async fn drive_operation(
                 &job_id,
                 "push_contacting",
                 &progress,
+                recovery_family,
                 vec![operation.source_snapshot_hash.clone()],
             )?;
             push_snapshot_generation(
@@ -617,6 +824,7 @@ async fn drive_operation(
                 &job_id,
                 "pushed",
                 &progress,
+                recovery_family,
                 vec![operation.source_snapshot_hash.clone()],
             )?;
         }
@@ -626,6 +834,7 @@ async fn drive_operation(
             &job_id,
             "launch_contacting",
             &progress,
+            recovery_family,
             vec![snapshot_hash.to_owned()],
         )?;
         let target_chain_root_id = if let Some(thread_id) = adopted {
@@ -673,7 +882,13 @@ async fn drive_operation(
             target_chain_root_id: target_chain_root_id.clone(),
             target_admission: target_admission.clone(),
         };
-        append_launch_acceptance(&state, &operation, drive_root_id, &acceptance)?;
+        append_launch_acceptance(
+            &state,
+            &operation,
+            drive_root_id,
+            &acceptance,
+            recovery_family,
+        )?;
         progress.launch_acceptance_drive_root_id = Some(drive_root_id.to_owned());
         progress.target_chain_root_id = Some(target_chain_root_id.clone());
         progress.target_admission = Some(target_admission);
@@ -682,6 +897,7 @@ async fn drive_operation(
             &job_id,
             "launch_accepted",
             &progress,
+            recovery_family,
             vec![snapshot_hash.to_owned()],
         )?;
         Ok(DriveOutcome::LaunchAccepted)
@@ -689,15 +905,15 @@ async fn drive_operation(
     .await;
     match drive_result {
         Ok(DriveOutcome::LaunchAccepted) => {
-            attempt.pause(&operation, &progress, "launch_accepted")?;
+            attempt.pause(&operation, &progress, "launch_accepted", recovery_family)?;
             Ok(launch_accepted_response(&operation, &progress))
         }
         Ok(DriveOutcome::CompletionPending) => {
-            attempt.pause(&operation, &progress, "completion_pending")?;
+            attempt.pause(&operation, &progress, "completion_pending", recovery_family)?;
             Ok(completion_pending_response(&operation, &progress))
         }
         Ok(DriveOutcome::Completed(receipt)) => {
-            attempt.complete(&operation, &receipt)?;
+            attempt.complete(&operation, &receipt, recovery_family)?;
             Ok(serde_json::to_value(receipt)?)
         }
         Err(error) => {
@@ -720,12 +936,24 @@ pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>)
         bail!("remote-worker workflow not found");
     }
     validate_recorded_owner(&state, &operation)?;
+    let retained = job
+        .result
+        .as_ref()
+        .context("remote-worker workflow projection omitted retained evidence")?;
+    let recovery_family = recovery_family(&operation, retained)?;
     if job.state == SyncJobState::Completed {
-        let receipt: Receipt = serde_json::from_value(
+        let receipt = decode_receipt(
             job.result
                 .context("completed remote-worker workflow omitted its receipt")?,
+            recovery_family,
         )?;
-        authoritative_receipt(&state, &operation, &receipt, &operation_digest(&operation)?)?;
+        authoritative_receipt(
+            &state,
+            &operation,
+            &receipt,
+            &operation_digest(&operation)?,
+            recovery_family,
+        )?;
         return Ok(serde_json::json!({
             "source_work_id": operation.source_work_id,
             "state": "completed",
@@ -741,12 +969,20 @@ pub async fn query(req: QueryRequest, ctx: HandlerContext, state: Arc<AppState>)
             "receipt": receipt,
         }));
     }
-    let mut progress = Progress::from_job(&job)?;
+    let mut progress = Progress::from_job(&job, recovery_family)?;
     let digest = operation_digest(&operation)?;
-    reconcile_launch_acceptance_for_query(&state, &operation, &digest, &mut progress)?;
+    reconcile_launch_acceptance_for_query(
+        &state,
+        &operation,
+        &digest,
+        &mut progress,
+        recovery_family,
+    )?;
     if let Some(drive_root_id) = progress.drive_root_id.as_deref() {
         validate_drive_intent(&state, drive_root_id, &operation, &digest)?;
-        if let Some(receipt) = read_settlement_fact(&state, drive_root_id, &operation, &digest)? {
+        if let Some(receipt) =
+            read_settlement_fact(&state, drive_root_id, &operation, &digest, recovery_family)?
+        {
             return Ok(serde_json::json!({
                 "source_work_id": operation.source_work_id,
                 "state": "completed",
@@ -774,6 +1010,7 @@ fn compile_workflow(
     task: &Value,
     credential_profile_id: &str,
     target_product_selections: &ryeos_state::external_content::products::composition::ProductSelectionInputs,
+    recovery_family: RecoveryFamily,
 ) -> Result<CompiledWorkflow> {
     let canonical = CanonicalRef::parse(workflow_ref)?;
     let context = ryeos_executor::execution::project_source::resolve_read_only_snapshot_context(
@@ -817,11 +1054,7 @@ fn compile_workflow(
     if trusted != resolved.value {
         bail!("trusted workflow Config bytes differ from the selected Config layer");
     }
-    let config: WorkflowConfig = serde_json::from_value(resolved.value.clone())
-        .context("parse remote-worker workflow Config")?;
-    if config.schema != WORKFLOW_SCHEMA {
-        bail!("remote-worker workflow Config schema is not current");
-    }
+    let config = decode_workflow_config(resolved.value.clone(), recovery_family)?;
     if config.category.trim().is_empty() || config.category.chars().any(char::is_control) {
         bail!("remote-worker workflow Config category is invalid");
     }
@@ -969,50 +1202,73 @@ fn target_readiness_evidence(
         .get("process_scopes")
         .and_then(Value::as_object)
         .context("target node status omitted process-control readiness")?;
-    let selected = process_scopes
-        .get(requirements.process_control.status_field())
-        .and_then(Value::as_object)
-        .context("target node status omitted selected process-control mode")?;
-    let ready = selected
-        .get("ready")
-        .and_then(Value::as_bool)
-        .context("target node status omitted selected process-control readiness")?;
-    let reason = selected
-        .get("reason")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .context("target node status omitted process-control reason")?;
-    if !ready {
-        bail!(
-            "target process-control mode {} is not workflow-ready: {reason}",
-            requirements.process_control.status_field()
-        );
-    }
     let policy_digest = isolation
         .get("policy_digest")
         .and_then(Value::as_str)
         .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
         .context("target node status omitted a valid isolation policy identity")?;
-    let authority_digest = process_scopes
-        .get("authority_digest")
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
-                .map(str::to_owned)
-                .context("target node status has an invalid process-scope authority identity")
-        })
-        .transpose()?;
-    if requirements.process_control == TargetProcessControl::ExclusiveSession
-        && authority_digest.is_none()
-    {
-        bail!("exclusive target readiness omitted protected process-scope authority identity");
+    let mut process_scope_authority_digest = None;
+    let (ready, reason) = match (requirements.process_control, requirements.cleanup_authority) {
+        (
+            TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        )
+        | (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+        ) => {
+            let selected = process_scopes
+                .get(requirements.process_control.status_field())
+                .and_then(Value::as_object)
+                .context("target node status omitted selected process-control mode")?;
+            if requirements.cleanup_authority
+                == PersistentSessionCleanupAuthority::LocalProcessScope
+            {
+                process_scope_authority_digest = read_optional_digest(
+                    process_scopes.get("authority_digest"),
+                    "process-scope authority",
+                )?;
+                if process_scope_authority_digest.is_none() {
+                    bail!(
+                        "exclusive target readiness omitted protected process-scope authority identity"
+                    );
+                }
+            }
+            (
+                selected
+                    .get("ready")
+                    .and_then(Value::as_bool)
+                    .context("target node status omitted selected process-control readiness")?,
+                selected
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .context("target node status omitted process-control reason")?,
+            )
+        }
+        (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+        ) => {
+            // A target cannot attest its own future death, enclosing-service
+            // replacement, or safe slot reuse. Accept this mode only after a
+            // source-side lifecycle adapter can contribute an independently
+            // protected placement receipt; node/status is intentionally not
+            // such an authority.
+            bail!(
+                "external placement-incarnation cleanup requires an independent source-side lifecycle receipt"
+            )
+        }
+        _ => bail!("target runtime requirements pair incompatible process and cleanup authority"),
+    };
+    if !ready {
+        bail!("target process cleanup is not workflow-ready: {reason}");
     }
     let evidence = TargetReadinessEvidence {
         requirements: requirements.clone(),
         daemon_revision: revision.to_owned(),
         isolation_policy_digest: policy_digest.to_owned(),
-        process_scope_authority_digest: authority_digest,
+        process_scope_authority_digest,
         process_control_reason: reason.to_owned(),
     };
     // The status observation is the pre-contact admission boundary. Apply the
@@ -1020,6 +1276,18 @@ fn target_readiness_evidence(
     // before project transfer or worker launch can occur.
     validate_target_readiness_evidence(&evidence)?;
     Ok(evidence)
+}
+
+fn read_optional_digest(value: Option<&Value>, label: &str) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| lillux::valid_hash(value.strip_prefix("sha256:").unwrap_or(value)))
+                .map(str::to_owned)
+                .with_context(|| format!("target node status has an invalid {label} identity"))
+        })
+        .transpose()
 }
 
 /// Resolve an interrupted target contact without replaying an accepted launch.
@@ -1502,7 +1770,12 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
 }
 
 fn validate_operation(operation: &Operation) -> Result<()> {
-    if operation.operation_type != OPERATION_TYPE || operation.schema != OPERATION_SCHEMA {
+    if operation.operation_type != OPERATION_TYPE
+        || !matches!(
+            operation.schema.as_str(),
+            OPERATION_SCHEMA | HISTORICAL_OPERATION_SCHEMA
+        )
+    {
         bail!("remote-worker workflow operation schema or type is not current");
     }
     ryeos_runtime::validate_runtime_thread_id(&operation.source_work_id)
@@ -1642,6 +1915,25 @@ fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Res
             "not_required"
         }
     };
+    let valid_optional_digest = |digest: Option<&str>| {
+        digest.is_none_or(|digest| {
+            lillux::valid_hash(digest.strip_prefix("sha256:").unwrap_or(digest))
+        })
+    };
+    let authority_shape_valid = match (
+        evidence.requirements.process_control,
+        evidence.requirements.cleanup_authority,
+    ) {
+        (
+            TargetProcessControl::OrdinarySubprocess | TargetProcessControl::PooledRequests,
+            PersistentSessionCleanupAuthority::NotRequired,
+        ) => evidence.process_scope_authority_digest.is_none(),
+        (
+            TargetProcessControl::ExclusiveSession,
+            PersistentSessionCleanupAuthority::LocalProcessScope,
+        ) => evidence.process_scope_authority_digest.is_some(),
+        _ => false,
+    };
     if evidence.daemon_revision.is_empty()
         || !lillux::valid_hash(
             evidence
@@ -1650,14 +1942,8 @@ fn validate_target_readiness_evidence(evidence: &TargetReadinessEvidence) -> Res
                 .unwrap_or(&evidence.isolation_policy_digest),
         )
         || evidence.process_control_reason != expected_reason
-        || evidence
-            .process_scope_authority_digest
-            .as_deref()
-            .is_some_and(|digest| {
-                !lillux::valid_hash(digest.strip_prefix("sha256:").unwrap_or(digest))
-            })
-        || (evidence.requirements.process_control == TargetProcessControl::ExclusiveSession
-            && evidence.process_scope_authority_digest.is_none())
+        || !authority_shape_valid
+        || !valid_optional_digest(evidence.process_scope_authority_digest.as_deref())
     {
         bail!("remote-worker target readiness evidence is invalid");
     }
@@ -1745,6 +2031,7 @@ fn append_launch_acceptance(
     operation: &Operation,
     drive_root_id: &str,
     acceptance: &LaunchAcceptance,
+    recovery_family: RecoveryFamily,
 ) -> Result<()> {
     validate_launch_acceptance(acceptance, operation, &operation_digest(operation)?)?;
     if acceptance.launch_acceptance_drive_root_id != drive_root_id {
@@ -1755,7 +2042,11 @@ fn append_launch_acceptance(
         drive_root_id,
         LAUNCH_ACCEPTED_EVENT,
         &launch_acceptance_operation_id(&operation.source_work_id)?,
-        serde_json::to_value(acceptance)?,
+        retained_evidence_value(
+            acceptance,
+            recovery_family,
+            HISTORICAL_LAUNCH_ACCEPTANCE_SCHEMA,
+        )?,
     )
 }
 
@@ -1764,6 +2055,7 @@ fn read_launch_acceptance(
     operation: &Operation,
     operation_digest: &str,
     drive_root_id: &str,
+    recovery_family: RecoveryFamily,
 ) -> Result<Option<LaunchAcceptance>> {
     let operation_id = launch_acceptance_operation_id(&operation.source_work_id)?;
     let fact = ryeos_app::authoritative_root_fact::lookup(
@@ -1778,13 +2070,30 @@ fn read_launch_acceptance(
     if fact.count != 1 {
         bail!("remote-worker workflow launch acceptance fact is duplicated");
     }
-    let acceptance: LaunchAcceptance = serde_json::from_value(strip_fact_operation_id(
+    let value = strip_fact_operation_id(
         fact.payload
             .context("remote-worker workflow launch acceptance fact is unavailable")?,
         &operation_id,
-    )?)?;
+    )?;
+    decode_launch_acceptance(value, operation, operation_digest, recovery_family).map(Some)
+}
+
+fn decode_launch_acceptance(
+    mut value: Value,
+    operation: &Operation,
+    operation_digest: &str,
+    recovery_family: RecoveryFamily,
+) -> Result<LaunchAcceptance> {
+    upgrade_historical_evidence(
+        &mut value,
+        HISTORICAL_LAUNCH_ACCEPTANCE_SCHEMA,
+        LAUNCH_ACCEPTANCE_SCHEMA,
+        recovery_family,
+    )?;
+    let acceptance: LaunchAcceptance =
+        serde_json::from_value(value).context("parse retained remote-worker launch acceptance")?;
     validate_launch_acceptance(&acceptance, operation, operation_digest)?;
-    Ok(Some(acceptance))
+    Ok(acceptance)
 }
 
 fn strip_fact_operation_id(mut payload: Value, expected: &str) -> Result<Value> {
@@ -1839,13 +2148,16 @@ fn reconcile_launch_acceptance(
     target_request_digest: &str,
     target_requirements: &TargetRuntimeRequirements,
     progress: &mut Progress,
+    recovery_family: RecoveryFamily,
 ) -> Result<()> {
     let acceptance_root = progress
         .launch_acceptance_drive_root_id
         .as_deref()
         .or(progress.drive_root_id.as_deref());
     let acceptance = match acceptance_root {
-        Some(root) => read_launch_acceptance(state, operation, operation_digest, root)?,
+        Some(root) => {
+            read_launch_acceptance(state, operation, operation_digest, root, recovery_family)?
+        }
         None => None,
     };
     let Some(acceptance) = acceptance else {
@@ -1887,13 +2199,16 @@ fn reconcile_launch_acceptance_for_query(
     operation: &Operation,
     operation_digest: &str,
     progress: &mut Progress,
+    recovery_family: RecoveryFamily,
 ) -> Result<()> {
     let acceptance_root = progress
         .launch_acceptance_drive_root_id
         .as_deref()
         .or(progress.drive_root_id.as_deref());
     let acceptance = match acceptance_root {
-        Some(root) => read_launch_acceptance(state, operation, operation_digest, root)?,
+        Some(root) => {
+            read_launch_acceptance(state, operation, operation_digest, root, recovery_family)?
+        }
         None => None,
     };
     let Some(acceptance) = acceptance else {
@@ -2042,7 +2357,10 @@ fn append_settlement_fact(
     operation: &Operation,
     operation_digest: &str,
     receipt: &Receipt,
+    recovery_family: RecoveryFamily,
 ) -> Result<()> {
+    let retained_receipt =
+        retained_evidence_value(receipt, recovery_family, HISTORICAL_RESPONSE_SCHEMA)?;
     ryeos_app::authoritative_root_fact::append_once(
         state,
         drive_root_id,
@@ -2052,7 +2370,7 @@ fn append_settlement_fact(
             "schema": DRIVE_FACT_SCHEMA,
             "source_work_id": operation.source_work_id,
             "operation_digest": operation_digest,
-            "receipt": receipt,
+            "receipt": retained_receipt,
         }),
     )
 }
@@ -2062,6 +2380,7 @@ fn read_settlement_fact(
     drive_root_id: &str,
     operation: &Operation,
     operation_digest: &str,
+    recovery_family: RecoveryFamily,
 ) -> Result<Option<Receipt>> {
     let fact = ryeos_app::authoritative_root_fact::lookup(
         state,
@@ -2078,7 +2397,14 @@ fn read_settlement_fact(
     let payload = fact
         .payload
         .context("remote-worker workflow settlement fact is unavailable")?;
-    decode_settlement_payload(payload, drive_root_id, operation, operation_digest).map(Some)
+    decode_settlement_payload(
+        payload,
+        drive_root_id,
+        operation,
+        operation_digest,
+        recovery_family,
+    )
+    .map(Some)
 }
 
 fn decode_settlement_payload(
@@ -2086,6 +2412,7 @@ fn decode_settlement_payload(
     drive_root_id: &str,
     operation: &Operation,
     operation_digest: &str,
+    recovery_family: RecoveryFamily,
 ) -> Result<Receipt> {
     if payload.get("schema").and_then(Value::as_str) != Some(DRIVE_FACT_SCHEMA)
         || payload.get("source_work_id").and_then(Value::as_str)
@@ -2094,11 +2421,12 @@ fn decode_settlement_payload(
     {
         bail!("remote-worker workflow settlement fact is contradictory");
     }
-    let receipt: Receipt = serde_json::from_value(
+    let receipt = decode_receipt(
         payload
             .get("receipt")
             .cloned()
             .context("workflow settlement omitted receipt")?,
+        recovery_family,
     )?;
     validate_receipt(&receipt, operation)?;
     if receipt.settlement_drive_root_id != drive_root_id {
@@ -2112,6 +2440,7 @@ fn authoritative_receipt(
     operation: &Operation,
     receipt: &Receipt,
     operation_digest: &str,
+    recovery_family: RecoveryFamily,
 ) -> Result<()> {
     validate_receipt(receipt, operation)?;
     let acceptance = read_launch_acceptance(
@@ -2119,6 +2448,7 @@ fn authoritative_receipt(
         operation,
         operation_digest,
         &receipt.launch_acceptance_drive_root_id,
+        recovery_family,
     )?
     .context("completed workflow lacks authoritative launch acceptance")?;
     if acceptance.workflow_digest != receipt.workflow_digest
@@ -2139,6 +2469,7 @@ fn authoritative_receipt(
         &receipt.settlement_drive_root_id,
         operation,
         operation_digest,
+        recovery_family,
     )?
     .context("completed workflow projection lacks authoritative settlement")?;
     if settled != *receipt {
@@ -2166,7 +2497,14 @@ impl WorkflowAttempt {
         }))
     }
 
-    fn complete(&mut self, operation: &Operation, receipt: &Receipt) -> Result<()> {
+    fn complete(
+        &mut self,
+        operation: &Operation,
+        receipt: &Receipt,
+        recovery_family: RecoveryFamily,
+    ) -> Result<()> {
+        let retained_receipt =
+            retained_evidence_value(receipt, recovery_family, HISTORICAL_RESPONSE_SCHEMA)?;
         self.state.state_store.with_state_db(|db| {
             let latest = db
                 .get_sync_job(&self.job_id)?
@@ -2177,7 +2515,7 @@ impl WorkflowAttempt {
                     state: ryeos_state::SyncJobAttemptState::Completed,
                     phase: "completed".to_owned(),
                     error: None,
-                    result: Some(serde_json::to_value(receipt)?),
+                    result: Some(retained_receipt.clone()),
                 },
                 &self.job_id,
                 &SyncJobUpdate {
@@ -2188,7 +2526,7 @@ impl WorkflowAttempt {
                     uploaded_hashes: latest.uploaded_hashes,
                     fetched_hashes: latest.fetched_hashes,
                     last_error: None,
-                    result: Some(serde_json::to_value(receipt)?),
+                    result: Some(retained_receipt),
                 },
             )
         })?;
@@ -2196,7 +2534,15 @@ impl WorkflowAttempt {
         Ok(())
     }
 
-    fn pause(&mut self, operation: &Operation, progress: &Progress, phase: &str) -> Result<()> {
+    fn pause(
+        &mut self,
+        operation: &Operation,
+        progress: &Progress,
+        phase: &str,
+        recovery_family: RecoveryFamily,
+    ) -> Result<()> {
+        let retained_progress =
+            retained_evidence_value(progress, recovery_family, HISTORICAL_PROGRESS_SCHEMA)?;
         self.state.state_store.with_state_db(|db| {
             let latest = db
                 .get_sync_job(&self.job_id)?
@@ -2207,7 +2553,7 @@ impl WorkflowAttempt {
                     state: ryeos_state::SyncJobAttemptState::Completed,
                     phase: phase.to_owned(),
                     error: None,
-                    result: Some(serde_json::to_value(progress)?),
+                    result: Some(retained_progress.clone()),
                 },
                 &self.job_id,
                 &SyncJobUpdate {
@@ -2218,7 +2564,7 @@ impl WorkflowAttempt {
                     uploaded_hashes: latest.uploaded_hashes,
                     fetched_hashes: latest.fetched_hashes,
                     last_error: None,
-                    result: Some(serde_json::to_value(progress)?),
+                    result: Some(retained_progress),
                 },
             )
         })?;
@@ -2428,8 +2774,11 @@ fn update_progress(
     job_id: &str,
     phase: &str,
     progress: &Progress,
+    recovery_family: RecoveryFamily,
     roots: Vec<String>,
 ) -> Result<()> {
+    let retained_progress =
+        retained_evidence_value(progress, recovery_family, HISTORICAL_PROGRESS_SCHEMA)?;
     state.state_store.with_state_db(|db| {
         db.update_sync_job(
             job_id,
@@ -2441,7 +2790,7 @@ fn update_progress(
                 uploaded_hashes: Vec::new(),
                 fetched_hashes: Vec::new(),
                 last_error: None,
-                result: Some(serde_json::to_value(progress)?),
+                result: Some(retained_progress),
             },
         )
     })
@@ -2689,18 +3038,19 @@ mod tests {
 
     #[test]
     fn workflow_config_is_closed_and_provider_neutral() {
-        let config: WorkflowConfig = serde_json::from_value(serde_json::json!({
+        let config = decode_workflow_config(serde_json::json!({
             "category": "provider",
             "schema": WORKFLOW_SCHEMA,
             "driver": "graph:provider/bounded-task",
             "target_requirements": {
                 "process_control": "exclusive_session",
+                "cleanup_authority": "local_process_scope",
                 "filesystem_mode": "enforce",
                 "network_mode": "host",
             },
             "ref_bindings": {"environment": "config:development/environment"},
             "parameters": {"request": "${inputs.task}", "profile": "${inputs.credential_profile_id}"},
-        }))
+        }), RecoveryFamily::Current)
         .unwrap();
         assert_eq!(config.driver, "graph:provider/bounded-task");
         assert_eq!(
@@ -2714,19 +3064,284 @@ mod tests {
             serde_json::json!({"request": {"objective": "edit"}, "profile": "personal"})
         );
         assert!(
-            serde_json::from_value::<WorkflowConfig>(serde_json::json!({
-                "category": "provider",
-                "schema": WORKFLOW_SCHEMA,
-                "driver": "graph:provider/bounded-task",
-                "target_requirements": {
-                    "process_control": "exclusive_session",
-                    "filesystem_mode": "enforce",
-                    "network_mode": "host",
-                },
-                "parameters": {},
-                "target_project_path": "/wrong-owner",
-            }))
+            decode_workflow_config(
+                serde_json::json!({
+                    "category": "provider",
+                    "schema": WORKFLOW_SCHEMA,
+                    "driver": "graph:provider/bounded-task",
+                    "target_requirements": {
+                        "process_control": "exclusive_session",
+                        "cleanup_authority": "local_process_scope",
+                        "filesystem_mode": "enforce",
+                        "network_mode": "host",
+                    },
+                    "parameters": {},
+                    "target_project_path": "/wrong-owner",
+                }),
+                RecoveryFamily::Current
+            )
             .is_err()
+        );
+        assert!(
+            decode_workflow_config(
+                serde_json::json!({
+                    "category": "provider",
+                    "schema": WORKFLOW_SCHEMA,
+                    "driver": "graph:provider/bounded-task",
+                    "target_requirements": {
+                        "process_control": "pooled_requests",
+                        "filesystem_mode": "disabled",
+                        "network_mode": "host",
+                    },
+                    "parameters": {},
+                }),
+                RecoveryFamily::Current
+            )
+            .is_err()
+        );
+        assert!(
+            decode_workflow_config(
+                serde_json::json!({
+                    "category": "provider",
+                    "schema": WORKFLOW_SCHEMA,
+                    "driver": "graph:provider/bounded-task",
+                    "target_requirements": {
+                        "process_control": "pooled_requests",
+                        "cleanup_authority": "local_process_scope",
+                        "filesystem_mode": "disabled",
+                        "network_mode": "host",
+                    },
+                    "parameters": {},
+                }),
+                RecoveryFamily::Current
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_requirement_pairs_are_validated_before_contact() {
+        let requirement = |process_control, cleanup_authority| TargetRuntimeRequirements {
+            process_control,
+            cleanup_authority,
+            filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
+            network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+        };
+        for process_control in [
+            TargetProcessControl::OrdinarySubprocess,
+            TargetProcessControl::PooledRequests,
+        ] {
+            assert!(
+                validate_target_runtime_requirements(&requirement(
+                    process_control,
+                    PersistentSessionCleanupAuthority::NotRequired,
+                ))
+                .is_ok()
+            );
+            assert!(
+                validate_target_runtime_requirements(&requirement(
+                    process_control,
+                    PersistentSessionCleanupAuthority::LocalProcessScope,
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            validate_target_runtime_requirements(&requirement(
+                TargetProcessControl::ExclusiveSession,
+                PersistentSessionCleanupAuthority::LocalProcessScope,
+            ))
+            .is_ok()
+        );
+        for cleanup_authority in [
+            PersistentSessionCleanupAuthority::NotRequired,
+            PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+        ] {
+            assert!(
+                validate_target_runtime_requirements(&requirement(
+                    TargetProcessControl::ExclusiveSession,
+                    cleanup_authority,
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn historical_workflow_schema_has_a_narrow_read_only_upgrade() {
+        let historical = serde_json::json!({
+            "category": "provider",
+            "schema": HISTORICAL_WORKFLOW_SCHEMA,
+            "driver": "graph:provider/bounded-task",
+            "target_requirements": {
+                "process_control": "exclusive_session",
+                "filesystem_mode": "enforce",
+                "network_mode": "host",
+            },
+            "parameters": {},
+        });
+        assert!(decode_workflow_config(historical.clone(), RecoveryFamily::Current).is_err());
+        let upgraded = decode_workflow_config(historical, RecoveryFamily::PreCleanupField).unwrap();
+        assert_eq!(upgraded.schema, WORKFLOW_SCHEMA);
+        assert_eq!(
+            upgraded.target_requirements.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+    }
+
+    #[test]
+    fn historical_progress_upgrade_does_not_create_external_authority() {
+        let mut historical = serde_json::json!({
+            "schema": HISTORICAL_PROGRESS_SCHEMA,
+            "pushed": false,
+            "workflow_digest": null,
+            "target_request_digest": null,
+            "target_readiness": {
+                "requirements": {
+                    "process_control": "pooled_requests",
+                    "filesystem_mode": "disabled",
+                    "network_mode": "host"
+                },
+                "daemon_revision": "old",
+                "isolation_policy_digest": "a".repeat(64),
+                "process_scope_authority_digest": null,
+                "process_control_reason": "not_required"
+            },
+            "target_chain_root_id": null,
+            "target_admission": null,
+            "launch_acceptance_drive_root_id": null,
+            "drive_root_id": null
+        });
+        upgrade_historical_evidence(
+            &mut historical,
+            HISTORICAL_PROGRESS_SCHEMA,
+            PROGRESS_SCHEMA,
+            RecoveryFamily::PreCleanupField,
+        )
+        .unwrap();
+        let progress: Progress = serde_json::from_value(historical).unwrap();
+        assert_eq!(
+            progress
+                .target_readiness
+                .unwrap()
+                .requirements
+                .cleanup_authority,
+            PersistentSessionCleanupAuthority::NotRequired
+        );
+    }
+
+    #[test]
+    fn operation_version_selects_one_exact_recovery_family() {
+        let mut operation = operation_fixture();
+        let current_progress = serde_json::json!({"schema": PROGRESS_SCHEMA});
+        assert_eq!(
+            recovery_family(&operation, &current_progress).unwrap(),
+            RecoveryFamily::Current
+        );
+
+        operation.schema = HISTORICAL_OPERATION_SCHEMA.to_owned();
+        assert_eq!(
+            recovery_family(
+                &operation,
+                &serde_json::json!({"schema": HISTORICAL_PROGRESS_SCHEMA})
+            )
+            .unwrap(),
+            RecoveryFamily::PreCleanupField
+        );
+        assert_eq!(
+            recovery_family(&operation, &current_progress).unwrap(),
+            RecoveryFamily::ExplicitLocalCleanupBridge
+        );
+        assert!(recovery_family(&operation, &serde_json::json!({"schema": "unknown"})).is_err());
+
+        let mut historical_receipt = serde_json::to_value(receipt_fixture(&operation)).unwrap();
+        historical_receipt["schema"] = Value::String(HISTORICAL_RESPONSE_SCHEMA.to_owned());
+        historical_receipt["target_readiness"]["requirements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_authority");
+        let decoded =
+            decode_receipt(historical_receipt.clone(), RecoveryFamily::PreCleanupField).unwrap();
+        assert_eq!(
+            decoded.target_readiness.requirements.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+        assert!(
+            decode_receipt(
+                historical_receipt.clone(),
+                RecoveryFamily::ExplicitLocalCleanupBridge
+            )
+            .is_err()
+        );
+        historical_receipt["target_readiness"]["requirements"]["cleanup_authority"] =
+            Value::String("external_placement_incarnation".to_owned());
+        assert!(decode_receipt(historical_receipt, RecoveryFamily::PreCleanupField).is_err());
+    }
+
+    #[test]
+    fn resumed_pre_cleanup_operation_keeps_its_durable_evidence_family() {
+        let mut operation = operation_fixture();
+        operation.schema = HISTORICAL_OPERATION_SCHEMA.to_owned();
+
+        let mut progress = Progress::new();
+        progress.target_readiness = Some(readiness_fixture());
+        let retained_progress = retained_evidence_value(
+            &progress,
+            RecoveryFamily::PreCleanupField,
+            HISTORICAL_PROGRESS_SCHEMA,
+        )
+        .unwrap();
+        assert_eq!(
+            recovery_family(&operation, &retained_progress).unwrap(),
+            RecoveryFamily::PreCleanupField
+        );
+        assert_eq!(
+            retained_progress.get("schema").and_then(Value::as_str),
+            Some(HISTORICAL_PROGRESS_SCHEMA)
+        );
+        assert!(
+            retained_progress
+                .pointer("/target_readiness/requirements/cleanup_authority")
+                .is_none()
+        );
+        let decoded_progress = {
+            let job = SyncJobRecord {
+                job_id: "remote-worker-workflow:historical".into(),
+                operation_type: OPERATION_TYPE.into(),
+                operation: serde_json::to_value(&operation).unwrap(),
+                peer: Some("default".into()),
+                state: SyncJobState::Running,
+                phase: "target_ready".into(),
+                roots: Vec::new(),
+                heads: Vec::new(),
+                uploaded_hashes: Vec::new(),
+                fetched_hashes: Vec::new(),
+                attempt_count: 1,
+                max_attempts: ryeos_state::SYNC_JOB_UNBOUNDED_ATTEMPTS,
+                last_error: None,
+                result: Some(retained_progress),
+                created_at: "2026-09-16T00:00:00Z".into(),
+                updated_at: "2026-09-16T00:00:01Z".into(),
+                finished_at: None,
+            };
+            Progress::from_job(&job, RecoveryFamily::PreCleanupField).unwrap()
+        };
+        assert_eq!(decoded_progress, progress);
+
+        let receipt = receipt_fixture(&operation);
+        let retained_receipt = retained_evidence_value(
+            &receipt,
+            RecoveryFamily::PreCleanupField,
+            HISTORICAL_RESPONSE_SCHEMA,
+        )
+        .unwrap();
+        assert_eq!(
+            recovery_family(&operation, &retained_receipt).unwrap(),
+            RecoveryFamily::PreCleanupField
+        );
+        assert_eq!(
+            decode_receipt(retained_receipt, RecoveryFamily::PreCleanupField).unwrap(),
+            receipt
         );
     }
 
@@ -2801,6 +3416,7 @@ mod tests {
     fn pooled_request_readiness_does_not_claim_exclusive_scope_authority() {
         let requirements = TargetRuntimeRequirements {
             process_control: TargetProcessControl::PooledRequests,
+            cleanup_authority: PersistentSessionCleanupAuthority::NotRequired,
             filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
             network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
         };
@@ -2817,6 +3433,26 @@ mod tests {
             Value::String("ready".to_string());
         let error = target_readiness_evidence(&malformed, &requirements).unwrap_err();
         assert!(format!("{error:#}").contains("readiness evidence is invalid"));
+    }
+
+    #[test]
+    fn target_cannot_self_attest_external_placement_cleanup() {
+        let requirements = TargetRuntimeRequirements {
+            process_control: TargetProcessControl::ExclusiveSession,
+            cleanup_authority: PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
+            filesystem_mode: ryeos_engine::isolation::IsolationMode::Disabled,
+            network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
+        };
+        let mut status = target_status(false, "policy_unconfigured", "disabled", "host");
+        status["external_placement_incarnation"] = serde_json::json!({
+            "ready": true,
+            "reason": "ready",
+            "authority_digest": format!("sha256:{}", "c".repeat(64)),
+            "incarnation_digest": format!("sha256:{}", "d".repeat(64)),
+            "controller_authority_digest": format!("sha256:{}", "e".repeat(64)),
+        });
+        let error = target_readiness_evidence(&status, &requirements).unwrap_err();
+        assert!(format!("{error:#}").contains("independent source-side lifecycle receipt"));
     }
 
     #[test]
@@ -2874,6 +3510,51 @@ mod tests {
         assert_eq!(
             graph_value.pointer("/config/nodes/run/assign/candidate_terminal_thread_id"),
             Some(&Value::String("${dispatch.child_thread_id}".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ryeos_recovery_qualification_workflow_selects_only_the_recovery_profile() {
+        let root = ryeos_engine::test_support::workspace_root();
+        let config_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/config/development/ryeos/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let config: WorkflowConfig = serde_json::from_value(config_value).unwrap();
+        assert_eq!(config.schema, WORKFLOW_SCHEMA);
+        assert_eq!(
+            config.driver,
+            "graph:ryeos/development/remote-worker-recovery"
+        );
+        assert_eq!(
+            config.target_requirements.process_control,
+            TargetProcessControl::ExclusiveSession
+        );
+
+        let graph_value: Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                root.join(".ai/graphs/ryeos/development/remote-worker-recovery.yaml"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let graph: ryeos_graph_definition::GraphFile =
+            serde_json::from_value(graph_value.clone()).unwrap();
+        ryeos_graph_definition::validate_graph_file(&graph).unwrap();
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/item_id"),
+            Some(&Value::String(
+                "worker_execution:codex/bounded-turn-recovery".to_owned()
+            ))
+        );
+        assert_eq!(
+            graph_value.pointer("/config/nodes/run/action/ref_bindings/environment"),
+            Some(&Value::String(
+                "config:development/ryeos/worker-environment".to_owned()
+            ))
         );
     }
 
@@ -3063,6 +3744,59 @@ mod tests {
     }
 
     #[test]
+    fn historical_launch_acceptance_preserves_identity_and_rejects_mixed_family() {
+        let mut operation = operation_fixture();
+        operation.schema = HISTORICAL_OPERATION_SCHEMA.to_owned();
+        let digest = operation_digest(&operation).unwrap();
+        let acceptance = LaunchAcceptance {
+            schema: LAUNCH_ACCEPTANCE_SCHEMA.into(),
+            source_work_id: operation.source_work_id.clone(),
+            operation_digest: digest.clone(),
+            workflow_digest: "1".repeat(64),
+            target_request_digest: "2".repeat(64),
+            target_launch_id: operation.target_launch_id.clone(),
+            target_readiness: readiness_fixture(),
+            launch_acceptance_drive_root_id: operation.source_invocation_id.clone(),
+            target_chain_root_id: "T-target-graph".into(),
+            target_admission: TargetAdmissionEvidence {
+                admitted_capsule_hash: "3".repeat(64),
+                exact_program_hash: "4".repeat(64),
+                effective_definition_digest: "5".repeat(64),
+            },
+        };
+        let mut historical = serde_json::to_value(&acceptance).unwrap();
+        historical["schema"] = Value::String(HISTORICAL_LAUNCH_ACCEPTANCE_SCHEMA.to_owned());
+        historical["target_readiness"]["requirements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_authority");
+
+        let decoded = decode_launch_acceptance(
+            historical.clone(),
+            &operation,
+            &digest,
+            RecoveryFamily::PreCleanupField,
+        )
+        .unwrap();
+        assert_eq!(decoded.source_work_id, operation.source_work_id);
+        assert_eq!(decoded.operation_digest, digest);
+        assert_eq!(decoded.target_launch_id, operation.target_launch_id);
+        assert_eq!(
+            decoded.target_readiness.requirements.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+        assert!(
+            decode_launch_acceptance(
+                historical,
+                &operation,
+                &digest,
+                RecoveryFamily::ExplicitLocalCleanupBridge,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn target_capsule_bytes_must_match_the_status_identity() {
         let value = serde_json::json!({"kind": "not-the-requested-capsule"});
         let another_hash = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
@@ -3089,6 +3823,7 @@ mod tests {
                 &operation.source_invocation_id,
                 &operation,
                 &operation_digest(&operation).unwrap(),
+                RecoveryFamily::Current,
             )
             .unwrap(),
             receipt_fixture(&operation)
@@ -3102,6 +3837,50 @@ mod tests {
                 &operation.source_invocation_id,
                 &operation,
                 &operation_digest(&operation).unwrap(),
+                RecoveryFamily::Current,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn historical_settlement_folds_only_its_exact_receipt_family() {
+        let mut operation = operation_fixture();
+        operation.schema = HISTORICAL_OPERATION_SCHEMA.to_owned();
+        let digest = operation_digest(&operation).unwrap();
+        let mut historical_receipt = serde_json::to_value(receipt_fixture(&operation)).unwrap();
+        historical_receipt["schema"] = Value::String(HISTORICAL_RESPONSE_SCHEMA.to_owned());
+        historical_receipt["target_readiness"]["requirements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_authority");
+        let payload = serde_json::json!({
+            "schema": DRIVE_FACT_SCHEMA,
+            "source_work_id": operation.source_work_id,
+            "operation_digest": digest,
+            "receipt": historical_receipt,
+        });
+        let decoded = decode_settlement_payload(
+            payload.clone(),
+            &operation.source_invocation_id,
+            &operation,
+            &operation_digest(&operation).unwrap(),
+            RecoveryFamily::PreCleanupField,
+        )
+        .unwrap();
+        assert_eq!(decoded.source_work_id, operation.source_work_id);
+        assert_eq!(decoded.target_launch_id, operation.target_launch_id);
+        assert_eq!(
+            decoded.target_readiness.requirements.cleanup_authority,
+            PersistentSessionCleanupAuthority::LocalProcessScope
+        );
+        assert!(
+            decode_settlement_payload(
+                payload,
+                &operation.source_invocation_id,
+                &operation,
+                &operation_digest(&operation).unwrap(),
+                RecoveryFamily::ExplicitLocalCleanupBridge,
             )
             .is_err()
         );
@@ -3294,6 +4073,7 @@ mod tests {
         TargetReadinessEvidence {
             requirements: TargetRuntimeRequirements {
                 process_control: TargetProcessControl::ExclusiveSession,
+                cleanup_authority: PersistentSessionCleanupAuthority::LocalProcessScope,
                 filesystem_mode: ryeos_engine::isolation::IsolationMode::Enforce,
                 network_mode: ryeos_engine::isolation::IsolationNetworkMode::Host,
             },

@@ -5937,6 +5937,16 @@ impl StateDb {
         self.operational()?.update_sync_job(job_id, update)
     }
 
+    pub fn complete_exhausted_sync_job_from_authority(
+        &self,
+        job_id: &str,
+        expected_operation: &serde_json::Value,
+        update: &SyncJobUpdate,
+    ) -> anyhow::Result<()> {
+        self.operational()?
+            .complete_exhausted_sync_job_from_authority(job_id, expected_operation, update)
+    }
+
     pub fn reconcile_interrupted_sync_job_attempts(&self) -> anyhow::Result<usize> {
         self.operational()?
             .reconcile_interrupted_sync_job_attempts()
