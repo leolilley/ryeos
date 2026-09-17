@@ -354,6 +354,14 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(
             os.environ.get("RYEOS_LOCAL_MODEL_PROFILE"), "qwen3-0.6b"
         )
+        self.assertEqual(
+            os.environ.get("LIBC_PATH"),
+            str(
+                (WORKSPACE / "runtime" / "lib" / "libc.so").resolve(
+                    strict=True
+                )
+            ),
+        )
 
     def test_all_shards_validate_before_any_tensor_materialization(self) -> None:
         events: list[str] = []

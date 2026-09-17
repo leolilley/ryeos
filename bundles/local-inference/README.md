@@ -56,6 +56,14 @@ did not run the model. This establishes numeric conformance only. It is not
 runtime ABI, target, hardware, isolation, worker/provider, publication, or ARC
 acceptance qualification.
 
+A follow-up operator calibration ran the same candidate under the admitted
+musl Python 3.14 runtime. Binding tinygrad's POSIX support to that runtime's
+exact `libc.so` was valid, but Modal's observed NVIDIA driver library then
+failed to load because it requires the glibc symbol `gnu_get_libc_version`.
+The CPU workers keep their musl runtime. A GPU worker must instead compose a
+separately admitted GNU runtime and qualify its complete driver ABI; it must
+not fall back to the host interpreter or ambient library search.
+
 An executable local-model profile is the signed worker composition, not a
 model name selected by Python code. It binds exact immutable products for the
 Python runtime, tinygrad source, compiler/toolchain and model/tokenizer, plus

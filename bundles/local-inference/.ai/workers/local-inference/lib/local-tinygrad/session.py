@@ -85,6 +85,10 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
         "PYTHONHASHSEED": "0",
         "PYTHONSAFEPATH": "1",
         "PATH": "",
+        # Tinygrad's generated POSIX bindings require an explicit libc
+        # coordinate. Bind the libc from the admitted runtime tree; never let
+        # its loader search the host filesystem.
+        "LIBC_PATH": str(workspace / "runtime" / "lib" / "libc.so"),
         # DEV is owned by the signed concrete worker profile. RyeOS selects
         # and grants resources generically; this worker owns tinygrad's name
         # for the backend that consumes that already-admitted access.
@@ -110,6 +114,9 @@ def _prepare_environment() -> tuple[Path, Path, Path, Path]:
     ]
     runtime_root = (workspace / "runtime").resolve(strict=True)
     python_root = (runtime_root / "python").resolve(strict=True)
+    libc = (runtime_root / "lib" / "libc.so").resolve(strict=True)
+    if not libc.is_file() or os.environ["LIBC_PATH"] != str(libc):
+        raise RuntimeError("local worker libc is outside the admitted runtime")
     if Path(sys.prefix).resolve(strict=True) != python_root:
         raise RuntimeError("local worker interpreter prefix is outside the admitted runtime")
     if (
