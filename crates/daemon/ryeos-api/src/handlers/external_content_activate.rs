@@ -233,6 +233,7 @@ struct ActivationSubmission {
 /// accepts this token instead of independently supplied activation/operation
 /// values so no recovery caller can complete an old active job before the
 /// revocation check.
+#[derive(Clone, Copy)]
 struct CurrentActivationAuthority<'a> {
     activation: &'a ResolvedManagedExternalContentActivation,
     operation: &'a ManagedActivationJobOperation,
@@ -286,21 +287,16 @@ fn submit_operation_with_status(
             attempt_started: false,
         });
     }
-    if matches!(
-        existing.state,
-        ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
-    ) {
+    if existing.state == ryeos_state::SyncJobState::Cancelled {
         bail!(
-            "managed activation job {} is terminal in state {}: {}",
+            "managed activation job {} is terminal in state cancelled: {}",
             job_id,
-            existing.state.as_str(),
             existing
                 .last_error
                 .as_deref()
                 .unwrap_or("no retained diagnostic")
         );
     }
-
     let has_running_attempt = state.state_store.with_state_db(|db| {
         Ok(db
             .list_sync_job_attempts(&job_id)?
@@ -354,6 +350,30 @@ fn submit_operation_with_status(
                 attempt_started: false,
             });
         }
+        if let Some(mut response) =
+            complete_job_from_current_bindings(&state, current, &job_id, &existing)?
+        {
+            response.idempotent = true;
+            return Ok(ActivationSubmission {
+                response,
+                attempt_started: false,
+            });
+        }
+    }
+
+    if matches!(
+        existing.state,
+        ryeos_state::SyncJobState::Failed | ryeos_state::SyncJobState::Cancelled
+    ) {
+        bail!(
+            "managed activation job {} is terminal in state {}: {}",
+            job_id,
+            existing.state.as_str(),
+            existing
+                .last_error
+                .as_deref()
+                .unwrap_or("no retained diagnostic")
+        );
     }
 
     let submitted =
@@ -718,22 +738,132 @@ fn complete_job_from_current_receipt(
         return Ok(None);
     }
     let result = serde_json::to_value(&response)?;
+    let update = ryeos_state::SyncJobUpdate {
+        state: ryeos_state::SyncJobState::Completed,
+        phase: "completed_from_authoritative_receipt".to_owned(),
+        roots: Some(vec![head.target_hash]),
+        heads: None,
+        uploaded_hashes: existing.uploaded_hashes.clone(),
+        fetched_hashes: existing.fetched_hashes.clone(),
+        last_error: None,
+        result: Some(result),
+    };
     authority.state_store.with_state_db(|db| {
-        db.update_sync_job(
-            job_id,
-            &ryeos_state::SyncJobUpdate {
-                state: ryeos_state::SyncJobState::Completed,
-                phase: "completed_from_authoritative_receipt".to_owned(),
-                roots: Some(vec![head.target_hash]),
-                heads: None,
-                uploaded_hashes: existing.uploaded_hashes.clone(),
-                fetched_hashes: existing.fetched_hashes.clone(),
-                last_error: None,
-                result: Some(result),
-            },
-        )
+        if existing.state == ryeos_state::SyncJobState::Failed {
+            db.complete_exhausted_sync_job_from_authority(job_id, &operation.to_value()?, &update)
+        } else {
+            db.update_sync_job(job_id, &update)
+        }
     })?;
     Ok(Some(response))
+}
+
+/// Close the publication crash window (including an exhausted retry ledger)
+/// when every exact component already has a current grant-bound consumer
+/// binding. The immutable binding objects remain the authority; this merely
+/// advances the portable activation head to their new realization and folds
+/// that node-signed receipt into the existing durable job.
+fn complete_job_from_current_bindings(
+    state: &AppState,
+    current: CurrentActivationAuthority<'_>,
+    job_id: &str,
+    existing: &ryeos_state::SyncJobRecord,
+) -> Result<Option<Response>> {
+    let activation = current.activation;
+    let operation = current.operation;
+    if existing.state == ryeos_state::SyncJobState::Failed
+        && (!existing.attempts_exhausted()
+            || !matches!(existing.phase.as_str(), "failed" | "attempts_exhausted"))
+    {
+        return Ok(None);
+    }
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+        activation.document.consumer_ref.clone(),
+        activation.publisher_fingerprint.clone(),
+    )?;
+    let mut components = Vec::with_capacity(activation.components.len());
+    for component in &activation.components {
+        let Some((binding_hash, binding)) = current_activation_binding(
+            &state.state_store,
+            &cas,
+            &component.expected_manifest_hash,
+            &consumer,
+            state.identity.fingerprint(),
+        )?
+        else {
+            return Ok(None);
+        };
+        if binding.manifest_kind != component.expected_manifest_kind {
+            bail!("current managed activation component manifest kind changed");
+        }
+        if binding.authorizer_grant_digest != operation.operator_authority_digest {
+            return Ok(None);
+        }
+        components.push(
+            ryeos_state::objects::ExternalContentActivationComponentReceipt {
+                id: component.recipe.id.clone(),
+                binding_hash,
+            },
+        );
+    }
+    authority.ensure_guard(&guard)?;
+    drop(guard);
+
+    let publication = ryeos_app::managed_external_content_operation::publish_activation_receipt(
+        state, activation, operation, components,
+    )?;
+    let response = Response {
+        job_id: job_id.to_owned(),
+        activation_id: publication.activation_id,
+        receipt_hash: Some(publication.receipt_hash.clone()),
+        consumer_ref: activation.document.consumer_ref.clone(),
+        state: "completed".to_owned(),
+        idempotent: publication.idempotent,
+    };
+    let result = serde_json::to_value(&response)?;
+    let update = ryeos_state::SyncJobUpdate {
+        state: ryeos_state::SyncJobState::Completed,
+        phase: "completed_from_current_bindings".to_owned(),
+        roots: Some(vec![publication.receipt_hash]),
+        heads: None,
+        uploaded_hashes: existing.uploaded_hashes.clone(),
+        fetched_hashes: existing.fetched_hashes.clone(),
+        last_error: None,
+        result: Some(result),
+    };
+    state.state_store.with_state_db(|db| {
+        if existing.state == ryeos_state::SyncJobState::Failed {
+            db.complete_exhausted_sync_job_from_authority(job_id, &operation.to_value()?, &update)
+        } else {
+            db.update_sync_job(job_id, &update)
+        }
+    })?;
+    Ok(Some(response))
+}
+
+fn current_activation_binding(
+    state_store: &ryeos_app::state_store::StateStore,
+    cas: &lillux::CasStore,
+    manifest_hash: &str,
+    consumer: &ryeos_state::objects::ExternalContentConsumerAuthority,
+    node_fingerprint: &str,
+) -> Result<Option<(String, ryeos_state::objects::ExternalContentBinding)>> {
+    // A fresh activation has not imported its declared manifest yet. That is
+    // ordinary absence of a recoverable realization, not corrupt binding
+    // authority; the caller must continue to the admitted acquisition attempt.
+    if cas.get_object(manifest_hash)?.is_none() {
+        return Ok(None);
+    }
+    ryeos_app::operator_external_content::active_binding_from_store(
+        state_store,
+        cas,
+        manifest_hash,
+        consumer,
+        node_fingerprint,
+    )
 }
 
 fn complete_claimed_attempt_from_current_receipt(
@@ -2635,6 +2765,31 @@ mod tests {
     }
 
     #[test]
+    fn fresh_store_has_no_recoverable_activation_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let state_store = test_state_store(root.path());
+        let authority = state_store.pinned_state_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let consumer = ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+            "tool:fixture/verifier".to_owned(),
+            "a".repeat(64),
+        )
+        .unwrap();
+
+        assert!(
+            current_activation_binding(
+                &state_store,
+                &cas,
+                &"b".repeat(64),
+                &consumer,
+                &"c".repeat(64),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn durable_attempt_is_the_submission_lease_and_restart_fence() {
         let root = tempfile::tempdir().unwrap();
         let state_store = test_state_store(root.path());
@@ -2972,6 +3127,34 @@ mod tests {
             .unwrap();
         drop(guard);
 
+        // Model a crash after authoritative publication but before the
+        // exhausted attempt ledger could be folded. Ordinary terminal
+        // transitions remain closed; the receipt proof below must use the
+        // exact authority-backed reconciliation path.
+        state_store
+            .with_state_db(|db| {
+                db.update_sync_job(
+                    &job_id,
+                    &ryeos_state::SyncJobUpdate {
+                        state: ryeos_state::SyncJobState::Failed,
+                        phase: "failed".to_owned(),
+                        roots: None,
+                        heads: None,
+                        uploaded_hashes: existing.uploaded_hashes.clone(),
+                        fetched_hashes: existing.fetched_hashes.clone(),
+                        last_error: Some("publication settlement interrupted".to_owned()),
+                        result: None,
+                    },
+                )
+            })
+            .unwrap();
+        let failed = state_store
+            .with_state_db(|db| {
+                db.get_sync_job(&job_id)?
+                    .ok_or_else(|| anyhow::anyhow!("failed activation job disappeared"))
+            })
+            .unwrap();
+
         let response = complete_job_from_current_receipt(
             ActivationReceiptAuthority {
                 state_store: &state_store,
@@ -2983,7 +3166,7 @@ mod tests {
                 operation: &operation,
             },
             &job_id,
-            &existing,
+            &failed,
         )
         .unwrap()
         .expect("authoritative receipt must complete without acquisition");
