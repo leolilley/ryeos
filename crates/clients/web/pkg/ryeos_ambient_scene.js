@@ -20,7 +20,7 @@ export function mountRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
   let latestOptions = options;
   let disposed = false;
 
-  import("https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js")
+  import("/ui/assets/ryeos_three.js")
     .then((module) => {
       if (disposed || !canvas.isConnected) return;
       THREE = module;
@@ -45,10 +45,14 @@ export function mountRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
 }
 
 function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
+  // Browser mechanics are injectable for deterministic qualification. They
+  // remain graphics resources only; semantic scene and interaction authority
+  // still comes from the Rust projection supplied above.
+  const platform = ambientPlatform(options.platform);
   const namespaceAtlas = options.mode === "namespace_atlas" || options.mode === "atlas_2d" || options.mode === "atlas_paper_3d";
   const atlasStyle = options.atlasStyle || (options.mode === "atlas_paper_3d" ? "paper_3d" : "flat_2d");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(platform.devicePixelRatio(), 2));
   renderer.setClearColor(G.bg, 1);
 
   const scene = new THREE.Scene();
@@ -101,9 +105,9 @@ function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
   if (shard) root.add(shard.group);
 
   if (!namespaceAtlas) addRingBands(root, spinners);
-  const fragments = namespaceAtlas ? [] : makeFragments(root);
-  const streams = namespaceAtlas ? null : makeStreams(root);
-  const stars = namespaceAtlas ? null : makeStars(scene);
+  const fragments = namespaceAtlas ? [] : makeFragments(root, platform.random);
+  const streams = namespaceAtlas ? null : makeStreams(root, platform.random);
+  const stars = namespaceAtlas ? null : makeStars(scene, platform.random);
   const semanticLayer = new THREE.Group();
   root.add(semanticLayer);
   const raycaster = namespaceAtlas ? new THREE.Raycaster() : null;
@@ -111,8 +115,9 @@ function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
-    const width = Math.max(1, Math.floor(rect.width || window.innerWidth));
-    const height = Math.max(1, Math.floor(rect.height || window.innerHeight));
+    const viewport = platform.viewport();
+    const width = Math.max(1, Math.floor(rect.width || viewport.width));
+    const height = Math.max(1, Math.floor(rect.height || viewport.height));
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     if (namespaceAtlas) {
@@ -233,17 +238,19 @@ function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
   canvas.addEventListener("pointercancel", onPointerUp);
   canvas.addEventListener("pointerleave", onPointerLeave);
   canvas.addEventListener("wheel", onWheel, { passive: false });
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("resize", resize);
+  platform.eventTarget.addEventListener("keydown", onKeyDown);
+  platform.eventTarget.addEventListener("resize", resize);
 
-  let last = performance.now();
+  let frame = null;
+  let last = platform.now();
   const animate = (now) => {
     if (state.disposed) return;
-    requestAnimationFrame(animate);
+    const reducedMotion = platform.reducedMotion();
+    frame = reducedMotion ? null : platform.requestFrame(animate);
     resize();
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    const t = now / 1000;
+    const t = reducedMotion ? 0 : now / 1000;
 
     if (state.resetting) {
       const lerpSpeed = 0.045;
@@ -321,6 +328,9 @@ function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
       state.atlasFocus = nextOptions.atlasFocus || null;
       updateSemanticObjects(semanticLayer, state, nextSceneModel);
       applyAtlasFocus(state);
+      if (platform.reducedMotion() && frame === null) {
+        frame = platform.requestFrame(animate);
+      }
     },
     dispose() {
       state.disposed = true;
@@ -330,17 +340,47 @@ function startRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
       canvas.removeEventListener("pointercancel", onPointerUp);
       canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("resize", resize);
+      platform.eventTarget.removeEventListener("keydown", onKeyDown);
+      platform.eventTarget.removeEventListener("resize", resize);
+      if (frame !== null) platform.cancelFrame(frame);
       disposeObject(scene);
       renderer.dispose();
     },
   };
-  api.update(sceneModel);
   resize();
   updateCamera();
-  requestAnimationFrame(animate);
+  frame = platform.requestFrame(animate);
+  api.update(sceneModel);
   return api;
+}
+
+export function ambientPlatform(overrides = {}) {
+  const eventTarget = overrides.eventTarget || window;
+  return {
+    random: overrides.random || Math.random,
+    now: overrides.now || (() => performance.now()),
+    requestFrame: overrides.requestFrame || ((callback) => requestAnimationFrame(callback)),
+    cancelFrame: overrides.cancelFrame || ((frame) => cancelAnimationFrame(frame)),
+    eventTarget,
+    devicePixelRatio: overrides.devicePixelRatio || (() => window.devicePixelRatio || 1),
+    viewport: overrides.viewport || (() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    })),
+    reducedMotion: overrides.reducedMotion
+      || (() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true),
+  };
+}
+
+export function seededAmbientRandom(seed) {
+  let state = Number(seed) >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function makeShard() {
@@ -422,7 +462,7 @@ function addRingBands(root, spinners) {
   }
 }
 
-function makeFragments(root) {
+function makeFragments(root, random) {
   const orbits = [
     [5, 0.8, 3.14, 0.25, 0.018], [5.5, -0.4, 2.8, 0.18, 0.02], [4.8, 0.3, 4.2, 0.3, 0.016], [5.2, -0.7, 0.8, 0.2, 0.022],
     [9, 1.5, 2.5, 0.4, 0.012], [10.5, -1.2, 3.8, 0.35, 0.01], [8.5, 0.5, 3.0, 0.5, 0.011], [11, -2, 0.5, 0.3, 0.013],
@@ -431,7 +471,7 @@ function makeFragments(root) {
   return orbits.map(([radius, height, phase, scale, speed], index) => {
     const group = miniShard(scale, radius > 14 ? 0.48 : 0.78);
     root.add(group);
-    return { group, radius, height, phase, angle: index * 0.9, speed, rx: (Math.random() - 0.5) * 0.012, ry: (Math.random() - 0.5) * 0.016, rz: (Math.random() - 0.5) * 0.01 };
+    return { group, radius, height, phase, angle: index * 0.9, speed, rx: (random() - 0.5) * 0.012, ry: (random() - 0.5) * 0.016, rz: (random() - 0.5) * 0.01 };
   });
 }
 
@@ -447,7 +487,7 @@ function miniShard(scale, opacity) {
   return group;
 }
 
-function makeStreams(root) {
+function makeStreams(root, random) {
   const count = 480;
   const positions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
@@ -455,10 +495,10 @@ function makeStreams(root) {
   const phases = new Float32Array(count);
   const defs = [new THREE.Color(G.orange), new THREE.Color(G.aqua), new THREE.Color(G.yellow), new THREE.Color(G.purple)];
   for (let i = 0; i < count; i++) {
-    phases[i] = Math.random();
-    sizes[i] = 0.8 + Math.random() * 1.5;
+    phases[i] = random();
+    sizes[i] = 0.8 + random() * 1.5;
     const c = defs[i % defs.length];
-    const fade = 0.3 + Math.random() * 0.7;
+    const fade = 0.3 + random() * 0.7;
     colors[i * 3] = c.r * fade; colors[i * 3 + 1] = c.g * fade; colors[i * 3 + 2] = c.b * fade;
   }
   const geo = new THREE.BufferGeometry();
@@ -494,7 +534,7 @@ function makeStreams(root) {
   };
 }
 
-function makeStars(scene) {
+function makeStars(scene, random) {
   const count = 2200;
   const positions = new Float32Array(count * 3);
   const sizes = new Float32Array(count);
@@ -503,18 +543,18 @@ function makeStars(scene) {
   const freqs = new Float32Array(count);
   const phases = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    const r = 60 + Math.random() * 320;
+    const theta = random() * Math.PI * 2;
+    const phi = Math.acos(2 * random() - 1);
+    const r = 60 + random() * 320;
     positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
     positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
     positions[i * 3 + 2] = r * Math.cos(phi);
-    baseSizes[i] = sizes[i] = 0.4 + Math.random() * 2.2;
-    freqs[i] = 0.3 + Math.random() * 2.5;
-    phases[i] = Math.random() * Math.PI * 2;
-    const tint = Math.random();
+    baseSizes[i] = sizes[i] = 0.4 + random() * 2.2;
+    freqs[i] = 0.3 + random() * 2.5;
+    phases[i] = random() * Math.PI * 2;
+    const tint = random();
     if (tint < 0.72) {
-      const b = 0.48 + Math.random() * 0.46;
+      const b = 0.48 + random() * 0.46;
       colors[i * 3] = b; colors[i * 3 + 1] = b * 0.92; colors[i * 3 + 2] = b * 0.74;
     } else if (tint < 0.84) {
       colors[i * 3] = 0.86; colors[i * 3 + 1] = 0.55; colors[i * 3 + 2] = 0.28;

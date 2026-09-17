@@ -35,6 +35,44 @@ fn ryeos_envelope(
 // WASM exports — JS calls these
 // ---------------------------------------------------------------------------
 
+#[wasm_bindgen]
+pub fn ryeos_layout_preference_key() -> Result<String, JsValue> {
+    RYEOS_UI.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?
+            .layout_preference_key()
+            .map_err(|e| JsValue::from_str(&e))
+    })
+}
+
+#[wasm_bindgen]
+pub fn ryeos_export_layout_preferences() -> Result<String, JsValue> {
+    RYEOS_UI.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?
+            .export_layout_preferences()
+            .map_err(|e| JsValue::from_str(&e))
+    })
+}
+
+#[wasm_bindgen]
+pub fn ryeos_restore_layout_preferences(encoded: &str) -> Result<JsValue, JsValue> {
+    RYEOS_UI.with(|state| {
+        let mut state = state.borrow_mut();
+        let core = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
+        let effects = core
+            .restore_layout_preferences(encoded)
+            .map_err(|e| JsValue::from_str(&e))?;
+        ryeos_envelope(core, effects)
+    })
+}
+
 /// Start RyeOS, returning the semantic view/scene models and initial effects.
 #[wasm_bindgen]
 pub fn ryeos_start(

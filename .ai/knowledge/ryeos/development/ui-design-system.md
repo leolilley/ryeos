@@ -1,258 +1,235 @@
-<!-- ryeos:signed:2026-09-16T03:44:59Z:b4cf04297c564c3928a141051cf649a125fb9cdb9fa65436d214a51d0a24a09a:l5hoERQQMA87lsUX/13Te+ZWGYZDuB/kKOrz1dzNMbeJzUuaJXDdYvC3SyM+Go4B+jasC+hPbKdeRptDTNXjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T00:05:36Z:8631e5797d399d86c8825ff236e7f9372e07d8d044340830c2b64d136a5247ff:Ur/6upWYEb90Zba5ZnonRVRVtNyZhoqCf4CXx5gs6XaZdcAn6nZYAB5VZB3Wl3S8TcDxrzFNCQyGjpoBt8bRBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
-title: "RyeOS UI Visual Language and Implementation Rules"
-description: "Contributor design specification for typography, composition, components, contextual input, renderer ownership and visual qualification"
+title: "RyeOS UI Visual Language and Composition Rules"
+description: "Contributor specification for Gruvbox styling, nested tiled workspaces, view groups, contextual input and renderer ownership"
 entry_type: reference
-version: "1.0.0"
+version: "2.0.0"
 ```
 
-# RyeOS UI visual language and implementation rules
+# RyeOS UI visual language and composition rules
 
-## Purpose and status
+## Status and interpretation
 
-This is contributor guidance for building RyeOS clients. It records the design
-direction agreed on 2026-09-16. It specifies intended behavior and appearance;
-it is not evidence that the installed clients already conform. Implementation
-progress belongs in the implementation plan and its qualification record.
+This is development guidance, not evidence of shipped behavior. It records the
+corrected design agreed on 2026-09-16. Read it with `ui-development.md`,
+`signing.md` and `dependency-constitution.md`.
 
-Read this before editing UI composition or styling, alongside
-`ui-development.md` for iteration and `signing.md` for authored-item changes.
-Installed UI contracts remain in the RyeOS UI bundle's knowledge.
+The approved visual study is in
+`crates/clients/web/tests/browser/design/`. It is standalone HTML/CSS with
+synthetic content, not the production renderer. Its appearance was approved;
+its controls, named workspaces, grouped tabs and operational claims are not
+implementation evidence. Reproduce the treatment through real shared UI
+contracts, not hardcoded specimen DOM.
 
-This guide supersedes the visual prescriptions in `.tmp/frontend/style.md`
-and the visual-system section of the earlier assistant UI programme. In
-particular, universal monospace, thick framing, hard-offset shadows, ambient
-HUD decoration and a visible character grid are no longer the default design.
-The previous programme's authority and execution contracts remain applicable.
+This revision supersedes the previous neutral-charcoal replacement palette,
+blanket removal of ambient layers, page/sidebar-first composition and advice
+to limit this work to the existing master/stack layout. Those directions did
+not represent the user's intention. Do not use the rejected earlier screenshots
+as a design target.
 
-## Art direction
+The full execution plan is
+`.tmp/ryeos-ui-visual-language-and-composition-implementation-plan.md` in the
+main checkout. This tracked guide retains the decisions even when temporary
+planning files are unavailable.
 
-RyeOS should feel like a precisely engineered instrument: composed, technical,
-legible and direct. Use industrial modernism with restrained neo-brutalist
-character. The character comes from exposed structure, flat planes, deliberate
-proportions and sharp geometry. Warm amber/orange gives the interface identity.
+## Design identity
 
-Information occupies the visual centre. Controls sit where they can act on
-that information. A screen should read as a continuous composition, including
-when it contains several independently supplied views.
+RyeOS is a composable working environment, not a website dashboard with a fixed
+sidebar and a single page. Preserve the launcher, workspaces, views, tiling,
+optional edge slots and authored background/scene character. Improve their
+proportions and relationships rather than removing them.
 
-This is a visual-language correction first. Do not substitute a new dashboard,
-new product vocabulary or a new work-context authority for the design work.
-Establish typography, surfaces, linework and proportions using the existing
-information before changing information architecture.
+One-line direction: **A precise Gruvbox working environment with editorial
+typography, sharp geometry, fine structural lines and restrained neo-brutalist
+character.**
 
-## Concrete visual rules
+Professional does not mean generic or colourless. Avoid rounded-card grids,
+ubiquitous pills, neutral-white substitution, uniform bold monospace, heavy
+nested boxes and arbitrary decorative metrics. Do not name the product a
+cockpit or studio. Use RyeOS's own terms.
 
-### Typography
+Working views can be dense, but density must be deliberate. Use a clear focal
+area and supporting regions. Give prose room to read; align technical material
+precisely. Do not apply marketing-scale headlines to every operational view.
 
-- Navigation, headings, prose, forms and ordinary row labels use a neutral,
-  compact sans-serif. Start with `system-ui, -apple-system, BlinkMacSystemFont,
-  "Segoe UI", sans-serif`; this requires no font acquisition or host setup.
-- Commands, code, hashes, identifiers, timestamps and technical values use
-  `ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace`.
-  A reference embedded in a row may be monospaced without making the row's
-  description or controls monospaced.
-- Use font weights 400 for body, 500 for labels and 600 for headings/selected
-  labels. Avoid making all labels bold. Use tabular figures for aligned numbers.
-- Starting scale in CSS pixels: body 14/20, secondary 13/18, technical 12/18,
-  section heading 14/20 at 600, page title 22/28 at 600. These are font-size /
-  line-height pairs. Implement with rem units and preserve browser zoom.
-- Uppercase is for short category annotations, if needed; use modest tracking
-  (approximately 0.06em). Navigation, page titles and prose use sentence case.
-- Long paragraphs should stay around 65–80 characters wide. Tables, diagrams
-  and evidence may use the full available work area.
-- Do not shrink text to make an overcrowded screen fit. Reflow the layout or
-  reveal detail on demand. Essential text must not disappear through ellipsis
-  without a keyboard-accessible way to inspect the complete value.
+## Colour: preserve Gruvbox
 
-A self-hosted font may replace the system stack after visual evaluation. That
-change must include exact font assets, license, weights and asset packaging.
-No runtime font CDN or machine-specific installed-font requirement. A font
-choice alone does not complete the design.
+Use the existing renderer token owner, not a parallel theme system.
 
-### Colour and material
+| Role | Baseline |
+|---|---|
+| Canvas / shell | `#1d2021` |
+| Main plane | `#282828` |
+| Raised / secondary plane | `#3c3836` |
+| Quiet structural line | `#504945` |
+| Primary text | `#ebdbb2` |
+| Supporting text | `#d5c4a1` |
+| Muted text / stronger boundary | `#a89984` |
+| Structural orange | `#d65d0e` |
+| Salient yellow | `#fabd2f` |
+| Positive state | `#8ec07c` |
+| Failure state | `#fb4934` |
 
-Use opaque, neutral charcoal planes, warm near-white text and restrained warm
-accents. Preserve the palette's warmth without tinting every background brown.
-The following is the initial implementation palette, subject to measured
-contrast and visual review. It is a starting specification, not a claim of
-already measured accessibility.
+Keep the cream foreground and warm dark planes. Orange marks active structure;
+yellow supplies occasional emphasis. Neither replaces ordinary readable text.
+Selection, keyboard focus, warning and failure are distinct signals and need
+non-colour cues. A quiet divider need not have control contrast, but a control
+cannot rely on that divider alone. Measure actual foreground/background pairs:
+normal text 4.5:1, essential indicators 3:1. Do not assume small orange text
+or white-on-orange passes.
 
-| Semantic role | Starting value | Use |
-|---|---|---|
-| Canvas | `#17191A` | Main working background |
-| Shell | `#131516` | Navigation and persistent shell |
-| Surface | `#1E2122` | Panels requiring a separate plane |
-| Raised surface | `#262A2B` | Menus, dialogs and input interiors |
-| Hover | `#2B3031` | Local pointer feedback |
-| Selected surface | `#332B21` | Restrained warm selection fill |
-| Primary text | `#EAE6DC` | Main readable information |
-| Secondary text | `#B8B7AE` | Supporting information |
-| Muted text | `#92968F` | Tertiary but still readable text |
-| Subtle divider | `#34393A` | Nonessential section separators |
-| Strong divider | `#565E60` | Major boundaries, when necessary |
-| Control boundary | `#717B7D` | A boundary required to recognize a control |
-| Accent | `#E3A342` | Selected markers and primary actions |
-| Strong accent | `#F08A36` | Limited stronger emphasis |
-| Focus | `#F2BD67` | Keyboard focus indicator |
-| Success | `#9BB981` | Positive state with a text label |
-| Warning | `#E8BB62` | Attention state with a text label |
-| Danger | `#EF8177` | Failure/destructive state with a text label |
-| Unknown | `#B0B7BA` | Unknown/unconfirmed state with explicit wording |
+Ambient/background content remains an authored surface decision. Retain the
+geometric identity where declared; tune contrast and opacity so content stays
+legible. Do not globally erase scenes, force every view transparent, or add
+background exceptions keyed to view refs. Main reading areas may be opaque
+while the surrounding workspace retains its background.
 
-The palette belongs in one renderer token layer, using the existing CSS token
-owner. Map semantic VM tones to it centrally. Do not sprinkle hex values into
-component functions or signed views. Do not blindly add a second token naming
-system next to the existing `--ryeos-*` variables; consolidate their consumers.
+## Typography and geometry
 
-Selection, keyboard focus, warning and failure are different states. Selection
-uses a restrained fill and a 2px marker; focus uses a visible 2px outline with
-offset that does not change layout. A selected warning row retains both meanings.
-No essential distinction may depend on colour alone. Accent-filled buttons use
-dark text; verify contrast rather than assuming white text is readable on amber.
+- Use sans-serif for human titles, navigation, prose, forms and row labels.
+  The approved study uses Arial/Helvetica; this is the initial specimen stack,
+  not a promise of identical glyph metrics on every machine.
+- Use Liberation Mono / platform monospace for code, commands, identifiers,
+  timestamps, short chrome annotations and aligned technical values.
+  The cell-grid renderer and measurement probe remain monospace.
+- Start with body 14px at 1.5 line height, ordinary labels at regular weight,
+  view headings 20–24px, short tile metadata 12px. Larger 32–36px headings are
+  appropriate only where actual content and available space warrant them.
+- Selected labels do not all become bold. Uppercase and tracking are for short
+  metadata, not all text. Use tabular figures for aligned values.
+- Start with 12px region gaps, 24px content padding (16px when constrained),
+  34px tile headers, 48px shell header and 28px status strip.
+  These are web measurements, not semantic contract fields or TUI row counts.
+- Use 36px minimum ordinary rows, allowing wrapped content to grow; provide
+  44px touch targets. Respect browser zoom and text enlargement.
+- Use square structural planes and fine 1px boundaries. Focus/selection can use
+  a 2px marker. Avoid repeated full rectangles inside each tile.
+- Tabs sit in a shared strip with a restrained active marker; they are not
+  unrelated boxed buttons. Inactive tabs remain readable.
+- Each substantial view owns its content scrolling. Headers, tab strips and
+  composers remain usable. Do not turn short status content into a tiny scroller.
+- Reserve subdued depth for transient overlays. The approved launcher may use
+  a soft shadow and restrained backdrop blur; this is not a glass-panel theme.
+- Reuse the existing code/vector visual mechanisms. Do not invent a replacement
+  logo or an unrelated icon set.
 
-### Geometry, density and linework
+A portable font addition must include licensed exact assets, supported weights
+and existing asset packaging. No runtime CDN or undeclared installed-font
+dependency. System stacks are acceptable until an exact family is selected.
 
-- Use a 4px spacing base with steps 4, 8, 12, 16, 24 and 32.
-- Start with 24px desktop content padding, 16px on narrow layouts; a 48px shell
-  header; 36px ordinary rows and controls; 44px touch targets. Let content expand
-  rows rather than clipping wrapped labels to a fixed height.
-- Use 1px separators. Reserve 2px for focus/selection indicators, not routine
-  containers. Do not double borders where adjacent panes share an edge.
-- Corners are square for structural planes; controls may use at most a subtle
-  2px radius. Avoid pill-shaped containers and rounded-card grids.
-- Group related material with alignment, space and quiet dividers. Do not draw
-  complete rectangles around every section, subsection and row.
-- Keep working surfaces flat and opaque. No decorative gradients, glass blur,
-  bevels, glow, hard-offset shadows, scan lines or permanent grid texture.
-- Use a single intentional scroll owner for the main content. Logs, large
-  tables and independently inspected evidence may have bounded local scrolling.
-  Do not create miniature scroll panes for status/header text.
-- Sparse screens use natural-height content and deliberate remaining space.
-  Do not stretch empty accordions to fill the viewport or invent activity.
+## Composition contract: intended implementation
 
-### Motion, imagery and icons
+The workspace model will support arbitrary nested horizontal/vertical splits,
+with a group of view tabs at each leaf. This is an extension of the existing
+shared layout machinery, not another UI framework.
 
-The default operational surfaces have no decorative scene behind their content.
-Keep explicit topology/field/scene views available as real views. Their visual
-content is part of their purpose and must not be erased by global CSS.
+- A surface signs the available views, sources, actions and initial arrangements.
+- A workspace owns its live layout, view groups, selection/focus and optional
+  anchored slots. Workspace tabs select arrangements, not hardcoded product pages.
+- A split allocates space. A group orders view-instance references and selects
+  an active member. A view instance owns its local content/input state.
+- The layout tree is the single placement authority. Master/stack becomes an
+  arrange operation, not a second mutable ordered-layout authority.
+- Move preserves view identity, draft, local state and bound subject.
+  Explicitly opening another instance creates independent local state.
+- Optional edge slots remain anchored supporting regions, using the same
+  view/group machinery where practical. Top/left/right/bottom remain available;
+  none is globally required or forbidden.
+- Contextual input belongs with the view it serves. A separately authored
+  workspace-wide input remains valid. An input capability must not erase
+  the view's content.
+- The launcher remains transient and available throughout. It can open a view,
+  open alongside, or instantiate an admitted arrangement. These are local
+  composition operations, not grants of executable authority.
+- Named view sets are initial arrangements within the existing surface contract,
+  not a new kind, registry or service. Names and contents are authored data.
+- Narrow rendering may present one group at a time without destroying the saved
+  tree. Hidden content remains reachable. Maximisation is temporary presentation,
+  not deletion of sibling views.
 
-Use short 120–180ms transitions for local feedback. Streaming text and ordinary
-data refresh should not move or animate whole containers. No continuously
-pulsing frame, spinning ornament or activity-driven corner growth. Respect
-reduced motion and show real loading stages without fabricated percentages.
+Retain the existing split/rectangle utilities, instance state, draft mechanisms,
+seat context and reducers wherever they satisfy these contracts. Do not implement
+grouped tabs as a JS-only state store while Rust believes a different view is
+active. Web and terminal must agree on the active instance and action target.
 
-Reuse existing code/vector icon mechanisms. Use consistent stroke weight and
-small, legible silhouettes; label ambiguous controls. Do not invent a new logo,
-icon library or bitmap decoration as part of this refinement.
+### Context and authority are not geometry
 
-## Component anatomy
+The current seat-wide route and selection are not automatically sufficient for
+two independent conversations. Resolve context through existing seat/binding
+owners, with explicit scope for shared selections versus retained subjects.
+Do not copy executable authority into layout nodes or add a second route truth
+in browser state.
 
-| Component | Required treatment | Avoid |
-|---|---|---|
-| Navigation | Quiet shell plane, aligned labels, one restrained active marker; full keyboard access | Each destination in an outlined box |
-| Page header | One authored human title, optional concise context, aligned actions | Slug, region name and title all repeated |
-| Section | Heading/count on one baseline, natural-height rows, optional single divider | Accordion rectangles for every group |
-| Row/table | Clear primary label, aligned secondary values, explicit local actions; retained identity in details | Full-row amber text, action implied by colour alone |
-| Status | Short label plus small marker; unknown and stale distinguished | Large badges everywhere; green inferred from absent errors |
-| Button | Compact rectangular control; a primary action uses accent sparingly; subdued secondary actions | Orange outlines on every action |
-| Text field | Explicit label, coherent boundary, stable focus, inline validation and preserved draft | Placeholder as the only label |
-| Composer | Declared target, editable body, delivery state and exact submit action | Permanent generic input beneath unrelated views |
-| Activity/feed | Clear authorship, grouping and timestamps; technical detail expandable | Every event in a separate bordered card |
-| Evidence/diff | Monospace where appropriate, aligned data, readable changes and preserved provenance | Decorating evidence until values are hard to compare |
-| Dialog/drawer | One boundary, clear title/action hierarchy, deterministic focus return | Nested frames and ambiguous global submit |
-| Empty/error state | Brief local explanation and an available relevant action, if any | Fake zeroes, raw stack traces as page content |
-| Boot/reconnect | Same typography/palette, concise actual stage, bounded error details | A separate ornamental launch aesthetic |
+Switching tabs or moving a view must not silently retarget a composer. Drafts
+remain keyed to exact view/input/target identity. Display the actual destination.
+A missing or stale target produces an honest unavailable state; it never falls
+back to another conversation, project or command.
 
-Every interactive component needs idle, hover, keyboard-focus, selected where
-applicable, disabled-with-reason, loading and error treatment. Disabled must
-remain readable. Do not confuse disabled with unauthorized: eligibility and
-its reason come from the compiled UI contract.
+Layout snapshots are untrusted presentation preferences. Revalidate their view
+references against the current compiled surface and re-resolve executable
+bindings. Never restore credentials, grants, signed authority or observed work
+facts from a browser snapshot. Treat draft persistence separately from geometry;
+do not silently persist sensitive message text with a saved arrangement.
 
-## Composition and contextual input
-
-Home should present its signed observations with one page title. It has no
-permanent bottom composer. Empty sections stay compact. Exact references and
-provenance remain inspectable even when a friendlier authored title is primary.
-
-The initial style specimen must retain the current information, including a
-single active UI seat if that is what the source returns. Styling does not
-authorize silently changing which records count as work. Any later filtering
-belongs in signed source parameters or the existing authoritative projection.
-
-Input remains an important RyeOS capability. Mount it where signed composition
-declares a meaningful interaction. A work conversation can have a composer;
-a review can have exact decision controls; a list can have search/filtering.
-The global command palette remains available through existing bindings and
-key handling without consuming a permanent bottom region.
-
-Keep the existing route/facet and draft model. Show the addressed work/site
-when relevant; retain drafts when switching targets; prevent a stale target
-from silently receiving text. A missing grant must never make the renderer
-substitute another command or widen authority. A malformed binding is a defect
-to report and fix, not a reason to hide a failing widget with CSS.
-
-## Ownership and constraints
+## Ownership
 
 | Concern | Owner |
 |---|---|
-| Product composition, navigation, sources, human labels, input placement and permitted actions | Signed surfaces/views in `bundles/ryeos-ui/.ai/` |
-| Shared focus, selection, input routing, draft identity and semantic presentation | `crates/clients/base/src/ui/` |
-| Pixels, fonts, responsive geometry, DOM, focus mechanics, CSS tokens and animation | `crates/clients/web/pkg/` |
-| Cell geometry, glyphs, terminal input and terminal rendering | `crates/clients/terminal/` |
-| Browser session, binding compilation, attenuation and source/action verification | `crates/daemon/ryeos-ui/` and existing API owners |
-| Provider-specific content | The provider bundle |
-| Contributor design rules and iteration instructions | Root `.ai/knowledge/ryeos/development/` |
-| Installed user-facing UI contract | `bundles/ryeos-ui/.ai/knowledge/` |
+| Available views, initial arrangements, labels, context declarations, sources and actions | Signed surface/view contracts in the UI bundle and existing schema/compiler |
+| Layout tree, group edits, instance identity, focus, draft/target semantics | Existing shared client model and reducers |
+| Pixel geometry, fonts, DOM, pointer gestures, renderer tokens | Web client |
+| Cell geometry, glyphs, keyboard rendering | Terminal client |
+| Trust, binding compilation, attenuation and invocation verification | Existing daemon UI/API authorities |
+| Provider-specific content | Provider bundle |
+| Contributor design/implementation rules | Root development knowledge |
+| Implemented user-facing UI contract | UI bundle knowledge |
 
-At the 2026-09-16 audit, `RyeOsThemeVm` contains `id` and `tone`; the shared VM
-sets `gruvbox-optic`. This is not a complete signed token/theme configuration
-system. Existing signed presentation controls include surface border and ambient
-settings and view chrome/background hints. Reuse those controls. Renderer
-metrics and colours belong to the renderer's token implementation. Do not invent
-a config schema, theme registry or node policy merely to change spacing/fonts.
-If selectable themes become a requirement, audit the existing composition
-mechanism before extending its contract. Do not describe unimplemented theme
-authoring as an existing feature.
+The current theme VM has an ID and tone, not a full signed token configuration.
+Do not introduce a theme registry or node policy to change font size or spacing.
+Layout schema bounds belong to its existing compiler; authority limits belong
+to existing admission owners. Product choices belong in authored definitions.
 
-Never use `if view_ref == ...`, provider names, project names or DOM selectors
-matching canonical refs to decide product behavior. Render generic semantic
-widgets and signed presentation declarations. No new Observe/Operate enum,
-work registry, action-profile authority or per-page executor.
+Never branch on a provider, project or canonical view ref to select renderer
+behavior. Never add an Observe/Operate mode enum, page executor or broad grant
+to make an arrangement render.
 
-Web and TUI share meaning and exact action targeting. Terminal font choice is
-controlled by the user's terminal; do not require a particular font or colour
-extension. Translate hierarchy into spacing, intensity and restrained rules.
-Full TUI interaction remains in scope; identical physical geometry is unnecessary.
+## Interaction and component acceptance
 
-## Visual acceptance and review
+Support drag-to-split/tab, tab reordering, divider resizing, moving between
+workspaces, closing, temporary maximisation and restoring saved arrangements.
+Provide keyboard and menu equivalents; drag cannot be the only path.
+A normal view/tab switch is not an execution. Dirty drafts need deliberate
+retention/discard behavior, not silent loss.
 
-Inspect real browser output at 1440×900, 1920×1080, 1024×768 and 390×844, plus
-200% zoom and keyboard-only navigation. Check terminal output at 120×40 and
-80×24. Data tables may scroll horizontally inside their own bounded region;
-the entire page must not become wider than the viewport.
+Launcher groups stay open when expanded/collapsed; unavailable actions include
+reasons; focus returns predictably. Content headers prefer authored human
+titles, with exact refs still inspectable. Errors, stale observations and
+unknown delivery must remain distinguishable from success or zero results.
 
-Use sparse, busy, loading, stale, error, unavailable-action and long-label
-states. Include a selected item with an independent keyboard focus target.
-Measure text/control contrast and inspect forced colours and reduced motion.
-Normal text should meet 4.5:1 contrast; essential control/focus indicators 3:1.
-Subtle nonessential separators must not be the only way to identify a control.
+Keep tile contents diverse: prose, tables, files, diffs, timelines and scenes
+need appropriate internal composition. The consistent layer is typography,
+palette, linework, chrome and interaction—not forcing every view into one card.
 
-Review these questions against captured screens:
+## Qualification
 
-1. Does the page read as one deliberate composition?
-2. Are type, alignment and spacing carrying hierarchy before colour/borders?
-3. Is the warm accent distinctive because it is used selectively?
-4. Are ordinary labels readable without resembling log output?
-5. Does sparse content still look intentional?
-6. Can a user distinguish selection, focus, warning, stale and unknown?
-7. Is every visible input meaningfully addressed and authorized?
-8. Are provenance and full technical values reachable?
-9. Do Home, Work, Review, Sites, Programs, dialogs and boot feel related?
+The standalone study is the visual target. The next screenshot gate must use
+actual production components and, after the model change, an actual shared-model
+projection. Mark synthetic data clearly; do not imply execution evidence.
 
-Passing DOM tests is not visual approval. Keep before/after screenshots and
-review the first coherent specimen with the user before propagating the
-treatment across every surface. Mock data must be labelled as fixtures.
-Actual installed-session and execution acceptance must be recorded separately.
+Check the populated tiled arrangement, launcher, an alternate arrangement and
+the empty workspace. Include all edge slots, nested splits, grouped tabs,
+long labels, unavailable actions, content plus input, focus and draft retention.
+Inspect at 1600×1000 (study reference), 1440×900, 1024×768, 390×844 and 200% zoom.
+Check terminal at 120×40 and 80×24. Respect reduced motion and forced colours.
+
+Use focused JS/browser checks for asset work. Scope Rust checks to changed owners
+with at most two jobs. No full build/reinstall cycle for CSS iteration.
+DOM tests are not visual approval. Source tests, reviewed screenshots, installed
+boot/seat acceptance and real execution evidence are distinct gates.
+
+Explicitly deferred: floating/overlapping windows, cross-browser dragging,
+collaborative layout editing, a new theme system and native terminal emulation.
+Nested composition, tab groups, contextual input, keyboard/TUI support and saved
+arrangements are not deferred behind cosmetic work.

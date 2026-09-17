@@ -1,0 +1,3 @@
+# Exact upstream artifact. Its verified bytes must not be rewritten to satisfy
+# this repository's authored-source whitespace rules.
+crates/clients/web/pkg/ryeos_three.js -whitespace

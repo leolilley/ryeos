@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub mod workspaces;
+
 // ---------------------------------------------------------------------------
 // SurfaceSpec — the declarative UI contract
 // ---------------------------------------------------------------------------
@@ -33,8 +35,8 @@ pub struct SurfaceSpec {
     pub extends: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// Dynamic-tiling algorithm for the center plane. The layout tree is
-    /// COMPUTED from this plus the ordered tile list — never authored.
+    /// Recipe for initial tile-list composition and explicit arrange commands.
+    /// It does not regenerate an already edited or explicitly authored tree.
     #[serde(default)]
     pub tiling: TilingSpec,
     /// Ordered initial center tiles, each a `view:<ref>` (graph/atlas
@@ -44,6 +46,10 @@ pub struct SurfaceSpec {
     /// Fixed edge slots; an absent edge has no slot.
     #[serde(default)]
     pub slots: SlotsSpec,
+    /// Explicit named initial compositions. When populated, each workspace
+    /// owns its tree and slots; surface-level tiles/slots must be empty.
+    #[serde(default)]
+    pub workspaces: Vec<workspaces::WorkspaceSeedSpec>,
     /// Chrome style (border treatment).
     #[serde(default)]
     pub style: SurfaceStyleSpec,
@@ -157,8 +163,8 @@ pub struct SurfaceCapabilitySpec {
 // Tiling — the dynamic layout algorithm (mechanism words only)
 // ---------------------------------------------------------------------------
 
-/// Dynamic tiling algorithm. The engine computes the layout tree from
-/// this spec and the ordered tile list; surfaces never author trees.
+/// Deterministic arrange recipe. Named workspaces may instead author a tree;
+/// subsequent edits always operate on the resulting canonical tree.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TilingSpec {
@@ -347,6 +353,9 @@ impl<'de> Deserialize<'de> for SlotContentSpec {
 pub struct SurfaceStyleSpec {
     #[serde(default)]
     pub border: BorderStyleSpec,
+    /// Workspace navigation remains visible independently of optional status.
+    #[serde(default)]
+    pub workspace_tabs: bool,
 }
 
 /// Closed border vocabulary. Renderers map names to local glyph/pixel
@@ -674,6 +683,8 @@ impl LoadedSurface {
         }
 
         // Parse composed value as SurfaceSpec
+        workspaces::validate_effective_workspaces(&composed)
+            .map_err(|message| SurfaceDiagnostic::ValidationError { message })?;
         let spec = match serde_json::from_value::<SurfaceSpec>(composed) {
             Ok(s) => s,
             Err(e) => {
@@ -810,6 +821,7 @@ pub fn builtin_default() -> SurfaceSpec {
         tiling: TilingSpec::default(),
         tiles: Vec::new(),
         slots: SlotsSpec::default(),
+        workspaces: Vec::new(),
         style: SurfaceStyleSpec::default(),
         input: None,
         sources: BTreeMap::new(),
@@ -923,6 +935,14 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 
     // Warn about unsupported fields
     let mut diagnostics = Vec::new();
+    if let Err(message) = spec.to_workspaces() {
+        diagnostics.push(SurfaceDiagnostic::ValidationError { message });
+        return LoadedSurface::LocalPreview {
+            path: path.to_path_buf(),
+            spec: builtin_default(),
+            diagnostics,
+        };
+    }
     if !spec.instruments.is_empty() {
         diagnostics.push(SurfaceDiagnostic::UnsupportedField {
             field: "instruments".into(),
@@ -950,15 +970,37 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 // ---------------------------------------------------------------------------
 
 impl SurfaceSpec {
+    pub fn to_workspaces(&self) -> Result<Vec<Workspace>, String> {
+        workspaces::validate_seeds(&self.workspaces)?;
+        if self.workspaces.is_empty() {
+            return Ok(vec![self.to_workspace()]);
+        }
+        if !self.tiles.is_empty()
+            || self.slots.top.is_some()
+            || self.slots.bottom.is_some()
+            || self.slots.left.is_some()
+            || self.slots.right.is_some()
+        {
+            return Err("named workspaces cannot inherit surface-level tiles or slots".into());
+        }
+        self.workspaces
+            .iter()
+            .map(|seed| seed.instantiate(&self.tiling))
+            .collect()
+    }
+
     /// Convert this surface spec into a Workspace for rendering.
     ///
-    /// The workspace holds the ordered tile list and the tiling spec;
-    /// the layout tree is computed, never stored.
+    /// Authored tiling seeds the canonical tree once. Subsequent edits change
+    /// that tree, not a separately ordered tile list or the authored recipe.
     pub fn to_workspace(&self) -> Workspace {
-        Workspace::from_tiling(
+        let mut workspace = Workspace::from_tiling(
             self.tiling.clone(),
             self.tiles.iter().map(ViewKindSpec::to_view_spec).collect(),
-        )
+        );
+        workspace.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
+        workspace.title = self.name.clone();
+        workspace
     }
 }
 
@@ -1183,7 +1225,7 @@ style:
     }
 
     #[test]
-    fn to_workspace_preserves_tile_order() {
+    fn to_workspace_preserves_authored_focus_and_derives_geometric_order() {
         let spec: SurfaceSpec = serde_yaml::from_str(
             "name: x\ntiles: [\"view:a/b\", \"view:ryeos/graph/topology\", \"view:ryeos/atlas\"]\n",
         )
@@ -1191,19 +1233,20 @@ style:
         let ws = spec.to_workspace();
         let ids = ws.tile_ids();
         assert_eq!(ids.len(), 3);
+        assert_eq!(ws.tiles[&ws.focused_tile].view.view_ref, "view:a/b");
         assert!(matches!(
             ws.tiles.get(&ids[0]).map(|t| &t.view),
-            Some(ViewSpec { view_ref }) if view_ref == "view:a/b"
-        ));
-        assert!(matches!(
-            ws.tiles.get(&ids[1]).map(|t| &t.view),
             Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/graph/topology"
         ));
         assert!(matches!(
-            ws.tiles.get(&ids[2]).map(|t| &t.view),
+            ws.tiles.get(&ids[1]).map(|t| &t.view),
             Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/atlas"
         ));
-        assert_eq!(ws.focused_tile, ids[0]);
+        assert!(matches!(
+            ws.tiles.get(&ids[2]).map(|t| &t.view),
+            Some(ViewSpec { view_ref }) if view_ref == "view:a/b"
+        ));
+        assert_eq!(ws.focused_tile, ids[2]);
         // Bound tiles carry generic list local state.
         assert!(matches!(
             ws.tiles.get(&ids[0]).map(|t| &t.local),

@@ -7,11 +7,15 @@ import { beginFieldFrame, endFieldFrame } from "/ui/assets/ryeos_components_fiel
 import { ryeosNavigation } from "/ui/assets/ryeos_components_navigation.js";
 
 export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
+  if (vm?.schema_version !== "ryeos.ui.vm.v2") {
+    throw new Error("Unsupported RyeOS view-model contract; web assets and client runtime must be updated together.");
+  }
   beginFieldFrame();
   root.className = "ryeos-app ryeos-os";
   // Surface-declared border treatment (thick | thin | hidden | none);
   // CSS maps it onto tiles, dock tiles, and panels.
   root.dataset.border = vm.presentation?.chrome?.border || "thin";
+  root.classList.toggle("has-navigation", (vm.navigation?.items || []).length > 0);
   const chromeShell = { ...shell, dispatchUi };
   const topBar = vm.presentation?.chrome?.top_bar;
   const statusBar = vm.presentation?.chrome?.status_bar;
@@ -54,6 +58,9 @@ function activeOverlayState(vm) {
       enabled: item.enabled !== false,
       intent: item.intent,
       secondary_intent: item.secondary_intent,
+      header: !!item.header,
+      expanded: !!item.expanded,
+      unavailable_reason: item.enabled === false ? item.meta || "" : "",
     })),
   };
 }

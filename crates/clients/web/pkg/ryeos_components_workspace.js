@@ -28,6 +28,43 @@ export function ryeosWorkspace(vm, ambient, motion, dispatchUi) {
 }
 
 function workspacePlane(vm, ambient, dispatchUi, motion) {
+  // A constrained viewport projects the focused group, not a rewritten tree.
+  // Every visible slot and centre group remains reachable through shared focus.
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    const groups = [];
+    const collect = (node) => {
+      if (!node) return;
+      if (node.type === "split") { collect(node.first); collect(node.second); }
+      else groups.push(node);
+    };
+    collect(vm.root);
+    const slots = Object.entries(vm.docks || {}).filter(([, slot]) => slot);
+    const focusedSlot = slots.find(([, slot]) => slot.focused);
+    const focused = groups.find((node) => node.focused) || groups[0];
+    if (focused || focusedSlot) {
+      const plane = el("section", "ryeos-compact-plane");
+      const chooser = el("nav", "ryeos-region-chooser");
+      chooser.setAttribute("aria-label", "Workspace regions");
+      for (const group of groups) {
+        const button = textEl("button", group.title, !focusedSlot && group === focused ? "active" : "");
+        button.type = "button";
+        button.addEventListener("click", () => dispatchUi({ type: "focus_changed", target: group.tile_id }));
+        chooser.append(button);
+      }
+      for (const [edge, slot] of slots) {
+        const button = textEl("button", slot.title || edge, slot.focused ? "active" : "");
+        button.type = "button";
+        button.addEventListener("click", () => dispatchUi({ type: "focus_dock", edge }));
+        chooser.append(button);
+      }
+      const content = el("div", "ryeos-compact-content");
+      content.append(focusedSlot ? dockTile(focusedSlot[1], dispatchUi) : layoutNode(focused, dispatchUi, motion, {
+        guard: vm.layout_guard, min: vm.split_min_ratio, max: vm.split_max_ratio,
+      }));
+      plane.append(chooser, content);
+      return plane;
+    }
+  }
   const plane = el("section", "ryeos-workspace-plane");
   const docks = vm.docks || {};
   const left = dockTile(docks.left, dispatchUi);
@@ -67,7 +104,9 @@ function workspacePlane(vm, ambient, dispatchUi, motion) {
     stack.append(backdrop);
   }
   if (vm.root) {
-    stack.append(layoutNode(vm.root, dispatchUi, motion));
+    stack.append(layoutNode(vm.root, dispatchUi, motion, {
+      guard: vm.layout_guard, min: vm.split_min_ratio, max: vm.split_max_ratio,
+    }));
   } else if (vm.backdrop) {
     // Empty center: the backdrop is content — drawn through the same
     // generic scene path. The background is a scene, never a renderer enum.
@@ -90,35 +129,75 @@ function dockTile(dockVm, dispatchUi) {
     dispatchUi({ type: "focus_dock", edge });
   });
   const chrome = el("header", "ryeos-dock-chrome");
-  chrome.append(textEl("strong", dockVm.title || edge), textEl("small", edge));
+  chrome.title = dockVm.view?.provenance || "";
+  chrome.append(textEl("strong", dockVm.supplement?.frame_label || dockVm.title || edge));
+  if (dockVm.supplement?.frame_detail) chrome.append(textEl("small", dockVm.supplement.frame_detail));
   tile.append(chrome, dockView(dockVm, dispatchUi));
   return tile;
 }
 
-// A view instance that declares `input` renders as the prompt (input is an
-// orthogonal capability, not a dock-content variant). Otherwise the bound
-// widget renders.
+// Input is an orthogonal capability: it does not replace a view's content.
+// Filters precede their content; composers remain below it in the same region.
 function dockView(instanceVm, dispatchUi) {
   const body = el("div", "ryeos-dock-body");
-  if (instanceVm.input) {
-    body.append(inputDock(instanceVm.input, dispatchUi));
-  } else {
-    body.append(view(instanceVm.view || {}, instanceVm.instance_key || "", instanceVm.tile_id || "", dispatchUi));
+  appendViewContent(body, instanceVm, dispatchUi);
+  if (instanceVm.supplement?.footer) body.append(contentFooter(instanceVm.supplement));
+  // Slot chrome already labels the view. Keep distinct authored content headings.
+  if (instanceVm.title === instanceVm.view?.title) {
+    body.querySelector(".ryeos-list-header")?.remove();
   }
   return body;
 }
 
+function appendViewContent(host, vm, dispatchUi) {
+  if (vm.input?.live_filter) host.append(inputDock(vm.input, dispatchUi));
+  const content = view(vm.view || {}, vm.instance_key || "", vm.tile_id || "", dispatchUi);
+  if (vm.heading) {
+    const heading = el("header", "ryeos-content-heading");
+    if (vm.heading.eyebrow) heading.append(textEl("small", vm.heading.eyebrow));
+    heading.append(textEl("h1", vm.heading.title));
+    if (vm.heading.summary) heading.append(textEl("p", vm.heading.summary));
+    const metadata = el("div", "ryeos-content-metadata");
+    for (const value of vm.heading.metadata || []) metadata.append(textEl("span", value));
+    if (metadata.childElementCount) heading.append(metadata);
+    content.querySelector(".ryeos-list-header")?.remove();
+    content.prepend(heading);
+  } else if (vm.title === vm.view?.title) {
+    // Navigation labels are not content headings. Do not repeat one title
+    // in the frame, tabs and body when no distinct introduction was authored.
+    content.querySelector(".ryeos-list-header")?.remove();
+  }
+  if (vm.supplement?.scene) {
+    const diagram = sceneDiagram(vm.supplement.scene);
+    const heading = content.querySelector(".ryeos-content-heading");
+    if (heading) heading.after(diagram); else content.prepend(diagram);
+  }
+  if (vm.supplement?.excerpt?.length) {
+    const excerpt = el("section", "ryeos-code-excerpt");
+    if (vm.supplement.excerpt_title) excerpt.append(textEl("header", vm.supplement.excerpt_title));
+    for (const line of vm.supplement.excerpt) {
+      const row = el("div", `ryeos-code-line tone-${line.tone || "neutral"}`);
+      row.append(textEl("small", line.field), textEl("code", line.value));
+      excerpt.append(row);
+    }
+    content.append(excerpt);
+  }
+  host.append(content);
+  if (vm.input && !vm.input.live_filter) host.append(inputDock(vm.input, dispatchUi));
+}
+
 function inputDock(inputVm, dispatchUi) {
+  const send = (action) => dispatchUi({ type: "input_at", address: inputVm.address, action });
   const wrap = el("section", "ryeos-input-dock");
   const meta = el("div", "ryeos-input-meta");
   meta.append(
     textEl("span", "→", "ryeos-input-arrow"),
     textEl("strong", inputVm.route_label || "target: ryeos"),
-    textEl("small", inputVm.hint || ""),
+    textEl("small", inputVm.text ? "DRAFT" : ""),
   );
+  meta.title = inputVm.hint || "";
 
   const row = el("div", "ryeos-input-row");
-  const prompt = textEl("span", "$", "ryeos-input-prompt");
   const input = document.createElement("textarea");
   input.rows = 1;
   input.value = inputVm.text || "";
@@ -126,27 +205,31 @@ function inputDock(inputVm, dispatchUi) {
   input.setAttribute("aria-label", inputVm.route_label ? `Input for ${inputVm.route_label}` : "RyeOS input");
   input.spellcheck = false;
   input.autocomplete = "off";
-  input.setAttribute("data-focus-key", "ryeos-input-dock");
+  input.setAttribute("data-focus-key", `input:${JSON.stringify(inputVm.address)}`);
+  input.addEventListener("focus", () => { if (!inputVm.focused) send({ type: "focus" }); });
   input.addEventListener("input", () => {
-    dispatchUi({ type: "set_input_text", text: input.value, cursor: byteCursor(input.value, input.selectionStart || 0) });
+    send({ type: "set_text", text: input.value, cursor: byteCursor(input.value, input.selectionStart || 0) });
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && event.shiftKey) {
       event.preventDefault();
-      dispatchUi({ type: "submit_input" });
+      send({ type: "submit", interrupt: false });
     } else if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
       event.preventDefault();
-      dispatchUi({ type: "complete_input" });
+      send({ type: "complete" });
     }
   });
   const submit = el("button", "ryeos-input-submit");
   submit.type = "button";
   submit.disabled = !inputVm.submit_enabled;
-  submit.textContent = "send";
+  submit.textContent = "↑";
   submit.setAttribute("aria-label", "Send RyeOS input");
-  submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
-  row.append(prompt, input, submit);
-  wrap.append(meta, row);
+  submit.addEventListener("click", () => send({ type: "submit", interrupt: false }));
+  row.append(input);
+  const actions = el("div", "ryeos-input-actions");
+  actions.append(textEl("span", "Tab · complete", "ryeos-input-help"));
+  actions.append(textEl("small", "Shift Enter to send"), submit);
+  wrap.append(meta, row, actions);
 
   // Completion suggestions from the input's `completion` source.
   const suggestions = inputVm.completion || [];
@@ -175,17 +258,95 @@ export function tileIdsForNode(node, ids = []) {
   return ids;
 }
 
-function layoutNode(node, dispatchUi, motion = []) {
+export const VIEW_DRAG_TYPE = "application/x-ryeos-view";
+
+function draggableView(element, tileId, edit) {
+  element.draggable = true;
+  element.addEventListener("dragstart", (event) => {
+    if (!edit.guard || !event.dataTransfer) { event.preventDefault(); return; }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(VIEW_DRAG_TYPE, JSON.stringify({ tile_id: tileId, guard: edit.guard }));
+  });
+}
+
+export function droppedView(event, edit) {
+  try {
+    const raw = event.dataTransfer?.getData(VIEW_DRAG_TYPE) || "";
+    if (raw.length > 512) return null;
+    const value = JSON.parse(raw);
+    return value.guard === edit.guard && typeof value.tile_id === "string" ? value : null;
+  } catch { return null; }
+}
+
+function splitDivider(wrap, node, edit, path, dispatchUi) {
+  const divider = el("div", "ryeos-split-divider");
+  const horizontal = node.axis === "horizontal";
+  divider.tabIndex = 0;
+  divider.setAttribute("role", "separator");
+  divider.setAttribute("aria-label", "Resize adjacent regions");
+  divider.setAttribute("aria-orientation", horizontal ? "vertical" : "horizontal");
+  divider.setAttribute("aria-valuemin", String(edit.min * 100));
+  divider.setAttribute("aria-valuemax", String(edit.max * 100));
+  divider.setAttribute("aria-valuenow", String(Math.round(node.ratio * 100)));
+  divider.dataset.focusKey = `divider:${path.join("/")}`;
+  const resize = (ratio) => {
+    if (!Number.isFinite(ratio) || !edit.guard) return;
+    dispatchUi({ type: "activate", intent: { type: "resize_split", layout_guard: edit.guard, path,
+      ratio: Math.min(edit.max, Math.max(edit.min, ratio)) } });
+  };
+  divider.addEventListener("keydown", (event) => {
+    const delta = (horizontal ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"]).indexOf(event.key);
+    if (delta < 0) return;
+    event.preventDefault(); event.stopPropagation();
+    resize(node.ratio + (delta === 0 ? -0.01 : 0.01));
+  });
+  divider.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    divider.focus();
+    divider.setPointerCapture(event.pointerId);
+    const finish = (end) => {
+      divider.removeEventListener("pointerup", finish);
+      divider.removeEventListener("pointercancel", cancel);
+      if (end.type !== "pointerup") return;
+      const rect = wrap.getBoundingClientRect();
+      resize(horizontal ? (end.clientX - rect.left) / rect.width : (end.clientY - rect.top) / rect.height);
+    };
+    const cancel = () => { divider.removeEventListener("pointerup", finish); divider.removeEventListener("pointercancel", cancel); };
+    divider.addEventListener("pointerup", finish, { once: true });
+    divider.addEventListener("pointercancel", cancel, { once: true });
+  });
+  return divider;
+}
+
+function layoutNode(node, dispatchUi, motion = [], edit = {}, path = []) {
   if (node.type === "split") {
     const wrap = el("div", `ryeos-split ${node.axis}`);
     wrap.style.setProperty("--split-ratio", `${Math.round((node.ratio || 0.5) * 100)}%`);
-    wrap.append(layoutNode(node.first, dispatchUi, motion), layoutNode(node.second, dispatchUi, motion));
+    wrap.append(layoutNode(node.first, dispatchUi, motion, edit, [...path, "first"]),
+      layoutNode(node.second, dispatchUi, motion, edit, [...path, "second"]),
+      splitDivider(wrap, node, edit, path, dispatchUi));
     return wrap;
   }
   const tile = el("section", `ryeos-tile${node.focused ? " focused" : ""}`);
   if (node.chrome_hidden) tile.classList.add("chrome-hidden");
   tile.dataset.viewInstanceKey = node.instance_key || "";
   tile.dataset.tileId = node.tile_id || "";
+  tile.addEventListener("dragover", (event) => {
+    if (event.dataTransfer?.types.includes(VIEW_DRAG_TYPE)) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }
+  });
+  tile.addEventListener("drop", (event) => {
+    event.preventDefault(); event.stopPropagation();
+    const source = droppedView(event, edit);
+    if (!source || source.tile_id === node.tile_id) return;
+    const rect = tile.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    const edge = x < .2 ? "left" : x > .8 ? "right" : y < .2 ? "up" : y > .8 ? "down" : null;
+    dispatchUi({ type: "activate", intent: edge
+      ? { type: "move_tile_beside", layout_guard: edit.guard, tile_id: source.tile_id, target_tile_id: node.tile_id, edge }
+      : { type: "move_tile_to_group", layout_guard: edit.guard, tile_id: source.tile_id, target_tile_id: node.tile_id, index: node.tabs.length } });
+  });
   const motionName = motionForTile(node, motion);
   if (motionName) tile.dataset.motion = motionName;
   tile.addEventListener("mousedown", (event) => {
@@ -194,15 +355,64 @@ function layoutNode(node, dispatchUi, motion = []) {
     dispatchUi({ type: "focus_changed", target: node.tile_id || null });
   });
   const chrome = el("header", "ryeos-tile-chrome");
-  chrome.append(textEl("strong", node.title || "tile"), textEl("small", node.tile_id || ""));
-  // A tile whose view declares `input` renders as the prompt.
-  if (node.input) {
-    tile.append(chrome, inputDock(node.input, dispatchUi));
-  } else if (node.chrome_hidden) {
-    tile.append(view(node.view || {}, node.instance_key || "", node.tile_id || "", dispatchUi));
-  } else {
-    tile.append(chrome, view(node.view || {}, node.instance_key || "", node.tile_id || "", dispatchUi), viewFooter(node.view || {}));
+  chrome.title = node.view?.provenance || "";
+  const title = textEl("strong", node.supplement?.frame_label || node.title || "View");
+  draggableView(title, node.tile_id, edit);
+  chrome.append(title);
+  if (node.supplement?.frame_detail) chrome.append(textEl("span", node.supplement.frame_detail, "ryeos-frame-detail"));
+  if (node.intents?.length) {
+    const menu = el("details", "ryeos-frame-menu");
+    const toggle = textEl("summary", "⋮");
+    toggle.setAttribute("aria-label", `Actions for ${node.title}`);
+    menu.append(toggle);
+    const choices = el("div", "ryeos-frame-choices");
+    for (const entry of node.intents) {
+      const button = textEl("button", entry.title || entry.label);
+      button.type = "button";
+      button.addEventListener("click", () => dispatchUi({type:"activate", intent:entry.intent}));
+      choices.append(button);
+    }
+    menu.append(choices);
+    chrome.append(menu);
   }
+  if (!node.chrome_hidden || (node.tabs || []).length > 1) tile.append(chrome);
+  if ((node.tabs || []).length > 1) {
+    const tabs = el("nav", "ryeos-view-tabs");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Views in this region");
+    node.tabs.forEach((tab, index) => {
+      const button = textEl("button", tab.title, tab.active ? "active" : "");
+      button.type = "button";
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(tab.active));
+      button.tabIndex = tab.active ? 0 : -1;
+      button.dataset.focusKey = `view-tab:${tab.tile_id}`;
+      draggableView(button, tab.tile_id, edit);
+      button.addEventListener("drop", (event) => {
+        event.preventDefault(); event.stopPropagation();
+        const source = droppedView(event, edit);
+        if (source) dispatchUi({ type: "activate", intent: { type: "move_tile_to_group", layout_guard: edit.guard,
+          tile_id: source.tile_id, target_tile_id: tab.tile_id, index } });
+      });
+      button.addEventListener("click", () => dispatchUi({ type: "focus_changed", target: tab.tile_id }));
+      button.addEventListener("keydown", (event) => {
+        const offset = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+        if (!offset) return;
+        event.preventDefault();
+        const nextIndex = (index + offset + node.tabs.length) % node.tabs.length;
+        const next = node.tabs[nextIndex];
+        // The shell captures DOM focus before replacing this projection.
+        // Move it to the selected tab first so restoration follows selection.
+        tabs.children[nextIndex].focus();
+        dispatchUi({ type: "focus_changed", target: next.tile_id });
+      });
+      tabs.append(button);
+    });
+    tile.append(tabs);
+  }
+  appendViewContent(tile, node, dispatchUi);
+  if (node.supplement?.footer) tile.append(contentFooter(node.supplement));
+  if (!node.chrome_hidden) tile.append(viewFooter(node.view || {}));
   return tile;
 }
 
@@ -272,7 +482,21 @@ function viewFooter(viewVm) {
   const footer = el("footer", "ryeos-tile-footer");
   const provenance = viewVm.provenance || "";
   const hints = (viewVm.affordance_hints || []).join(" · ");
-  footer.append(textEl("span", provenance), textEl("small", hints));
+  // Provenance remains inspectable without occupying a full row in every tile.
+  footer.hidden = !hints;
+  footer.title = provenance;
+  footer.append(textEl("small", hints));
+  return footer;
+}
+
+function contentFooter(content) {
+  const footer = el("footer", "ryeos-content-footer");
+  footer.append(textEl("div", content.footer));
+  for (const row of content.footer_rows || []) {
+    const line = el("div", `ryeos-footer-line tone-${row.tone || "neutral"}`);
+    line.append(textEl("span", row.field), textEl("small", row.value));
+    footer.append(line);
+  }
   return footer;
 }
 
@@ -475,6 +699,38 @@ function sceneMap(scene, dispatchUi) {
   }
   wrap.append(header, stage);
   return wrap;
+}
+
+// A compact, noninteractive vector projection of the existing scene model.
+// Geometry and labels are authored data; it knows no worker or project nouns.
+function sceneDiagram(scene) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.classList.add("ryeos-scene-diagram");
+  svg.setAttribute("role", "img");
+  const points = (scene.objects || []).flatMap((object) => [object.position, object.end].filter(Boolean));
+  const xs = points.map((point) => Number(point[0]));
+  const ys = points.map((point) => -Number(point[1]));
+  const minX = xs.length ? Math.min(...xs) : 0, maxX = xs.length ? Math.max(...xs) : 1;
+  const minY = ys.length ? Math.min(...ys) : 0, maxY = ys.length ? Math.max(...ys) : 1;
+  svg.setAttribute("viewBox", `${minX - 20} ${minY - 15} ${maxX - minX + 40} ${maxY - minY + 30}`);
+  svg.setAttribute("aria-label", (scene.objects || []).filter((o) => o.label).map((o) => o.label).join("; "));
+  for (const object of scene.objects || []) {
+    const x = Number(object.position?.[0] || 0), y = -Number(object.position?.[1] || 0);
+    const node = document.createElementNS(ns, object.end ? "line" : object.kind === "text" ? "text" : object.glyph === "diamond" ? "polygon" : object.glyph === "square" ? "rect" : "circle");
+    const radius = Math.max(1, Number(object.scale?.[0] || 5));
+    const attributes = object.end ? {x1:x,y1:y,x2:object.end[0],y2:-object.end[1]}
+      : object.kind === "text" ? {x,y}
+      : object.glyph === "diamond" ? {points:`${x},${y-radius} ${x+radius},${y} ${x},${y+radius} ${x-radius},${y}`}
+      : object.glyph === "square" ? {x:x-radius,y:y-radius,width:radius*2,height:radius*2}
+      : {cx:x,cy:y,r:radius};
+    for (const [key,value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+    node.setAttribute("stroke", object.color || "currentColor");
+    node.setAttribute("fill", object.kind === "text" ? object.color || "currentColor" : "var(--ryeos-panel)");
+    if (object.kind === "text") { node.setAttribute("stroke", "none"); node.textContent = object.label || ""; }
+    svg.append(node);
+  }
+  return svg;
 }
 
 function atlasTile(scene, dispatchUi) {
@@ -688,6 +944,7 @@ function rows(items, kind, tileId, cursorOffset, dispatchUi) {
 }
 
 function rowGlyph(item) {
+  if (item.glyph !== undefined && item.glyph !== null) return item.glyph;
   switch (item.tone || "neutral") {
     case "good": return "✓";
     case "warn": return "!";

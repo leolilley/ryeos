@@ -2,9 +2,18 @@
   "name": "ryeos-web-client",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "24.21.0",
+    "npm": "11.19.0"
+  },
+  "packageManager": "npm@11.19.0",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser/run.mjs",
     "test:all": "npm test && npm run test:browser"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0",
+    "three": "0.128.0"
   }
 }

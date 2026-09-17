@@ -1,5 +1,6 @@
 import { mountRyeOsAmbientScene } from "/ui/assets/ryeos_ambient_scene.js";
 import { el, textEl } from "/ui/assets/ryeos_components_primitives.js";
+import { droppedView, VIEW_DRAG_TYPE } from "/ui/assets/ryeos_components_workspace.js";
 
 let ambientCanvas = null;
 let ambientScene = null;
@@ -94,21 +95,117 @@ export function topStatusLine(vm, shell) {
   const transient = !top.visible && Date.now() < transientTopbarUntil;
   line.classList.toggle("hidden", !top.visible);
   line.classList.toggle("transient", transient);
+  const system = el("div", "ryeos-systembar");
+  const launch = () => shell?.dispatchUi?.({ type: "open_overlay", overlay_id: "views" });
+  const brand = el("button", "ryeos-brand-launch");
+  // Reuse the approved vector mark; never load a runtime font or icon CDN.
+  const mark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  mark.setAttribute("viewBox", "0 0 28 28");
+  mark.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(mark.namespaceURI, "path");
+  path.setAttribute("d", "M4 22V6h10l9 8-9 8H4Zm0-8h19M14 6v16");
+  mark.append(path);
+  const wordmark = textEl("span", "rye", "ryeos-wordmark");
+  wordmark.append(textEl("span", "os"));
+  brand.append(mark, wordmark, textEl("small", "⌄"));
+  brand.type = "button";
+  brand.setAttribute("aria-label", "Open RyeOS launcher");
+  brand.addEventListener("click", launch);
+  system.append(brand, textEl("span", vm.session?.user_principal_id || "Session", "ryeos-system-principal"),
+    textEl("span", vm.session?.project_path || "Node workspace", "ryeos-system-context"));
+  const health = textEl("span", vm.chrome?.health_label || "", `ryeos-system-health tone-${vm.chrome?.health_tone || "neutral"}`);
+  const launcher = textEl("button", "Launch", "ryeos-launch-control");
+  launcher.type = "button";
+  launcher.append(textEl("kbd", "Ctrl K"));
+  launcher.addEventListener("click", launch);
+  system.append(health, launcher);
+  const strip = el("div", "ryeos-workspace-strip");
   const tabs = el("nav", "ryeos-workspace-tabs");
   tabs.setAttribute("aria-label", "RyeOS workspaces");
   for (const tab of top.tabs || []) {
-    const button = textEl("button", String(tab.number), tab.active ? "active" : "");
+    const button = textEl("button", tab.title || String(tab.number), tab.active ? "active" : "");
+    const index = textEl("small", String(tab.number).padStart(2, "0"), "ryeos-workspace-index");
+    index.setAttribute("aria-hidden", "true");
+    button.prepend(index);
+    if (tab.active) button.append(el("i", "ryeos-workspace-active-mark"));
     button.type = "button";
     button.title = `workspace ${tab.number} · ${tab.tile_count || 0} tiles`;
     button.addEventListener("click", () => shell?.dispatchUi?.({
       type: "activate",
-      intent: { type: "switch_tab", index: Math.max(0, (tab.number || 1) - 1) },
+      intent: { type: "select_workspace", workspace_id: tab.workspace_id },
     }));
+    // Rename is local presentation editing, not a command or a new route.
+    // Keep the exact identity captured by this render even if another tab closes.
+    const rename = () => {
+      if (!button.isConnected) return;
+      const editor = el("input", "ryeos-workspace-name");
+      editor.value = tab.title;
+      editor.setAttribute("aria-label", "Workspace name");
+      let finished = false;
+      const finish = (save) => {
+        if (finished) return;
+        finished = true;
+        editor.replaceWith(button);
+        button.focus();
+        if (save) shell?.dispatchUi?.({ type: "activate", intent: {
+          type: "rename_workspace", workspace_id: tab.workspace_id, title: editor.value,
+        } });
+      };
+      editor.addEventListener("keydown", (event) => {
+        // Do not let workspace keyboard shortcuts consume name entry.
+        event.stopPropagation();
+        if (event.key === "Enter" || event.key === "Escape") {
+          event.preventDefault();
+          finish(event.key === "Enter");
+        }
+      });
+      editor.addEventListener("blur", () => finish(false));
+      button.replaceWith(editor);
+      editor.focus();
+      editor.select();
+    };
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "F2") { event.preventDefault(); event.stopPropagation(); rename(); }
+    });
+    button.addEventListener("dblclick", rename);
+    button.title += " · F2 to rename";
+    button.addEventListener("dragover", (event) => {
+      if (event.dataTransfer?.types.includes(VIEW_DRAG_TYPE)) event.preventDefault();
+    });
+    button.addEventListener("drop", (event) => {
+      const source = droppedView(event, { guard: vm.workspace?.layout_guard });
+      if (!source) return;
+      event.preventDefault();
+      shell?.dispatchUi?.({ type: "activate", intent: {
+        type: "move_tile_to_workspace", layout_guard: source.guard,
+        tile_id: source.tile_id, workspace_id: tab.workspace_id,
+      } });
+    });
     tabs.append(button);
+    if (tab.active && top.tabs.length > 1) {
+      const close = textEl("button", "×", "ryeos-workspace-close");
+      close.type = "button";
+      close.setAttribute("aria-label", `Close workspace ${tab.title}`);
+      close.title = "Close this arrangement; running work is not stopped";
+      close.addEventListener("click", () => shell?.dispatchUi?.({ type: "activate", intent: {
+        type: "close_workspace", workspace_id: tab.workspace_id,
+      } }));
+      tabs.append(close);
+    }
   }
-  line.append(tabs);
-  line.append(textEl("span", top.focused_title || "home", "focused-title"));
-  line.append(textEl("span", top.layout_symbol || "M1│S0", "layout-symbol"));
+  const add = textEl("button", "+");
+  add.type = "button";
+  add.setAttribute("aria-label", "New workspace");
+  add.addEventListener("click", () => shell?.dispatchUi?.({ type: "activate", intent: { type: "new_workspace" } }));
+  tabs.append(add);
+  strip.append(tabs);
+  strip.append(textEl("span", top.focused_title || "", "focused-title"));
+  const views = textEl("button", "⊞", "ryeos-workspace-launch");
+  views.type = "button";
+  views.setAttribute("aria-label", "Open views and arrangements");
+  views.addEventListener("click", launch);
+  strip.append(views);
+  line.append(system, strip);
   return line;
 }
 
@@ -137,10 +234,21 @@ export function statusLine(vm, shell) {
     const classes = [`tone-${segment.tone || "neutral"}`];
     if (segment.grow) classes.push("grow");
     const value = segment.label ? `${segment.label} ${segment.value}` : segment.value;
-    line.append(textEl(tag, value, classes.join(" ")));
+    const item = textEl(tag, value, classes.join(" "));
+    item.dataset.segment = segment.id;
+    line.append(item);
   }
-  appendCompatMetrics(line, vm, segments);
-  if (status?.key_hint) line.append(textEl("span", status.key_hint, "keys"));
+  const details = el("details", "ryeos-status-details");
+  details.append(textEl("summary", "Session details"));
+  const inventory = el("div", "ryeos-status-inventory");
+  for (const item of [...line.children]) {
+    if (!["health", "project"].includes(item.dataset.segment)) inventory.append(item);
+  }
+  if (status?.key_hint) inventory.append(textEl("span", status.key_hint, "keys"));
+  details.append(inventory);
+  const active = vm.presentation?.chrome?.top_bar?.tabs?.find((tab) => tab.active);
+  if (active) line.append(textEl("span", `${active.title} · ${active.tile_count} views`, "ryeos-status-workspace"));
+  line.append(details);
   return line;
 }
 
@@ -165,8 +273,18 @@ function ryeosVersion(shell) {
 function ambientLayer(scene, ambient = {}) {
   const mode = ambientSceneFamily(ambient);
   const style = atlasStyle(ambient);
-  const key = `${mode}:${style}`;
-  const options = { mode, atlasStyle: style, atlasFocus };
+  // Ambient browser mechanics belong to the shell adapter, not the Rust
+  // semantic model. The optional key makes a changed adapter an explicit
+  // graphics-runtime generation boundary (used by deterministic browser
+  // qualification); ordinary production shells omit both values.
+  const platformKey = latestShell?.ambientPlatformKey || "browser";
+  const key = `${mode}:${style}:${platformKey}`;
+  const options = {
+    mode,
+    atlasStyle: style,
+    atlasFocus,
+    platform: latestShell?.ambientPlatform,
+  };
   if (!ambientCanvas) {
     ambientCanvas = document.createElement("canvas");
     ambientCanvas.className = "ryeos-ambient-canvas";

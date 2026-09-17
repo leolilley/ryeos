@@ -5,6 +5,9 @@ import init, {
   ryeos_replay_seat_events,
   ryeos_seat_events,
   ryeos_start,
+  ryeos_layout_preference_key,
+  ryeos_export_layout_preferences,
+  ryeos_restore_layout_preferences,
 } from "/ui/assets/ryeos_web.js";
 import { renderDom } from "/ui/assets/ryeos_dom_adapter.js";
 import { failedResultFor, runEffect } from "/ui/assets/ryeos_effects.js";
@@ -14,6 +17,7 @@ import {
   isTypingTarget,
   ryeosKeyEvent,
 } from "/ui/assets/ryeos_keyboard.js";
+import { createLayoutPreferencePersistence } from "/ui/assets/ryeos_layout_preferences.js";
 
 let root = null;
 let committing = false;
@@ -33,6 +37,18 @@ let hintFlushTimer = null;
 let threadTail = null;
 let threadTailUrl = null;
 let threadTailThreadId = null;
+let layoutPreferences = null;
+
+function reportLayoutStorageError(error) {
+  let notice = document.getElementById("ryeos-layout-storage-error");
+  if (!notice) {
+    notice = document.createElement("aside");
+    notice.id = "ryeos-layout-storage-error";
+    notice.setAttribute("role", "status");
+    root.before(notice);
+  }
+  notice.textContent = `Layout preferences were not applied or saved: ${String(error)}. Current signed surface remains available.`;
+}
 
 export async function bootRyeOs(appRoot) {
   root = appRoot;
@@ -41,6 +57,29 @@ export async function bootRyeOs(appRoot) {
   const session = await getJson("/ui/api/session/current");
   let envelope = ryeos_start(session, viewport(), BigInt(Date.now()));
   envelope = await attachSeat(session, envelope);
+  // Browser storage carries one opaque Rust-owned presentation arrangement.
+  // Rust checks its authenticated scope and admitted views and excludes drafts,
+  // grants, observations, pending effects, and all execution authority.
+  try {
+    const key = ryeos_layout_preference_key();
+    const saved = localStorage.getItem(key);
+    if (saved !== null) {
+      try {
+        envelope = ryeos_restore_layout_preferences(saved);
+      } catch (error) {
+        // A stale or corrupt browser value is not launch authority. Keep the
+        // current Rust arrangement and allow it to replace the invalid value.
+        reportLayoutStorageError(error);
+      }
+    }
+    layoutPreferences = createLayoutPreferencePersistence({
+      key,
+      persisted: saved,
+      readCurrent: ryeos_export_layout_preferences,
+      storage: localStorage,
+      reportError: reportLayoutStorageError,
+    });
+  } catch (error) { reportLayoutStorageError(error); }
   await commit(envelope);
   if (location.hash) {
     await commit(ryeos_dispatch({ type: "route_changed", route: location.hash.replace(/^#/, "") }));
@@ -72,6 +111,9 @@ async function commit(envelope) {
       overlayReturnFocus = null;
     }
     overlayOpenLastCommit = overlayOpen;
+    // Observe only after the Rust envelope has been accepted and rendered.
+    // Ordinary events whose presentation arrangement is unchanged do no I/O.
+    layoutPreferences?.observeAcceptedState();
     if (overlayOpen) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
@@ -455,6 +497,9 @@ function attachBrowserEvents() {
     void commit(ryeos_dispatch({ type: "route_changed", route: location.hash.replace(/^#/, "") }));
   });
   window.addEventListener("pagehide", () => {
+    // Flush the exact already-observed arrangement when navigation beats the
+    // debounce. Do not re-export unrelated state during page teardown.
+    layoutPreferences?.flush();
     if (!seatThreadId) return;
     const body = JSON.stringify({
       thread_id: seatThreadId,

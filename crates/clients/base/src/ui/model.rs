@@ -251,6 +251,18 @@ pub struct InputBufferKey {
     pub target_scope: Option<String>,
 }
 
+/// Exact presentation origin. This fences a renderer event, not a capability:
+/// submission still goes through the existing compiled binding and seat route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RyeOsInputAddress {
+    pub session_id: String,
+    pub binding_digest: String,
+    pub workspace_index: usize,
+    pub workspace_id: crate::ids::WorkspaceId,
+    pub buffer: InputBufferKey,
+}
+
 impl InputBufferKey {
     pub fn new(
         view_instance_key: RyeOsViewInstanceKey,
@@ -277,7 +289,7 @@ impl InputBufferKey {
     }
 
     /// Stable string key for the buffer map (JSON map keys must be
-    /// strings). The three components are NUL-joined so they never collide.
+    /// strings). Components are separated by the ASCII unit separator.
     pub fn storage_key(&self) -> String {
         let base = format!(
             "{}\u{1f}{}\u{1f}{}",
@@ -287,6 +299,13 @@ impl InputBufferKey {
             Some(scope) => format!("{base}\u{1f}{scope}"),
             None => base,
         }
+    }
+
+    /// Inspect ownership without re-deriving the current route: a mounted
+    /// composer can retain drafts for previously selected subjects as well.
+    pub fn storage_key_belongs_to(key: &str, instance: &RyeOsViewInstanceKey) -> bool {
+        key.split_once('\u{1f}')
+            .is_some_and(|(owner, _)| owner == instance.as_str())
     }
 }
 
@@ -416,23 +435,6 @@ pub struct RyeOsUiState {
     pub files: RyeOsFilesState,
     #[serde(default)]
     pub overlay: RyeOsOverlayState,
-    #[serde(default)]
-    pub focus_target: Option<RyeOsFocusTarget>,
-    /// Transient input buffers, keyed layout-neutrally by
-    /// `InputBufferKey::storage_key()`. A buffer belongs to a view
-    /// instance, not a placement; the same view rendered twice has
-    /// independent buffers. Ephemera — never braided.
-    #[serde(default)]
-    pub input_buffers: BTreeMap<String, RyeOsInputState>,
-    #[serde(default)]
-    pub dock_local: BTreeMap<RyeOsViewInstanceKey, ViewLocalState>,
-    /// The field instance whose shared query is currently receiving keyboard
-    /// text. This is focus/editor state only; the query itself remains in the
-    /// instance-keyed `FieldLocalState` and is changed through shared events.
-    #[serde(default)]
-    pub field_query_editing: Option<RyeOsViewInstanceKey>,
-    #[serde(default)]
-    pub docks: RyeOsDockState,
     /// Ambient/backdrop atlas state — the empty-center `namespace_atlas`
     /// background. Surface-level, not a tile. Per-tile Atlas tiles keep
     /// their own arrangement in [`Self::tile_atlas`].
@@ -469,11 +471,6 @@ impl Default for RyeOsUiState {
             filters: RyeOsFilters::default(),
             files: RyeOsFilesState::default(),
             overlay: RyeOsOverlayState::default(),
-            focus_target: None,
-            input_buffers: BTreeMap::new(),
-            dock_local: BTreeMap::new(),
-            field_query_editing: None,
-            docks: RyeOsDockState::default(),
             atlas: AtlasUiStateVm::default(),
             tile_atlas: BTreeMap::new(),
             motion: Vec::new(),
@@ -485,7 +482,7 @@ impl Default for RyeOsUiState {
             // and we have nothing settled to put there yet. Toggle-on still
             // works if we decide on content later.
             top_status_visible: false,
-            bottom_status_visible: false,
+            bottom_status_visible: true,
             backdrop_break_amount: 0.0,
             backdrop_break_target: 0.0,
         }
@@ -722,7 +719,8 @@ pub struct RyeOsCore {
     /// Surface-declared chrome style (border treatment).
     #[serde(default)]
     pub style: SurfaceStyleSpec,
-    pub workspace: Workspace,
+    /// Each workspace has one canonical state. The active index selects it;
+    /// never retain a separately writable clone of the active arrangement.
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
     pub runtime: RyeOsRuntimeState,
@@ -755,7 +753,11 @@ impl RyeOsCore {
         let parsed_surface = binding_contract_matches
             .then_some(session.effective_surface.as_ref())
             .flatten()
-            .map(|value| serde_json::from_value::<SurfaceSpec>(value.clone()));
+            .map(|value| {
+                crate::surface::workspaces::validate_effective_workspaces(value)
+                    .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+                serde_json::from_value::<SurfaceSpec>(value.clone())
+            });
         let surface_failure = if local_preview {
             None
         } else if !binding_contract_matches {
@@ -801,20 +803,13 @@ impl RyeOsCore {
         {
             core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
         }
-        // Edge slots initialize FROM the surface slots block; the
-        // fallback surface's slots are the only default source.
-        core.ui.docks = RyeOsDockState::from_slots(&surface.slots);
-        // Initial focus lands on the surface's input slot (bottom-first,
-        // the conventional initial input focus) so a fresh session types
-        // straight into the chat line; surfaces without a visible input
-        // slot keep the workspace-tile fallback.
-        core.focus_default_input();
         core.style = surface.style;
-        core.workspace = surface.to_workspace();
-        let blank = Workspace::from_tiling(surface.tiling.clone(), Vec::new());
-        core.workspaces = vec![blank; 9];
-        core.workspaces[0] = core.workspace.clone();
+        core.workspaces = surface
+            .to_workspaces()
+            .expect("validated surface composition");
         core.active_workspace = 0;
+        // Select input only after mounting the authored workspace and slots.
+        core.focus_default_input();
         if let Some(reason) = surface_failure {
             core.notice(reason, RyeOsTone::Danger);
         }
@@ -936,8 +931,8 @@ impl RyeOsCore {
         self.normalize_field_local_states();
         let mut bound_tiles: Vec<(crate::ids::TileId, RyeOsViewInstanceKey, String)> = Vec::new();
 
-        for tile_id in self.workspace.tile_ids() {
-            let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+        for tile_id in self.workspaces[self.active_workspace].tile_ids() {
+            let Some(tile) = self.workspaces[self.active_workspace].tiles.get(&tile_id) else {
                 continue;
             };
             let view_ref = tile.view.view_ref.clone();
@@ -1056,8 +1051,7 @@ impl RyeOsCore {
     }
 
     pub(crate) fn normalize_field_local_states(&mut self) {
-        let field_instances = self
-            .workspace
+        let field_instances = self.workspaces[self.active_workspace]
             .tiles
             .values()
             .filter(|tile| {
@@ -1067,7 +1061,7 @@ impl RyeOsCore {
             })
             .map(|tile| tile.instance_key.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        for tile in self.workspace.tiles.values_mut() {
+        for tile in self.workspaces[self.active_workspace].tiles.values_mut() {
             if field_instances.contains(&tile.instance_key)
                 && !matches!(tile.local, ViewLocalState::Field(_))
             {
@@ -1075,13 +1069,16 @@ impl RyeOsCore {
             }
         }
 
-        for (edge, view_ref) in self.ui.docks.visible_slot_views() {
+        for (edge, view_ref) in self.workspaces[self.active_workspace]
+            .docks
+            .visible_slot_views()
+        {
             if self
                 .views
                 .get(&view_ref)
                 .is_some_and(|binding| binding.widget == "field")
             {
-                self.ui
+                self.workspaces[self.active_workspace]
                     .dock_local
                     .entry(dock_view_instance_key(edge))
                     .and_modify(|local| {
@@ -1135,12 +1132,12 @@ impl RyeOsCore {
         // Resolve only live view instances whose authored source selects a
         // thread collection. Transcript/event sources also contain thread_id,
         // but are not lifecycle rows and must remain byte-for-byte untouched.
-        let mut instances: Vec<(RyeOsViewInstanceKey, String)> = self
-            .workspace
+        let mut instances: Vec<(RyeOsViewInstanceKey, String)> = self.workspaces
+            [self.active_workspace]
             .tile_ids()
             .into_iter()
             .filter_map(|tile_id| {
-                let tile = self.workspace.tiles.get(&tile_id)?;
+                let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
                 Some((tile.instance_key.clone(), tile.view.view_ref.clone()))
             })
             .collect();
@@ -1201,7 +1198,7 @@ impl RyeOsCore {
     }
 
     pub fn wants_fast_ticks(&self) -> bool {
-        self.workspace.center_is_empty()
+        self.workspaces[self.active_workspace].center_is_empty()
             || (self.surface_uses_backdrop_underlay() && self.workspace_has_transparent_view())
             || self.runtime.activity_pulse > 0.02
     }
@@ -1238,11 +1235,11 @@ impl RyeOsCore {
                 .collect::<Vec<_>>()
         };
         let mut targets: std::collections::BTreeSet<(RyeOsViewInstanceKey, String, String)> = self
-            .workspace
+            .workspaces[self.active_workspace]
             .tile_ids()
             .into_iter()
             .flat_map(|tile_id| {
-                let tile = self.workspace.tiles.get(&tile_id)?;
+                let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
                 Some(
@@ -1283,8 +1280,7 @@ impl RyeOsCore {
         tile_id: crate::ids::TileId,
         view_ref: &str,
     ) -> Vec<RyeOsEffect> {
-        let Some(instance_key) = self
-            .workspace
+        let Some(instance_key) = self.workspaces[self.active_workspace]
             .tiles
             .get(&tile_id)
             .map(|tile| tile.instance_key.clone())
@@ -1383,7 +1379,9 @@ impl RyeOsCore {
                     && let (Some(feeds), Some(input_id)) = (&feeds, &input_id)
                 {
                     let key = InputBufferKey::new(instance_key.clone(), view_ref, input_id.clone());
-                    let buffer = self.ui.input_buffers.get(&key.storage_key());
+                    let buffer = self.workspaces[self.active_workspace]
+                        .input_buffers
+                        .get(&key.storage_key());
                     let text = buffer.map(|buffer| buffer.text.clone()).unwrap_or_default();
                     let field = buffer.map(|buffer| buffer.filter_field).unwrap_or(0);
                     let param = feeds.active_param(field).to_string();
@@ -1619,7 +1617,12 @@ impl RyeOsCore {
             .parse::<u64>()
             .ok()
             .map(crate::ids::TileId::new)
-            .and_then(|id| self.workspace.tiles.get(&id).cloned())?;
+            .and_then(|id| {
+                self.workspaces[self.active_workspace]
+                    .tiles
+                    .get(&id)
+                    .cloned()
+            })?;
         self.fetch_view_source_role(tile.instance_key, &tile.view.view_ref, role, dynamic_params)
     }
 
@@ -1665,7 +1668,7 @@ impl RyeOsCore {
         let Some(source_key) = super::source_key::RyeOsSourceInstanceKey::decode(source_key) else {
             return false;
         };
-        self.workspace
+        self.workspaces[self.active_workspace]
             .tiles
             .values()
             .any(|tile| tile.instance_key == source_key.view_instance)
@@ -1677,7 +1680,7 @@ impl RyeOsCore {
 
     /// Visible content-bound slot views, keyed for source fetches.
     pub fn visible_dock_views(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
-        self.ui
+        self.workspaces[self.active_workspace]
             .docks
             .visible_slot_views()
             .into_iter()
@@ -1711,17 +1714,20 @@ impl RyeOsCore {
     }
 
     fn workspace_has_transparent_view(&self) -> bool {
-        self.workspace.tiles.values().any(|tile| {
-            self.views
-                .get(&tile.view.view_ref)
-                .and_then(|binding| binding.presentation.background)
-                .is_some_and(|background| {
-                    matches!(
-                        background,
-                        super::content::ViewBackgroundPresentation::Transparent
-                    )
-                })
-        })
+        self.workspaces[self.active_workspace]
+            .tiles
+            .values()
+            .any(|tile| {
+                self.views
+                    .get(&tile.view.view_ref)
+                    .and_then(|binding| binding.presentation.background)
+                    .is_some_and(|background| {
+                        matches!(
+                            background,
+                            super::content::ViewBackgroundPresentation::Transparent
+                        )
+                    })
+            })
     }
 
     pub fn bump_generation(&mut self) {
@@ -1833,7 +1839,7 @@ impl RyeOsCore {
         let Some(tile_id) = parse_source_tile_key(source_key) else {
             return;
         };
-        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace].tiles.get(&tile_id) else {
             return;
         };
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
@@ -1905,13 +1911,13 @@ impl RyeOsCore {
     pub(crate) fn rebuild_field_source_cache(&mut self, source_key: &str) {
         let is_field_instance = super::source_key::RyeOsSourceInstanceKey::decode(source_key)
             .is_some_and(|key| {
-                self.workspace
+                self.workspaces[self.active_workspace]
                     .tiles
                     .values()
                     .find(|tile| tile.instance_key == key.view_instance)
                     .map(|tile| matches!(tile.local, ViewLocalState::Field(_)))
                     .or_else(|| {
-                        self.ui
+                        self.workspaces[self.active_workspace]
                             .dock_local
                             .get(&key.view_instance)
                             .map(|local| matches!(local, ViewLocalState::Field(_)))
@@ -1970,11 +1976,14 @@ impl RyeOsCore {
     /// The currently selected UI target. `None` means the workspace's
     /// focused tile remains selected.
     pub fn focus_target(&self) -> RyeOsFocusTarget {
-        self.ui
+        self.workspaces[self.active_workspace]
             .focus_target
             .clone()
             .unwrap_or_else(|| RyeOsFocusTarget::WorkspaceTile {
-                tile_id: self.workspace.focused_tile.0.to_string(),
+                tile_id: self.workspaces[self.active_workspace]
+                    .focused_tile
+                    .0
+                    .to_string(),
             })
     }
 
@@ -1983,8 +1992,7 @@ impl RyeOsCore {
     /// declares `input`.
     pub fn focused_input_instance(&self) -> Option<(InputBufferKey, String)> {
         if let RyeOsFocusTarget::Dock { edge } = self.focus_target() {
-            let view_ref = self
-                .ui
+            let view_ref = self.workspaces[self.active_workspace]
                 .docks
                 .slot(edge)
                 .filter(|slot| slot.visible)
@@ -2005,14 +2013,20 @@ impl RyeOsCore {
             return None;
         }
 
-        let focused = self.workspace.focused_tile;
-        if let Some(ViewSpec { view_ref }) =
-            self.workspace.tiles.get(&focused).map(|tile| &tile.view)
+        let focused = self.workspaces[self.active_workspace].focused_tile;
+        if let Some(ViewSpec { view_ref }) = self.workspaces[self.active_workspace]
+            .tiles
+            .get(&focused)
+            .map(|tile| &tile.view)
             && let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref())
         {
             return Some((
                 InputBufferKey::new(
-                    self.workspace.tiles.get(&focused)?.instance_key.clone(),
+                    self.workspaces[self.active_workspace]
+                        .tiles
+                        .get(&focused)?
+                        .instance_key
+                        .clone(),
                     view_ref.clone(),
                     input.id.clone(),
                 )
@@ -2030,7 +2044,7 @@ impl RyeOsCore {
         let Some(edge) = self.default_input_edge() else {
             return false;
         };
-        self.ui.focus_target = Some(RyeOsFocusTarget::Dock { edge });
+        self.workspaces[self.active_workspace].focus_target = Some(RyeOsFocusTarget::Dock { edge });
         true
     }
 
@@ -2046,7 +2060,9 @@ impl RyeOsCore {
     }
 
     fn ordered_slot_views(&self) -> Vec<(RyeOsDockEdge, String)> {
-        let mut slots = self.ui.docks.visible_slot_views();
+        let mut slots = self.workspaces[self.active_workspace]
+            .docks
+            .visible_slot_views();
         // Bottom is the conventional initial input focus; sort it first.
         slots.sort_by_key(|(edge, _)| match edge {
             RyeOsDockEdge::Bottom => 0,
@@ -2066,14 +2082,21 @@ impl RyeOsCore {
     /// Read-only access to the focused instance's input buffer.
     pub fn focused_input_buffer(&self) -> Option<&RyeOsInputState> {
         let (key, _) = self.focused_input_instance()?;
-        self.ui.input_buffers.get(&key.storage_key())
+        self.workspaces[self.active_workspace]
+            .input_buffers
+            .get(&key.storage_key())
     }
 
     /// Mutable access to the focused instance's input buffer, creating it
     /// on first edit.
     pub fn focused_input_buffer_mut(&mut self) -> Option<&mut RyeOsInputState> {
         let (key, _) = self.focused_input_instance()?;
-        Some(self.ui.input_buffers.entry(key.storage_key()).or_default())
+        Some(
+            self.workspaces[self.active_workspace]
+                .input_buffers
+                .entry(key.storage_key())
+                .or_default(),
+        )
     }
 
     /// Resolve the focused-context capabilities the shared keymap needs.
@@ -2084,7 +2107,11 @@ impl RyeOsCore {
         let focused = self.focused_input_instance();
         let (text, cursor) = focused
             .as_ref()
-            .and_then(|(key, _)| self.ui.input_buffers.get(&key.storage_key()))
+            .and_then(|(key, _)| {
+                self.workspaces[self.active_workspace]
+                    .input_buffers
+                    .get(&key.storage_key())
+            })
             .map(|buf| (buf.text.clone(), buf.cursor))
             .unwrap_or_default();
         let input = focused
@@ -2214,7 +2241,7 @@ impl RyeOsCore {
         let Some(tile_id) = parse_source_tile_key(source_key) else {
             return;
         };
-        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace].tiles.get(&tile_id) else {
             return;
         };
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
@@ -2234,7 +2261,10 @@ impl RyeOsCore {
             .map(|value| projected_row_signatures(binding, value, start, end))
             .unwrap_or_default();
         let now_ms = self.runtime.now_ms;
-        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace]
+            .tiles
+            .get_mut(&tile_id)
+        else {
             return;
         };
         let ViewLocalState::GenericList { changed_rows, .. } = &mut tile.local else {
@@ -2270,8 +2300,8 @@ impl RyeOsCore {
     }
 
     pub(crate) fn focused_row_expand_state(&self) -> Option<(bool, bool)> {
-        let tile_id = self.workspace.focused_tile;
-        let tile = self.workspace.tiles.get(&tile_id)?;
+        let tile_id = self.workspaces[self.active_workspace].focused_tile;
+        let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
         let binding = self.views.get(&tile.view.view_ref)?;
         let (key, _, fields) = self.focused_expandable_row(tile_id, binding)?;
         if fields.is_empty() {
@@ -2285,8 +2315,8 @@ impl RyeOsCore {
     }
 
     pub(crate) fn set_focused_row_expanded(&mut self, expand: bool) -> bool {
-        let tile_id = self.workspace.focused_tile;
-        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+        let tile_id = self.workspaces[self.active_workspace].focused_tile;
+        let Some(tile) = self.workspaces[self.active_workspace].tiles.get(&tile_id) else {
             return false;
         };
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
@@ -2298,7 +2328,10 @@ impl RyeOsCore {
         if fields.is_empty() {
             return false;
         }
-        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace]
+            .tiles
+            .get_mut(&tile_id)
+        else {
             return false;
         };
         let ViewLocalState::GenericList { expanded_rows, .. } = &mut tile.local else {
@@ -2312,8 +2345,8 @@ impl RyeOsCore {
     }
 
     pub(crate) fn focused_tree_row_fold_state(&self) -> Option<(bool, bool)> {
-        let tile_id = self.workspace.focused_tile;
-        let tile = self.workspace.tiles.get(&tile_id)?;
+        let tile_id = self.workspaces[self.active_workspace].focused_tile;
+        let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
         let binding = self.views.get(&tile.view.view_ref)?;
         super::content::table_hierarchy(binding)?;
         let (channel, _) = binding.primary_source()?;
@@ -2336,8 +2369,8 @@ impl RyeOsCore {
     }
 
     pub(crate) fn set_focused_tree_row_collapsed(&mut self, collapsed: bool) -> bool {
-        let tile_id = self.workspace.focused_tile;
-        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+        let tile_id = self.workspaces[self.active_workspace].focused_tile;
+        let Some(tile) = self.workspaces[self.active_workspace].tiles.get(&tile_id) else {
             return false;
         };
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
@@ -2349,7 +2382,10 @@ impl RyeOsCore {
         let Some((key, _)) = self.focused_row_key_and_record(tile_id, binding) else {
             return false;
         };
-        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+        let Some(tile) = self.workspaces[self.active_workspace]
+            .tiles
+            .get_mut(&tile_id)
+        else {
             return false;
         };
         let ViewLocalState::GenericList {
@@ -2371,7 +2407,7 @@ impl RyeOsCore {
         tile_id: crate::ids::TileId,
         binding: &super::content::ViewBinding,
     ) -> Option<(String, serde_json::Value)> {
-        let tile = self.workspace.tiles.get(&tile_id)?;
+        let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
         let cursor = match &tile.local {
             ViewLocalState::GenericList { cursor, .. } => *cursor,
             ViewLocalState::None | ViewLocalState::Field(_) => 0,
@@ -2465,7 +2501,7 @@ impl RyeOsCore {
             let (key, record) = self.focused_row_key_and_record(tile_id, binding)?;
             return Some((key, record, super::content::expand_fields(binding)));
         }
-        let tile = self.workspace.tiles.get(&tile_id)?;
+        let tile = self.workspaces[self.active_workspace].tiles.get(&tile_id)?;
         let (cursor, collapsed) = match &tile.local {
             ViewLocalState::GenericList {
                 cursor, collapsed, ..
@@ -2620,8 +2656,17 @@ fn field_local_state_for_instance<'a>(
 ) -> Option<&'a crate::workspace::FieldLocalState> {
     let state = instance_key
         .workspace_tile_id()
-        .and_then(|tile_id| core.workspace.tiles.get(&tile_id).map(|tile| &tile.local))
-        .or_else(|| core.ui.dock_local.get(instance_key));
+        .and_then(|tile_id| {
+            core.workspaces[core.active_workspace]
+                .tiles
+                .get(&tile_id)
+                .map(|tile| &tile.local)
+        })
+        .or_else(|| {
+            core.workspaces[core.active_workspace]
+                .dock_local
+                .get(instance_key)
+        });
     match state {
         Some(ViewLocalState::Field(state)) => Some(state),
         _ => None,
@@ -2698,7 +2743,7 @@ impl Default for RyeOsCore {
     fn default() -> Self {
         let surface = builtin_default();
         let workspace = surface.to_workspace();
-        let workspaces = vec![workspace.clone(); 9];
+        let workspaces = vec![workspace];
         Self {
             data: RyeOsDataState::default(),
             surface_sources: surface.sources,
@@ -2706,7 +2751,6 @@ impl Default for RyeOsCore {
             ui: RyeOsUiState::default(),
             seat: super::seat::SeatLog::default(),
             style: surface.style,
-            workspace,
             workspaces,
             active_workspace: 0,
             runtime: RyeOsRuntimeState::default(),
@@ -2992,7 +3036,7 @@ mod tests {
         );
         // The default slot set is empty (no views named in code), so give the
         // core a bottom input slot the way a real surface's data would.
-        core.ui.docks = RyeOsDockState::from_slots(&SlotsSpec {
+        core.workspaces[core.active_workspace].docks = RyeOsDockState::from_slots(&SlotsSpec {
             bottom: Some(SlotSpec {
                 content: SlotContentSpec::View("view:ryeos/input".to_string()),
                 open: true,
@@ -3020,7 +3064,12 @@ mod tests {
         assert_eq!(key.view_instance_key.as_str(), "dock:bottom");
         assert_eq!(key.input_id, "line");
         // Hiding the slot removes the instance: focus falls through.
-        core.ui.docks.bottom.as_mut().unwrap().visible = false;
+        core.workspaces[core.active_workspace]
+            .docks
+            .bottom
+            .as_mut()
+            .unwrap()
+            .visible = false;
         assert!(!core.has_focused_input());
     }
 
@@ -3075,19 +3124,27 @@ mod tests {
             ..Default::default()
         };
         let core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let left = core.ui.docks.left.as_ref().expect("left slot");
+        let left = core.workspaces[core.active_workspace]
+            .docks
+            .left
+            .as_ref()
+            .expect("left slot");
         assert!(left.visible);
         assert_eq!(left.size, 20);
         assert!(matches!(
             &left.content,
             RyeOsDockContent::View { view_ref } if view_ref == "view:custom/list"
         ));
-        let bottom = core.ui.docks.bottom.as_ref().expect("bottom slot");
+        let bottom = core.workspaces[core.active_workspace]
+            .docks
+            .bottom
+            .as_ref()
+            .expect("bottom slot");
         assert!(!bottom.visible);
         assert_eq!(bottom.size, 5);
         // Edges the surface does not declare have no slot.
-        assert!(core.ui.docks.right.is_none());
-        assert!(core.ui.docks.top.is_none());
+        assert!(core.workspaces[core.active_workspace].docks.right.is_none());
+        assert!(core.workspaces[core.active_workspace].docks.top.is_none());
         // Style flows from the surface, too.
         assert_eq!(core.style.border, crate::surface::BorderStyleSpec::Thick);
     }
@@ -3107,8 +3164,13 @@ mod tests {
 
         assert!(core.views.is_empty());
         assert!(core.surface_sources.is_empty());
-        assert!(core.workspace.tiles.is_empty());
-        assert!(core.ui.docks.bottom.is_none());
+        assert!(core.workspaces[core.active_workspace].tiles.is_empty());
+        assert!(
+            core.workspaces[core.active_workspace]
+                .docks
+                .bottom
+                .is_none()
+        );
         assert!(core.ui.notices.iter().any(|notice| {
             notice
                 .message
@@ -3131,7 +3193,12 @@ mod tests {
     fn hidden_input_ignores_stale_input_events() {
         let mut core = RyeOsCore::default();
         with_input_view(&mut core);
-        core.ui.docks.bottom.as_mut().unwrap().visible = false;
+        core.workspaces[core.active_workspace]
+            .docks
+            .bottom
+            .as_mut()
+            .unwrap()
+            .visible = false;
 
         let effects = core.dispatch(super::super::event::RyeOsEvent::Ui {
             event: super::super::event::RyeOsUiEvent::InsertInputChar { ch: 'x' },

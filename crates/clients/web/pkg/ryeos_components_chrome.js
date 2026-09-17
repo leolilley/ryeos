@@ -15,6 +15,14 @@ export function overlayDialog(state, shell) {
   dialog.setAttribute("aria-label", state.title || "Open RyeOS tile");
   dialog.setAttribute("aria-modal", "true");
 
+  const heading = el("header", "ryeos-command-heading");
+  heading.append(textEl("span", state.title || "RyeOS"));
+  const close = textEl("button", "Esc");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close launcher");
+  close.addEventListener("click", () => shell.closeOverlay?.());
+  heading.append(close);
+
   const input = document.createElement("input");
   input.type = "search";
   input.placeholder = state.title ? `${state.title.toLowerCase()}…` : "open tile…";
@@ -53,21 +61,26 @@ export function overlayDialog(state, shell) {
     list.append(empty);
   }
   choices.forEach((item, index) => {
-    const row = el("button", `ryeos-command-choice${index === selected ? " selected" : ""}`);
+    const row = el("button", `ryeos-command-choice${index === selected ? " selected" : ""}${item.header ? " group" : ""}`);
     row.type = "button";
     row.id = `ryeos-command-option-${index}`;
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", index === selected ? "true" : "false");
     row.disabled = item.enabled === false;
-    row.append(
-      textEl("strong", item.label || item.primary || "View"),
-      textEl("span", item.hint || item.secondary || item.meta || ""),
-    );
-    row.addEventListener("click", () => {
+    row.append(textEl("strong", `${item.header ? (item.expanded ? "▾ " : "▸ ") : ""}${item.label || item.primary || "View"}`));
+    const detail = item.hint || item.secondary || item.meta || "";
+    if (detail && (!item.header || detail !== (item.label || item.primary))) {
+      row.append(textEl("span", detail));
+    }
+    if (item.unavailable_reason) row.append(textEl("span", item.unavailable_reason, "unavailable"));
+    row.addEventListener("click", (event) => {
       if (item.enabled === false) return;
-      if (item.intent && shell.dispatchUi) {
-        shell.dispatchUi({ type: "activate", intent: item.intent });
-        shell.closeOverlay?.();
+      const intent = event.shiftKey && item.secondary_intent ? item.secondary_intent : item.intent;
+      if (intent && shell.dispatchUi) {
+        shell.dispatchUi({ type: "activate", intent });
+        // Group activation changes the existing launcher fold, not the
+        // workspace. Keep it open so mouse and keyboard behave alike.
+        if (!item.header) shell.closeOverlay?.();
       } else {
         shell.chooseOverlay?.(false);
       }
@@ -77,7 +90,7 @@ export function overlayDialog(state, shell) {
 
   const hint = textEl("div", state.hint || "Alt+K open · ↑/↓ select · Enter choose · Shift+Enter new tile · Esc close");
   hint.className = "ryeos-command-hint";
-  dialog.append(input, list, hint);
+  dialog.append(heading, input, list, hint);
   overlay.append(dialog);
   overlay.addEventListener("keydown", (event) => {
     if (event.key !== "Tab") return;

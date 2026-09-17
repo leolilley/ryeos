@@ -622,7 +622,7 @@ pub fn field_path<'v>(record: &'v Value, path: &str) -> Option<&'v Value> {
     Some(current)
 }
 
-fn field_text(record: &Value, path: &str) -> Option<String> {
+pub(crate) fn field_text(record: &Value, path: &str) -> Option<String> {
     let value = field_path(record, path)?;
     Some(match value {
         Value::String(s) => s.clone(),

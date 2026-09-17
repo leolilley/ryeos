@@ -199,10 +199,14 @@ fn draw_dock_tile(
     border: Option<Border>,
     now_ms: u64,
 ) {
-    // An input dock renders minimally on the page background — no PANEL
-    // fill, no title, no shadow. Just the bordered buffer + cursor.
+    // An input remains with its content. Cell allocation is renderer-local;
+    // input ownership and routing are the shared instance contract.
     if let Some(input) = dock.input.as_ref() {
-        draw_input_tile(surface, rect, input, project_path, border);
+        let input_height = rect.h.min(3);
+        let view_rect = Rect::new(rect.x, rect.y, rect.w, rect.h - input_height);
+        let input_rect = Rect::new(rect.x, rect.y + view_rect.h, rect.w, input_height);
+        super::draw_view(surface, view_rect, &dock.view, now_ms);
+        draw_input_tile(surface, input_rect, input, project_path, border);
         return;
     }
 
@@ -340,10 +344,18 @@ pub fn draw_tile(
         }
         return;
     }
-    // A prompt input (no widget of its own, e.g. the foot input) renders as
-    // the buffer + cursor only; the tile already owns the border/chrome.
+    // A composer does not replace the view it belongs to.
     if let Some(input) = input {
-        draw_input_tile(surface, inner, input, None, None);
+        let input_height = inner.h.min(3);
+        let view_rect = Rect::new(inner.x, inner.y, inner.w, inner.h - input_height);
+        super::draw_view(surface, view_rect, view, now_ms);
+        draw_input_tile(
+            surface,
+            Rect::new(inner.x, inner.y + view_rect.h, inner.w, input_height),
+            input,
+            None,
+            None,
+        );
         return;
     }
     super::draw_view(surface, inner, view, now_ms);
@@ -386,6 +398,8 @@ mod tests {
             instance_key: ryeos_client_base::ui::model::dock_view_instance_key(edge),
             edge,
             title: "t".into(),
+            heading: None,
+            supplement: None,
             size,
             focused: false,
             view: RyeOsViewVm::Placeholder {
@@ -463,6 +477,19 @@ mod tests {
             }],
         };
         let input = RyeOsInputVm {
+            address: ryeos_client_base::ui::model::RyeOsInputAddress {
+                session_id: "fixture".into(),
+                binding_digest: "fixture".into(),
+                workspace_index: 0,
+                workspace_id: ryeos_client_base::ids::WorkspaceId::new(1),
+                buffer: ryeos_client_base::ui::model::InputBufferKey::new(
+                    ryeos_client_base::ids::RyeOsViewInstanceKey::workspace_tile(
+                        ryeos_client_base::ids::TileId::new(1),
+                    ),
+                    "view:test/input",
+                    "line",
+                ),
+            },
             cursor: 3,
             focused: false,
             route_label: String::new(),

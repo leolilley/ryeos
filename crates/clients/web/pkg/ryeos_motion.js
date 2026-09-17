@@ -20,6 +20,8 @@ export function captureWorkspaceMotion(root) {
 
 export function applyWorkspaceMotion(root, snapshot, currentTileIds, motionEvents = []) {
   if (!root || !snapshot?.appRect) return;
+  // CSS reduced-motion rules do not disable Web Animations created here.
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   animateRetainedExits(root, snapshot, currentTileIds || new Set());
   animateSplitBeams(root, snapshot, motionEvents);
   animatePersistentTiles(root, snapshot);

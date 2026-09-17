@@ -68,8 +68,8 @@ pub(super) fn status_tone(status: &str) -> RyeOsTone {
 /// focused feed entry — both the Enter intent and command-overlay secondary
 /// intents derive from it.
 pub(super) fn focused_timeline_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
+    let tile_id = core.workspaces[core.active_workspace].focused_tile;
+    let view = core.workspaces[core.active_workspace].focused_view()?;
     if let RyeOsViewVm::Timeline {
         entries, selected, ..
     } = bound_view_vm(core, tile_id, &view.view_ref)

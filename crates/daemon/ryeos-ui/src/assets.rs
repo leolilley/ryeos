@@ -73,10 +73,13 @@ static RYEOS_UI_FIELD_LAYOUT_JS: &[u8] =
 static RYEOS_UI_GRID_CANVAS_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_grid_canvas.js");
 static RYEOS_UI_KEYBOARD_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_keyboard.js");
+static RYEOS_UI_LAYOUT_PREFERENCES_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_layout_preferences.js");
 static RYEOS_UI_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_motion.js");
 static RYEOS_UI_PRESENTATION_STATE_JS: &[u8] =
     include_bytes!("../../../clients/web/pkg/ryeos_presentation_state.js");
 static RYEOS_UI_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_shell.js");
+static RYEOS_UI_THREE_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_three.js");
 static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
 static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
 static RYEOS_WEB_WASM: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web_bg.wasm");
@@ -133,11 +136,15 @@ impl StaticAssetProvider for WebAssetProvider {
             "ryeos_keyboard.js" | "ui/assets/ryeos_keyboard.js" => {
                 (RYEOS_UI_KEYBOARD_JS, "no-cache")
             }
+            "ryeos_layout_preferences.js" | "ui/assets/ryeos_layout_preferences.js" => {
+                (RYEOS_UI_LAYOUT_PREFERENCES_JS, "no-cache")
+            }
             "ryeos_motion.js" | "ui/assets/ryeos_motion.js" => (RYEOS_UI_MOTION_JS, "no-cache"),
             "ryeos_presentation_state.js" | "ui/assets/ryeos_presentation_state.js" => {
                 (RYEOS_UI_PRESENTATION_STATE_JS, "no-cache")
             }
             "ryeos_shell.js" | "ui/assets/ryeos_shell.js" => (RYEOS_UI_SHELL_JS, "no-cache"),
+            "ryeos_three.js" | "ui/assets/ryeos_three.js" => (RYEOS_UI_THREE_JS, "no-cache"),
             "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
             "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
             "ryeos_web_bg.wasm" | "ui/assets/ryeos_web_bg.wasm" => (RYEOS_WEB_WASM, "no-cache"),

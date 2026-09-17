@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-16T03:44:59Z:da51122072df582a4857dfb7e5135f2af532c3fd7b20c05fdb58b95c5dd2967f:5pI11WNg8PsPh5TRNmJQVJncGlkUKnShDgAgxfRfW3IXZxVTAxj5LuXlfK0aaQHop7TFGNQcD8S+fuYG0AHyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T00:05:36Z:b36def5aa267cb9ce7842eb92da6150aa4729a249e32002485100751c4bc88e3:YyQ3galHDBFjC8ZAx53/RBzIlrzJrPM7bzsrzehWdYC8G+WNSwDMk3apmPk6K8kQ4GBZlKPNBjTOVJ/r1PlEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to iterate on RyeOS UI browser UI assets without republishing bundles for every JS/CSS edit"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Browser UI Development Workflow
@@ -14,12 +14,18 @@ Use this when working on the RyeOS UI browser UI. The goal is to avoid the
 slow bundle/reinstall loop for ordinary JavaScript and CSS changes.
 
 Read `ui-design-system.md` first for the governing visual language and component
-rules. This workflow explains iteration, not aesthetic choices. The default
-operational UI is moving to restrained flat surfaces, selective warm accents,
-sans-serif interface text and technical monospace. The older mandates for
-universal monospace, thick frames and always-on HUD decoration are superseded.
+rules. This workflow explains iteration, not aesthetic choices. Preserve the
+Gruvbox palette, tiled workspace, launcher, optional slots and authored ambient
+character. Refine typography, linework and composition; do not replace them
+with a generic sidebar/page shell. Nested split layouts and view-tab groups
+belong in the shared model, not a browser-only styling workaround.
 The implementation plan is
 `.tmp/ryeos-ui-visual-language-and-composition-implementation-plan.md`.
+
+The approved visual study is in `crates/clients/web/tests/browser/design/`.
+It is standalone synthetic HTML/CSS, not production or execution evidence.
+Qualify the implementation with actual shared-model projections and production
+renderers; record visual, source-test and installed acceptance separately.
 
 ## Where the browser UI lives
 
@@ -157,8 +163,9 @@ daemon behavior.
 
 ## Ambient scene state hooks
 
-These hooks remain applicable to explicitly composed scene/topology views.
-Their existence does not require a decorative scene behind operational pages.
+These hooks remain applicable to authored ambient backgrounds and explicit
+scene/topology views. Preserve their role in RyeOS's visual identity while
+keeping working content legible; do not globally remove ambient character.
 Select ambient composition through signed surface declarations; do not hide a
 named page's background through a renderer-specific canonical-ref check.
 

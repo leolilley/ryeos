@@ -13,11 +13,16 @@ core:
 Regenerate and verify them with `scripts/check-ui-wasm-fresh.sh`. Do not edit
 them by hand.
 
-All other JavaScript, CSS and HTML files in this directory are authored source.
-They are committed beside the generated bridge because this directory is also
-the exact static asset tree embedded by `ryeos-ui`. Browser adapter code must
-remain transport, DOM and platform glue over the shared semantic view model; it
-must not acquire product routing or authorization logic.
+`ryeos_three.js` is the exact `three@0.128.0` `build/three.module.js` artifact
+selected by `package-lock.json`; its retained MIT notice is
+`../third_party/three/LICENSE`. Regenerate it from the locked offline npm input,
+never from a CDN or an ambient host installation.
+
+All remaining JavaScript, CSS and HTML files in this directory are authored
+source. They are committed beside generated artifacts because this directory is
+also the exact static asset tree embedded by `ryeos-ui`. Browser adapter code
+must remain transport, DOM and platform glue over the shared semantic view
+model; it must not acquire product routing or authorization logic.
 
 Imports beginning with `/ui/assets/` are the installed serving contract. Tests
 must serve that namespace rather than rewriting those imports to suit Node.
