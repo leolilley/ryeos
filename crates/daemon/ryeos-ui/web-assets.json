@@ -18,7 +18,7 @@
       "filename": "ryeos_ui.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "3d918fb8575fb13d6b8651312404c47b3fb42117e534a7d65c38add8bed24935",
+      "sha256": "0975f572b8c43cfbe7ae4b94446612170799928cacac4f61501ff45e385575bf",
       "imports": [
         "/ui/assets/ryeos_three.js",
         "/ui/assets/ryeos_web.js",
@@ -30,7 +30,7 @@
       "filename": "ryeos_ui.css",
       "mime": "text/css; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "9d73e2ae90e9d10bc7b169f8fcd13ff344fb38b42d52a77ba98d664f7e3b99f8",
+      "sha256": "38efbbb99ad9308406a8d2ca37ed1666b73782a98df2d56748e6a1ba15d5b13c",
       "imports": []
     },
     {

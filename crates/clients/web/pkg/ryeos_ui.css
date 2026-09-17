@@ -158,5 +158,35 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .table-view { --columns: 1; padding: 16px 20px; }.table-head, .table-view > button { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); width: 100%; min-height: 38px; border-bottom: 1px solid var(--line); }.table-head { color: var(--muted); font: 9px var(--font-data); text-transform: uppercase; }.table-head span, .table-view > button span { padding: 11px 9px; overflow: hidden; text-overflow: ellipsis; }
 .timeline-entry { margin-left: calc(var(--indent) * 18px); padding: 12px 15px; border-left: 1px solid var(--line); }.timeline-entry.selected { border-color: var(--accent-bright); background: var(--plane-selected); }.timeline-entry button { display: flex; width: 100%; justify-content: space-between; }.timeline-entry small { color: var(--muted); }.timeline-separator { color: var(--faint); font: 9px var(--font-data); text-transform: uppercase; }
 .sections-view section > button { display: flex; justify-content: space-between; width: 100%; min-height: 40px; padding: 0 10px; border-bottom: 1px solid var(--line-strong); color: var(--text); }.sections-view section > button.selected { color: var(--yellow); }
-.scene-host, .field-host { width: 100%; height: 100%; min-height: 240px; }.field-host canvas { width: 100%; height: 100%; }
+.scene-view, .field-view { position: relative; width: 100%; height: 100%; min-height: 240px; overflow: hidden; }
+.scene-view svg { display: block; width: 100%; height: 100%; min-height: 240px; }
+.scene-view svg line, .scene-view svg polygon, .scene-view svg rect, .scene-view svg circle { fill: var(--plane); vector-effect: non-scaling-stroke; stroke-width: 1; }
+.scene-view svg text { font: 5px var(--font-data); }
+.scene-view svg g.interactive { cursor: pointer; }
+.scene-view svg g.interactive:focus { outline: none; filter: brightness(1.35); }
+.atlas-toolbar { position: absolute; z-index: 2; inset: 12px 14px auto; display: flex; align-items: center; gap: 14px; min-height: 34px; border-bottom: 1px solid var(--line); }
+.atlas-identity { display: grid; min-width: 130px; }.atlas-identity strong { font-weight: 500; }.atlas-identity span { color: var(--muted); font: 8px var(--font-data); text-transform: uppercase; }
+.atlas-projections, .atlas-layers { display: flex; gap: 3px; }
+.atlas-toolbar button { padding: 5px 7px; border: 1px solid transparent; color: var(--muted); font: 9px var(--font-data); }
+.atlas-toolbar button.active { border-color: var(--line-strong); color: var(--yellow); background: var(--plane-selected); }
+.scene-view .atlas-canvas { padding-top: 42px; }
+.atlas-canvas line { stroke: var(--line-strong); stroke-width: .035; }
+.atlas-node circle { fill: var(--plane-raised); stroke: var(--faint); stroke-width: .035; vector-effect: non-scaling-stroke; }
+.atlas-node text { fill: var(--text); font: .32px var(--font-data); }
+.atlas-node.selected circle, .atlas-node.highlighted circle { stroke: var(--yellow); }.atlas-node.dimmed { opacity: .28; }
+.atlas-node[role="button"] { cursor: pointer; }.atlas-node[role="button"]:focus { outline: none; filter: brightness(1.35); }
+.atlas-stack-item[data-kind="directive"] { fill: var(--orange); }.atlas-stack-item[data-kind="tool"] { fill: var(--yellow); }.atlas-stack-item[data-kind="knowledge"] { fill: var(--green); }.atlas-stack-item[data-kind="config"] { fill: var(--blue); }
+.field-stage, .field-stage canvas { width: 100%; height: 100%; min-height: 240px; }
+.field-stage canvas { display: block; }
+.field-toolbar { position: absolute; z-index: 2; inset: 0 0 auto; display: grid; grid-template-columns: auto 1fr minmax(120px, 220px); gap: 10px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--plane) 94%, transparent); }
+.field-identity { display: grid; min-width: 130px; }.field-identity strong { font-weight: 500; }.field-identity span { color: var(--muted); font: 8px var(--font-data); }
+.field-controls { display: flex; gap: 3px; overflow-x: auto; }.field-controls button, .field-rail button, .field-detail button { padding: 4px 6px; border: 1px solid var(--line); color: var(--muted); font: 9px var(--font-data); white-space: nowrap; }.field-controls button[aria-pressed="true"] { color: var(--yellow); }
+.field-toolbar input { min-width: 0; padding: 6px 8px; border: 1px solid var(--line-strong); background: var(--plane); color: var(--text); font: 10px var(--font-data); }
+.field-stage { padding-top: 46px; }
+.field-rail { position: absolute; z-index: 3; left: 10px; bottom: 10px; display: flex; gap: 3px; max-width: calc(100% - 20px); overflow: auto; }.field-rail button.selected { color: var(--yellow); border-color: var(--yellow); }
+.field-detail { position: absolute; z-index: 3; top: 58px; right: 12px; display: grid; gap: 6px; width: min(250px, 36%); max-height: calc(100% - 82px); overflow: auto; padding: 10px; border: 1px solid var(--line-strong); background: color-mix(in srgb, var(--plane) 96%, transparent); }.field-detail > strong { font-weight: 500; }.field-detail > small { color: var(--muted); font: 8px var(--font-data); }.field-detail button { text-align: left; }
+.field-preview { margin: 4px 0; }.field-preview figcaption { color: var(--muted); font: 8px var(--font-data); }.field-preview canvas { max-width: 100%; image-rendering: pixelated; }
+.field-warning { color: var(--yellow) !important; }
+.field-accessibility { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.field-warnings { position: absolute; right: 12px; bottom: 10px; max-width: 60%; padding: 5px 8px; border: 1px solid var(--line-strong); background: var(--plane); color: var(--yellow); font: 9px var(--font-data); }
 }

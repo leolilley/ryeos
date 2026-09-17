@@ -41,3 +41,16 @@ test("compiled entry contains no predecessor renderer vocabulary", async () => {
     assert.equal(entry.includes(forbidden), false, `compiled entry retains ${forbidden}`);
   }
 });
+
+test("scene and field views retain the shared projection boundary", async () => {
+  const scene = await readFile(new URL("browser/views/SceneView.svelte", root), "utf8");
+  const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
+  const field = await readFile(new URL("browser/views/FieldView.svelte", root), "utf8");
+
+  assert.match(renderer, /<SceneView scene=\{model\.scene\} \{tileId\} \/>/);
+  assert.doesNotMatch(renderer, /SceneView[^\n]*(kind|mode|style)=/);
+  assert.match(scene, /interface Props \{ scene: RyeOsSceneModel; tileId: string \}/);
+  assert.doesNotMatch(scene, /namespace_atlas|paper_3d|flat_2d|AmbientOptions/);
+  assert.match(field, /new FieldCanvasController\(canvas, dispatch, instanceKey\)/);
+  assert.doesNotMatch(field, /mountField|replaceChildren|innerHTML/);
+});

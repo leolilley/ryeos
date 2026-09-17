@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T01:17:07Z:64af9f017e0f8a5e7a47e0c54bbba028787028982fed5179797e2ad419d1e447:E0J6aj+0fks5YHzoJAv5G1jhM6F9P4y9jYLcOXUhAoLYGpClg1tTAi+3IaqaBmhRb3Goa2VfF8p09jytPdtpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-17T01:49:07Z:227e81541e0bb086eaea5a5dd56ca6e8c5dfd55abe0686ee9a5de3b4f502257f:NX1oiPMDD/KR82RxfdP+HEV3PV0d/xg+qyiuQScVdrqIjsFeXqdZD0EdaXrNyu90QUTNxDznIo2WD6jRtG84BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -84,6 +84,27 @@ declared development environment; never substitute a host browser silently.
 Three.js is the exact local `0.128.0` build chunk; there is no CDN import.
 Visibility comes from the authored surface projection, never a browser-side
 view-name exception. Animation state does not become RyeOS semantic state.
+
+## Scene, atlas and field views
+
+Map and Atlas are ordinary views placed by the shared Rust-owned layout tree.
+A compact execution map may occupy a supporting tile while the same view can be
+promoted into the central workspace; Atlas usually benefits from the larger
+workspace with selection or evidence in adjacent tiles. These are authored
+arrangements, not fixed browser positions.
+
+`SceneView.svelte` receives only the projected scene and owning tile identity.
+It must not accept a browser-authored map/atlas kind, rendering mode or visual
+style. A scene containing the typed atlas projection renders its projected
+atlas controls and interactions; another scene renders its generic semantic
+objects. Rust remains authoritative for which model exists and where it is
+placed.
+
+Field is likewise a normal typed view. Svelte owns its toolbar, event rail,
+details, accessibility tree and preview composition. The retained canvas
+controller owns only bounded drawing, hit testing and pointer mechanics. Never
+restore a hidden DOM renderer, compatibility mount function or browser-side
+application model behind the Svelte component.
 
 ## Rebuild boundaries
 

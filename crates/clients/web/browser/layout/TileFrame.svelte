@@ -18,6 +18,6 @@
     </header>
   {/if}
   {#if model.heading}<div class="content-heading"><small>{model.heading.eyebrow}</small><h1>{model.heading.title}</h1>{#if model.heading.summary}<p>{model.heading.summary}</p>{/if}{#if model.heading.metadata.length}<div class="heading-meta">{model.heading.metadata.join("  /  ")}</div>{/if}</div>{/if}
-  <ViewRenderer model={model.view} tileId={model.tile_id} />
+  <ViewRenderer model={model.view} tileId={model.tile_id} instanceKey={model.instance_key} />
   {#if model.input}<InputComposer model={model.input} />{/if}
 </article>

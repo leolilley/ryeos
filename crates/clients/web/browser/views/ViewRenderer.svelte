@@ -1,9 +1,11 @@
 <script lang="ts">
-  import type { RyeOsUiIntent, RyeOsViewVm } from "../generated";
+  import type { RyeOsUiIntent, RyeOsViewInstanceKey, RyeOsViewVm } from "../generated";
   import EmptyState from "../components/EmptyState.svelte";
+  import FieldView from "./FieldView.svelte";
+  import SceneView from "./SceneView.svelte";
   import { dispatchUi } from "../runtime/context";
-  interface Props { model: RyeOsViewVm; tileId: string }
-  let { model, tileId }: Props = $props();
+  interface Props { model: RyeOsViewVm; tileId: string; instanceKey: RyeOsViewInstanceKey }
+  let { model, tileId, instanceKey }: Props = $props();
   const dispatch = dispatchUi();
   const activate = (intent: RyeOsUiIntent) => dispatch({ type: "activate", intent });
 </script>
@@ -59,8 +61,8 @@
   {:else if model.type === "placeholder"}
     <EmptyState title={model.title} message={model.message} />
   {:else if model.type === "map" || model.type === "atlas"}
-    <div class="scene-host" data-scene={model.type} aria-label={`${model.type} view`}></div>
+    <SceneView scene={model.scene} {tileId} />
   {:else if model.type === "field"}
-    <div class="field-host" aria-label="Field view"><canvas></canvas></div>
+    <FieldView field={model.field} {instanceKey} />
   {/if}
 </div>

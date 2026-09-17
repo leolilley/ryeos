@@ -143,6 +143,26 @@ function deferred() {
 		reject
 	};
 }
+/**
+* When encountering a situation like `let [a, b, c] = $derived(blah())`,
+* we need to stash an intermediate value that `a`, `b`, and `c` derive
+* from, in case it's an iterable
+* @template T
+* @param {ArrayLike<T> | Iterable<T>} value
+* @param {number} [n]
+* @returns {Array<T>}
+*/
+function to_array(value, n) {
+	if (Array.isArray(value)) return value;
+	if (n === void 0 || !(Symbol.iterator in value)) return Array.from(value);
+	/** @type {T[]} */
+	const array = [];
+	for (const element of value) {
+		array.push(element);
+		if (array.length === n) break;
+	}
+	return array;
+}
 var CLEAN = 1024;
 var DIRTY = 2048;
 var MAYBE_DIRTY = 4096;
@@ -178,6 +198,7 @@ var ATTRIBUTES_CACHE = Symbol("attributes");
 var CLASS_CACHE = Symbol("class");
 var STYLE_CACHE = Symbol("style");
 var TEXT_CACHE = Symbol("text");
+var FORM_RESET_HANDLER = Symbol("form reset");
 /** allow users to ignore aborted signal errors if `reason.name === 'StaleReactionError` */
 var STALE_REACTION = new class StaleReactionError extends Error {
 	name = "StaleReactionError";
@@ -610,6 +631,18 @@ var legacy_is_updating_store = false;
 */
 function remove_textarea_child(dom) {
 	if (hydrating && /* @__PURE__ */ get_first_child(dom) !== null) clear_text_content(dom);
+}
+var listening_to_form_reset = false;
+function add_form_reset_listener() {
+	if (!listening_to_form_reset) {
+		listening_to_form_reset = true;
+		document.addEventListener("reset", (evt) => {
+			Promise.resolve().then(() => {
+				if (!evt.defaultPrevented) for (const e of evt.target.elements)
+ /** @type {any} */ e[FORM_RESET_HANDLER]?.();
+			});
+		}, { capture: true });
+	}
 }
 //#endregion
 //#region node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
@@ -3138,6 +3171,52 @@ function from_html(content, flags) {
 	};
 }
 /**
+* @param {string} content
+* @param {number} flags
+* @param {'svg' | 'math'} ns
+* @returns {() => Node | Node[]}
+*/
+/*#__NO_SIDE_EFFECTS__*/
+function from_namespace(content, flags, ns = "svg") {
+	/**
+	* Whether or not the first item is a text/element node. If not, we need to
+	* create an additional comment node to act as `effect.nodes.start`
+	*/
+	var has_start = !content.startsWith("<!>");
+	var is_fragment = (flags & 1) !== 0;
+	var wrapped = `<${ns}>${has_start ? content : "<!>" + content}</${ns}>`;
+	/** @type {Element | DocumentFragment} */
+	var node;
+	return () => {
+		if (hydrating) {
+			assign_nodes(hydrate_node, null);
+			return hydrate_node;
+		}
+		if (!node) {
+			var root = /* @__PURE__ */ get_first_child(create_fragment_from_html(wrapped));
+			if (is_fragment) {
+				node = document.createDocumentFragment();
+				while (/* @__PURE__ */ get_first_child(root)) node.appendChild(/* @__PURE__ */ get_first_child(root));
+			} else node = /* @__PURE__ */ get_first_child(root);
+		}
+		var clone = node.cloneNode(true);
+		if (is_fragment) {
+			var start = /* @__PURE__ */ get_first_child(clone);
+			var end = clone.lastChild;
+			assign_nodes(start, end);
+		} else assign_nodes(clone, clone);
+		return clone;
+	};
+}
+/**
+* @param {string} content
+* @param {number} flags
+*/
+/*#__NO_SIDE_EFFECTS__*/
+function from_svg(content, flags) {
+	return /* @__PURE__ */ from_namespace(content, flags, "svg");
+}
+/**
 * @returns {TemplateNode | DocumentFragment}
 */
 function comment() {
@@ -4540,6 +4619,33 @@ var IS_HTML = Symbol("is html");
 var LINK_TAG = IS_XHTML ? "link" : "LINK";
 var PROGRESS_TAG = IS_XHTML ? "progress" : "PROGRESS";
 /**
+* The value/checked attribute in the template actually corresponds to the defaultValue property, so we need
+* to remove it upon hydration to avoid a bug when someone resets the form value.
+* @param {HTMLInputElement} input
+* @returns {void}
+*/
+function remove_input_defaults(input) {
+	if (!hydrating) return;
+	var already_removed = false;
+	var remove_defaults = () => {
+		if (already_removed) return;
+		already_removed = true;
+		if (input.hasAttribute("value")) {
+			var value = input.value;
+			set_attribute(input, "value", null);
+			input.value = value;
+		}
+		if (input.hasAttribute("checked")) {
+			var checked = input.checked;
+			set_attribute(input, "checked", null);
+			input.checked = checked;
+		}
+	};
+	/** @type {any} */ input[FORM_RESET_HANDLER] = remove_defaults;
+	queue_micro_task(remove_defaults);
+	add_form_reset_listener();
+}
+/**
 * @param {Element} element
 * @param {any} value
 */
@@ -4698,18 +4804,18 @@ function dispatchUi() {
 }
 //#endregion
 //#region browser/app/Navigation.svelte
-var root$12 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$5 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
+var root$15 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root_1$5();
+	var aside = root_1$7();
 	var div = child(aside);
 	var text = only_child(sibling(child(div)), true);
 	reset(div);
 	var nav = sibling(div, 2);
 	each(nav, 21, () => $$props.model.items, (item) => item.id, ($$anchor, item) => {
-		var button = root$12();
+		var button = root$15();
 		let classes;
 		var span_1 = sibling(child(button), 2);
 		var text_1 = only_child(child(span_1), true);
@@ -6379,7 +6485,7 @@ function colorValue(value) {
 }
 //#endregion
 //#region browser/app/AmbientLayer.svelte
-var root$11 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
+var root$14 = /* @__PURE__ */ from_html(`<div class="ambient-layer" aria-hidden="true"><canvas></canvas></div>`);
 function AmbientLayer($$anchor, $$props) {
 	push($$props, true);
 	let canvas;
@@ -6398,7 +6504,7 @@ function AmbientLayer($$anchor, $$props) {
 	user_effect(() => {
 		controller?.update($$props.scene, get(options));
 	});
-	var div = root$11();
+	var div = root$14();
 	bind_this(child(div), ($$value) => canvas = $$value, () => canvas);
 	reset(div);
 	template_effect(() => set_style(div, `--ambient-opacity:${$$props.ambient.opacity ?? 1}`));
@@ -6407,17 +6513,17 @@ function AmbientLayer($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/StatusBar.svelte
-var root$10 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$4 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
+var root$13 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var footer = root_1$4();
+		var footer = root_1$6();
 		var node_1 = child(footer);
 		each(node_1, 17, () => $$props.model.segments, index, ($$anchor, segment) => {
-			var span = root$10();
+			var span = root$13();
 			let classes;
 			var text = only_child(span);
 			template_effect(() => {
@@ -6440,10 +6546,10 @@ function StatusBar($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/SystemBar.svelte
-var root$9 = /* @__PURE__ */ from_html(`<header class="system-bar"><div class="brand" aria-label="RyeOS"><span class="brand-mark" aria-hidden="true">◇</span> <span> </span></div> <div class="system-context"><span class="presence">●</span> <span> </span> <span class="separator">/</span> <span> </span></div> <div class="system-state"><span> </span> <span class="transport"> </span></div></header>`);
+var root$12 = /* @__PURE__ */ from_html(`<header class="system-bar"><div class="brand" aria-label="RyeOS"><span class="brand-mark" aria-hidden="true">◇</span> <span> </span></div> <div class="system-context"><span class="presence">●</span> <span> </span> <span class="separator">/</span> <span> </span></div> <div class="system-state"><span> </span> <span class="transport"> </span></div></header>`);
 function SystemBar($$anchor, $$props) {
 	push($$props, true);
-	var header = root$9();
+	var header = root$12();
 	var div = child(header);
 	var text = only_child(sibling(child(div), 2), true);
 	reset(div);
@@ -6474,18 +6580,18 @@ function SystemBar($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/WorkspaceStrip.svelte
-var root$8 = /* @__PURE__ */ from_html(`<button><span class="ordinal"> </span> <span> </span></button>`);
-var root_1$3 = /* @__PURE__ */ from_html(`<nav class="workspace-strip" aria-label="Workspaces"><!> <button class="new-workspace" aria-label="New workspace">＋</button></nav>`);
+var root$11 = /* @__PURE__ */ from_html(`<button><span class="ordinal"> </span> <span> </span></button>`);
+var root_1$5 = /* @__PURE__ */ from_html(`<nav class="workspace-strip" aria-label="Workspaces"><!> <button class="new-workspace" aria-label="New workspace">＋</button></nav>`);
 function WorkspaceStrip($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var nav = root_1$3();
+		var nav = root_1$5();
 		var node_1 = child(nav);
 		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.workspace_id, ($$anchor, tab) => {
-			var button = root$8();
+			var button = root$11();
 			let classes;
 			var span = child(button);
 			var text = only_child(span, true);
@@ -6523,7 +6629,7 @@ function WorkspaceStrip($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/components/InputComposer.svelte
-var root$7 = /* @__PURE__ */ from_html(`<section class="composer"><div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div> <textarea></textarea> <div class="composer-actions"><span> </span><button>↑</button></div></section>`);
+var root$10 = /* @__PURE__ */ from_html(`<section class="composer"><div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div> <textarea></textarea> <div class="composer-actions"><span> </span><button>↑</button></div></section>`);
 function InputComposer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -6543,7 +6649,7 @@ function InputComposer($$anchor, $$props) {
 			}
 		});
 	}
-	var section = root$7();
+	var section = root$10();
 	var div = child(section);
 	var text_1 = only_child(sibling(child(div)), true);
 	next();
@@ -6608,9 +6714,9 @@ delegate([
 ]);
 //#endregion
 //#region browser/components/EmptyState.svelte
-var root$6 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
+var root$9 = /* @__PURE__ */ from_html(`<div class="empty-state"><span>◇</span><strong> </strong><p> </p></div>`);
 function EmptyState($$anchor, $$props) {
-	var div = root$6();
+	var div = root$9();
 	var strong = sibling(child(div));
 	var text = only_child(strong, true);
 	var text_1 = only_child(sibling(strong), true);
@@ -6621,6 +6727,1374 @@ function EmptyState($$anchor, $$props) {
 	});
 	append($$anchor, div);
 }
+//#endregion
+//#region browser/visuals/ryeos_field_layout.js
+var GROUP_WIDTH = 520;
+var RANK_SPACING = 210;
+var GROUP_RIGHT_GUTTER = 300;
+var GROUP_HEADER_HEIGHT = 26;
+var LARGE_FIELD_ENTITY_COUNT = 240;
+var LARGE_FIELD_RELATION_COUNT = 720;
+var StaleFieldLayoutError = class extends Error {
+	constructor() {
+		super("field layout superseded");
+		this.name = "StaleFieldLayoutError";
+	}
+};
+function layoutField(vm, previous = /* @__PURE__ */ new Map()) {
+	const prepared = prepareField(vm);
+	return placeField(vm, prepared, stronglyConnectedComponents(prepared.ids, prepared.relations), previous);
+}
+async function layoutFieldChunked(vm, previous = /* @__PURE__ */ new Map(), { schedule = nextFrame, isStale = () => false } = {}) {
+	const prepared = prepareField(vm);
+	if (!isLarge(prepared)) return layoutField(vm, previous);
+	await schedule();
+	if (isStale()) throw new StaleFieldLayoutError();
+	const components = stronglyConnectedComponents(prepared.ids, prepared.relations);
+	await schedule();
+	if (isStale()) throw new StaleFieldLayoutError();
+	const layout = placeField(vm, prepared, components, previous);
+	if (isStale()) throw new StaleFieldLayoutError();
+	return layout;
+}
+function settleLayout(layout, amount = 1) {
+	for (const node of layout.nodes.values()) {
+		node.x += (node.targetX - node.x) * amount;
+		node.y += (node.targetY - node.y) * amount;
+	}
+	for (const edge of layout.edges) edge.points = routeEdge(layout.nodes.get(edge.relation.source_id), layout.nodes.get(edge.relation.target_id));
+	layout.groups = groupBounds(layout.groupDefinitions, layout.nodes, layout.groupOrigins);
+	return layout;
+}
+function hitTest(layout, x, y) {
+	return [...layout.nodes.values()].reverse().find((node) => Math.abs(x - node.x) <= node.width / 2 && Math.abs(y - node.y) <= node.height / 2) || null;
+}
+function hitTestGroup(layout, x, y) {
+	return [...layout.groups].reverse().find((group) => x >= group.x && x <= group.x + group.width && y >= group.y && y <= group.y + GROUP_HEADER_HEIGHT) || null;
+}
+function fieldLayoutIsLarge(vm) {
+	return (vm.entities || []).length >= LARGE_FIELD_ENTITY_COUNT || (vm.relations || []).length >= LARGE_FIELD_RELATION_COUNT;
+}
+function fieldLayoutMembershipKey(vm) {
+	return JSON.stringify(visibleEntities(vm).map((entity) => entity.id));
+}
+function rebindFieldLayout(layout, vm) {
+	const entities = new Map((vm?.entities || []).map((entity) => [entity.id, entity]));
+	const relations = new Map((vm?.relations || []).map((relation) => [relation.id, relation]));
+	for (const node of layout.nodes.values()) node.entity = entities.get(node.id) || node.entity;
+	for (const edge of layout.edges) edge.relation = relations.get(edge.relation.id) || edge.relation;
+	return layout;
+}
+function prepareField(vm) {
+	const visible = visibleEntities(vm);
+	const ids = visible.map((entity) => entity.id);
+	const idSet = new Set(ids);
+	return {
+		visible,
+		ids,
+		relations: (vm.relations || []).filter((relation) => idSet.has(relation.source_id) && idSet.has(relation.target_id))
+	};
+}
+function placeField(vm, prepared, components, previous) {
+	const { visible, relations } = prepared;
+	const componentById = /* @__PURE__ */ new Map();
+	components.forEach((members, index) => {
+		members.forEach((id) => componentById.set(id, index));
+	});
+	const componentRanks = rankComponents(components, componentById, relations, visible);
+	const groupDefinitions = (vm.groups || []).map((group) => ({ ...group }));
+	const groupOrder = new Map(groupDefinitions.map((group, index) => [group.id, index]));
+	const laneNames = [...new Set(visible.map((entity) => entity.lane || "").filter(Boolean))].sort();
+	const laneOrder = new Map(laneNames.map((lane, index) => [lane, index]));
+	const buckets = /* @__PURE__ */ new Map();
+	for (const entity of visible) {
+		const key = `${groupOrder.get(entity.group_id) ?? groupOrder.size}\0${Number.isFinite(entity.rank) ? Number(entity.rank) : componentRanks.get(componentById.get(entity.id)) || 0}\0${laneOrder.get(entity.lane) ?? laneOrder.size}`;
+		if (!buckets.has(key)) buckets.set(key, []);
+		buckets.get(key).push(entity);
+	}
+	for (const entities of buckets.values()) entities.sort((left, right) => number(left.order) - number(right.order) || left.id.localeCompare(right.id));
+	const maximumRankByGroup = /* @__PURE__ */ new Map();
+	groupDefinitions.forEach((_, index) => maximumRankByGroup.set(index, 0));
+	for (const key of buckets.keys()) {
+		const [groupText, rankText] = key.split("\0");
+		const group = Number(groupText);
+		const rank = Number(rankText);
+		maximumRankByGroup.set(group, Math.max(maximumRankByGroup.get(group) ?? 0, rank));
+	}
+	const groupOrigins = /* @__PURE__ */ new Map();
+	let nextGroupOrigin = 0;
+	for (const group of [...maximumRankByGroup.keys()].sort((left, right) => left - right)) {
+		groupOrigins.set(group, nextGroupOrigin);
+		nextGroupOrigin += Math.max(GROUP_WIDTH, (maximumRankByGroup.get(group) || 0) * RANK_SPACING + GROUP_RIGHT_GUTTER);
+	}
+	const nodes = /* @__PURE__ */ new Map();
+	const incoming = incomingSources(relations);
+	for (const [key, entities] of [...buckets.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+		const [groupText, rankText, laneText] = key.split("\0");
+		const group = Number(groupText);
+		const rank = Number(rankText);
+		const lane = Number(laneText);
+		entities.forEach((entity, index) => {
+			const targetX = 120 + (groupOrigins.get(group) || 0) + rank * RANK_SPACING;
+			const targetY = 90 + lane * 150 + index * 86;
+			const seed = seedPosition(entity, previous, incoming, targetX, targetY);
+			nodes.set(entity.id, {
+				id: entity.id,
+				entity,
+				x: seed.x,
+				y: seed.y,
+				targetX,
+				targetY,
+				width: entity.traits?.shape === "aggregate" ? 156 : 136,
+				height: entity.traits?.shape === "grid" ? 74 : 52,
+				componentSize: components[componentById.get(entity.id)]?.length || 1
+			});
+		});
+	}
+	const edges = relations.map((relation) => ({
+		relation,
+		points: routeEdge(nodes.get(relation.source_id), nodes.get(relation.target_id))
+	}));
+	const groups = groupBounds(groupDefinitions, nodes, groupOrigins);
+	return {
+		nodes,
+		edges,
+		groups,
+		groupDefinitions,
+		groupOrigins,
+		width: Math.max(640, ...[...nodes.values()].map((node) => node.targetX + node.width + 100), ...groups.map((group) => group.x + group.width + 40)),
+		height: Math.max(360, ...[...nodes.values()].map((node) => node.targetY + node.height + 100), ...groups.map((group) => group.y + group.height + 40))
+	};
+}
+function visibleEntities(vm) {
+	const hidden = new Set((vm.layers || []).filter((layer) => !layer.visible).map((layer) => layer.id));
+	const collapsed = new Set((vm.groups || []).filter((group) => group.collapsed).map((group) => group.id));
+	return (vm.entities || []).filter((entity) => {
+		if (entity.selected) return true;
+		if (entity.group_id && collapsed.has(entity.group_id)) return false;
+		if (!(entity.layer_ids || []).length) return true;
+		return entity.layer_ids.some((layer) => !hidden.has(layer));
+	});
+}
+function seedPosition(entity, previous, incoming, targetX, targetY) {
+	const prior = previous.get(entity.id);
+	if (prior) return {
+		x: prior.x,
+		y: prior.y
+	};
+	const parent = entity.parent_id && previous.get(entity.parent_id);
+	if (parent) return {
+		x: parent.x,
+		y: parent.y
+	};
+	for (const sourceId of incoming.get(entity.id) || []) {
+		const source = previous.get(sourceId);
+		if (source) return {
+			x: source.x,
+			y: source.y
+		};
+	}
+	return {
+		x: targetX - 28,
+		y: targetY
+	};
+}
+function incomingSources(relations) {
+	const incoming = /* @__PURE__ */ new Map();
+	for (const relation of relations) {
+		if (!incoming.has(relation.target_id)) incoming.set(relation.target_id, []);
+		incoming.get(relation.target_id).push(relation.source_id);
+	}
+	for (const sources of incoming.values()) sources.sort();
+	return incoming;
+}
+function stronglyConnectedComponents(ids, relations) {
+	const graph = new Map(ids.map((id) => [id, []]));
+	for (const relation of relations) graph.get(relation.source_id)?.push(relation.target_id);
+	for (const targets of graph.values()) targets.sort();
+	let index = 0;
+	const stack = [];
+	const onStack = /* @__PURE__ */ new Set();
+	const indices = /* @__PURE__ */ new Map();
+	const low = /* @__PURE__ */ new Map();
+	const components = [];
+	const visit = (id) => {
+		indices.set(id, index);
+		low.set(id, index);
+		index += 1;
+		stack.push(id);
+		onStack.add(id);
+		for (const next of graph.get(id) || []) if (!indices.has(next)) {
+			visit(next);
+			low.set(id, Math.min(low.get(id), low.get(next)));
+		} else if (onStack.has(next)) low.set(id, Math.min(low.get(id), indices.get(next)));
+		if (low.get(id) === indices.get(id)) {
+			const component = [];
+			let member;
+			do {
+				member = stack.pop();
+				onStack.delete(member);
+				component.push(member);
+			} while (member !== id);
+			component.sort();
+			components.push(component);
+		}
+	};
+	[...ids].sort().forEach((id) => {
+		if (!indices.has(id)) visit(id);
+	});
+	return components;
+}
+function rankComponents(components, componentById, relations, entities) {
+	const ranks = /* @__PURE__ */ new Map();
+	const authored = new Map(entities.filter((entity) => Number.isFinite(entity.rank)).map((entity) => [componentById.get(entity.id), Number(entity.rank)]));
+	const incoming = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
+	const outgoing = new Map(components.map((_, index) => [index, /* @__PURE__ */ new Set()]));
+	for (const relation of relations) {
+		const source = componentById.get(relation.source_id);
+		const target = componentById.get(relation.target_id);
+		if (source === target) continue;
+		outgoing.get(source).add(target);
+		incoming.get(target).add(source);
+	}
+	const remainingIncoming = new Map([...incoming].map(([component, parents]) => [component, new Set(parents)]));
+	const queue = components.map((_, index) => index).filter((index) => remainingIncoming.get(index).size === 0).sort((left, right) => left - right);
+	while (queue.length) {
+		const component = queue.shift();
+		const rank = authored.get(component) ?? Math.max(0, ...[...incoming.get(component)].map((parent) => (ranks.get(parent) || 0) + 1));
+		ranks.set(component, rank);
+		for (const next of [...outgoing.get(component)].sort((left, right) => left - right)) {
+			remainingIncoming.get(next).delete(component);
+			if (remainingIncoming.get(next).size === 0) queue.push(next);
+		}
+		queue.sort((left, right) => left - right);
+	}
+	components.forEach((_, index) => {
+		if (!ranks.has(index)) ranks.set(index, authored.get(index) || 0);
+	});
+	return ranks;
+}
+function routeEdge(source, target) {
+	if (!source || !target) return [];
+	const middle = (source.x + target.x) / 2;
+	return [
+		[source.x + source.width / 2, source.y],
+		[middle, source.y],
+		[middle, target.y],
+		[target.x - target.width / 2, target.y]
+	];
+}
+function groupBounds(groups, nodes, groupOrigins = /* @__PURE__ */ new Map()) {
+	return groups.map((group, index) => {
+		const members = [...nodes.values()].filter((node) => node.entity.group_id === group.id);
+		if (!members.length) return {
+			id: group.id,
+			label: group.label,
+			collapsed: !!group.collapsed,
+			x: 20 + (groupOrigins.get(index) ?? index * GROUP_WIDTH),
+			y: 20,
+			width: 200,
+			height: 38
+		};
+		const minX = Math.min(...members.map((node) => node.x - node.width / 2)) - 32;
+		const maxX = Math.max(...members.map((node) => node.x + node.width / 2)) + 32;
+		const minY = Math.min(...members.map((node) => node.y - node.height / 2)) - 42;
+		const maxY = Math.max(...members.map((node) => node.y + node.height / 2)) + 28;
+		return {
+			id: group.id,
+			label: group.label,
+			collapsed: !!group.collapsed,
+			x: minX,
+			y: minY,
+			width: maxX - minX,
+			height: maxY - minY
+		};
+	});
+}
+function isLarge(prepared) {
+	return prepared.visible.length >= LARGE_FIELD_ENTITY_COUNT || prepared.relations.length >= LARGE_FIELD_RELATION_COUNT;
+}
+function nextFrame() {
+	return new Promise((resolve) => {
+		if (globalThis.requestAnimationFrame) requestAnimationFrame(() => resolve());
+		else setTimeout(resolve, 0);
+	});
+}
+function number(value) {
+	return Number.isFinite(value) ? Number(value) : 0;
+}
+//#endregion
+//#region browser/visuals/ryeos_field_canvas.js
+var TONES = {
+	good: "#8ec07c",
+	warn: "#fabd2f",
+	danger: "#fb4934",
+	accent: "#d65d0e",
+	neutral: "#a89984"
+};
+var HIGH_CONTRAST_TONES = {
+	good: "CanvasText",
+	warn: "CanvasText",
+	danger: "CanvasText",
+	accent: "Highlight",
+	neutral: "CanvasText"
+};
+var FieldCanvasController = class {
+	constructor(canvas, dispatchUi, instanceKey) {
+		this.canvas = canvas;
+		this.context = canvas.getContext?.("2d") || null;
+		this.dispatchUi = dispatchUi;
+		this.instanceKey = instanceKey;
+		this.layout = emptyLayout();
+		this.structuralRevision = null;
+		this.viewport = {
+			x: 20,
+			y: 20,
+			zoom: 1
+		};
+		this.frame = null;
+		this.drag = null;
+		this.layoutGeneration = 0;
+		this.layoutCount = 0;
+		this.tombstones = /* @__PURE__ */ new Map();
+		this.unmounted = false;
+		this.wireEvents();
+	}
+	update(vm) {
+		this.vm = vm;
+		this.captureExited(vm);
+		const layoutRevision = `${vm.structural_revision || ""}\0${fieldLayoutMembershipKey(vm)}`;
+		if (this.structuralRevision !== layoutRevision) {
+			this.structuralRevision = layoutRevision;
+			this.scheduleLayout(vm);
+			return;
+		}
+		rebindFieldLayout(this.layout, vm);
+		this.draw();
+	}
+	resize() {
+		const rect = this.canvas.getBoundingClientRect?.() || {
+			width: 640,
+			height: 360
+		};
+		const ratio = globalThis.devicePixelRatio || 1;
+		const width = Math.max(1, Math.floor(rect.width * ratio));
+		const height = Math.max(1, Math.floor(rect.height * ratio));
+		if (this.canvas.width !== width || this.canvas.height !== height) {
+			this.canvas.width = width;
+			this.canvas.height = height;
+		}
+		this.draw();
+	}
+	draw() {
+		const context = this.context;
+		if (!context) return;
+		const ratio = globalThis.devicePixelRatio || 1;
+		const highContrast = preference("(forced-colors: active)");
+		context.setTransform(ratio * this.viewport.zoom, 0, 0, ratio * this.viewport.zoom, ratio * this.viewport.x, ratio * this.viewport.y);
+		context.clearRect(-this.viewport.x / this.viewport.zoom, -this.viewport.y / this.viewport.zoom, this.canvas.width / ratio / this.viewport.zoom, this.canvas.height / ratio / this.viewport.zoom);
+		drawGroups(context, this.layout.groups, highContrast);
+		const changes = new Map((this.vm?.changes || []).map((change) => [change.id, change]));
+		drawRelations(context, this.layout.edges, changes, this.viewport.zoom, highContrast);
+		for (const node of this.layout.nodes.values()) drawEntity(context, node, changes.get(node.id), this.viewport.zoom, highContrast);
+		drawTombstones(context, this.tombstones, highContrast);
+	}
+	scheduleLayout(vm) {
+		const token = ++this.layoutGeneration;
+		const previous = new Map(this.layout.nodes);
+		const commit = (layout) => {
+			if (this.unmounted || token !== this.layoutGeneration) return;
+			rebindFieldLayout(layout, this.vm);
+			this.layout = layout;
+			this.layoutCount += 1;
+			this.animate(token);
+		};
+		if (!fieldLayoutIsLarge(vm)) {
+			commit(layoutField(vm, previous));
+			return;
+		}
+		layoutFieldChunked(vm, previous, { isStale: () => this.unmounted || token !== this.layoutGeneration }).then(commit).catch((error) => {
+			if (!(error instanceof StaleFieldLayoutError)) {
+				this.structuralRevision = null;
+				this.canvas.dataset.layoutError = String(error?.message || error);
+			}
+		});
+	}
+	animate(token) {
+		this.cancelAnimation();
+		if (preference("(prefers-reduced-motion: reduce)")) {
+			settleLayout(this.layout, 1);
+			this.draw();
+			this.tombstones.clear();
+			return;
+		}
+		let remaining = this.tombstones.size ? 22 : 12;
+		const tick = () => {
+			if (this.unmounted || token !== this.layoutGeneration) return;
+			settleLayout(this.layout, remaining <= 1 ? 1 : .24);
+			fadeTombstones(this.tombstones, remaining);
+			this.draw();
+			remaining -= 1;
+			this.frame = remaining > 0 && globalThis.requestAnimationFrame ? requestAnimationFrame(tick) : null;
+		};
+		tick();
+	}
+	captureExited(vm) {
+		for (const change of vm.changes || []) {
+			if (change.kind !== "exited" || !change.tombstone) continue;
+			const prior = this.layout.nodes.get(change.id);
+			if (!prior) continue;
+			this.tombstones.set(change.id, {
+				id: change.id,
+				label: change.tombstone.label || change.id,
+				traits: change.tombstone.traits || {},
+				x: prior.x,
+				y: prior.y,
+				width: prior.width,
+				height: prior.height,
+				alpha: .72
+			});
+		}
+	}
+	cancelAnimation() {
+		if (this.frame != null && globalThis.cancelAnimationFrame) cancelAnimationFrame(this.frame);
+		this.frame = null;
+	}
+	unmount() {
+		this.unmounted = true;
+		this.layoutGeneration += 1;
+		this.cancelAnimation();
+		this.canvas.onpointerdown = null;
+		this.canvas.onpointermove = null;
+		this.canvas.onpointerup = null;
+		this.canvas.onpointercancel = null;
+		this.canvas.onwheel = null;
+		this.tombstones.clear();
+	}
+	wireEvents() {
+		this.canvas.onpointerdown = (event) => {
+			const point = this.fieldPoint(event);
+			const hit = hitTest(this.layout, point.x, point.y);
+			if (hit) {
+				this.dispatchUi({
+					type: "set_field_selection",
+					instance_key: this.instanceKey,
+					entity_id: hit.id
+				});
+				if (event.shiftKey && canCompareEntity(this.vm, hit.id)) this.dispatchUi({
+					type: "toggle_field_compare",
+					instance_key: this.instanceKey,
+					entity_id: hit.id
+				});
+				if (event.detail >= 2 && hit.entity.activate_intent) this.dispatchUi({
+					type: "activate",
+					intent: hit.entity.activate_intent
+				});
+				return;
+			}
+			const group = hitTestGroup(this.layout, point.x, point.y);
+			if (group) {
+				this.dispatchUi({
+					type: "set_field_group_collapsed",
+					instance_key: this.instanceKey,
+					group_id: group.id,
+					collapsed: !group.collapsed
+				});
+				return;
+			}
+			this.drag = {
+				pointerId: event.pointerId,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				viewportX: this.viewport.x,
+				viewportY: this.viewport.y
+			};
+			this.canvas.setPointerCapture?.(event.pointerId);
+		};
+		this.canvas.onpointermove = (event) => {
+			if (!this.drag || this.drag.pointerId !== event.pointerId) return;
+			this.viewport.x = this.drag.viewportX + event.clientX - this.drag.clientX;
+			this.viewport.y = this.drag.viewportY + event.clientY - this.drag.clientY;
+			this.draw();
+		};
+		const end = (event) => {
+			if (this.drag?.pointerId === event.pointerId) this.drag = null;
+		};
+		this.canvas.onpointerup = end;
+		this.canvas.onpointercancel = end;
+		this.canvas.onwheel = (event) => {
+			event.preventDefault();
+			const rect = this.canvas.getBoundingClientRect();
+			const screenX = event.clientX - rect.left;
+			const screenY = event.clientY - rect.top;
+			const fieldX = (screenX - this.viewport.x) / this.viewport.zoom;
+			const fieldY = (screenY - this.viewport.y) / this.viewport.zoom;
+			const zoom = Math.max(.25, Math.min(3.5, this.viewport.zoom * Math.exp(-event.deltaY * .001)));
+			this.viewport.zoom = zoom;
+			this.viewport.x = screenX - fieldX * zoom;
+			this.viewport.y = screenY - fieldY * zoom;
+			this.draw();
+		};
+	}
+	fieldPoint(event) {
+		const rect = this.canvas.getBoundingClientRect();
+		return {
+			x: (event.clientX - rect.left - this.viewport.x) / this.viewport.zoom,
+			y: (event.clientY - rect.top - this.viewport.y) / this.viewport.zoom
+		};
+	}
+};
+function canCompareEntity(vm, entityId) {
+	const entity = (vm?.entities || []).find((item) => item.id === entityId);
+	if (!entity || !(entity.preview_ids || []).length) return false;
+	if ((vm.compare || []).includes(entityId)) return true;
+	const candidate = previewForEntity(vm, entityId);
+	if (!candidate?.comparison_key) return false;
+	const anchorId = (vm.compare || [])[0];
+	if (!anchorId) return true;
+	return comparablePreviews(previewForEntity(vm, anchorId), candidate);
+}
+function previewForEntity(vm, entityId) {
+	return ((vm.entities || []).find((item) => item.id === entityId)?.preview_ids || []).map((id) => (vm.previews || []).find((preview) => preview.id === id)).find((preview) => preview?.grid);
+}
+function comparablePreviews(left, right) {
+	if (!left || !right || !left.grid || !right.grid) return false;
+	return left.comparison_key === right.comparison_key && left.kind === right.kind && left.grid.width === right.grid.width && left.grid.height === right.grid.height && JSON.stringify(left.grid.palette || []) === JSON.stringify(right.grid.palette || []);
+}
+function drawGroups(context, groups, highContrast) {
+	context.font = "12px ui-monospace, monospace";
+	for (const group of groups) {
+		context.strokeStyle = highContrast ? "CanvasText" : "rgba(168,153,132,.52)";
+		context.setLineDash([6, 5]);
+		context.strokeRect(group.x, group.y, group.width, group.height);
+		context.setLineDash([]);
+		context.fillStyle = highContrast ? "Canvas" : "rgba(29,32,33,.94)";
+		context.fillRect(group.x, group.y, group.width, 26);
+		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
+		context.textAlign = "left";
+		context.textBaseline = "alphabetic";
+		context.fillText(`${group.collapsed ? "▸" : "▾"} ${group.label || group.id}`, group.x + 8, group.y + 17);
+	}
+}
+function drawRelations(context, edges, changes, zoom, highContrast) {
+	for (const edge of edges) {
+		if (edge.points.length < 2) continue;
+		const relation = edge.relation;
+		if (zoom < .4 && !relation.selected && relation.emphasis !== "strong" && relation.motion !== "flow") continue;
+		const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
+		context.strokeStyle = tones[relation.tone] || tones.neutral;
+		context.lineWidth = changes.get(relation.id) ? 4 : relation.emphasis === "strong" ? 2.5 : relation.emphasis === "quiet" ? .7 : 1.3;
+		context.setLineDash(relation.stroke === "dashed" ? [7, 5] : relation.stroke === "dotted" ? [2, 4] : []);
+		context.beginPath();
+		edge.points.forEach(([x, y], index) => index ? context.lineTo(x, y) : context.moveTo(x, y));
+		context.stroke();
+	}
+	context.setLineDash([]);
+}
+function drawEntity(context, node, change, zoom, highContrast) {
+	const entity = node.entity;
+	const tones = highContrast ? HIGH_CONTRAST_TONES : TONES;
+	const tone = tones[entity.tone] || tones.neutral;
+	context.save();
+	context.translate(node.x, node.y);
+	context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "Canvas" : "#1d2021" : tone;
+	context.strokeStyle = entity.selected ? highContrast ? "Highlight" : "#ebdbb2" : tone;
+	context.lineWidth = entity.selected ? 4 : 2;
+	context.setLineDash(entity.traits?.stroke === "dashed" ? [7, 4] : entity.traits?.stroke === "dotted" ? [2, 3] : []);
+	if (change) {
+		context.save();
+		context.globalAlpha = .32;
+		context.strokeStyle = tone;
+		context.lineWidth = 8;
+		entityPath(context, entity.traits?.shape, node.width + 14, node.height + 14);
+		context.stroke();
+		context.restore();
+	}
+	const width = zoom < .4 ? Math.min(36, node.width) : node.width;
+	const height = zoom < .4 ? Math.min(24, node.height) : node.height;
+	entityPath(context, entity.traits?.shape, width, height);
+	context.fill();
+	context.stroke();
+	context.setLineDash([]);
+	if (zoom >= .55) {
+		if (node.componentSize > 1) {
+			context.fillStyle = highContrast ? "CanvasText" : "#fabd2f";
+			context.fillText(`↻${node.componentSize}`, node.width / 2 - 24, -node.height / 2 + 13);
+		}
+		context.fillStyle = entity.traits?.fill === "hollow" ? highContrast ? "CanvasText" : "#ebdbb2" : highContrast ? "Canvas" : "#1d2021";
+		context.textAlign = "center";
+		context.textBaseline = "middle";
+		context.font = "600 12px ui-monospace, monospace";
+		context.fillText(clipLabel(entity.label || entity.id, zoom >= 1.25 ? 34 : 20), 0, -4);
+		if (zoom >= .9) {
+			context.font = "10px ui-monospace, monospace";
+			context.fillText(entity.status || entity.kind || "", 0, 12);
+		}
+	}
+	context.restore();
+}
+function drawTombstones(context, tombstones, highContrast) {
+	for (const tombstone of tombstones.values()) {
+		context.save();
+		context.globalAlpha = tombstone.alpha;
+		context.translate(tombstone.x, tombstone.y);
+		context.strokeStyle = highContrast ? "CanvasText" : TONES.neutral;
+		context.fillStyle = highContrast ? "Canvas" : "#1d2021";
+		context.setLineDash([4, 5]);
+		entityPath(context, tombstone.traits?.shape, tombstone.width, tombstone.height);
+		context.fill();
+		context.stroke();
+		context.fillStyle = highContrast ? "CanvasText" : "#a89984";
+		context.font = "11px ui-monospace, monospace";
+		context.textAlign = "center";
+		context.fillText(clipLabel(tombstone.label, 20), 0, 3);
+		context.restore();
+	}
+}
+function fadeTombstones(tombstones, remaining) {
+	for (const [id, tombstone] of tombstones) {
+		tombstone.alpha = Math.min(.72, remaining / 22);
+		if (remaining <= 1) tombstones.delete(id);
+	}
+}
+function entityPath(context, shape, width, height) {
+	context.beginPath();
+	if (shape === "disc" || shape === "ring" || shape === "dot") context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
+	else if (shape === "diamond") {
+		context.moveTo(0, -height / 2);
+		context.lineTo(width / 2, 0);
+		context.lineTo(0, height / 2);
+		context.lineTo(-width / 2, 0);
+		context.closePath();
+	} else if (shape === "hex") {
+		for (let index = 0; index < 6; index += 1) {
+			const angle = Math.PI / 3 * index;
+			const x = Math.cos(angle) * width / 2;
+			const y = Math.sin(angle) * height / 2;
+			if (index) context.lineTo(x, y);
+			else context.moveTo(x, y);
+		}
+		context.closePath();
+	} else context.roundRect(-width / 2, -height / 2, width, height, shape === "capsule" ? height / 2 : 7);
+}
+function emptyLayout() {
+	return {
+		nodes: /* @__PURE__ */ new Map(),
+		edges: [],
+		groups: [],
+		groupDefinitions: [],
+		width: 640,
+		height: 360
+	};
+}
+function preference(query) {
+	return !!globalThis.matchMedia?.(query)?.matches;
+}
+function clipLabel(value, length) {
+	return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
+}
+//#endregion
+//#region browser/visuals/ryeos_grid_canvas.js
+function drawIndexedGrid(canvas, preview, options = {}) {
+	const grid = preview?.grid;
+	const context = canvas?.getContext?.("2d");
+	if (!grid || !context || !grid.width || !grid.height) return false;
+	const scale = Math.max(1, Number(options.scale || 10));
+	canvas.width = grid.width * scale;
+	canvas.height = grid.height * scale;
+	const palette = new Map((grid.palette || []).map((entry) => [entry.index, entry]));
+	const changed = new Set(grid.changed || []);
+	for (let index = 0; index < grid.cells.length; index += 1) {
+		const entry = palette.get(grid.cells[index]);
+		if (!entry) continue;
+		const x = index % grid.width * scale;
+		const y = Math.floor(index / grid.width) * scale;
+		context.fillStyle = entry.color || "#a89984";
+		context.fillRect(x, y, scale, scale);
+		if (entry.glyph && scale >= 7) {
+			context.fillStyle = contrastingTextColor(entry.color);
+			context.font = `${Math.max(6, Math.floor(scale * .72))}px monospace`;
+			context.textAlign = "center";
+			context.textBaseline = "middle";
+			context.fillText(entry.glyph, x + scale / 2, y + scale / 2, scale);
+		}
+		if (changed.has(index)) {
+			context.strokeStyle = options.changedColor || "#fb4934";
+			context.lineWidth = Math.max(1, scale / 5);
+			context.strokeRect(x + 1, y + 1, scale - 2, scale - 2);
+		}
+	}
+	return true;
+}
+function indexedGridAccessibilityLabel(preview, label = preview?.label || preview?.id || "Grid") {
+	const grid = preview?.grid;
+	if (!grid) return label;
+	const glyphs = new Map((grid.palette || []).map((entry) => [entry.index, entry.glyph]));
+	const cells = (grid.cells || []).slice(0, 64).map((index) => glyphs.get(index) || String(index));
+	const suffix = (grid.cells || []).length > cells.length ? "; remaining cells omitted" : "";
+	return `${label}; ${grid.width} by ${grid.height} indexed grid; cells ${cells.join(" ")}${suffix}`;
+}
+function contrastingTextColor(color) {
+	const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(color || "");
+	if (!match) return "CanvasText";
+	return (Number.parseInt(match[1], 16) * 299 + Number.parseInt(match[2], 16) * 587 + Number.parseInt(match[3], 16) * 114) / 1e3 >= 140 ? "#111111" : "#ffffff";
+}
+//#endregion
+//#region browser/views/GridPreview.svelte
+var root$8 = /* @__PURE__ */ from_html(`<figure class="field-preview"><figcaption> </figcaption> <canvas></canvas></figure>`);
+function GridPreview($$anchor, $$props) {
+	push($$props, true);
+	let canvas;
+	const label = /* @__PURE__ */ user_derived(() => indexedGridAccessibilityLabel($$props.preview, $$props.preview.label));
+	onMount(() => drawIndexedGrid(canvas, $$props.preview, { scale: 9 }));
+	user_effect(() => {
+		if (canvas) drawIndexedGrid(canvas, $$props.preview, { scale: 9 });
+	});
+	var figure = root$8();
+	var figcaption = child(figure);
+	var text = only_child(figcaption, true);
+	var canvas_1 = sibling(figcaption, 2);
+	bind_this(canvas_1, ($$value) => canvas = $$value, () => canvas);
+	reset(figure);
+	template_effect(() => {
+		set_text(text, $$props.preview.label);
+		set_attribute(canvas_1, "aria-label", get(label));
+		set_attribute(canvas_1, "title", $$props.compareEnabled ? "Shift-click to compare" : void 0);
+	});
+	delegated("click", canvas_1, (event) => {
+		if (event.shiftKey && $$props.compareEnabled) $$props.oncompare();
+	});
+	append($$anchor, figure);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region browser/views/FieldView.svelte
+var root$7 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$4 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
+var root_2$3 = /* @__PURE__ */ from_html(`<button> </button> <button> </button> <!>`, 1);
+var root_3$3 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
+var root_4$3 = /* @__PURE__ */ from_html(`<button role="option"> </button>`);
+var root_5$3 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!>`, 1);
+var root_6$3 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
+var root_7$2 = /* @__PURE__ */ from_html(`<aside class="field-detail"><!> <!></aside>`);
+var root_8$2 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas></div> <div class="field-accessibility" role="listbox"></div> <!></section>`);
+function FieldView($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	let canvas;
+	let controller = null;
+	const selected = /* @__PURE__ */ user_derived(() => $$props.field.entities.find((entity) => entity.id === $$props.field.selected) ?? null);
+	const selectedRelations = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.relations.filter((relation) => relation.source_id === get(selected).id || relation.target_id === get(selected).id) : []);
+	const previewIds = /* @__PURE__ */ user_derived(() => {
+		const ids = new Set(get(selected)?.preview_ids ?? []);
+		for (const id of $$props.field.compare) for (const preview of $$props.field.entities.find((entity) => entity.id === id)?.preview_ids ?? []) ids.add(preview);
+		return ids;
+	});
+	const previews = /* @__PURE__ */ user_derived(() => $$props.field.previews.filter((preview) => get(previewIds).has(preview.id)));
+	const expansion = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.expansions.find((item) => item.source === get(selected).source && item.root_id === get(selected).id) ?? null : null);
+	onMount(() => {
+		controller = new FieldCanvasController(canvas, dispatch, $$props.instanceKey);
+		const observer = new ResizeObserver(() => controller?.resize());
+		observer.observe(canvas);
+		controller.update($$props.field);
+		controller.resize();
+		return () => {
+			observer.disconnect();
+			controller?.unmount();
+			controller = null;
+		};
+	});
+	user_effect(() => controller?.update($$props.field));
+	var section = root_8$2();
+	var header = child(section);
+	var div = child(header);
+	var strong = child(div);
+	var text = only_child(strong, true);
+	var text_1 = only_child(sibling(strong), true);
+	reset(div);
+	var div_1 = sibling(div, 2);
+	var button = child(div_1);
+	var button_1 = sibling(button, 2);
+	var text_2 = only_child(button_1, true);
+	var button_2 = sibling(button_1, 2);
+	var button_3 = sibling(button_2, 2);
+	var node = sibling(button_3, 2);
+	each(node, 17, () => $$props.field.groups, (group) => group.id, ($$anchor, group) => {
+		var button_4 = root$7();
+		var text_3 = only_child(button_4);
+		template_effect(() => set_text(text_3, `${get(group).collapsed ? "▸" : "▾"} ${get(group).label ?? ""}`));
+		delegated("click", button_4, () => dispatch({
+			type: "set_field_group_collapsed",
+			instance_key: $$props.instanceKey,
+			group_id: get(group).id,
+			collapsed: !get(group).collapsed
+		}));
+		append($$anchor, button_4);
+	});
+	var node_1 = sibling(node, 2);
+	each(node_1, 17, () => $$props.field.layers, (layer) => layer.id, ($$anchor, layer) => {
+		var button_5 = root$7();
+		var text_4 = only_child(button_5);
+		template_effect(() => {
+			set_attribute(button_5, "aria-pressed", get(layer).visible);
+			set_text(text_4, `${get(layer).visible ? "●" : "○"} ${get(layer).label ?? ""}`);
+		});
+		delegated("click", button_5, () => dispatch({
+			type: "set_field_layer_visible",
+			instance_key: $$props.instanceKey,
+			layer_id: get(layer).id,
+			visible: !get(layer).visible
+		}));
+		append($$anchor, button_5);
+	});
+	var node_2 = sibling(node_1, 2);
+	var consequent_1 = ($$anchor) => {
+		var fragment = root_2$3();
+		var button_6 = first_child(fragment);
+		var text_5 = only_child(button_6, true);
+		var button_7 = sibling(button_6, 2);
+		var text_6 = only_child(button_7, true);
+		var node_3 = sibling(button_7, 2);
+		var consequent = ($$anchor) => {
+			var button_8 = root_1$4();
+			delegated("click", button_8, () => dispatch({
+				type: "clear_field_expansion",
+				instance_key: $$props.instanceKey,
+				source: get(selected).source,
+				root_id: get(selected).id
+			}));
+			append($$anchor, button_8);
+		};
+		if_block(node_3, ($$render) => {
+			if (get(expansion)) $$render(consequent);
+		});
+		template_effect(($0, $1) => {
+			button_6.disabled = $0;
+			set_text(text_5, $1);
+			button_7.disabled = !!get(expansion) && !get(expansion).can_continue;
+			set_text(text_6, get(expansion)?.can_continue ? "Continue" : get(expansion) ? "Expanded" : "Expand");
+		}, [() => !canCompareEntity($$props.field, get(selected).id), () => $$props.field.compare.includes(get(selected).id) ? "Uncompare" : "Compare"]);
+		delegated("click", button_6, () => dispatch({
+			type: "toggle_field_compare",
+			instance_key: $$props.instanceKey,
+			entity_id: get(selected).id
+		}));
+		delegated("click", button_7, () => dispatch({
+			type: get(expansion)?.can_continue ? "continue_field_expansion" : "request_field_expansion",
+			instance_key: $$props.instanceKey,
+			source: get(selected).source,
+			root_id: get(selected).id
+		}));
+		append($$anchor, fragment);
+	};
+	if_block(node_2, ($$render) => {
+		if (get(selected)) $$render(consequent_1);
+	});
+	reset(div_1);
+	var input = sibling(div_1, 2);
+	remove_input_defaults(input);
+	reset(header);
+	var node_4 = sibling(header, 2);
+	var consequent_2 = ($$anchor) => {
+		var nav = root_3$3();
+		each(nav, 21, () => $$props.field.replay.rail, index, ($$anchor, entry) => {
+			var button_9 = root$7();
+			let classes;
+			var text_7 = only_child(button_9, true);
+			template_effect(() => {
+				set_attribute(button_9, "aria-pressed", get(entry).selected);
+				classes = set_class(button_9, 1, "", null, classes, { selected: get(entry).selected });
+				set_text(text_7, get(entry).label);
+			});
+			delegated("click", button_9, () => dispatch({
+				type: "set_field_cursor",
+				instance_key: $$props.instanceKey,
+				cursor: {
+					mode: "braid_cut",
+					anchor: get(entry).event
+				}
+			}));
+			append($$anchor, button_9);
+		});
+		reset(nav);
+		append($$anchor, nav);
+	};
+	if_block(node_4, ($$render) => {
+		if ($$props.field.replay.rail.length) $$render(consequent_2);
+	});
+	var div_2 = sibling(node_4, 2);
+	bind_this(child(div_2), ($$value) => canvas = $$value, () => canvas);
+	reset(div_2);
+	var div_3 = sibling(div_2, 2);
+	each(div_3, 21, () => $$props.field.traversal, index, ($$anchor, entityId) => {
+		const entity = /* @__PURE__ */ user_derived(() => $$props.field.entities.find((candidate) => candidate.id === get(entityId)));
+		var fragment_1 = comment();
+		var node_5 = first_child(fragment_1);
+		var consequent_3 = ($$anchor) => {
+			var button_10 = root_4$3();
+			var text_8 = only_child(button_10, true);
+			template_effect(() => {
+				set_attribute(button_10, "aria-selected", $$props.field.selected === get(entity).id);
+				set_text(text_8, get(entity).accessibility_label);
+			});
+			delegated("click", button_10, () => dispatch({
+				type: "set_field_selection",
+				instance_key: $$props.instanceKey,
+				entity_id: get(entity).id
+			}));
+			append($$anchor, button_10);
+		};
+		if_block(node_5, ($$render) => {
+			if (get(entity)) $$render(consequent_3);
+		});
+		append($$anchor, fragment_1);
+	});
+	reset(div_3);
+	var node_6 = sibling(div_3, 2);
+	var consequent_5 = ($$anchor) => {
+		var aside = root_7$2();
+		var node_7 = child(aside);
+		var consequent_4 = ($$anchor) => {
+			var fragment_2 = root_5$3();
+			var strong_1 = first_child(fragment_2);
+			var text_9 = only_child(strong_1, true);
+			var small = sibling(strong_1);
+			var text_10 = only_child(small, true);
+			var node_8 = sibling(small, 2);
+			each(node_8, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
+				var button_11 = root$7();
+				var text_11 = only_child(button_11, true);
+				template_effect(() => {
+					button_11.disabled = !get(relation).activate_intent;
+					set_text(text_11, get(relation).label);
+				});
+				delegated("click", button_11, () => get(relation).activate_intent && dispatch({
+					type: "activate",
+					intent: get(relation).activate_intent
+				}));
+				append($$anchor, button_11);
+			});
+			each(sibling(node_8, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
+				{
+					let $0 = /* @__PURE__ */ user_derived(() => canCompareEntity($$props.field, get(selected).id));
+					GridPreview($$anchor, {
+						get preview() {
+							return get(preview);
+						},
+						get compareEnabled() {
+							return get($0);
+						},
+						oncompare: () => dispatch({
+							type: "toggle_field_compare",
+							instance_key: $$props.instanceKey,
+							entity_id: get(selected).id
+						})
+					});
+				}
+			});
+			template_effect(($0) => {
+				set_text(text_9, get(selected).label);
+				set_text(text_10, $0);
+			}, [() => [
+				get(selected).kind,
+				get(selected).status,
+				get(selected).source
+			].filter(Boolean).join(" · ")]);
+			append($$anchor, fragment_2);
+		};
+		if_block(node_7, ($$render) => {
+			if (get(selected)) $$render(consequent_4);
+		});
+		each(sibling(node_7, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
+			var small_1 = root_6$3();
+			var text_12 = only_child(small_1, true);
+			template_effect(() => set_text(text_12, get(warning)));
+			append($$anchor, small_1);
+		});
+		reset(aside);
+		append($$anchor, aside);
+	};
+	if_block(node_6, ($$render) => {
+		if (get(selected) || $$props.field.warnings.length) $$render(consequent_5);
+	});
+	reset(section);
+	template_effect(($0) => {
+		set_attribute(section, "aria-label", $$props.field.title);
+		set_text(text, $$props.field.title);
+		set_text(text_1, $0);
+		button.disabled = !$$props.field.replay.previous;
+		button_1.disabled = !$$props.field.replay.playing && !$$props.field.replay.next;
+		set_text(text_2, $$props.field.replay.playing ? "Pause" : "Play");
+		button_2.disabled = !$$props.field.replay.next;
+		button_3.disabled = $$props.field.replay.mode === "live";
+		set_value(input, $$props.field.search.query);
+		set_attribute(div_3, "aria-label", `${$$props.field.title} entities`);
+	}, [() => $$props.field.sources.map((source) => `${source.name}:${source.phase}`).join(" · ")]);
+	delegated("click", button, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "previous"
+	}));
+	delegated("click", button_1, () => dispatch({
+		type: "set_field_playback",
+		instance_key: $$props.instanceKey,
+		playing: !$$props.field.replay.playing
+	}));
+	delegated("click", button_2, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "next"
+	}));
+	delegated("click", button_3, () => dispatch({
+		type: "step_field_cursor",
+		instance_key: $$props.instanceKey,
+		direction: "live"
+	}));
+	delegated("input", input, (event) => dispatch({
+		type: "set_field_query",
+		instance_key: $$props.instanceKey,
+		query: event.currentTarget.value
+	}));
+	delegated("keydown", input, (event) => {
+		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+			event.preventDefault();
+			dispatch({
+				type: "move_field_search_match",
+				instance_key: $$props.instanceKey,
+				delta: event.key === "ArrowUp" ? -1 : 1
+			});
+		}
+	});
+	append($$anchor, section);
+	pop();
+}
+delegate([
+	"click",
+	"input",
+	"keydown"
+]);
+//#endregion
+//#region browser/views/SceneView.svelte
+var root$6 = /* @__PURE__ */ from_html(`<button> </button>`);
+var root_1$3 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div>`);
+var root_2$2 = /* @__PURE__ */ from_svg(`<line></line>`);
+var root_3$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055" role="button" tabindex="-1"><title> </title></circle>`);
+var root_4$2 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text><!></g>`);
+var root_5$2 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"><button>AI space</button> <button>Files</button></div> <!></div> <svg class="atlas-canvas" role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg>`, 1);
+var root_6$2 = /* @__PURE__ */ from_svg(`<text> </text>`);
+var root_7$1 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
+var root_8$1 = /* @__PURE__ */ from_svg(`<rect></rect>`);
+var root_9$1 = /* @__PURE__ */ from_svg(`<circle></circle>`);
+var root_10$1 = /* @__PURE__ */ from_svg(`<title> </title>`);
+var root_11$1 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
+var root_12$1 = /* @__PURE__ */ from_svg(`<svg role="img" preserveAspectRatio="xMidYMid meet"></svg>`);
+var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!></div>`);
+function SceneView($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	const points = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => [object.position, object.end].filter((point) => point != null)));
+	const bounds = /* @__PURE__ */ user_derived(() => {
+		const xs = get(points).map((point) => Number(point[0] ?? 0));
+		const ys = get(points).map((point) => -Number(point[1] ?? 0));
+		const minX = xs.length ? Math.min(...xs) : 0;
+		const maxX = xs.length ? Math.max(...xs) : 1;
+		const minY = ys.length ? Math.min(...ys) : 0;
+		const maxY = ys.length ? Math.max(...ys) : 1;
+		return `${minX - 20} ${minY - 15} ${Math.max(40, maxX - minX + 40)} ${Math.max(30, maxY - minY + 30)}`;
+	});
+	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
+	const activate = (intent) => intent && dispatch({
+		type: "activate",
+		intent
+	});
+	const radius = (object) => Math.max(1, Number(object.scale?.[0] ?? 5));
+	const x = (object) => Number(object.position?.[0] ?? 0);
+	const y = (object) => -Number(object.position?.[1] ?? 0);
+	const atlasNodes = /* @__PURE__ */ user_derived(() => new Map(($$props.scene.atlas?.nodes ?? []).map((node) => [node.id, node])));
+	const atlasBounds = /* @__PURE__ */ user_derived(() => {
+		const bounds = $$props.scene.atlas?.bounds;
+		if (!bounds) return "-10 -10 20 20";
+		return `${bounds.x_min - 2} ${bounds.z_min - 2} ${Math.max(4, bounds.x_max - bounds.x_min + 4)} ${Math.max(4, bounds.z_max - bounds.z_min + 4)}`;
+	});
+	const atlasPoint = (position) => ({
+		x: Number(position[0] ?? 0),
+		y: Number(position[2] ?? position[1] ?? 0)
+	});
+	const atlasInteraction = (interaction) => {
+		if (!interaction) return;
+		if (interaction.type === "inspect_item") dispatch({
+			type: "activate",
+			intent: interaction
+		});
+		else if (interaction.type === "read_file") dispatch({
+			type: "activate",
+			intent: interaction
+		});
+		else dispatch({
+			type: "set_atlas_file_space_path",
+			tile_id: $$props.tileId,
+			root: interaction.root ?? $$props.scene.atlas?.ui.file_space_root ?? "project",
+			path: interaction.path
+		});
+	};
+	const layerLabels = [
+		["directive", "Directives"],
+		["tool", "Tools"],
+		["knowledge", "Knowledge"],
+		["config", "Config"]
+	];
+	var div = root_13$1();
+	var node_1 = child(div);
+	var consequent_2 = ($$anchor) => {
+		var fragment = root_5$2();
+		var div_1 = first_child(fragment);
+		var div_2 = child(div_1);
+		var strong = child(div_2);
+		var text = only_child(strong, true);
+		var text_1 = only_child(sibling(strong));
+		reset(div_2);
+		var div_3 = sibling(div_2, 2);
+		var button = child(div_3);
+		let classes;
+		var button_1 = sibling(button, 2);
+		let classes_1;
+		reset(div_3);
+		var node_2 = sibling(div_3, 2);
+		var consequent = ($$anchor) => {
+			var div_4 = root_1$3();
+			each(div_4, 21, () => layerLabels, index, ($$anchor, $$item) => {
+				var $$array = /* @__PURE__ */ user_derived(() => to_array(get($$item), 2));
+				let kind = () => get($$array)[0];
+				let label = () => get($$array)[1];
+				const active = /* @__PURE__ */ user_derived(() => $$props.scene.atlas.ui.visible_layers.includes(kind()));
+				var button_2 = root$6();
+				let classes_2;
+				var text_2 = only_child(button_2, true);
+				template_effect(() => {
+					set_attribute(button_2, "aria-pressed", get(active));
+					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(active) });
+					set_text(text_2, label());
+				});
+				delegated("click", button_2, () => dispatch({
+					type: "set_atlas_layer_visible",
+					tile_id: $$props.tileId,
+					kind: kind(),
+					visible: !get(active)
+				}));
+				append($$anchor, button_2);
+			});
+			reset(div_4);
+			append($$anchor, div_4);
+		};
+		if_block(node_2, ($$render) => {
+			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
+		});
+		reset(div_1);
+		var svg = sibling(div_1, 2);
+		var node_3 = child(svg);
+		each(node_3, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
+			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
+			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
+			var fragment_1 = comment();
+			var node_4 = first_child(fragment_1);
+			var consequent_1 = ($$anchor) => {
+				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
+				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
+				var line = root_2$2();
+				template_effect(() => {
+					set_attribute(line, "x1", get(start).x);
+					set_attribute(line, "y1", get(start).y);
+					set_attribute(line, "x2", get(end).x);
+					set_attribute(line, "y2", get(end).y);
+					set_attribute(line, "data-kind", get(link).kind);
+				});
+				append($$anchor, line);
+			};
+			if_block(node_4, ($$render) => {
+				if (get(from) && get(to)) $$render(consequent_1);
+			});
+			append($$anchor, fragment_1);
+		});
+		each(sibling(node_3), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
+			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
+			var g = root_4$2();
+			let classes_3;
+			var circle = child(g);
+			var text_3 = sibling(circle);
+			var text_4 = only_child(text_3, true);
+			each(sibling(text_3), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
+				var circle_1 = root_3$2();
+				var text_5 = only_child(child(circle_1), true);
+				reset(circle_1);
+				template_effect(() => {
+					set_attribute(circle_1, "data-kind", get(item).kind);
+					set_attribute(circle_1, "cx", get(point).x + get(index) * .11);
+					set_attribute(circle_1, "cy", get(point).y - .24);
+					set_text(text_5, get(item).canonical_ref);
+				});
+				delegated("click", circle_1, (event) => {
+					event.stopPropagation();
+					atlasInteraction(get(item).interaction);
+				});
+				delegated("keydown", circle_1, (event) => {
+					if (event.key === "Enter" || event.key === " ") atlasInteraction(get(item).interaction);
+				});
+				append($$anchor, circle_1);
+			});
+			reset(g);
+			template_effect(($0) => {
+				classes_3 = set_class(g, 0, "atlas-node", null, classes_3, {
+					selected: get(node).state.selected,
+					highlighted: get(node).state.highlighted,
+					dimmed: get(node).state.dimmed
+				});
+				set_attribute(g, "role", get(node).interaction ? "button" : void 0);
+				set_attribute(g, "tabindex", get(node).interaction ? 0 : void 0);
+				set_attribute(circle, "cx", get(point).x);
+				set_attribute(circle, "cy", get(point).y);
+				set_attribute(circle, "r", $0);
+				set_attribute(text_3, "x", get(point).x + .28);
+				set_attribute(text_3, "y", get(point).y + .08);
+				set_text(text_4, get(node).label);
+			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
+			delegated("click", g, () => atlasInteraction(get(node).interaction));
+			delegated("keydown", g, (event) => {
+				if (event.key === "Enter" || event.key === " ") atlasInteraction(get(node).interaction);
+			});
+			append($$anchor, g);
+		});
+		reset(svg);
+		template_effect(() => {
+			set_text(text, $$props.scene.atlas.root_label);
+			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
+			classes = set_class(button, 1, "", null, classes, { active: $$props.scene.atlas.projection === "ai_space" });
+			classes_1 = set_class(button_1, 1, "", null, classes_1, { active: $$props.scene.atlas.projection === "file_space" });
+			set_attribute(svg, "viewBox", get(atlasBounds));
+			set_attribute(svg, "aria-label", `${$$props.scene.atlas.root_label} atlas`);
+		});
+		delegated("click", button, () => dispatch({
+			type: "set_atlas_projection",
+			tile_id: $$props.tileId,
+			projection: "ai_space",
+			root: null
+		}));
+		delegated("click", button_1, () => dispatch({
+			type: "set_atlas_projection",
+			tile_id: $$props.tileId,
+			projection: "file_space",
+			root: $$props.scene.atlas?.ui.file_space_root ?? null
+		}));
+		append($$anchor, fragment);
+	};
+	var alternate_1 = ($$anchor) => {
+		var svg_1 = root_12$1();
+		each(svg_1, 21, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
+			const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
+			const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
+			const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
+			const end = /* @__PURE__ */ user_derived(() => get(object).end);
+			var g_1 = root_11$1();
+			let classes_4;
+			var node_7 = child(g_1);
+			var consequent_3 = ($$anchor) => {
+				var line_1 = root_2$2();
+				template_effect(($0, $1) => {
+					set_attribute(line_1, "x1", get(ox));
+					set_attribute(line_1, "y1", get(oy));
+					set_attribute(line_1, "x2", $0);
+					set_attribute(line_1, "y2", $1);
+					set_attribute(line_1, "stroke", get(object).color);
+				}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
+				append($$anchor, line_1);
+			};
+			var consequent_4 = ($$anchor) => {
+				var text_6 = root_6$2();
+				var text_7 = only_child(text_6, true);
+				template_effect(() => {
+					set_attribute(text_6, "x", get(ox));
+					set_attribute(text_6, "y", get(oy));
+					set_attribute(text_6, "fill", get(object).color);
+					set_text(text_7, get(object).label ?? "");
+				});
+				append($$anchor, text_6);
+			};
+			var consequent_5 = ($$anchor) => {
+				var polygon = root_7$1();
+				template_effect(() => {
+					set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
+					set_attribute(polygon, "stroke", get(object).color);
+				});
+				append($$anchor, polygon);
+			};
+			var consequent_6 = ($$anchor) => {
+				var rect = root_8$1();
+				template_effect(() => {
+					set_attribute(rect, "x", get(ox) - get(r));
+					set_attribute(rect, "y", get(oy) - get(r));
+					set_attribute(rect, "width", get(r) * 2);
+					set_attribute(rect, "height", get(r) * 2);
+					set_attribute(rect, "stroke", get(object).color);
+				});
+				append($$anchor, rect);
+			};
+			var alternate = ($$anchor) => {
+				var circle_2 = root_9$1();
+				template_effect(() => {
+					set_attribute(circle_2, "cx", get(ox));
+					set_attribute(circle_2, "cy", get(oy));
+					set_attribute(circle_2, "r", get(r));
+					set_attribute(circle_2, "stroke", get(object).color);
+				});
+				append($$anchor, circle_2);
+			};
+			if_block(node_7, ($$render) => {
+				if (get(end)) $$render(consequent_3);
+				else if (get(object).kind === "text") $$render(consequent_4, 1);
+				else if (get(object).glyph === "diamond") $$render(consequent_5, 2);
+				else if (get(object).glyph === "square") $$render(consequent_6, 3);
+				else $$render(alternate, -1);
+			});
+			var node_8 = sibling(node_7);
+			var consequent_7 = ($$anchor) => {
+				var title_1 = root_10$1();
+				var text_8 = only_child(title_1, true);
+				template_effect(() => set_text(text_8, get(object).label));
+				append($$anchor, title_1);
+			};
+			if_block(node_8, ($$render) => {
+				if (get(object).label && get(object).kind !== "text") $$render(consequent_7);
+			});
+			reset(g_1);
+			template_effect(() => {
+				set_attribute(g_1, "data-tone", get(object).tone);
+				set_attribute(g_1, "opacity", get(object).opacity);
+				set_attribute(g_1, "role", get(object).intent ? "button" : void 0);
+				set_attribute(g_1, "tabindex", get(object).intent ? 0 : void 0);
+				classes_4 = set_class(g_1, 0, "", null, classes_4, { interactive: get(object).intent != null });
+			});
+			delegated("click", g_1, () => activate(get(object).intent));
+			delegated("keydown", g_1, (event) => {
+				if (event.key === "Enter" || event.key === " ") activate(get(object).intent);
+			});
+			append($$anchor, g_1);
+		});
+		reset(svg_1);
+		template_effect(() => {
+			set_attribute(svg_1, "viewBox", get(bounds));
+			set_attribute(svg_1, "aria-label", get(accessibleLabel));
+		});
+		append($$anchor, svg_1);
+	};
+	if_block(node_1, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_2);
+		else $$render(alternate_1, -1);
+	});
+	reset(div);
+	append($$anchor, div);
+	pop();
+}
+delegate(["click", "keydown"]);
 //#endregion
 //#region browser/views/ViewRenderer.svelte
 var root$5 = /* @__PURE__ */ from_html(`<div> </div>`);
@@ -6642,9 +8116,7 @@ var root_15 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
 var root_16 = /* @__PURE__ */ from_html(`<button><span> </span><small> </small></button>`);
 var root_17 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
 var root_18 = /* @__PURE__ */ from_html(`<div class="sections-view"></div>`);
-var root_19 = /* @__PURE__ */ from_html(`<div class="scene-host"></div>`);
-var root_20 = /* @__PURE__ */ from_html(`<div class="field-host" aria-label="Field view"><canvas></canvas></div>`);
-var root_21 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
+var root_19 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
 function ViewRenderer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -6652,7 +8124,7 @@ function ViewRenderer($$anchor, $$props) {
 		type: "activate",
 		intent
 	});
-	var div = root_21();
+	var div = root_19();
 	var node = child(div);
 	var consequent = ($$anchor) => {
 		var div_1 = root_1$2();
@@ -6896,15 +8368,24 @@ function ViewRenderer($$anchor, $$props) {
 		});
 	};
 	var consequent_14 = ($$anchor) => {
-		var div_9 = root_19();
-		template_effect(() => {
-			set_attribute(div_9, "data-scene", $$props.model.type);
-			set_attribute(div_9, "aria-label", `${$$props.model.type} view`);
+		SceneView($$anchor, {
+			get scene() {
+				return $$props.model.scene;
+			},
+			get tileId() {
+				return $$props.tileId;
+			}
 		});
-		append($$anchor, div_9);
 	};
 	var consequent_15 = ($$anchor) => {
-		append($$anchor, root_20());
+		FieldView($$anchor, {
+			get field() {
+				return $$props.model.field;
+			},
+			get instanceKey() {
+				return $$props.instanceKey;
+			}
+		});
 	};
 	if_block(node, ($$render) => {
 		if ($$props.model.type === "text") $$render(consequent);
@@ -6943,6 +8424,9 @@ function DockSlot($$anchor, $$props) {
 			},
 			get tileId() {
 				return get($0);
+			},
+			get instanceKey() {
+				return $$props.model.instance_key;
 			}
 		});
 	}
@@ -7065,6 +8549,9 @@ function TileFrame($$anchor, $$props) {
 		},
 		get tileId() {
 			return $$props.model.tile_id;
+		},
+		get instanceKey() {
+			return $$props.model.instance_key;
 		}
 	});
 	var node_6 = sibling(node_5, 2);
