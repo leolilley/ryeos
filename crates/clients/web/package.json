@@ -11,6 +11,7 @@
     "build:renderer": "vite build && node browser/validate-stage.mjs",
     "check:renderer": "svelte-check --tsconfig ./tsconfig.json",
     "test:renderer-root": "node tests/browser/svelte-root.mjs",
+    "test:wasm-contract": "node tests/browser/wasm-contract.mjs",
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser/run.mjs",
     "test:all": "npm test && npm run test:browser"

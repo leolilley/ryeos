@@ -9,7 +9,7 @@
   const dispatch = dispatchUi();
 </script>
 
-<article class="tile-frame" class:focused={model.focused} class:transparent={model.background_transparent} data-instance={model.instance_key}>
+<article class="tile-frame" class:focused={model.focused} class:transparent={model.background_transparent} data-instance={model.instance_key} data-scroll-key={`tile:${model.instance_key}`}>
   {#if !model.chrome_hidden}
     <header class="tile-header">
       <div class="tile-identity"><span class="tile-signal"></span><strong>{model.title}</strong></div>

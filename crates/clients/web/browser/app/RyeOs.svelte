@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RyeOsEnvelope, RyeOsUiEvent } from "../generated";
   import Navigation from "./Navigation.svelte";
+  import AmbientLayer from "./AmbientLayer.svelte";
   import StatusBar from "./StatusBar.svelte";
   import SystemBar from "./SystemBar.svelte";
   import WorkspaceStrip from "./WorkspaceStrip.svelte";
@@ -24,6 +25,9 @@
 </script>
 
 <div class="ryeos-shell" data-generation={String(envelope.generation)} data-theme={envelope.view_model.presentation.theme.id}>
+  {#if envelope.view_model.session.ambient.show_background}
+    <AmbientLayer ambient={envelope.view_model.session.ambient} scene={envelope.scene_model} />
+  {/if}
   <SystemBar chrome={envelope.view_model.chrome} session={envelope.view_model.session} transport={envelope.view_model.transport} />
   <WorkspaceStrip model={envelope.view_model.presentation.chrome.top_bar} />
   <div class="shell-body">

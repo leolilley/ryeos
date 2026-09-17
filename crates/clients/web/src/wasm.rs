@@ -15,6 +15,14 @@ use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use std::cell::RefCell;
 
+fn to_js_value<T: Serialize + ?Sized>(value: &T, context: &str) -> Result<JsValue, JsValue> {
+    let serializer =
+        serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true);
+    value
+        .serialize(&serializer)
+        .map_err(|error| JsValue::from_str(&format!("{context}: {error}")))
+}
+
 // ---------------------------------------------------------------------------
 // State — single-threaded WASM, safe to use thread_local RefCell
 // ---------------------------------------------------------------------------
@@ -27,8 +35,7 @@ fn ryeos_envelope(
     core: &RyeOsCore,
     effects: Vec<ryeos_client_base::ui::RyeOsEffect>,
 ) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&core.envelope(effects))
-        .map_err(|e| JsValue::from_str(&format!("serialize RyeOS envelope: {e}")))
+    to_js_value(&core.envelope(effects), "serialize RyeOS envelope")
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +184,7 @@ pub fn ryeos_key(event_json: JsValue) -> Result<JsValue, JsValue> {
             handled,
             envelope: core.envelope(effects),
         };
-        serde_wasm_bindgen::to_value(&outcome)
-            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS key outcome: {e}")))
+        to_js_value(&outcome, "serialize RyeOS key outcome")
     })
 }
 
@@ -190,8 +196,10 @@ pub fn ryeos_view_model() -> Result<JsValue, JsValue> {
         let core = state
             .as_ref()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).view_model)
-            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS view model: {e}")))
+        to_js_value(
+            &core.envelope(Vec::new()).view_model,
+            "serialize RyeOS view model",
+        )
     })
 }
 
@@ -203,8 +211,10 @@ pub fn ryeos_scene_model() -> Result<JsValue, JsValue> {
         let core = state
             .as_ref()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        serde_wasm_bindgen::to_value(&core.envelope(Vec::new()).scene_model)
-            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS scene model: {e}")))
+        to_js_value(
+            &core.envelope(Vec::new()).scene_model,
+            "serialize RyeOS scene model",
+        )
     })
 }
 
@@ -216,8 +226,7 @@ pub fn ryeos_seat_events() -> Result<JsValue, JsValue> {
         let core = state
             .as_ref()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        serde_wasm_bindgen::to_value(core.seat.events())
-            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS seat events: {e}")))
+        to_js_value(core.seat.events(), "serialize RyeOS seat events")
     })
 }
 

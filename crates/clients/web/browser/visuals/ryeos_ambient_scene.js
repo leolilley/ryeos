@@ -20,7 +20,7 @@ export function mountRyeOsAmbientScene(canvas, sceneModel = {}, options = {}) {
   let latestOptions = options;
   let disposed = false;
 
-  import("/ui/assets/ryeos_three.js")
+  import("three")
     .then((module) => {
       if (disposed || !canvas.isConnected) return;
       THREE = module;

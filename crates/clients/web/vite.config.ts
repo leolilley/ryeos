@@ -20,6 +20,9 @@ export default defineConfig({
       input: path.resolve(packageRoot, "browser/main.ts"),
       preserveEntrySignatures: "strict",
       output: {
+        manualChunks(id) {
+          return id.includes("/node_modules/three/") ? "ryeos_three" : undefined;
+        },
         entryFileNames: "ryeos_ui.js",
         chunkFileNames: "[name].js",
         assetFileNames: (asset) => asset.names.some((name) => name.endsWith(".css"))

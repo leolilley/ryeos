@@ -19,6 +19,7 @@ const ROOT_TYPES: &[&str] = &[
     "RyeOsEffectResult",
     "RyeOsEnvelope",
     "RyeOsEvent",
+    "RyeOsKeyEvent",
     "SeatEvent",
 ];
 

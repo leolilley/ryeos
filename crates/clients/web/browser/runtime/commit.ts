@@ -25,6 +25,12 @@ export interface CommitRuntimeOptions<
 export interface CommitRuntime<Event, Envelope> {
   enqueueEvent(event: Event): void;
   enqueueEnvelope(envelope: Envelope): void;
+  /**
+   * Admit a non-event WASM mutation (currently the shared keymap) through the
+   * same queue. The callback runs synchronously when accepted from a browser
+   * event turn, allowing the caller to observe platform handling metadata.
+   */
+  commitMutation(mutation: () => Envelope): void;
   /** Test/teardown fence for all work accepted before this call. */
   idle(): Promise<void>;
 }
@@ -142,6 +148,9 @@ export function createCommitRuntime<
     },
     enqueueEnvelope(envelope) {
       enqueueMutation(() => envelope);
+    },
+    commitMutation(mutation) {
+      enqueueMutation(mutation);
     },
     idle() {
       const sequence = acceptedSequence;

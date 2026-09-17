@@ -21,6 +21,7 @@
 <section class="composer" aria-label={model.route_label}>
   <div class="composer-route"><span class="route-state">●</span><span>{model.route_label}</span><span class="draft-state">DRAFT</span></div>
   <textarea
+    data-focus-key={`input:${model.address.buffer.view_instance_key}:${model.address.buffer.input_id}`}
     value={model.text}
     placeholder={model.placeholder}
     aria-label={model.route_label}
