@@ -64,7 +64,7 @@ pub struct AtlasStackItemVm {
 pub enum AtlasInteractionVm {
     InspectItem { canonical_ref: String },
     ReadFile { root: String, path: String },
-    FocusFolder { root: Option<String>, path: String },
+    FocusFolder { root: String, path: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

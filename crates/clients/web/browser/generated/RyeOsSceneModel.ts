@@ -2,6 +2,7 @@
 /* Rust-owned browser wire contract. */
 import type { NamespaceAtlasVm } from "./NamespaceAtlasVm";
 import type { RyeOsCameraVm } from "./RyeOsCameraVm";
+import type { RyeOsSceneActionVm } from "./RyeOsSceneActionVm";
 import type { RyeOsSceneObjectVm } from "./RyeOsSceneObjectVm";
 import type { SceneSweep } from "./SceneSweep";
 
@@ -11,6 +12,11 @@ export interface RyeOsSceneModel {
   camera: RyeOsCameraVm;
   objects: RyeOsSceneObjectVm[];
   atlas?: NamespaceAtlasVm | null;
+  /**
+   * Exact controls and interactions for this mounted scene. Browser clients
+   * render and echo these events; they do not reconstruct atlas policy.
+   */
+  actions: RyeOsSceneActionVm[];
   /**
    * Ambient animation energy in `[0, 1]` — how alive the scene reads.
    * The builder maps a real signal into it (the backdrop uses the

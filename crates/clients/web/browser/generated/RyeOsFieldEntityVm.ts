@@ -24,6 +24,12 @@ export interface RyeOsFieldEntityVm {
   traits: RyeOsFieldEntityTraitsVm;
   badges: RyeOsFieldBadgeVm[];
   preview_ids: string[];
+  /**
+   * Whether the exact current comparison selection admits toggling this
+   * entity. Renderers consume this projection; they do not reproduce grid
+   * compatibility policy.
+   */
+  compare_available: boolean;
   selected: boolean;
   selectable: boolean;
   select_intent: RyeOsUiIntent | null;

@@ -26,11 +26,10 @@ const HIGH_CONTRAST_TONES = {
 };
 
 export class FieldCanvasController {
-  constructor(canvas, dispatchUi, instanceKey) {
+  constructor(canvas, interactions) {
     this.canvas = canvas;
     this.context = canvas.getContext?.("2d") || null;
-    this.dispatchUi = dispatchUi;
-    this.instanceKey = instanceKey;
+    this.interactions = interactions;
     this.layout = emptyLayout();
     this.structuralRevision = null;
     this.viewport = { x: 20, y: 20, zoom: 1 };
@@ -183,31 +182,16 @@ export class FieldCanvasController {
       const point = this.fieldPoint(event);
       const hit = hitTest(this.layout, point.x, point.y);
       if (hit) {
-        this.dispatchUi({
-          type: "set_field_selection",
-          instance_key: this.instanceKey,
-          entity_id: hit.id,
+        this.interactions.entity({
+          entityId: hit.id,
+          compare: event.shiftKey,
+          activate: event.detail >= 2,
         });
-        if (event.shiftKey && canCompareEntity(this.vm, hit.id)) {
-          this.dispatchUi({
-            type: "toggle_field_compare",
-            instance_key: this.instanceKey,
-            entity_id: hit.id,
-          });
-        }
-        if (event.detail >= 2 && hit.entity.activate_intent) {
-          this.dispatchUi({ type: "activate", intent: hit.entity.activate_intent });
-        }
         return;
       }
       const group = hitTestGroup(this.layout, point.x, point.y);
       if (group) {
-        this.dispatchUi({
-          type: "set_field_group_collapsed",
-          instance_key: this.instanceKey,
-          group_id: group.id,
-          collapsed: !group.collapsed,
-        });
+        this.interactions.group({ groupId: group.id, collapsed: !group.collapsed });
         return;
       }
       this.drag = {
@@ -255,34 +239,6 @@ export class FieldCanvasController {
       y: (event.clientY - rect.top - this.viewport.y) / this.viewport.zoom,
     };
   }
-}
-
-export function canCompareEntity(vm, entityId) {
-  const entity = (vm?.entities || []).find((item) => item.id === entityId);
-  if (!entity || !(entity.preview_ids || []).length) return false;
-  if ((vm.compare || []).includes(entityId)) return true;
-  const candidate = previewForEntity(vm, entityId);
-  if (!candidate?.comparison_key) return false;
-  const anchorId = (vm.compare || [])[0];
-  if (!anchorId) return true;
-  const anchor = previewForEntity(vm, anchorId);
-  return comparablePreviews(anchor, candidate);
-}
-
-function previewForEntity(vm, entityId) {
-  const entity = (vm.entities || []).find((item) => item.id === entityId);
-  return (entity?.preview_ids || [])
-    .map((id) => (vm.previews || []).find((preview) => preview.id === id))
-    .find((preview) => preview?.grid);
-}
-
-function comparablePreviews(left, right) {
-  if (!left || !right || !left.grid || !right.grid) return false;
-  return left.comparison_key === right.comparison_key
-    && left.kind === right.kind
-    && left.grid.width === right.grid.width
-    && left.grid.height === right.grid.height
-    && JSON.stringify(left.grid.palette || []) === JSON.stringify(right.grid.palette || []);
 }
 
 function drawGroups(context, groups, highContrast) {

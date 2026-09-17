@@ -86,6 +86,7 @@ export type { RyeOsPresentationMetricsVm } from "./RyeOsPresentationMetricsVm";
 export type { RyeOsPresentationVm } from "./RyeOsPresentationVm";
 export type { RyeOsRowDetailVm } from "./RyeOsRowDetailVm";
 export type { RyeOsRowVm } from "./RyeOsRowVm";
+export type { RyeOsSceneActionVm } from "./RyeOsSceneActionVm";
 export type { RyeOsSceneModel } from "./RyeOsSceneModel";
 export type { RyeOsSceneObjectKind } from "./RyeOsSceneObjectKind";
 export type { RyeOsSceneObjectVm } from "./RyeOsSceneObjectVm";

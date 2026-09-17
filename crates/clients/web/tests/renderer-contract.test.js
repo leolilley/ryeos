@@ -47,10 +47,13 @@ test("scene and field views retain the shared projection boundary", async () => 
   const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
   const field = await readFile(new URL("browser/views/FieldView.svelte", root), "utf8");
 
-  assert.match(renderer, /<SceneView scene=\{model\.scene\} \{tileId\} \/>/);
+  assert.match(renderer, /<SceneView scene=\{model\.scene\} \/>/);
   assert.doesNotMatch(renderer, /SceneView[^\n]*(kind|mode|style)=/);
-  assert.match(scene, /interface Props \{ scene: RyeOsSceneModel; tileId: string \}/);
+  assert.match(scene, /interface Props \{ scene: RyeOsSceneModel \}/);
   assert.doesNotMatch(scene, /namespace_atlas|paper_3d|flat_2d|AmbientOptions/);
-  assert.match(field, /new FieldCanvasController\(canvas, dispatch, instanceKey\)/);
+  assert.doesNotMatch(scene, /set_atlas_|\?\? "project"/);
+  assert.match(scene, /scene\.camera\.fov_degrees/);
+  assert.match(field, /new FieldCanvasController\(canvas, \{/);
+  assert.doesNotMatch(field, /canCompareEntity/);
   assert.doesNotMatch(field, /mountField|replaceChildren|innerHTML/);
 });

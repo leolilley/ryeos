@@ -3,4 +3,4 @@
 export type AtlasInteractionVm =
   | { type: "inspect_item"; canonical_ref: string }
   | { type: "read_file"; root: string; path: string }
-  | { type: "focus_folder"; root: string | null; path: string };
+  | { type: "focus_folder"; root: string; path: string };

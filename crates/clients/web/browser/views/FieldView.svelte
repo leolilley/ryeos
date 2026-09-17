@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import type { RyeOsFieldVm, RyeOsViewInstanceKey } from "../generated";
   import { dispatchUi } from "../runtime/context";
-  import { canCompareEntity, FieldCanvasController } from "../visuals/ryeos_field_canvas.js";
+  import { fieldAccessibilityModel } from "../visuals/ryeos_field_accessibility.js";
+  import { FieldCanvasController } from "../visuals/ryeos_field_canvas.js";
   import GridPreview from "./GridPreview.svelte";
 
   interface Props { field: RyeOsFieldVm; instanceKey: RyeOsViewInstanceKey }
@@ -19,9 +20,28 @@
   });
   const previews = $derived(field.previews.filter((preview) => previewIds.has(preview.id)));
   const expansion = $derived(selected ? field.expansions.find((item) => item.source === selected.source && item.root_id === selected.id) ?? null : null);
+  const accessibilityItems = $derived(fieldAccessibilityModel(field));
+  const activeOptionId = $derived(accessibilityItems.find((item) => item.selected)?.domId);
+
+  const selectEntity = (entityId: string) => dispatch({ type: "set_field_selection", instance_key: instanceKey, entity_id: entityId });
+  const activateEntity = (entityId: string) => {
+    const entity = field.entities.find((candidate) => candidate.id === entityId);
+    if (entity?.activate_intent) dispatch({ type: "activate", intent: entity.activate_intent });
+  };
+  const compareEntity = (entityId: string) => {
+    const entity = field.entities.find((candidate) => candidate.id === entityId);
+    if (entity?.compare_available) dispatch({ type: "toggle_field_compare", instance_key: instanceKey, entity_id: entityId });
+  };
 
   onMount(() => {
-    controller = new FieldCanvasController(canvas, dispatch, instanceKey);
+    controller = new FieldCanvasController(canvas, {
+      entity: ({ entityId, compare, activate }) => {
+        selectEntity(entityId);
+        if (compare) compareEntity(entityId);
+        if (activate) activateEntity(entityId);
+      },
+      group: ({ groupId, collapsed }) => dispatch({ type: "set_field_group_collapsed", instance_key: instanceKey, group_id: groupId, collapsed }),
+    });
     const observer = new ResizeObserver(() => controller?.resize());
     observer.observe(canvas);
     controller.update(field);
@@ -42,7 +62,7 @@
       {#each field.groups as group (group.id)}<button onclick={() => dispatch({ type: "set_field_group_collapsed", instance_key: instanceKey, group_id: group.id, collapsed: !group.collapsed })}>{group.collapsed ? "▸" : "▾"} {group.label}</button>{/each}
       {#each field.layers as layer (layer.id)}<button aria-pressed={layer.visible} onclick={() => dispatch({ type: "set_field_layer_visible", instance_key: instanceKey, layer_id: layer.id, visible: !layer.visible })}>{layer.visible ? "●" : "○"} {layer.label}</button>{/each}
       {#if selected}
-        <button disabled={!canCompareEntity(field, selected.id)} onclick={() => dispatch({ type: "toggle_field_compare", instance_key: instanceKey, entity_id: selected.id })}>{field.compare.includes(selected.id) ? "Uncompare" : "Compare"}</button>
+        <button disabled={!selected.compare_available} onclick={() => compareEntity(selected.id)}>{field.compare.includes(selected.id) ? "Uncompare" : "Compare"}</button>
         <button disabled={!!expansion && !expansion.can_continue} onclick={() => dispatch({ type: expansion?.can_continue ? "continue_field_expansion" : "request_field_expansion", instance_key: instanceKey, source: selected.source, root_id: selected.id })}>{expansion?.can_continue ? "Continue" : expansion ? "Expanded" : "Expand"}</button>
         {#if expansion}<button onclick={() => dispatch({ type: "clear_field_expansion", instance_key: instanceKey, source: selected.source, root_id: selected.id })}>Clear</button>{/if}
       {/if}
@@ -55,10 +75,34 @@
     <nav class="field-rail" aria-label="Durable execution events">{#each field.replay.rail as entry}<button class:selected={entry.selected} aria-pressed={entry.selected} onclick={() => dispatch({ type: "set_field_cursor", instance_key: instanceKey, cursor: { mode: "braid_cut", anchor: entry.event } })}>{entry.label}</button>{/each}</nav>
   {/if}
   <div class="field-stage"><canvas bind:this={canvas} aria-hidden="true"></canvas></div>
-  <div class="field-accessibility" role="listbox" aria-label={`${field.title} entities`}>
-    {#each field.traversal as entityId}
-      {@const entity = field.entities.find((candidate) => candidate.id === entityId)}
-      {#if entity}<button role="option" aria-selected={field.selected === entity.id} onclick={() => dispatch({ type: "set_field_selection", instance_key: instanceKey, entity_id: entity.id })}>{entity.accessibility_label}</button>{/if}
+  <div class="field-accessibility" role="tree" tabindex="0" aria-label={`${field.title} entities`} aria-activedescendant={activeOptionId}
+    onfocus={() => { if (!field.selected && accessibilityItems[0]) selectEntity(accessibilityItems[0].id); }}
+    onkeydown={(event) => {
+      const current = accessibilityItems.find((item) => item.selected) ?? accessibilityItems[0];
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        dispatch({ type: "move_field_selection", instance_key: instanceKey, delta: event.key === "ArrowUp" ? -1 : 1 });
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        const item = event.key === "Home" ? accessibilityItems[0] : accessibilityItems.at(-1);
+        if (item) selectEntity(item.id);
+      } else if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && current?.groupId) {
+        const collapsed = event.key === "ArrowLeft";
+        if (current.expanded === collapsed) {
+          event.preventDefault();
+          dispatch({ type: "set_field_group_collapsed", instance_key: instanceKey, group_id: current.groupId, collapsed });
+        }
+      } else if (event.key === "Enter" && field.selected) {
+        event.preventDefault(); activateEntity(field.selected);
+      } else if (event.key === " " && field.selected) {
+        event.preventDefault(); compareEntity(field.selected);
+      }
+    }}>
+    {#each accessibilityItems as item (item.id)}
+      <div id={item.domId} role="treeitem" tabindex="-1" aria-selected={item.selected} aria-posinset={item.position} aria-setsize={item.size}
+        aria-level={item.level} aria-expanded={item.expanded ?? undefined}
+        onclick={() => selectEntity(item.id)} ondblclick={() => activateEntity(item.id)}
+        onkeydown={(event) => { if (event.key === "Enter") activateEntity(item.id); }}>{item.groupLabel ? `Group ${item.groupLabel}. ` : ""}{item.label}{item.neighbors ? `. ${item.neighbors}` : ""}</div>
     {/each}
   </div>
   {#if selected || field.warnings.length}
@@ -66,7 +110,7 @@
       {#if selected}
         <strong>{selected.label}</strong><small>{[selected.kind, selected.status, selected.source].filter(Boolean).join(" · ")}</small>
         {#each selectedRelations as relation (relation.id)}<button disabled={!relation.activate_intent} onclick={() => relation.activate_intent && dispatch({ type: "activate", intent: relation.activate_intent })}>{relation.label}</button>{/each}
-        {#each previews as preview (preview.id)}<GridPreview {preview} compareEnabled={canCompareEntity(field, selected.id)} oncompare={() => dispatch({ type: "toggle_field_compare", instance_key: instanceKey, entity_id: selected.id })} />{/each}
+        {#each previews as preview (preview.id)}<GridPreview {preview} compareEnabled={selected.compare_available} oncompare={() => compareEntity(selected.id)} />{/each}
       {/if}
       {#each field.warnings as warning}<small class="field-warning">{warning}</small>{/each}
     </aside>

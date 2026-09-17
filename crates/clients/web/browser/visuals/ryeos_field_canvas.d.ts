@@ -1,11 +1,13 @@
-import type { RyeOsFieldVm, RyeOsViewInstanceKey } from "../generated";
-import type { DispatchUi } from "../runtime/context";
+import type { RyeOsFieldVm } from "../generated";
+
+export interface FieldCanvasInteractions {
+  entity(hit: { entityId: string; compare: boolean; activate: boolean }): void;
+  group(hit: { groupId: string; collapsed: boolean }): void;
+}
 
 export class FieldCanvasController {
-  constructor(canvas: HTMLCanvasElement, dispatchUi: DispatchUi, instanceKey: RyeOsViewInstanceKey);
+  constructor(canvas: HTMLCanvasElement, interactions: FieldCanvasInteractions);
   update(vm: RyeOsFieldVm): void;
   resize(): void;
   unmount(): void;
 }
-
-export function canCompareEntity(vm: RyeOsFieldVm, entityId: string): boolean;

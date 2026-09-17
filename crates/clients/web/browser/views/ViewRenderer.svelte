@@ -61,7 +61,7 @@
   {:else if model.type === "placeholder"}
     <EmptyState title={model.title} message={model.message} />
   {:else if model.type === "map" || model.type === "atlas"}
-    <SceneView scene={model.scene} {tileId} />
+    <SceneView scene={model.scene} />
   {:else if model.type === "field"}
     <FieldView field={model.field} {instanceKey} />
   {/if}

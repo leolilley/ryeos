@@ -143,26 +143,6 @@ function deferred() {
 		reject
 	};
 }
-/**
-* When encountering a situation like `let [a, b, c] = $derived(blah())`,
-* we need to stash an intermediate value that `a`, `b`, and `c` derive
-* from, in case it's an iterable
-* @template T
-* @param {ArrayLike<T> | Iterable<T>} value
-* @param {number} [n]
-* @returns {Array<T>}
-*/
-function to_array(value, n) {
-	if (Array.isArray(value)) return value;
-	if (n === void 0 || !(Symbol.iterator in value)) return Array.from(value);
-	/** @type {T[]} */
-	const array = [];
-	for (const element of value) {
-		array.push(element);
-		if (array.length === n) break;
-	}
-	return array;
-}
 var CLEAN = 1024;
 var DIRTY = 2048;
 var MAYBE_DIRTY = 4096;
@@ -6728,6 +6708,51 @@ function EmptyState($$anchor, $$props) {
 	append($$anchor, div);
 }
 //#endregion
+//#region browser/visuals/ryeos_field_accessibility.js
+function fieldAccessibilityModel(vm) {
+	const byId = new Map((vm.entities || []).map((entity) => [entity.id, entity]));
+	const groups = new Map((vm.groups || []).map((group) => [group.id, group]));
+	const neighbors = new Map((vm.entities || []).map((entity) => [entity.id, []]));
+	for (const relation of vm.relations || []) {
+		if (neighbors.has(relation.source_id) && byId.has(relation.target_id)) neighbors.get(relation.source_id).push(`${relation.kind} to ${byId.get(relation.target_id).label}`);
+		if (neighbors.has(relation.target_id) && byId.has(relation.source_id)) neighbors.get(relation.target_id).push(`${relation.kind} from ${byId.get(relation.source_id).label}`);
+	}
+	const ordered = (vm.traversal || []).map((id) => byId.get(id)).filter(Boolean);
+	return ordered.map((entity, index) => {
+		const group = entity.group_id ? groups.get(entity.group_id) : null;
+		return {
+			id: entity.id,
+			domId: `ryeos-field-option-${safeId(entity.id)}`,
+			label: entity.accessibility_label || entity.label || entity.id,
+			selected: vm.selected === entity.id,
+			position: index + 1,
+			size: ordered.length,
+			level: entityLevel(entity, byId),
+			groupId: group?.id || null,
+			groupLabel: group?.label || null,
+			expanded: group ? !group.collapsed : null,
+			neighbors: (neighbors.get(entity.id) || []).sort().join("; "),
+			selectIntent: entity.select_intent || null,
+			activateIntent: entity.activate_intent || null,
+			compare: entity.compare_available
+		};
+	});
+}
+function entityLevel(entity, byId) {
+	let level = 1;
+	let parentId = entity.parent_id;
+	const visited = /* @__PURE__ */ new Set([entity.id]);
+	while (parentId && byId.has(parentId) && !visited.has(parentId)) {
+		visited.add(parentId);
+		level += 1;
+		parentId = byId.get(parentId).parent_id;
+	}
+	return level;
+}
+function safeId(value) {
+	return [...String(value)].map((character) => /[a-zA-Z0-9-]/.test(character) ? character : `_${character.codePointAt(0).toString(16)}_`).join("");
+}
+//#endregion
 //#region browser/visuals/ryeos_field_layout.js
 var GROUP_WIDTH = 520;
 var RANK_SPACING = 210;
@@ -7040,11 +7065,10 @@ var HIGH_CONTRAST_TONES = {
 	neutral: "CanvasText"
 };
 var FieldCanvasController = class {
-	constructor(canvas, dispatchUi, instanceKey) {
+	constructor(canvas, interactions) {
 		this.canvas = canvas;
 		this.context = canvas.getContext?.("2d") || null;
-		this.dispatchUi = dispatchUi;
-		this.instanceKey = instanceKey;
+		this.interactions = interactions;
 		this.layout = emptyLayout();
 		this.structuralRevision = null;
 		this.viewport = {
@@ -7176,28 +7200,17 @@ var FieldCanvasController = class {
 			const point = this.fieldPoint(event);
 			const hit = hitTest(this.layout, point.x, point.y);
 			if (hit) {
-				this.dispatchUi({
-					type: "set_field_selection",
-					instance_key: this.instanceKey,
-					entity_id: hit.id
-				});
-				if (event.shiftKey && canCompareEntity(this.vm, hit.id)) this.dispatchUi({
-					type: "toggle_field_compare",
-					instance_key: this.instanceKey,
-					entity_id: hit.id
-				});
-				if (event.detail >= 2 && hit.entity.activate_intent) this.dispatchUi({
-					type: "activate",
-					intent: hit.entity.activate_intent
+				this.interactions.entity({
+					entityId: hit.id,
+					compare: event.shiftKey,
+					activate: event.detail >= 2
 				});
 				return;
 			}
 			const group = hitTestGroup(this.layout, point.x, point.y);
 			if (group) {
-				this.dispatchUi({
-					type: "set_field_group_collapsed",
-					instance_key: this.instanceKey,
-					group_id: group.id,
+				this.interactions.group({
+					groupId: group.id,
 					collapsed: !group.collapsed
 				});
 				return;
@@ -7244,23 +7257,6 @@ var FieldCanvasController = class {
 		};
 	}
 };
-function canCompareEntity(vm, entityId) {
-	const entity = (vm?.entities || []).find((item) => item.id === entityId);
-	if (!entity || !(entity.preview_ids || []).length) return false;
-	if ((vm.compare || []).includes(entityId)) return true;
-	const candidate = previewForEntity(vm, entityId);
-	if (!candidate?.comparison_key) return false;
-	const anchorId = (vm.compare || [])[0];
-	if (!anchorId) return true;
-	return comparablePreviews(previewForEntity(vm, anchorId), candidate);
-}
-function previewForEntity(vm, entityId) {
-	return ((vm.entities || []).find((item) => item.id === entityId)?.preview_ids || []).map((id) => (vm.previews || []).find((preview) => preview.id === id)).find((preview) => preview?.grid);
-}
-function comparablePreviews(left, right) {
-	if (!left || !right || !left.grid || !right.grid) return false;
-	return left.comparison_key === right.comparison_key && left.kind === right.kind && left.grid.width === right.grid.width && left.grid.height === right.grid.height && JSON.stringify(left.grid.palette || []) === JSON.stringify(right.grid.palette || []);
-}
 function drawGroups(context, groups, highContrast) {
 	context.font = "12px ui-monospace, monospace";
 	for (const group of groups) {
@@ -7474,11 +7470,11 @@ var root$7 = /* @__PURE__ */ from_html(`<button> </button>`);
 var root_1$4 = /* @__PURE__ */ from_html(`<button>Clear</button>`);
 var root_2$3 = /* @__PURE__ */ from_html(`<button> </button> <button> </button> <!>`, 1);
 var root_3$3 = /* @__PURE__ */ from_html(`<nav class="field-rail" aria-label="Durable execution events"></nav>`);
-var root_4$3 = /* @__PURE__ */ from_html(`<button role="option"> </button>`);
+var root_4$3 = /* @__PURE__ */ from_html(`<div role="treeitem" tabindex="-1"> </div>`);
 var root_5$3 = /* @__PURE__ */ from_html(`<strong> </strong><small> </small> <!> <!>`, 1);
 var root_6$3 = /* @__PURE__ */ from_html(`<small class="field-warning"> </small>`);
 var root_7$2 = /* @__PURE__ */ from_html(`<aside class="field-detail"><!> <!></aside>`);
-var root_8$2 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas></div> <div class="field-accessibility" role="listbox"></div> <!></section>`);
+var root_8$2 = /* @__PURE__ */ from_html(`<section class="field-view"><header class="field-toolbar"><div class="field-identity"><strong> </strong><span> </span></div> <div class="field-controls"><button>◀</button> <button> </button> <button>▶</button> <button>Live</button> <!> <!> <!></div> <input type="search" placeholder="Search field" aria-label="Search field entities"/></header> <!> <div class="field-stage"><canvas aria-hidden="true"></canvas></div> <div class="field-accessibility" role="tree" tabindex="0"></div> <!></section>`);
 function FieldView($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7493,8 +7489,41 @@ function FieldView($$anchor, $$props) {
 	});
 	const previews = /* @__PURE__ */ user_derived(() => $$props.field.previews.filter((preview) => get(previewIds).has(preview.id)));
 	const expansion = /* @__PURE__ */ user_derived(() => get(selected) ? $$props.field.expansions.find((item) => item.source === get(selected).source && item.root_id === get(selected).id) ?? null : null);
+	const accessibilityItems = /* @__PURE__ */ user_derived(() => fieldAccessibilityModel($$props.field));
+	const activeOptionId = /* @__PURE__ */ user_derived(() => get(accessibilityItems).find((item) => item.selected)?.domId);
+	const selectEntity = (entityId) => dispatch({
+		type: "set_field_selection",
+		instance_key: $$props.instanceKey,
+		entity_id: entityId
+	});
+	const activateEntity = (entityId) => {
+		const entity = $$props.field.entities.find((candidate) => candidate.id === entityId);
+		if (entity?.activate_intent) dispatch({
+			type: "activate",
+			intent: entity.activate_intent
+		});
+	};
+	const compareEntity = (entityId) => {
+		if ($$props.field.entities.find((candidate) => candidate.id === entityId)?.compare_available) dispatch({
+			type: "toggle_field_compare",
+			instance_key: $$props.instanceKey,
+			entity_id: entityId
+		});
+	};
 	onMount(() => {
-		controller = new FieldCanvasController(canvas, dispatch, $$props.instanceKey);
+		controller = new FieldCanvasController(canvas, {
+			entity: ({ entityId, compare, activate }) => {
+				selectEntity(entityId);
+				if (compare) compareEntity(entityId);
+				if (activate) activateEntity(entityId);
+			},
+			group: ({ groupId, collapsed }) => dispatch({
+				type: "set_field_group_collapsed",
+				instance_key: $$props.instanceKey,
+				group_id: groupId,
+				collapsed
+			})
+		});
 		const observer = new ResizeObserver(() => controller?.resize());
 		observer.observe(canvas);
 		controller.update($$props.field);
@@ -7569,17 +7598,13 @@ function FieldView($$anchor, $$props) {
 		if_block(node_3, ($$render) => {
 			if (get(expansion)) $$render(consequent);
 		});
-		template_effect(($0, $1) => {
-			button_6.disabled = $0;
-			set_text(text_5, $1);
+		template_effect(($0) => {
+			button_6.disabled = !get(selected).compare_available;
+			set_text(text_5, $0);
 			button_7.disabled = !!get(expansion) && !get(expansion).can_continue;
 			set_text(text_6, get(expansion)?.can_continue ? "Continue" : get(expansion) ? "Expanded" : "Expand");
-		}, [() => !canCompareEntity($$props.field, get(selected).id), () => $$props.field.compare.includes(get(selected).id) ? "Uncompare" : "Compare"]);
-		delegated("click", button_6, () => dispatch({
-			type: "toggle_field_compare",
-			instance_key: $$props.instanceKey,
-			entity_id: get(selected).id
-		}));
+		}, [() => $$props.field.compare.includes(get(selected).id) ? "Uncompare" : "Compare"]);
+		delegated("click", button_6, () => compareEntity(get(selected).id));
 		delegated("click", button_7, () => dispatch({
 			type: get(expansion)?.can_continue ? "continue_field_expansion" : "request_field_expansion",
 			instance_key: $$props.instanceKey,
@@ -7627,71 +7652,60 @@ function FieldView($$anchor, $$props) {
 	bind_this(child(div_2), ($$value) => canvas = $$value, () => canvas);
 	reset(div_2);
 	var div_3 = sibling(div_2, 2);
-	each(div_3, 21, () => $$props.field.traversal, index, ($$anchor, entityId) => {
-		const entity = /* @__PURE__ */ user_derived(() => $$props.field.entities.find((candidate) => candidate.id === get(entityId)));
-		var fragment_1 = comment();
-		var node_5 = first_child(fragment_1);
-		var consequent_3 = ($$anchor) => {
-			var button_10 = root_4$3();
-			var text_8 = only_child(button_10, true);
-			template_effect(() => {
-				set_attribute(button_10, "aria-selected", $$props.field.selected === get(entity).id);
-				set_text(text_8, get(entity).accessibility_label);
-			});
-			delegated("click", button_10, () => dispatch({
-				type: "set_field_selection",
-				instance_key: $$props.instanceKey,
-				entity_id: get(entity).id
-			}));
-			append($$anchor, button_10);
-		};
-		if_block(node_5, ($$render) => {
-			if (get(entity)) $$render(consequent_3);
+	each(div_3, 21, () => get(accessibilityItems), (item) => item.id, ($$anchor, item) => {
+		var div_4 = root_4$3();
+		var text_8 = only_child(div_4);
+		template_effect(() => {
+			set_attribute(div_4, "id", get(item).domId);
+			set_attribute(div_4, "aria-selected", get(item).selected);
+			set_attribute(div_4, "aria-posinset", get(item).position);
+			set_attribute(div_4, "aria-setsize", get(item).size);
+			set_attribute(div_4, "aria-level", get(item).level);
+			set_attribute(div_4, "aria-expanded", get(item).expanded ?? void 0);
+			set_text(text_8, `${get(item).groupLabel ? `Group ${get(item).groupLabel}. ` : ""}${get(item).label ?? ""}${get(item).neighbors ? `. ${get(item).neighbors}` : ""}`);
 		});
-		append($$anchor, fragment_1);
+		delegated("click", div_4, () => selectEntity(get(item).id));
+		delegated("dblclick", div_4, () => activateEntity(get(item).id));
+		delegated("keydown", div_4, (event) => {
+			if (event.key === "Enter") activateEntity(get(item).id);
+		});
+		append($$anchor, div_4);
 	});
 	reset(div_3);
-	var node_6 = sibling(div_3, 2);
-	var consequent_5 = ($$anchor) => {
+	var node_5 = sibling(div_3, 2);
+	var consequent_4 = ($$anchor) => {
 		var aside = root_7$2();
-		var node_7 = child(aside);
-		var consequent_4 = ($$anchor) => {
-			var fragment_2 = root_5$3();
-			var strong_1 = first_child(fragment_2);
+		var node_6 = child(aside);
+		var consequent_3 = ($$anchor) => {
+			var fragment_1 = root_5$3();
+			var strong_1 = first_child(fragment_1);
 			var text_9 = only_child(strong_1, true);
 			var small = sibling(strong_1);
 			var text_10 = only_child(small, true);
-			var node_8 = sibling(small, 2);
-			each(node_8, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
-				var button_11 = root$7();
-				var text_11 = only_child(button_11, true);
+			var node_7 = sibling(small, 2);
+			each(node_7, 17, () => get(selectedRelations), (relation) => relation.id, ($$anchor, relation) => {
+				var button_10 = root$7();
+				var text_11 = only_child(button_10, true);
 				template_effect(() => {
-					button_11.disabled = !get(relation).activate_intent;
+					button_10.disabled = !get(relation).activate_intent;
 					set_text(text_11, get(relation).label);
 				});
-				delegated("click", button_11, () => get(relation).activate_intent && dispatch({
+				delegated("click", button_10, () => get(relation).activate_intent && dispatch({
 					type: "activate",
 					intent: get(relation).activate_intent
 				}));
-				append($$anchor, button_11);
+				append($$anchor, button_10);
 			});
-			each(sibling(node_8, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
-				{
-					let $0 = /* @__PURE__ */ user_derived(() => canCompareEntity($$props.field, get(selected).id));
-					GridPreview($$anchor, {
-						get preview() {
-							return get(preview);
-						},
-						get compareEnabled() {
-							return get($0);
-						},
-						oncompare: () => dispatch({
-							type: "toggle_field_compare",
-							instance_key: $$props.instanceKey,
-							entity_id: get(selected).id
-						})
-					});
-				}
+			each(sibling(node_7, 2), 17, () => get(previews), (preview) => preview.id, ($$anchor, preview) => {
+				GridPreview($$anchor, {
+					get preview() {
+						return get(preview);
+					},
+					get compareEnabled() {
+						return get(selected).compare_available;
+					},
+					oncompare: () => compareEntity(get(selected).id)
+				});
 			});
 			template_effect(($0) => {
 				set_text(text_9, get(selected).label);
@@ -7701,12 +7715,12 @@ function FieldView($$anchor, $$props) {
 				get(selected).status,
 				get(selected).source
 			].filter(Boolean).join(" · ")]);
-			append($$anchor, fragment_2);
+			append($$anchor, fragment_1);
 		};
-		if_block(node_7, ($$render) => {
-			if (get(selected)) $$render(consequent_4);
+		if_block(node_6, ($$render) => {
+			if (get(selected)) $$render(consequent_3);
 		});
-		each(sibling(node_7, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
+		each(sibling(node_6, 2), 17, () => $$props.field.warnings, index, ($$anchor, warning) => {
 			var small_1 = root_6$3();
 			var text_12 = only_child(small_1, true);
 			template_effect(() => set_text(text_12, get(warning)));
@@ -7715,8 +7729,8 @@ function FieldView($$anchor, $$props) {
 		reset(aside);
 		append($$anchor, aside);
 	};
-	if_block(node_6, ($$render) => {
-		if (get(selected) || $$props.field.warnings.length) $$render(consequent_5);
+	if_block(node_5, ($$render) => {
+		if (get(selected) || $$props.field.warnings.length) $$render(consequent_4);
 	});
 	reset(section);
 	template_effect(($0) => {
@@ -7730,6 +7744,7 @@ function FieldView($$anchor, $$props) {
 		button_3.disabled = $$props.field.replay.mode === "live";
 		set_value(input, $$props.field.search.query);
 		set_attribute(div_3, "aria-label", `${$$props.field.title} entities`);
+		set_attribute(div_3, "aria-activedescendant", get(activeOptionId));
 	}, [() => $$props.field.sources.map((source) => `${source.name}:${source.phase}`).join(" · ")]);
 	delegated("click", button, () => dispatch({
 		type: "step_field_cursor",
@@ -7766,30 +7781,66 @@ function FieldView($$anchor, $$props) {
 			});
 		}
 	});
+	event("focus", div_3, () => {
+		if (!$$props.field.selected && get(accessibilityItems)[0]) selectEntity(get(accessibilityItems)[0].id);
+	});
+	delegated("keydown", div_3, (event) => {
+		const current = get(accessibilityItems).find((item) => item.selected) ?? get(accessibilityItems)[0];
+		if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+			event.preventDefault();
+			dispatch({
+				type: "move_field_selection",
+				instance_key: $$props.instanceKey,
+				delta: event.key === "ArrowUp" ? -1 : 1
+			});
+		} else if (event.key === "Home" || event.key === "End") {
+			event.preventDefault();
+			const item = event.key === "Home" ? get(accessibilityItems)[0] : get(accessibilityItems).at(-1);
+			if (item) selectEntity(item.id);
+		} else if ((event.key === "ArrowLeft" || event.key === "ArrowRight") && current?.groupId) {
+			const collapsed = event.key === "ArrowLeft";
+			if (current.expanded === collapsed) {
+				event.preventDefault();
+				dispatch({
+					type: "set_field_group_collapsed",
+					instance_key: $$props.instanceKey,
+					group_id: current.groupId,
+					collapsed
+				});
+			}
+		} else if (event.key === "Enter" && $$props.field.selected) {
+			event.preventDefault();
+			activateEntity($$props.field.selected);
+		} else if (event.key === " " && $$props.field.selected) {
+			event.preventDefault();
+			compareEntity($$props.field.selected);
+		}
+	});
 	append($$anchor, section);
 	pop();
 }
 delegate([
 	"click",
 	"input",
-	"keydown"
+	"keydown",
+	"dblclick"
 ]);
 //#endregion
 //#region browser/views/SceneView.svelte
 var root$6 = /* @__PURE__ */ from_html(`<button> </button>`);
-var root_1$3 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div>`);
-var root_2$2 = /* @__PURE__ */ from_svg(`<line></line>`);
-var root_3$2 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055" role="button" tabindex="-1"><title> </title></circle>`);
-var root_4$2 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text><!></g>`);
-var root_5$2 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"><button>AI space</button> <button>Files</button></div> <!></div> <svg class="atlas-canvas" role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg>`, 1);
-var root_6$2 = /* @__PURE__ */ from_svg(`<text> </text>`);
-var root_7$1 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
-var root_8$1 = /* @__PURE__ */ from_svg(`<rect></rect>`);
-var root_9$1 = /* @__PURE__ */ from_svg(`<circle></circle>`);
-var root_10$1 = /* @__PURE__ */ from_svg(`<title> </title>`);
-var root_11$1 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
-var root_12$1 = /* @__PURE__ */ from_svg(`<svg role="img" preserveAspectRatio="xMidYMid meet"></svg>`);
-var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!></div>`);
+var root_1$3 = /* @__PURE__ */ from_html(`<div class="atlas-layers"></div> <div class="atlas-lenses" aria-label="Atlas lens"></div>`, 1);
+var root_2$2 = /* @__PURE__ */ from_html(`<div class="atlas-toolbar"><div class="atlas-identity"><strong> </strong><span> </span></div> <div class="atlas-projections" aria-label="Atlas projection"></div> <!></div>`);
+var root_3$2 = /* @__PURE__ */ from_svg(`<line></line>`);
+var root_4$2 = /* @__PURE__ */ from_svg(`<text> </text>`);
+var root_5$2 = /* @__PURE__ */ from_svg(`<polygon></polygon>`);
+var root_6$2 = /* @__PURE__ */ from_svg(`<rect></rect>`);
+var root_7$1 = /* @__PURE__ */ from_svg(`<circle></circle>`);
+var root_8$1 = /* @__PURE__ */ from_svg(`<title> </title>`);
+var root_9$1 = /* @__PURE__ */ from_svg(`<g><!><!></g>`);
+var root_10$1 = /* @__PURE__ */ from_svg(`<circle class="atlas-stack-item" r="0.055"><title> </title></circle>`);
+var root_11$1 = /* @__PURE__ */ from_svg(`<g><circle></circle><text> </text></g><!>`, 1);
+var root_12$1 = /* @__PURE__ */ from_svg(`<!><!>`, 1);
+var root_13$1 = /* @__PURE__ */ from_html(`<div class="scene-view"><!> <svg role="img" preserveAspectRatio="xMidYMid meet"><!><!></svg></div>`);
 function SceneView($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7801,7 +7852,10 @@ function SceneView($$anchor, $$props) {
 		const maxX = xs.length ? Math.max(...xs) : 1;
 		const minY = ys.length ? Math.min(...ys) : 0;
 		const maxY = ys.length ? Math.max(...ys) : 1;
-		return `${minX - 20} ${minY - 15} ${Math.max(40, maxX - minX + 40)} ${Math.max(30, maxY - minY + 30)}`;
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(40, maxX - minX + 40) * scale;
+		const height = Math.max(30, maxY - minY + 30) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${-Number($$props.scene.camera.target[1] ?? 0) - height / 2} ${width} ${height}`;
 	});
 	const accessibleLabel = /* @__PURE__ */ user_derived(() => $$props.scene.objects.flatMap((object) => object.label ? [object.label] : []).join("; ") || "Scene");
 	const activate = (intent) => intent && dispatch({
@@ -7815,282 +7869,274 @@ function SceneView($$anchor, $$props) {
 	const atlasBounds = /* @__PURE__ */ user_derived(() => {
 		const bounds = $$props.scene.atlas?.bounds;
 		if (!bounds) return "-10 -10 20 20";
-		return `${bounds.x_min - 2} ${bounds.z_min - 2} ${Math.max(4, bounds.x_max - bounds.x_min + 4)} ${Math.max(4, bounds.z_max - bounds.z_min + 4)}`;
+		const scale = Math.max(.25, $$props.scene.camera.fov_degrees / 45);
+		const width = Math.max(4, bounds.x_max - bounds.x_min + 4) * scale;
+		const height = Math.max(4, bounds.z_max - bounds.z_min + 4) * scale;
+		return `${Number($$props.scene.camera.target[0] ?? 0) - width / 2} ${Number($$props.scene.camera.target[2] ?? 0) - height / 2} ${width} ${height}`;
 	});
 	const atlasPoint = (position) => ({
 		x: Number(position[0] ?? 0),
 		y: Number(position[2] ?? position[1] ?? 0)
 	});
-	const atlasInteraction = (interaction) => {
-		if (!interaction) return;
-		if (interaction.type === "inspect_item") dispatch({
-			type: "activate",
-			intent: interaction
-		});
-		else if (interaction.type === "read_file") dispatch({
-			type: "activate",
-			intent: interaction
-		});
-		else dispatch({
-			type: "set_atlas_file_space_path",
-			tile_id: $$props.tileId,
-			root: interaction.root ?? $$props.scene.atlas?.ui.file_space_root ?? "project",
-			path: interaction.path
-		});
+	const actionById = /* @__PURE__ */ user_derived(() => new Map($$props.scene.actions.map((action) => [action.id, action])));
+	const actions = (group) => $$props.scene.actions.filter((action) => action.group === group);
+	const runAction = (action) => action && dispatch(action.event);
+	const keyAction = (event, action) => {
+		if (event.key === "Enter" || event.key === " ") {
+			event.preventDefault();
+			runAction(action);
+		}
 	};
-	const layerLabels = [
-		["directive", "Directives"],
-		["tool", "Tools"],
-		["knowledge", "Knowledge"],
-		["config", "Config"]
-	];
 	var div = root_13$1();
 	var node_1 = child(div);
-	var consequent_2 = ($$anchor) => {
-		var fragment = root_5$2();
-		var div_1 = first_child(fragment);
+	var consequent_1 = ($$anchor) => {
+		var div_1 = root_2$2();
 		var div_2 = child(div_1);
 		var strong = child(div_2);
 		var text = only_child(strong, true);
 		var text_1 = only_child(sibling(strong));
 		reset(div_2);
 		var div_3 = sibling(div_2, 2);
-		var button = child(div_3);
-		let classes;
-		var button_1 = sibling(button, 2);
-		let classes_1;
+		each(div_3, 21, () => actions("projection"), (action) => action.id, ($$anchor, action) => {
+			var button = root$6();
+			let classes;
+			var text_2 = only_child(button, true);
+			template_effect(() => {
+				set_attribute(button, "aria-pressed", get(action).active);
+				classes = set_class(button, 1, "", null, classes, { active: get(action).active });
+				set_text(text_2, get(action).label);
+			});
+			delegated("click", button, () => runAction(get(action)));
+			append($$anchor, button);
+		});
 		reset(div_3);
 		var node_2 = sibling(div_3, 2);
 		var consequent = ($$anchor) => {
-			var div_4 = root_1$3();
-			each(div_4, 21, () => layerLabels, index, ($$anchor, $$item) => {
-				var $$array = /* @__PURE__ */ user_derived(() => to_array(get($$item), 2));
-				let kind = () => get($$array)[0];
-				let label = () => get($$array)[1];
-				const active = /* @__PURE__ */ user_derived(() => $$props.scene.atlas.ui.visible_layers.includes(kind()));
-				var button_2 = root$6();
-				let classes_2;
-				var text_2 = only_child(button_2, true);
+			var fragment = root_1$3();
+			var div_4 = first_child(fragment);
+			each(div_4, 21, () => actions("layer"), (action) => action.id, ($$anchor, action) => {
+				var button_1 = root$6();
+				let classes_1;
+				var text_3 = only_child(button_1, true);
 				template_effect(() => {
-					set_attribute(button_2, "aria-pressed", get(active));
-					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(active) });
-					set_text(text_2, label());
+					set_attribute(button_1, "aria-pressed", get(action).active);
+					classes_1 = set_class(button_1, 1, "", null, classes_1, { active: get(action).active });
+					set_text(text_3, get(action).label);
 				});
-				delegated("click", button_2, () => dispatch({
-					type: "set_atlas_layer_visible",
-					tile_id: $$props.tileId,
-					kind: kind(),
-					visible: !get(active)
-				}));
-				append($$anchor, button_2);
+				delegated("click", button_1, () => runAction(get(action)));
+				append($$anchor, button_1);
 			});
 			reset(div_4);
-			append($$anchor, div_4);
+			var div_5 = sibling(div_4, 2);
+			each(div_5, 21, () => actions("lens"), (action) => action.id, ($$anchor, action) => {
+				var button_2 = root$6();
+				let classes_2;
+				var text_4 = only_child(button_2, true);
+				template_effect(() => {
+					set_attribute(button_2, "aria-pressed", get(action).active);
+					classes_2 = set_class(button_2, 1, "", null, classes_2, { active: get(action).active });
+					set_text(text_4, get(action).label);
+				});
+				delegated("click", button_2, () => runAction(get(action)));
+				append($$anchor, button_2);
+			});
+			reset(div_5);
+			append($$anchor, fragment);
 		};
 		if_block(node_2, ($$render) => {
 			if ($$props.scene.atlas.projection === "ai_space") $$render(consequent);
 		});
 		reset(div_1);
-		var svg = sibling(div_1, 2);
-		var node_3 = child(svg);
-		each(node_3, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
+		template_effect(() => {
+			set_text(text, $$props.scene.atlas.root_label);
+			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
+		});
+		append($$anchor, div_1);
+	};
+	if_block(node_1, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_1);
+	});
+	var svg = sibling(node_1, 2);
+	let classes_3;
+	var node_3 = child(svg);
+	each(node_3, 17, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
+		const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
+		const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
+		const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
+		const end = /* @__PURE__ */ user_derived(() => get(object).end);
+		var g = root_9$1();
+		let classes_4;
+		var node_4 = child(g);
+		var consequent_2 = ($$anchor) => {
+			var line = root_3$2();
+			template_effect(($0, $1) => {
+				set_attribute(line, "x1", get(ox));
+				set_attribute(line, "y1", get(oy));
+				set_attribute(line, "x2", $0);
+				set_attribute(line, "y2", $1);
+				set_attribute(line, "stroke", get(object).color);
+			}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
+			append($$anchor, line);
+		};
+		var consequent_3 = ($$anchor) => {
+			var text_5 = root_4$2();
+			var text_6 = only_child(text_5, true);
+			template_effect(() => {
+				set_attribute(text_5, "x", get(ox));
+				set_attribute(text_5, "y", get(oy));
+				set_attribute(text_5, "fill", get(object).color);
+				set_text(text_6, get(object).label ?? "");
+			});
+			append($$anchor, text_5);
+		};
+		var consequent_4 = ($$anchor) => {
+			var polygon = root_5$2();
+			template_effect(() => {
+				set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
+				set_attribute(polygon, "stroke", get(object).color);
+			});
+			append($$anchor, polygon);
+		};
+		var consequent_5 = ($$anchor) => {
+			var rect = root_6$2();
+			template_effect(() => {
+				set_attribute(rect, "x", get(ox) - get(r));
+				set_attribute(rect, "y", get(oy) - get(r));
+				set_attribute(rect, "width", get(r) * 2);
+				set_attribute(rect, "height", get(r) * 2);
+				set_attribute(rect, "stroke", get(object).color);
+			});
+			append($$anchor, rect);
+		};
+		var alternate = ($$anchor) => {
+			var circle = root_7$1();
+			template_effect(() => {
+				set_attribute(circle, "cx", get(ox));
+				set_attribute(circle, "cy", get(oy));
+				set_attribute(circle, "r", get(r));
+				set_attribute(circle, "stroke", get(object).color);
+			});
+			append($$anchor, circle);
+		};
+		if_block(node_4, ($$render) => {
+			if (get(end)) $$render(consequent_2);
+			else if (get(object).kind === "text") $$render(consequent_3, 1);
+			else if (get(object).glyph === "diamond") $$render(consequent_4, 2);
+			else if (get(object).glyph === "square") $$render(consequent_5, 3);
+			else $$render(alternate, -1);
+		});
+		var node_5 = sibling(node_4);
+		var consequent_6 = ($$anchor) => {
+			var title = root_8$1();
+			var text_7 = only_child(title, true);
+			template_effect(() => set_text(text_7, get(object).label));
+			append($$anchor, title);
+		};
+		if_block(node_5, ($$render) => {
+			if (get(object).label && get(object).kind !== "text") $$render(consequent_6);
+		});
+		reset(g);
+		template_effect(() => {
+			set_attribute(g, "data-tone", get(object).tone);
+			set_attribute(g, "opacity", get(object).opacity);
+			set_attribute(g, "role", get(object).intent ? "button" : void 0);
+			set_attribute(g, "tabindex", get(object).intent ? 0 : void 0);
+			classes_4 = set_class(g, 0, "", null, classes_4, { interactive: get(object).intent != null });
+		});
+		delegated("click", g, () => activate(get(object).intent));
+		delegated("keydown", g, (event) => {
+			if (event.key === "Enter" || event.key === " ") {
+				event.preventDefault();
+				activate(get(object).intent);
+			}
+		});
+		append($$anchor, g);
+	});
+	var node_6 = sibling(node_3);
+	var consequent_8 = ($$anchor) => {
+		var fragment_1 = root_12$1();
+		var node_7 = first_child(fragment_1);
+		each(node_7, 17, () => $$props.scene.atlas.links, (link) => link.id, ($$anchor, link) => {
 			const from = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).from));
 			const to = /* @__PURE__ */ user_derived(() => get(atlasNodes).get(get(link).to));
-			var fragment_1 = comment();
-			var node_4 = first_child(fragment_1);
-			var consequent_1 = ($$anchor) => {
+			var fragment_2 = comment();
+			var node_8 = first_child(fragment_2);
+			var consequent_7 = ($$anchor) => {
 				const start = /* @__PURE__ */ user_derived(() => atlasPoint(get(from).position));
 				const end = /* @__PURE__ */ user_derived(() => atlasPoint(get(to).position));
-				var line = root_2$2();
+				var line_1 = root_3$2();
 				template_effect(() => {
-					set_attribute(line, "x1", get(start).x);
-					set_attribute(line, "y1", get(start).y);
-					set_attribute(line, "x2", get(end).x);
-					set_attribute(line, "y2", get(end).y);
-					set_attribute(line, "data-kind", get(link).kind);
+					set_attribute(line_1, "x1", get(start).x);
+					set_attribute(line_1, "y1", get(start).y);
+					set_attribute(line_1, "x2", get(end).x);
+					set_attribute(line_1, "y2", get(end).y);
+					set_attribute(line_1, "data-kind", get(link).kind);
 				});
-				append($$anchor, line);
+				append($$anchor, line_1);
 			};
-			if_block(node_4, ($$render) => {
-				if (get(from) && get(to)) $$render(consequent_1);
+			if_block(node_8, ($$render) => {
+				if (get(from) && get(to)) $$render(consequent_7);
 			});
-			append($$anchor, fragment_1);
+			append($$anchor, fragment_2);
 		});
-		each(sibling(node_3), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
+		each(sibling(node_7), 17, () => $$props.scene.atlas.nodes, (node) => node.id, ($$anchor, node) => {
 			const point = /* @__PURE__ */ user_derived(() => atlasPoint(get(node).position));
-			var g = root_4$2();
-			let classes_3;
-			var circle = child(g);
-			var text_3 = sibling(circle);
-			var text_4 = only_child(text_3, true);
-			each(sibling(text_3), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
-				var circle_1 = root_3$2();
-				var text_5 = only_child(child(circle_1), true);
-				reset(circle_1);
+			const nodeAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`node:${get(node).id}`));
+			var fragment_3 = root_11$1();
+			var g_1 = first_child(fragment_3);
+			let classes_5;
+			var circle_1 = child(g_1);
+			var text_8 = sibling(circle_1);
+			var text_9 = only_child(text_8, true);
+			reset(g_1);
+			each(sibling(g_1), 19, () => get(node).stack.slice(0, 4), (item) => item.id, ($$anchor, item, index) => {
+				const itemAction = /* @__PURE__ */ user_derived(() => get(actionById).get(`item:${get(item).id}`));
+				var circle_2 = root_10$1();
+				var text_10 = only_child(child(circle_2), true);
+				reset(circle_2);
 				template_effect(() => {
-					set_attribute(circle_1, "data-kind", get(item).kind);
-					set_attribute(circle_1, "cx", get(point).x + get(index) * .11);
-					set_attribute(circle_1, "cy", get(point).y - .24);
-					set_text(text_5, get(item).canonical_ref);
+					set_attribute(circle_2, "data-kind", get(item).kind);
+					set_attribute(circle_2, "cx", get(point).x + get(index) * .11);
+					set_attribute(circle_2, "cy", get(point).y - .24);
+					set_attribute(circle_2, "role", get(itemAction) ? "button" : void 0);
+					set_attribute(circle_2, "tabindex", get(itemAction) ? 0 : void 0);
+					set_text(text_10, get(item).canonical_ref);
 				});
-				delegated("click", circle_1, (event) => {
-					event.stopPropagation();
-					atlasInteraction(get(item).interaction);
-				});
-				delegated("keydown", circle_1, (event) => {
-					if (event.key === "Enter" || event.key === " ") atlasInteraction(get(item).interaction);
-				});
-				append($$anchor, circle_1);
+				delegated("click", circle_2, () => runAction(get(itemAction)));
+				delegated("keydown", circle_2, (event) => keyAction(event, get(itemAction)));
+				append($$anchor, circle_2);
 			});
-			reset(g);
 			template_effect(($0) => {
-				classes_3 = set_class(g, 0, "atlas-node", null, classes_3, {
+				classes_5 = set_class(g_1, 0, "atlas-node", null, classes_5, {
 					selected: get(node).state.selected,
 					highlighted: get(node).state.highlighted,
 					dimmed: get(node).state.dimmed
 				});
-				set_attribute(g, "role", get(node).interaction ? "button" : void 0);
-				set_attribute(g, "tabindex", get(node).interaction ? 0 : void 0);
-				set_attribute(circle, "cx", get(point).x);
-				set_attribute(circle, "cy", get(point).y);
-				set_attribute(circle, "r", $0);
-				set_attribute(text_3, "x", get(point).x + .28);
-				set_attribute(text_3, "y", get(point).y + .08);
-				set_text(text_4, get(node).label);
+				set_attribute(g_1, "role", get(nodeAction) ? "button" : void 0);
+				set_attribute(g_1, "tabindex", get(nodeAction) ? 0 : void 0);
+				set_attribute(circle_1, "cx", get(point).x);
+				set_attribute(circle_1, "cy", get(point).y);
+				set_attribute(circle_1, "r", $0);
+				set_attribute(text_8, "x", get(point).x + .28);
+				set_attribute(text_8, "y", get(point).y + .08);
+				set_text(text_9, get(node).label);
 			}, [() => Math.max(.18, .16 + get(node).stack.length * .045)]);
-			delegated("click", g, () => atlasInteraction(get(node).interaction));
-			delegated("keydown", g, (event) => {
-				if (event.key === "Enter" || event.key === " ") atlasInteraction(get(node).interaction);
-			});
-			append($$anchor, g);
+			delegated("click", g_1, () => runAction(get(nodeAction)));
+			delegated("keydown", g_1, (event) => keyAction(event, get(nodeAction)));
+			append($$anchor, fragment_3);
 		});
-		reset(svg);
-		template_effect(() => {
-			set_text(text, $$props.scene.atlas.root_label);
-			set_text(text_1, `${$$props.scene.atlas.nodes.length ?? ""} regions`);
-			classes = set_class(button, 1, "", null, classes, { active: $$props.scene.atlas.projection === "ai_space" });
-			classes_1 = set_class(button_1, 1, "", null, classes_1, { active: $$props.scene.atlas.projection === "file_space" });
-			set_attribute(svg, "viewBox", get(atlasBounds));
-			set_attribute(svg, "aria-label", `${$$props.scene.atlas.root_label} atlas`);
-		});
-		delegated("click", button, () => dispatch({
-			type: "set_atlas_projection",
-			tile_id: $$props.tileId,
-			projection: "ai_space",
-			root: null
-		}));
-		delegated("click", button_1, () => dispatch({
-			type: "set_atlas_projection",
-			tile_id: $$props.tileId,
-			projection: "file_space",
-			root: $$props.scene.atlas?.ui.file_space_root ?? null
-		}));
-		append($$anchor, fragment);
+		append($$anchor, fragment_1);
 	};
-	var alternate_1 = ($$anchor) => {
-		var svg_1 = root_12$1();
-		each(svg_1, 21, () => $$props.scene.objects, (object) => object.id, ($$anchor, object) => {
-			const r = /* @__PURE__ */ user_derived(() => radius(get(object)));
-			const ox = /* @__PURE__ */ user_derived(() => x(get(object)));
-			const oy = /* @__PURE__ */ user_derived(() => y(get(object)));
-			const end = /* @__PURE__ */ user_derived(() => get(object).end);
-			var g_1 = root_11$1();
-			let classes_4;
-			var node_7 = child(g_1);
-			var consequent_3 = ($$anchor) => {
-				var line_1 = root_2$2();
-				template_effect(($0, $1) => {
-					set_attribute(line_1, "x1", get(ox));
-					set_attribute(line_1, "y1", get(oy));
-					set_attribute(line_1, "x2", $0);
-					set_attribute(line_1, "y2", $1);
-					set_attribute(line_1, "stroke", get(object).color);
-				}, [() => Number(get(end)[0] ?? 0), () => -Number(get(end)[1] ?? 0)]);
-				append($$anchor, line_1);
-			};
-			var consequent_4 = ($$anchor) => {
-				var text_6 = root_6$2();
-				var text_7 = only_child(text_6, true);
-				template_effect(() => {
-					set_attribute(text_6, "x", get(ox));
-					set_attribute(text_6, "y", get(oy));
-					set_attribute(text_6, "fill", get(object).color);
-					set_text(text_7, get(object).label ?? "");
-				});
-				append($$anchor, text_6);
-			};
-			var consequent_5 = ($$anchor) => {
-				var polygon = root_7$1();
-				template_effect(() => {
-					set_attribute(polygon, "points", `${get(ox)},${get(oy) - get(r)} ${get(ox) + get(r)},${get(oy)} ${get(ox)},${get(oy) + get(r)} ${get(ox) - get(r)},${get(oy)}`);
-					set_attribute(polygon, "stroke", get(object).color);
-				});
-				append($$anchor, polygon);
-			};
-			var consequent_6 = ($$anchor) => {
-				var rect = root_8$1();
-				template_effect(() => {
-					set_attribute(rect, "x", get(ox) - get(r));
-					set_attribute(rect, "y", get(oy) - get(r));
-					set_attribute(rect, "width", get(r) * 2);
-					set_attribute(rect, "height", get(r) * 2);
-					set_attribute(rect, "stroke", get(object).color);
-				});
-				append($$anchor, rect);
-			};
-			var alternate = ($$anchor) => {
-				var circle_2 = root_9$1();
-				template_effect(() => {
-					set_attribute(circle_2, "cx", get(ox));
-					set_attribute(circle_2, "cy", get(oy));
-					set_attribute(circle_2, "r", get(r));
-					set_attribute(circle_2, "stroke", get(object).color);
-				});
-				append($$anchor, circle_2);
-			};
-			if_block(node_7, ($$render) => {
-				if (get(end)) $$render(consequent_3);
-				else if (get(object).kind === "text") $$render(consequent_4, 1);
-				else if (get(object).glyph === "diamond") $$render(consequent_5, 2);
-				else if (get(object).glyph === "square") $$render(consequent_6, 3);
-				else $$render(alternate, -1);
-			});
-			var node_8 = sibling(node_7);
-			var consequent_7 = ($$anchor) => {
-				var title_1 = root_10$1();
-				var text_8 = only_child(title_1, true);
-				template_effect(() => set_text(text_8, get(object).label));
-				append($$anchor, title_1);
-			};
-			if_block(node_8, ($$render) => {
-				if (get(object).label && get(object).kind !== "text") $$render(consequent_7);
-			});
-			reset(g_1);
-			template_effect(() => {
-				set_attribute(g_1, "data-tone", get(object).tone);
-				set_attribute(g_1, "opacity", get(object).opacity);
-				set_attribute(g_1, "role", get(object).intent ? "button" : void 0);
-				set_attribute(g_1, "tabindex", get(object).intent ? 0 : void 0);
-				classes_4 = set_class(g_1, 0, "", null, classes_4, { interactive: get(object).intent != null });
-			});
-			delegated("click", g_1, () => activate(get(object).intent));
-			delegated("keydown", g_1, (event) => {
-				if (event.key === "Enter" || event.key === " ") activate(get(object).intent);
-			});
-			append($$anchor, g_1);
-		});
-		reset(svg_1);
-		template_effect(() => {
-			set_attribute(svg_1, "viewBox", get(bounds));
-			set_attribute(svg_1, "aria-label", get(accessibleLabel));
-		});
-		append($$anchor, svg_1);
-	};
-	if_block(node_1, ($$render) => {
-		if ($$props.scene.atlas) $$render(consequent_2);
-		else $$render(alternate_1, -1);
+	if_block(node_6, ($$render) => {
+		if ($$props.scene.atlas) $$render(consequent_8);
 	});
+	reset(svg);
 	reset(div);
+	template_effect(() => {
+		set_attribute(svg, "viewBox", $$props.scene.atlas ? get(atlasBounds) : get(bounds));
+		set_attribute(svg, "aria-label", $$props.scene.atlas ? `${$$props.scene.atlas.root_label} atlas` : get(accessibleLabel));
+		classes_3 = set_class(svg, 0, "", null, classes_3, { "atlas-canvas": $$props.scene.atlas != null });
+	});
 	append($$anchor, div);
 	pop();
 }
@@ -8368,14 +8414,9 @@ function ViewRenderer($$anchor, $$props) {
 		});
 	};
 	var consequent_14 = ($$anchor) => {
-		SceneView($$anchor, {
-			get scene() {
-				return $$props.model.scene;
-			},
-			get tileId() {
-				return $$props.tileId;
-			}
-		});
+		SceneView($$anchor, { get scene() {
+			return $$props.model.scene;
+		} });
 	};
 	var consequent_15 = ($$anchor) => {
 		FieldView($$anchor, {

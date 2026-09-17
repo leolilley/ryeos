@@ -5,7 +5,7 @@ use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
-use super::scene_model::{RyeOsSceneModel, build_scene_model};
+use super::scene_model::{RyeOsSceneModel, bind_scene_actions, build_scene_model};
 use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
@@ -1341,20 +1341,22 @@ fn bound_view_vm_keyed(
         "atlas" => {
             // This tile's own scoped dataset when it has one (keyed by tile
             // id == source_key); otherwise None falls back to the shared data.
-            return RyeOsViewVm::Atlas {
-                scene: build_scene_model(
-                    core,
-                    atlas,
-                    scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
-                    scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
-                ),
-            };
+            let mut scene = build_scene_model(
+                core,
+                atlas,
+                scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
+                scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
+            );
+            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            bind_scene_actions(&mut scene, tile_id);
+            return RyeOsViewVm::Atlas { scene };
         }
         "graph" => {
             // Graph renders shared topology; no per-tile content scope yet.
-            return RyeOsViewVm::Map {
-                scene: build_scene_model(core, atlas, None, None),
-            };
+            let mut scene = build_scene_model(core, atlas, None, None);
+            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            bind_scene_actions(&mut scene, tile_id);
+            return RyeOsViewVm::Map { scene };
         }
         "sections" => {
             // A sections view reads one typed source channel per section, not
