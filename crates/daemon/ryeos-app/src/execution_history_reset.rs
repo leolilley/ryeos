@@ -19,6 +19,12 @@ use crate::state_lock::{StateLock, default_lock_path};
 pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str =
     "ryeos node reset execution-history --include-project-heads --confirm --confirm-project-heads";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionHistorySchemaCut {
+    pub from: u32,
+    pub to: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionHistoryResetOptions {
     pub app_root: Option<PathBuf>,
@@ -27,6 +33,10 @@ pub struct ExecutionHistoryResetOptions {
     /// project HEADs. This is accepted only with the all-thread-history discard
     /// because live history may reference either namespace.
     pub discard_project_heads: bool,
+    /// When present, reset only the exact named predecessor epoch. A repeated
+    /// invocation against the named current epoch is a non-destructive no-op;
+    /// every other epoch pairing is refused.
+    pub schema_cut: Option<ExecutionHistorySchemaCut>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -87,6 +97,22 @@ pub enum RuntimeThreadHistoryAccounting {
     UnavailableIncompatibleSchema,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionHistorySchemaCutStatus {
+    Required,
+    Completed,
+    AlreadyCurrent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecutionHistorySchemaCutReport {
+    pub from: u32,
+    pub to: u32,
+    pub observed: u32,
+    pub status: ExecutionHistorySchemaCutStatus,
+}
+
 impl RuntimeThreadHistoryAccounting {
     pub fn total_rows(&self) -> Option<usize> {
         match self {
@@ -111,6 +137,9 @@ fn completed_runtime_accounting(
 pub struct ExecutionHistoryResetReport {
     pub app_root: PathBuf,
     pub dry_run: bool,
+    pub performed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_cut: Option<ExecutionHistorySchemaCutReport>,
     pub chain_heads: usize,
     pub project_heads: usize,
     pub chain_ref_artifacts: usize,
@@ -213,6 +242,35 @@ fn run_execution_history_reset_inner(
         &runtime_directory_lock,
         options.dry_run,
     )?;
+    let observed_runtime_schema_epoch = runtime_db
+        .operator_schema_epoch()
+        .context("inspect runtime operator schema epoch")?;
+    let current_runtime_schema_epoch = RuntimeDb::current_operator_schema_epoch();
+    let schema_cut_already_current = if let Some(schema_cut) = options.schema_cut {
+        if schema_cut.from == schema_cut.to {
+            anyhow::bail!("execution-history schema cut must name distinct epochs");
+        }
+        if schema_cut.to != current_runtime_schema_epoch {
+            anyhow::bail!(
+                "execution-history schema cut targets epoch {}, but this RyeOS build owns epoch {}",
+                schema_cut.to,
+                current_runtime_schema_epoch
+            );
+        }
+        if observed_runtime_schema_epoch != schema_cut.from
+            && observed_runtime_schema_epoch != schema_cut.to
+        {
+            anyhow::bail!(
+                "execution-history schema cut expects stored epoch {} or completed epoch {}, but observed epoch {}",
+                schema_cut.from,
+                schema_cut.to,
+                observed_runtime_schema_epoch
+            );
+        }
+        observed_runtime_schema_epoch == schema_cut.to
+    } else {
+        false
+    };
     let scheduler_db_path = runtime_state_dir.join("scheduler.sqlite3");
     let scheduler_preview = inspect_scheduler_db(&scheduler_db_path, &runtime_directory)?;
 
@@ -264,7 +322,7 @@ fn run_execution_history_reset_inner(
         ryeos_state::OperationalDb::prepare_replay_reset_with_namespace_authority(
             &runtime_directory,
             runtime_directory_lock.clone(),
-            options.dry_run,
+            options.dry_run || schema_cut_already_current,
         )
         .context("prepare replay retirement and stable credential preservation")?;
     let replay_indexes = prepared_replay.report();
@@ -301,11 +359,24 @@ fn run_execution_history_reset_inner(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    if options.dry_run {
+    if options.dry_run || schema_cut_already_current {
         publish_progress(&mut observer, ExecutionHistoryResetPhase::Complete, None);
         return Ok(ExecutionHistoryResetReport {
             app_root: config.app_root,
-            dry_run: true,
+            dry_run: options.dry_run,
+            performed: false,
+            schema_cut: options
+                .schema_cut
+                .map(|schema_cut| ExecutionHistorySchemaCutReport {
+                    from: schema_cut.from,
+                    to: schema_cut.to,
+                    observed: observed_runtime_schema_epoch,
+                    status: if schema_cut_already_current {
+                        ExecutionHistorySchemaCutStatus::AlreadyCurrent
+                    } else {
+                        ExecutionHistorySchemaCutStatus::Required
+                    },
+                }),
             chain_heads: authoritative_preview.chain_heads,
             project_heads: project_heads_preview,
             chain_ref_artifacts: authoritative_preview.chain_ref_artifacts,
@@ -428,6 +499,15 @@ fn run_execution_history_reset_inner(
     Ok(ExecutionHistoryResetReport {
         app_root: config.app_root,
         dry_run: false,
+        performed: true,
+        schema_cut: options
+            .schema_cut
+            .map(|schema_cut| ExecutionHistorySchemaCutReport {
+                from: schema_cut.from,
+                to: schema_cut.to,
+                observed: observed_runtime_schema_epoch,
+                status: ExecutionHistorySchemaCutStatus::Completed,
+            }),
         chain_heads: authoritative.chain_heads,
         project_heads,
         chain_ref_artifacts: authoritative.chain_ref_artifacts,
@@ -877,10 +957,19 @@ mod tests {
             app_root: Some(tmp.path().to_owned()),
             dry_run: true,
             discard_project_heads: false,
+            schema_cut: Some(ExecutionHistorySchemaCut {
+                from: RuntimeDb::current_operator_schema_epoch() - 1,
+                to: RuntimeDb::current_operator_schema_epoch(),
+            }),
         };
         let runtime_before = std::fs::read(&config.db_path).unwrap();
         let operational_before = std::fs::read(&operational_path).unwrap();
         let preview = run_execution_history_reset(&options).unwrap();
+        assert!(!preview.performed);
+        assert_eq!(
+            preview.schema_cut.as_ref().unwrap().status,
+            ExecutionHistorySchemaCutStatus::Required
+        );
         assert_eq!(
             preview.replay_indexes.scope,
             ryeos_state::operational::ReplayIndexResetScope::AllReplayRecords
@@ -913,6 +1002,11 @@ mod tests {
             ..options
         };
         let report = run_execution_history_reset(&options).unwrap();
+        assert!(report.performed);
+        assert_eq!(
+            report.schema_cut.as_ref().unwrap().status,
+            ExecutionHistorySchemaCutStatus::Completed
+        );
         assert_eq!(report.replay_indexes, preview.replay_indexes);
         let db = ryeos_state::OperationalDb::open_existing_current(&operational_path).unwrap();
         assert_eq!(
@@ -936,6 +1030,12 @@ mod tests {
         drop(RuntimeDb::open(&config.db_path).unwrap());
         drop(ryeos_state::StateDb::open(&config.runtime_state_dir(), trust).unwrap());
         let repeated = run_execution_history_reset(&options).unwrap();
+        assert!(!repeated.performed);
+        assert!(!repeated.dry_run);
+        assert_eq!(
+            repeated.schema_cut.as_ref().unwrap().status,
+            ExecutionHistorySchemaCutStatus::AlreadyCurrent
+        );
         assert_eq!(
             repeated.replay_indexes.scope,
             ryeos_state::operational::ReplayIndexResetScope::Unchanged

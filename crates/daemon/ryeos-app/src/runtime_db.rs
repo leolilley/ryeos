@@ -14107,6 +14107,17 @@ impl RuntimeDb {
         self.reset_required
     }
 
+    /// Report the exact operator-schema epoch owned by this pinned runtime
+    /// database. Offline schema-cut callers use this only after opening the
+    /// database through the explicit reset authority above.
+    pub fn operator_schema_epoch(&self) -> Result<u32> {
+        runtime_operator_schema_epoch(&self.conn, Path::new("<pinned-runtime-database>"))
+    }
+
+    pub const fn current_operator_schema_epoch() -> u32 {
+        RUNTIME_OPERATOR_SCHEMA_EPOCH
+    }
+
     /// Apply the already-confirmed destructive schema cutover. Callers must
     /// publish their authoritative cross-store discard intent before invoking
     /// this method; opening the pinned handle never performs this mutation.
