@@ -1,12 +1,11 @@
 # RyeOS remote development completion plan and live ledger
 
-Updated: 2026-09-17, Pacific/Auckland. Owner: this execution thread.
-Status: EXECUTING — G0a/G3a and both grant-refresh activation corrections are
-implemented and independently reviewed. The former `/tmp` source and target were
-deleted during an explicitly requested disk cleanup, invalidating every node-,
-grant-, snapshot-, and product-bound live witness. Fresh v0.5.91 nodes are now
-initialized, host-provisioned, healthy, and mutually pinned; exact authority and
-products are being reconstructed. No E2E pass claimed.
+Updated: 2026-09-18, Pacific/Auckland. Owner: this execution thread.
+Status: EXECUTING — merged-worktree remediation is complete at `545c716e2` and
+the primary node is live on that exact revision. The retained source and target
+nodes remain healthy, mutually pinned, and state-preserving on v0.5.91 revision
+`bc58d9b70919`; they must be upgraded in place through the supported lifecycle
+before qualification resumes. No E2E pass claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -21,27 +20,25 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: reconstruct G0 authority on the fresh v0.5.91 pair. The narrow
-source-node transfer/co-signing grant and `qualification` identity pin are complete.
-The origin-bound configured-operator grant is awaiting explicit approval for its
-exact remote-development production, activation, verifier, and worker-execution
-scopes. After that, push the newly pinned source project once and reproduce all
-target-local products before resuming the native verifier boundary. Do not reuse
-historical hashes or launch IDs, create another node, use a custom runner, copy a
-binary directly, or issue bare host-upgrade phases outside the audited installer.
+Current gate: upgrade the existing retained source/target pair from v0.5.91
+revision `bc58d9b70919` to the completed implementation revision `545c716e2`,
+without recreating either node or replacing its identity, state, grants, snapshots,
+or products. Revalidate those authorities after the supported upgrade, then resume
+G1 at the native authoring-runtime verifier boundary. Do not reuse historical
+launch IDs, create another node, use a custom runner, copy a binary directly, or
+issue bare host-upgrade phases outside the audited installer.
 
-Latest committed fix: `ac4bea5bb Advance managed activation realizations safely`.
-It CAS-advances the portable activation head when verified grant-bound binding hashes
-change and narrowly reconciles an exhausted failed ledger from exact current binding
-or receipt authority. Cancellation and malformed authority remain terminal/fail
-closed. The 27-test activation suite and state-owner regression pass; two independent
-re-reviews approve. Native verifier live success is NOT established.
+Current implementation checkpoint: `545c716e2 Implement merged worktree
+remediation`. It contains the reviewed remote-development and CLI reflow corrections
+and is the exact revision reported by the healthy primary daemon. The source and
+target nodes have not yet consumed this generation. Native verifier live success is
+NOT established.
 
-Host-context audit at 2026-09-17T11:26:02+12:00: source 7423 and target 7445 are
-stopped. The obsolete GgHPTg target on 7444 and Sep-10 host-supervision daemon were
-still descriptor-launched under runit and are now down. Four additional stale
-`/tmp` services were in failed `want up` loops and are now down. The primary node at
-7400 remains running and untouched. No retained fixture data was deleted.
+Host-context audit at 2026-09-18: primary 7400 is healthy on v0.5.93 revision
+`545c716e2a25` (PID 19430). Retained source 7423 (PID 11380) and target 7445
+(PID 9401) are both healthy on v0.5.91 revision `bc58d9b70919`. No retained node
+state, fixture data, identity, grant, snapshot, product, or project authority was
+changed by this audit.
 
 ## Scope and finish line
 
@@ -88,7 +85,7 @@ These are last-known coordinates; G0 must confirm them without mutation.
 
 | Field | Retained value |
 |---|---|
-| Repo / branch | `/home/leo/projects/ryeos-next`, `next` |
+| Repo / branch | `/home/leo/projects/ryeos-next`, `next`; implementation checkpoint `545c716e2`; documentation-only follow-up `4ce7bc6e0` |
 | Source app root | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-node` |
 | Source HTTP | `http://127.0.0.1:7423` |
 | Source project | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-project`, detached `bc58d9b709194a8e13f26f641585e2266ba4ba7f`, tree `7a8ea1a83864345f5d7c2d6a8fffcb2a3b8b4e7c` |
@@ -102,9 +99,10 @@ These are last-known coordinates; G0 must confirm them without mutation.
 | Target vault identity | `0b29be10b26bea6ac4bb2034c71aee41a35fc34f287d5d482f3b922c7be501b8` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
 | Frozen target snapshot / target HEAD | `19fd0c0119daa9358a7f9a280cd3d08a8d6b403e717fa7e40e73e9cb066def9e`; tree `7e09b35c0110494cc3f8667e671f4f7706440741673575ca8835283b9a011d4b`; 3,010 entries; source Git `bc58d9b709194a8e13f26f641585e2266ba4ba7f`; historical `24ec8029…` remains invalid |
-| Installed CLI / daemon | `/usr/bin/ryeos` v0.5.91, sha256 `ffbc1cbff010e02ca7b09a2d56a6c4bfb93480b9fdfa8219d71966f8122edd7a`; `/usr/bin/ryeosd` v0.5.91, sha256 `be8171f3afc77425bca8d9a5e5d76e02a7f4028d31ae965db884c2f42c76f0e4` |
+| Primary installed CLI / daemon | `/usr/bin/ryeos` v0.5.93 revision `545c716e2a25`, sha256 `abd6676b5c5e8ab4749d3ce0a03aef2e882bd1f6e8721fce0e31acd33c2b2110`; `/usr/bin/ryeosd` v0.5.93 revision `545c716e2a25`, sha256 `0b0e893375e02a8276998e0b0a02a293e2867d6ac6a8a3eface653e80aa13488`; both exactly match `target/release` |
+| Retained source / target daemon generation | both v0.5.91 revision `bc58d9b70919`; source PID 11380 on 7423, target PID 9401 on 7445; supported in-place upgrade pending |
 | Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` remains v0.5.87 revision `3a43ed50ee3e`, sha256 `263b937620543e2a72ef7e8d4d19225c48a4e40921c8c6b9a1af56e5080aa28b`; it is not the canonical target service image |
-| Target daemon last known | fresh canonical host service healthy on 7445 with installed v0.5.91 at 2026-09-17T18:57 NZST; source likewise healthy on 7423 |
+| Target daemon last known | retained canonical target healthy on 7445 at v0.5.91 revision `bc58d9b70919`; source likewise healthy on 7423; both require supported in-place upgrade to `545c716e2` |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
 
 G0 must fill source/target binary revisions and digests, bundle identities, runtime
@@ -386,6 +384,7 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 17 14:30 NZST | G1 live retry / second correction | installed `affd9c8db`; retried exact activation `9deb5e9a…`, job `external-activation:0bb63d…` | consumer-binding contradiction was fixed, exposing a distinct portable-head contradiction. Three attempts safely exhausted; exact job is Failed, no duplicate job/push/grant. Implemented CAS head advancement plus exact exhausted-ledger reconciliation; fresh-store, cancelled, corrupt and mismatched-operation boundaries remain closed. 27 activation tests + state regression pass; authority and acceptance re-reviews approve | install `ac4bea5bb`, whose staged daemon sha256 is `4b58b0799bcee13d1684b97b86be0d01dc4649f9e0651646c04e4373f8220c93`; source is stopped, target remains live on `affd9c8db`. Run audited installer command, restart source, repeat exact activation to fold the same job |
 | Sept 17 15:00 NZST | G1 install / activation recovery | supported full installer after rebuilding the clean `next` CLI | first install safely stopped at a stale cross-worktree CLI expecting `persistent_session.cleanup_authority`; rebuilt `ryeos` sha256 `2ff0f831e8ae693eed45bf8585a3f662f8ac6921aaec1c5e930ba157d2b66232`. Installed daemon sha256 `4b58b0799bcee13d1684b97b86be0d01dc4649f9e0651646c04e4373f8220c93`, v0.5.88 revision `ac4bea5bb65a`. Exact activation `9deb5e9a…` completed on the same exhausted job with receipt `84c92061…`, phase `completed_from_current_bindings`, attempt count still 3 | activation correction is live-proved; no new acquisition, producer rebuild, push or identity replacement occurred |
 | Sept 17 15:06 NZST | G1 verifier composition / launch | composed exact current authoring-runtime and prepared-input bindings, then accepted launch `L-20260917000000000000000000000053` | composition thread `svc-1789613869182-f5ac2ba4`; bindings `01db730e…` and `d4ff9e…`. Verifier thread `T-5961667f-a21c-6438-b129-17dd84fdacf4` failed before PID/start with retained `engine_error`; admitted capsule `735e6bc5…` proves exact manifests `462135d8…`, `55027628…`, producer Python `800d4969…`, and correct projectless authority | do not reuse launch 53. Retained error is intentionally redacted and receipts add no process step; run one synchronous verifier request through the same origin-bound remote route so the spawn boundary is returned directly, then correct the generic isolation/spawn defect if confirmed |
+| Sept 18 | G0 implementation reconciliation | host lifecycle status plus installed/release hash comparison at source checkpoint `545c716e2` | primary healthy on 7400 at v0.5.93 revision `545c716e2a25`, PID 19430; installed CLI/daemon exactly match release hashes `abd6676b…`/`0b0e8933…`. Retained source 7423 PID 11380 and target 7445 PID 9401 remain healthy at v0.5.91 revision `bc58d9b70919` | preserve both retained nodes and all authority; perform supported in-place upgrade to the exact current committed generation, then revalidate identity/grants/snapshots/products before resuming the native verifier boundary |
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,
