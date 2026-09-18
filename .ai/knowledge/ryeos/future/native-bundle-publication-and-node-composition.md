@@ -124,7 +124,10 @@ consumers repeat the equivalent check under their own policy.
 The current key-lifecycle design has no rotation or succession contract.
 Production therefore requires at least a static trust epoch and explicit
 compromise freeze/clean-cut recovery procedure, without claiming automatic
-continuity for old releases after revocation.
+continuity for old releases after revocation. Under the current fail-closed
+model, revocation may invalidate historical recovery. Recording the old policy
+digest preserves evidence of the prior decision; it does not preserve present
+authority to activate or recover under that policy.
 
 ## Durable identities
 
@@ -154,6 +157,11 @@ paths, normalized executable modes, internal links, byte counts, and blob
 edges unless implementation proves it cannot faithfully represent a bundle.
 The current live-directory `bundle/export` response is a migration mechanism,
 not the durable generation format.
+
+V1 release attestations are non-expiring and remain subject to current local
+publisher policy and revocation. Their signed `issued_at` is an issuer claim,
+not an independent timestamp or freshness proof. Expiring release authority
+requires a later explicit offline recovery and rollback policy.
 
 ### Bundle set
 
@@ -392,7 +400,7 @@ it cannot create historical provenance retroactively.
 - Register complete closure edges and bounded validators.
 - Provide local package and verification operations.
 
-### Stage 2 — source node
+### Stage 2 — bundle-source node
 
 - Add publisher-authorized catalog publication and exact read/resolve APIs.
 - Reuse bounded object transfer and generic signed-head retention.
@@ -448,7 +456,7 @@ The first production cut is complete only when:
   producer, environment, checks, publisher, target, and content, and each claim
   is accepted only under explicit policy;
 - source-node restart preserves current and retained catalog generations;
-- the source node cannot forge publisher evidence;
+- the bundle-source node cannot forge publisher evidence;
 - consumers reject missing, partial, malformed, oversized, wrong-target,
   incompatible, unsigned, or wrongly signed closures;
 - one consumer can move to the new set while another remains on the old set;
@@ -463,8 +471,8 @@ The first production cut is complete only when:
 
 - An OCI image per bundle generation.
 - Treating OCI registries as the RyeOS bundle protocol.
-- Installing every catalog bundle on the source node.
-- Giving a build worker or source node the publisher private key.
+- Installing every catalog bundle on the bundle-source node.
+- Giving a build worker or bundle-source node the publisher private key.
 - Floating consumer installation from an unpinned `latest` response.
 - Inferring bundle sets from catalog contents.
 - Replacing Git source hosting in the first slice.
