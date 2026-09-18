@@ -22,26 +22,24 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: allow the in-progress v0.5.97 source/doc generation to land, freeze
-its exact commit in a dedicated immutable Git worktree, then build and install
-one exact source generation. Create one fresh source/target pair with
-the supported installer and `development` node profile. Reconstruct the remote
+Current gate: stage the already-released v0.5.96 CLI/daemon in the dedicated
+root-owned qualification path, provision the two already-initialized fresh nodes
+through supported host setup, and start them. Reconstruct the remote
 descriptor, exact grant, immutable source project, target snapshot, credential
 status, and product witnesses from their owning APIs. Do not attempt to recover
 authority from the recreated empty paths or reuse any former identity, launch,
 chain, witness, project HEAD, receipt, or replay coordinate.
 
-Current implementation checkpoint: committed HEAD advanced through
-`68b2c1672 Admit trusted structured worker sessions`; an uncommitted v0.5.97
-version cut plus knowledge changes is currently present and must not be built
-until it lands. The generic resource-selection realization correction landed at
-`7be572725`; exact hosted execution schema-cut support landed at `aa57e36ce`.
-Installed `/usr/bin` is mixed and stale: CLI v0.5.93 (`abd6676b…`) and daemon
-`d18fd85f…`. A full v0.5.96 population started from clean `37eaedbc7`, but the
-shared checkout advanced during the build; it was stopped as soon as a v0.5.97
-static component exposed the mixed generation. Do not install or admit any output
-from that interrupted run. Preserve Cargo cache only, then rebuild from the frozen
-worktree.
+Current implementation checkpoint: pin the immutable published v0.5.96 release,
+not moving `next`. Its release commit is `91b2e70c9afd48851579f80c3ff57100eb46f71d`,
+and it contains both `545c716e2` and the generic resource-selection correction
+`7be572725`. The official amd64 image manifest is `sha256:cc18414d…`; extracted
+CLI/daemon hashes are `65c571d6…` / `cf087705…`, and daemon build-info reports
+v0.5.96, the full release commit, build date `2026-09-18T22:14:04Z`, profile
+`release`. The 98 MB official full-bundle archive checksum passes. Ongoing
+v0.5.97+ source/release work is deliberately outside this proof and cannot
+invalidate it. The interrupted local mixed-generation population remains invalid
+and none of its outputs may be installed or admitted.
 
 Host-context checkpoint at 2026-09-19: former source service
 `ryeos-0b1d0411…` and target service `ryeos-721ce0a7…` are durably down after
@@ -120,6 +118,18 @@ G0 must fill source/target binary revisions and digests, bundle identities, runt
 epoch, grant digest, actual source HEAD, target-issued HEAD, Git base, host service
 association, and credential status. Keep Git revision, CAS snapshot, bundle digest,
 and node fingerprint separate. Paths containing GgHPTg do not imply node ownership.
+
+Replacement topology, initialized from the pinned release and current for G0:
+
+| Field | Current value |
+|---|---|
+| Release root | `/tmp/ryeos-remote-qualification-v0596.W0orXP` |
+| Release source | v0.5.96 commit `91b2e70c9afd48851579f80c3ff57100eb46f71d`; image amd64 manifest `sha256:cc18414da363350664408a3928911cf43a13faa3557bbee7520e216546733d03` |
+| Frozen CLI / daemon | SHA-256 `65c571d67f782c96e38fb08f3f5d93e4ebc1a105d25290da718cc58a52fdac1e` / `cf087705e9d377204b8bf01e69e3b58524b50213105e01129b3b233fd5d0399e`; dedicated root-owned staging pending |
+| Signed bundle source | `ryeos-bundles-0.5.96-x86_64`; release checksum passed; official publisher `c9d7301f…` |
+| Source | app root `source-node`; HTTP 7423; UDS `source.sock`; node `2bffd316a0cbaf16d35bd540b86b004fd0f1fd15e3e455aedac56a86f69686b2`; operator `2a11be4d71a845493c1d61bad903a6a3c1d2643eed3b5380e7b4201602382f10`; vault `a62d3bf79e0d1bfd4fde08cbbec2c8b79bdea9eef875822397c17212b6e34e43` |
+| Target | app root `target-node`; HTTP 7445; UDS `target.sock`; node `b6f956eeaf3ffc3031f27cd436184565c85584cb13d80322c7983102cba419fc`; operator `366d046c9495c0274bcddcc72f8bf941f7774c07033d42f0f4fe0014fe95da39`; vault `e38f972c098481de32848ffc51af0f24f2a392b92cce948e8cc425e96891fab2` |
+| Policy / lifecycle | both initialized with exact full bundle set and signed `development` profile; host association and start pending |
 
 ## Product evidence ledger
 
@@ -403,6 +413,8 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 19 10:15 NZST | G0 retained-state invalidation | filesystem, service, binary-hash, and endpoint reconciliation after `/tmp` cleanup | former source project is absent; both former app-root names were recreated at 10:00 NZST with only `.ai/.bundles.lock`. Exact runit services still report PIDs 16335 / 26242 as normally down, while 7423 / 7445 are unreachable. Installed CLI is v0.5.93 and installed daemon hash differs from both its former generation and staged v0.5.95. All former pair authority and every dependent G0/G1 product coordinate are invalidated | stop only the two exact orphan services. Rebuild/install exact current HEAD, create one fresh development-profile pair, and reconstruct authority once through supported APIs; never mine or reuse the deleted generation |
 | Sept 19 10:25 NZST | G0 orphan retirement | exact TERM of stale PIDs 16335 / 26242 followed by exact `sv down` for services `ryeos-0b1d0411…` / `ryeos-721ce0a7…` | both supervisors report durably down with no daemon PID; no other RyeOS service was touched | wait for the existing v0.5.96 worktree cut to land, then build/install one exact committed generation and create the replacement pair |
 | Sept 19 11:15 NZST | G0 immutable-build correction | full population begun from clean v0.5.96 `37eaedbc7`, bounded to four jobs; main release build completed in 41m28s and first static worker in 5m21s | shared checkout advanced to `68b2c1672` and then acquired an uncommitted v0.5.97 cut while the same script was running; the next static component identified itself as v0.5.97. Population was interrupted immediately (exit 130), before any install. Its outputs are mixed and invalid for authority | wait for current changes to commit, freeze exact HEAD in a dedicated worktree, and repopulate there. Reuse compiler cache only; never install or sign-admit the interrupted generation |
+| Sept 19 11:35 NZST | G0 released-generation selection | Git ancestry, GitHub release assets, official full-bundle checksum, pinned OCI manifest, and extracted binary build-info | selected immutable published v0.5.96 commit `91b2e70c…`, image manifest `cc18414d…`, CLI/daemon `65c571d6…` / `cf087705…`. It contains the remote-authority and realization fixes. This replaces the erroneous moving-tip build requirement; v0.5.97+ work is irrelevant unless the proof finds a missing capability | do not rebuild or globally reinstall merely because `next` advances; use this release for the whole proof |
+| Sept 19 11:40 NZST | G0 replacement-node initialization | official v0.5.96 CLI plus checksum-verified official full bundle archive, signed `development` profile | fresh source and target initialized at the replacement topology above with persisted 7423 / 7445 endpoints and new exact identities; no global path or running node changed | stage the two frozen binaries in `/usr/lib/ryeos-qualification/v0.5.96`, provision both host associations, start, and continue authority reconstruction |
 
 Evidence correction (subsequent code review): the 05:55 entry overstates two
 conclusions. The unary launch's detailed admission cause was not recovered;
