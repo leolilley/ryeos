@@ -4,7 +4,7 @@ name: environment-build-system
 title: RyeOS Environment Build System
 description: A RyeOS-native model for producing, verifying, publishing, and consuming portable execution environments from exact admitted content.
 entry_type: design
-version: "0.1.0"
+version: "0.2.0"
 status: discussion
 ```
 
@@ -84,6 +84,7 @@ Related boundaries are described in:
 - [Large-content realization follow-ons](large-content-realization-follow-ons.md)
 - [Execution identity](execution-identity.md)
 - [RyeOS-native development platform](ryeos-native-development-platform.md)
+- [Native bundle publication and node composition](native-bundle-publication-and-node-composition.md)
 - [Reflexive deployment](reflexive-deployment.md)
 - [Determinism classes](determinism-classes.md)
 
@@ -117,6 +118,29 @@ The Graph supplies ordering, branching, failure behavior, and durable lineage.
 The content system supplies byte identity. Publication supplies the authority
 transition from a private result to a reusable input. None of these roles
 should be reimplemented by a recipe language or producer script.
+
+## Relationship to native software releases
+
+This build system supplies exact environments and reusable artifact-producing
+operations to the RyeOS-native development platform. It does not own project,
+bundle, or substrate release authority.
+
+In the bundle-publication path, an admitted build Graph consumes an exact
+published authoring environment and exact source closure, then retains bundle
+products and qualification evidence. A separate publisher decision authorizes
+the exact bundle generation. The bundle-source node stores that publication,
+and consumers apply their own admission. Producing the environment does not
+authorize any of those later transitions.
+
+External CI may temporarily invoke the same native operations, but workflow
+YAML must not be the only owner of build inputs, bundle assembly, qualification,
+or publication behavior. The long-term producer is a RyeOS development node;
+GitHub becomes an optional trigger and projection as described by the native
+development-platform owner.
+
+The native authoring environment is therefore bootstrap infrastructure for the
+software factory, not the software factory itself. Ordinary bundle releases
+reuse a published environment and must not reproduce it for every build.
 
 ## Implementation languages are replaceable
 

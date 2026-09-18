@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T08:24:14Z:a6cd0359802765cf7071e6091ed424862f2e42760628642d44f92e3c1e91a4db:ZUrGe1XIeXHjG3fgVu/dWAAPr0kH2MN/9EZX3tKpNQ0ZjDcqEWugGbX643kRMeLWVYyysfT7oySma3GxkRLWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T23:05:06Z:cde0aa466b0f4c58f51058f24fe9e425b8e3193f20239b1c97f26e9c1a8d5d36:1jl+WKT+aryXWpxuuVxtrbW55hWp/k+jGR30zOTFjtRTOZLGgo0I/CfGCYA39wjKVbJMDpRuB5P84MQ3FVdFBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.6.0"
+version: "1.7.0"
 ```
 
 # RyeOS Release Process
@@ -27,6 +27,21 @@ pushing.
 The active distribution channel is GHCR. The release tag and Docker/GHCR
 workflow are the shipping path. AUR files live in the repo as packaging
 scaffolding, but AUR is not currently an active release channel.
+
+## Future direction boundary
+
+This runbook describes the current release authority; it is not the permanent
+software-factory architecture. The scheduled direction in
+[`native-bundle-publication-and-node-composition.md`](../future/native-bundle-publication-and-node-composition.md)
+separates infrequent substrate-image releases from independently published
+bundle generations and makes a RyeOS development node the eventual release
+executor. GitHub Actions becomes a temporary adapter and optional mirror.
+
+Until that path passes its publication, restart, consumer-admission, activation,
+and rollback gates, do not substitute the future design for this runbook or
+claim that bundle-only releases are active. Conversely, new release behavior
+should be implemented behind RyeOS-owned commands, services, libraries, and
+Graphs so GitHub workflow YAML does not become a second permanent authority.
 
 ## Critical rules
 

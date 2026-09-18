@@ -22,22 +22,26 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: build and install one exact current source generation, then create
-one fresh source/target pair with
+Current gate: allow the in-progress v0.5.97 source/doc generation to land, freeze
+its exact commit in a dedicated immutable Git worktree, then build and install
+one exact source generation. Create one fresh source/target pair with
 the supported installer and `development` node profile. Reconstruct the remote
 descriptor, exact grant, immutable source project, target snapshot, credential
 status, and product witnesses from their owning APIs. Do not attempt to recover
 authority from the recreated empty paths or reuse any former identity, launch,
 chain, witness, project HEAD, receipt, or replay coordinate.
 
-Current implementation checkpoint: repository HEAD `86beed305 Add explicit
-trusted Codex enrollment lane`, one commit ahead of `origin/next` at the time of
-this checkpoint. The generic resource-selection realization correction landed at
-`7be572725`; exact hosted execution schema-cut support and v0.5.95 landed at
-`aa57e36ce`. Existing `target/release` CLI/daemon artifacts report v0.5.95 with
-hashes `e8f5146a…` / `67e253a8…`, but predate current HEAD. Installed `/usr/bin`
-is mixed and stale: CLI v0.5.93 (`abd6676b…`) and daemon `d18fd85f…`. Rebuild and
-install one exact current generation before admitting the replacement pair.
+Current implementation checkpoint: committed HEAD advanced through
+`68b2c1672 Admit trusted structured worker sessions`; an uncommitted v0.5.97
+version cut plus knowledge changes is currently present and must not be built
+until it lands. The generic resource-selection realization correction landed at
+`7be572725`; exact hosted execution schema-cut support landed at `aa57e36ce`.
+Installed `/usr/bin` is mixed and stale: CLI v0.5.93 (`abd6676b…`) and daemon
+`d18fd85f…`. A full v0.5.96 population started from clean `37eaedbc7`, but the
+shared checkout advanced during the build; it was stopped as soon as a v0.5.97
+static component exposed the mixed generation. Do not install or admit any output
+from that interrupted run. Preserve Cargo cache only, then rebuild from the frozen
+worktree.
 
 Host-context checkpoint at 2026-09-19: former source service
 `ryeos-0b1d0411…` and target service `ryeos-721ce0a7…` are durably down after
@@ -398,6 +402,7 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 18 05:58 NZST | G1 prepared-input reproduction / generic blocker | configured-operator launch `L-1c370bec6676a8ebce347df12da51c21`; source remote thread `svc-1789711065965-d99c57b0`; target root `T-99ffc235-c781-eda2-7be3-b22aded526cf` | launch bound to exact snapshot `21867eea…`, project authority `f27736e…`, then failed before start with `execution realization properties must be scalar or null`; PID/PGID null, no successor, no capsule, zero receipts/effects, no producer Tool/provider contact. Source digest-only error `6028cea0…`. Code inspection finds `execution_properties()` stores `selected_resources` as a JSON array while `AdmittedExecutionRealization::validate()` rejects every array/object property | stop without retry. Correct the generic representation/validation contract and cover empty plus nonempty resource selections; install on both retained nodes, then use a new launch coordinate and continue G1 |
 | Sept 19 10:15 NZST | G0 retained-state invalidation | filesystem, service, binary-hash, and endpoint reconciliation after `/tmp` cleanup | former source project is absent; both former app-root names were recreated at 10:00 NZST with only `.ai/.bundles.lock`. Exact runit services still report PIDs 16335 / 26242 as normally down, while 7423 / 7445 are unreachable. Installed CLI is v0.5.93 and installed daemon hash differs from both its former generation and staged v0.5.95. All former pair authority and every dependent G0/G1 product coordinate are invalidated | stop only the two exact orphan services. Rebuild/install exact current HEAD, create one fresh development-profile pair, and reconstruct authority once through supported APIs; never mine or reuse the deleted generation |
 | Sept 19 10:25 NZST | G0 orphan retirement | exact TERM of stale PIDs 16335 / 26242 followed by exact `sv down` for services `ryeos-0b1d0411…` / `ryeos-721ce0a7…` | both supervisors report durably down with no daemon PID; no other RyeOS service was touched | wait for the existing v0.5.96 worktree cut to land, then build/install one exact committed generation and create the replacement pair |
+| Sept 19 11:15 NZST | G0 immutable-build correction | full population begun from clean v0.5.96 `37eaedbc7`, bounded to four jobs; main release build completed in 41m28s and first static worker in 5m21s | shared checkout advanced to `68b2c1672` and then acquired an uncommitted v0.5.97 cut while the same script was running; the next static component identified itself as v0.5.97. Population was interrupted immediately (exit 130), before any install. Its outputs are mixed and invalid for authority | wait for current changes to commit, freeze exact HEAD in a dedicated worktree, and repopulate there. Reuse compiler cache only; never install or sign-admit the interrupted generation |
 
 Evidence correction (subsequent code review): the 05:55 entry overstates two
 conclusions. The unary launch's detailed admission cause was not recovered;
