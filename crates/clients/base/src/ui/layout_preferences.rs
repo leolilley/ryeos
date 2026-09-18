@@ -4,7 +4,10 @@
 
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockSlotState};
 use crate::layout::LayoutTree;
-use crate::surface::view_sets::{LayoutSeedSpec, ViewSetSeedSpec, validate_seeds};
+use crate::surface::view_sets::{
+    LayoutSeedSpec, SavedViewSetTemplate, ViewSetSeedSpec, validate_saved_view_set_templates,
+    validate_seeds,
+};
 use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +48,65 @@ fn slot(slot: &Option<RyeOsDockSlotState>) -> Option<SlotSpec> {
     })
 }
 
+fn capture_layout(
+    tree: &LayoutTree,
+    view_set: &crate::view_set::ViewSet,
+) -> Result<LayoutSeedSpec, String> {
+    Ok(match tree {
+        LayoutTree::Group { tabs, active, .. } => LayoutSeedSpec::Group {
+            views: tabs
+                .iter()
+                .map(|id| {
+                    let tile = view_set
+                        .tiles
+                        .get(id)
+                        .ok_or("layout references an unmounted view")?;
+                    serde_json::from_value::<ViewKindSpec>(serde_json::Value::String(
+                        tile.view.view_ref.clone(),
+                    ))
+                    .map_err(|e| e.to_string())
+                })
+                .collect::<Result<_, String>>()?,
+            active: tabs
+                .iter()
+                .position(|id| id == active)
+                .ok_or("invalid active view")?,
+        },
+        LayoutTree::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => LayoutSeedSpec::Split {
+            axis: *axis,
+            ratio: *ratio,
+            first: Box::new(capture_layout(first, view_set)?),
+            second: Box::new(capture_layout(second, view_set)?),
+        },
+    })
+}
+
+fn capture_view_set(
+    view_set: &crate::view_set::ViewSet,
+    id: String,
+) -> Result<ViewSetSeedSpec, String> {
+    Ok(ViewSetSeedSpec {
+        id,
+        title: view_set.title.clone(),
+        root: view_set
+            .root
+            .as_ref()
+            .map(|root| capture_layout(root, view_set))
+            .transpose()?,
+        slots: SlotsSpec {
+            top: slot(&view_set.docks.top),
+            bottom: slot(&view_set.docks.bottom),
+            left: slot(&view_set.docks.left),
+            right: slot(&view_set.docks.right),
+        },
+    })
+}
+
 impl RyeOsCore {
     fn preference_scope(&self) -> Result<Scope, String> {
         let session = self
@@ -71,64 +133,13 @@ impl RyeOsCore {
     }
 
     pub fn export_layout_preferences(&self) -> Result<String, String> {
-        fn capture(
-            tree: &LayoutTree,
-            view_set: &crate::view_set::ViewSet,
-        ) -> Result<LayoutSeedSpec, String> {
-            Ok(match tree {
-                LayoutTree::Group { tabs, active, .. } => LayoutSeedSpec::Group {
-                    views: tabs
-                        .iter()
-                        .map(|id| {
-                            let tile = view_set
-                                .tiles
-                                .get(id)
-                                .ok_or("layout references an unmounted view")?;
-                            serde_json::from_value::<ViewKindSpec>(serde_json::Value::String(
-                                tile.view.view_ref.clone(),
-                            ))
-                            .map_err(|e| e.to_string())
-                        })
-                        .collect::<Result<_, String>>()?,
-                    active: tabs
-                        .iter()
-                        .position(|id| id == active)
-                        .ok_or("invalid active view")?,
-                },
-                LayoutTree::Split {
-                    axis,
-                    ratio,
-                    first,
-                    second,
-                } => LayoutSeedSpec::Split {
-                    axis: *axis,
-                    ratio: *ratio,
-                    first: Box::new(capture(first, view_set)?),
-                    second: Box::new(capture(second, view_set)?),
-                },
-            })
-        }
         let view_sets = self
             .view_sets
             .iter()
             .enumerate()
             .map(|(index, view_set)| {
                 Ok(SavedViewSet {
-                    seed: ViewSetSeedSpec {
-                        id: format!("view-set-{index}"),
-                        title: view_set.title.clone(),
-                        root: view_set
-                            .root
-                            .as_ref()
-                            .map(|root| capture(root, view_set))
-                            .transpose()?,
-                        slots: SlotsSpec {
-                            top: slot(&view_set.docks.top),
-                            bottom: slot(&view_set.docks.bottom),
-                            left: slot(&view_set.docks.left),
-                            right: slot(&view_set.docks.right),
-                        },
-                    },
+                    seed: capture_view_set(view_set, format!("view-set-{index}"))?,
                     focused_view: view_set
                         .tile_ids()
                         .iter()
@@ -147,6 +158,69 @@ impl RyeOsCore {
             return Err("layout preferences exceed byte limit".into());
         }
         Ok(encoded)
+    }
+
+    /// Capture only the active set's reusable composition. The caller supplies
+    /// the stable personal-library identity and display name; neither can grant
+    /// access to a view or retain this session's runtime state.
+    pub fn export_active_view_set_template(
+        &self,
+        id: String,
+        name: String,
+    ) -> Result<SavedViewSetTemplate, String> {
+        let view_set = self
+            .view_sets
+            .get(self.active_view_set)
+            .ok_or("active view set is unavailable")?;
+        let template = SavedViewSetTemplate {
+            composition: capture_view_set(view_set, id.clone())?,
+            id,
+            name,
+        };
+        validate_saved_view_set_templates(std::slice::from_ref(&template))?;
+        Ok(template)
+    }
+
+    /// Open a reusable composition as a fresh set. This is intentionally not
+    /// resume: subjects must be selected again through current admitted
+    /// context, and no work, draft, observation or authority is restored.
+    pub fn open_saved_view_set_template(
+        &mut self,
+        template: &SavedViewSetTemplate,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        validate_saved_view_set_templates(std::slice::from_ref(template))?;
+        let tiling = self
+            .view_sets
+            .get(self.active_view_set)
+            .ok_or("active view set is unavailable")?
+            .tiling
+            .clone();
+        let view_set = template.composition.instantiate(&tiling)?;
+        for tile in view_set.tiles.values() {
+            if !self.views.contains_key(&tile.view.view_ref) {
+                return Err(format!(
+                    "saved view is not admitted: {}",
+                    tile.view.view_ref
+                ));
+            }
+        }
+        for slot in [
+            &view_set.docks.top,
+            &view_set.docks.bottom,
+            &view_set.docks.left,
+            &view_set.docks.right,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let RyeOsDockContent::View { view_ref } = &slot.content;
+            if !self.views.contains_key(view_ref) {
+                return Err(format!("saved slot is not admitted: {view_ref}"));
+            }
+        }
+        self.view_sets.push(view_set);
+        self.active_view_set = self.view_sets.len() - 1;
+        Ok(self.refresh_view_set_sources())
     }
 
     pub fn restore_layout_preferences(
@@ -351,5 +425,56 @@ mod tests {
             ids
         );
         assert_eq!(target.view_sets[0].input_buffers["draft"].text, "keep me");
+    }
+
+    #[test]
+    fn reusable_template_opens_fresh_and_never_carries_session_state() {
+        let mut source = core();
+        source.view_sets[0].input_buffers.insert(
+            "draft".into(),
+            RyeOsInputState {
+                text: "private draft".into(),
+                ..Default::default()
+            },
+        );
+        let source_ids = source.view_sets[0].tile_ids();
+        let template = source
+            .export_active_view_set_template("development".into(), "Development".into())
+            .unwrap();
+        let encoded = serde_json::to_string(&template).unwrap();
+        assert!(!encoded.contains("private draft"));
+        assert!(!encoded.contains("session:test"));
+
+        let mut target = core();
+        let effects = target.open_saved_view_set_template(&template).unwrap();
+        assert_eq!(target.view_sets.len(), 2);
+        assert_eq!(target.active_view_set, 1);
+        assert!(target.view_sets[1].input_buffers.is_empty());
+        assert!(
+            target.view_sets[1]
+                .tile_ids()
+                .iter()
+                .all(|id| !source_ids.contains(id))
+        );
+        assert!(effects.iter().all(|effect| !matches!(
+            effect.kind,
+            super::super::effect::RyeOsEffectKind::InvokeBinding { .. }
+        )));
+    }
+
+    #[test]
+    fn reusable_template_revalidates_views_before_mutating_open_sets() {
+        let source = core();
+        let mut template = source
+            .export_active_view_set_template("development".into(), "Development".into())
+            .unwrap();
+        template.composition.root = Some(LayoutSeedSpec::Group {
+            views: vec![ViewKindSpec("view:unadmitted/private".into())],
+            active: 0,
+        });
+        let mut target = core();
+        let before = target.view_sets.len();
+        assert!(target.open_saved_view_set_template(&template).is_err());
+        assert_eq!(target.view_sets.len(), before);
     }
 }

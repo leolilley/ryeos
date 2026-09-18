@@ -14,13 +14,16 @@ use ryeos_app::principal::{
     HostedPrincipalResolver, LOCAL_PRINCIPAL_ID, LockedPrincipalStore, PrincipalStore,
 };
 use ryeos_app::state::AppState;
+use ryeos_client_base::surface::view_sets::{
+    SavedViewSetTemplate, validate_saved_view_set_templates,
+};
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
-const RYEOS_UI_CONFIG_VERSION: u32 = 2;
+const RYEOS_UI_CONFIG_VERSION: u32 = 3;
 const RECENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,12 +54,15 @@ pub struct ProjectEntry {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RyeOsConfigFile {
     pub version: u32,
     pub theme: String,
     pub landing_view: String,
+    pub view_set_library_revision: u64,
+    #[serde(default)]
+    pub saved_view_sets: Vec<SavedViewSetTemplate>,
 }
 
 impl Default for RyeOsConfigFile {
@@ -65,6 +71,8 @@ impl Default for RyeOsConfigFile {
             version: RYEOS_UI_CONFIG_VERSION,
             theme: "system".into(),
             landing_view: "projects".into(),
+            view_set_library_revision: 0,
+            saved_view_sets: Vec::new(),
         }
     }
 }
@@ -137,6 +145,15 @@ pub struct UpdateConfigRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub landing_view: Option<String>,
+    #[serde(default)]
+    pub view_set_library: Option<ViewSetLibraryUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSetLibraryUpdate {
+    pub expected_revision: u64,
+    pub saved_view_sets: Vec<SavedViewSetTemplate>,
 }
 
 pub async fn handle_projects_list(
@@ -431,22 +448,45 @@ pub async fn handle_config_update(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: UpdateConfigRequest = parse_request(params)?;
+    let store = locked_principal_store(&ctx, &state).await?;
+    let mut config = store.load_ui_config()?;
+    apply_config_update(&mut config, req)?;
+    store.write_ui_config(&config)?;
+    Ok(json!(config))
+}
+
+fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -> Result<()> {
     if let Some(theme) = req.theme.as_deref() {
         validate_choice("theme", theme, &["system", "light", "dark"])?;
     }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
     }
-    let store = locked_principal_store(&ctx, &state).await?;
-    let mut config = store.load_ui_config()?;
+    if let Some(update) = &req.view_set_library {
+        validate_saved_view_set_templates(&update.saved_view_sets)
+            .map_err(HandlerError::BadRequest)?;
+        if update.expected_revision != config.view_set_library_revision {
+            return Err(HandlerError::Conflict(format!(
+                "view-set library revision advanced: expected {}, current {}",
+                update.expected_revision, config.view_set_library_revision
+            ))
+            .into());
+        }
+    }
     if let Some(theme) = req.theme {
         config.theme = theme;
     }
     if let Some(landing_view) = req.landing_view {
         config.landing_view = landing_view;
     }
-    store.write_ui_config(&config)?;
-    Ok(json!(config))
+    if let Some(update) = req.view_set_library {
+        config.view_set_library_revision = config
+            .view_set_library_revision
+            .checked_add(1)
+            .ok_or_else(|| HandlerError::Conflict("view-set library revision exhausted".into()))?;
+        config.saved_view_sets = update.saved_view_sets;
+    }
+    validate_ui_config(config)
 }
 
 fn canonical_project_root(root: &str) -> Result<PathBuf> {
@@ -489,7 +529,7 @@ impl RyeOsPrincipalStoreExt for PrincipalStore {
 
     fn load_ui_config(&self) -> Result<RyeOsConfigFile> {
         let config: RyeOsConfigFile = self.load_yaml(&self.paths().ryeos_config())?;
-        ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+        validate_ui_config(&config)?;
         Ok(config)
     }
 
@@ -514,7 +554,7 @@ impl LockedRyeOsPrincipalStoreExt for LockedPrincipalStore {
     }
 
     fn write_ui_config(&self, config: &RyeOsConfigFile) -> Result<()> {
-        ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+        validate_ui_config(config)?;
         self.write_yaml(&self.paths().ryeos_config(), config)
     }
 
@@ -591,6 +631,14 @@ fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
+    ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+    validate_choice("theme", &config.theme, &["system", "light", "dark"])?;
+    validate_choice("landing_view", &config.landing_view, &["projects"])?;
+    validate_saved_view_set_templates(&config.saved_view_sets)
+        .map_err(|error| HandlerError::BadRequest(error).into())
 }
 
 fn validate_choice(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
@@ -820,6 +868,51 @@ mod tests {
         let file = ProjectsFile::default();
         assert_eq!(file.version, 1);
         assert!(file.projects.is_empty());
+    }
+
+    #[test]
+    fn ui_config_defaults_to_empty_revisioned_view_set_library() {
+        let config = RyeOsConfigFile::default();
+        assert_eq!(config.version, 3);
+        assert_eq!(config.view_set_library_revision, 0);
+        assert!(config.saved_view_sets.is_empty());
+        validate_ui_config(&config).unwrap();
+    }
+
+    fn saved_view_set_update(expected_revision: u64) -> UpdateConfigRequest {
+        serde_json::from_value(json!({
+            "view_set_library": {
+                "expected_revision": expected_revision,
+                "saved_view_sets": [{
+                    "id": "development",
+                    "name": "Development",
+                    "composition": {
+                        "id": "development",
+                        "title": "Development",
+                        "root": {
+                            "type": "group",
+                            "views": ["view:ryeos/development"],
+                            "active": 0
+                        },
+                        "slots": {}
+                    }
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn view_set_library_update_is_revision_fenced() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, saved_view_set_update(0)).unwrap();
+        assert_eq!(config.view_set_library_revision, 1);
+        assert_eq!(config.saved_view_sets.len(), 1);
+
+        let before = config.clone();
+        let error = apply_config_update(&mut config, saved_view_set_update(0)).unwrap_err();
+        assert!(error.to_string().contains("revision advanced"));
+        assert_eq!(config, before);
     }
 
     #[test]

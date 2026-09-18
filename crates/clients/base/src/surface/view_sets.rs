@@ -12,8 +12,11 @@ use std::collections::BTreeSet;
 
 pub const MAX_VIEW_SETS: usize = 16;
 pub const MAX_VIEW_SET_LABEL_BYTES: usize = 128;
+pub const MAX_SAVED_VIEW_SETS: usize = 64;
+pub const MAX_SAVED_VIEW_SET_ID_BYTES: usize = 64;
+pub const MAX_SAVED_VIEW_SET_LIBRARY_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewSetSeedSpec {
     pub id: String,
@@ -24,7 +27,7 @@ pub struct ViewSetSeedSpec {
     pub slots: SlotsSpec,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LayoutSeedSpec {
     Group {
@@ -37,6 +40,56 @@ pub enum LayoutSeedSpec {
         first: Box<Self>,
         second: Box<Self>,
     },
+}
+
+/// One reusable personal composition. This is deliberately only a template:
+/// it carries no mounted identities, drafts, observations, compiled grants or
+/// retained session authority. Opening it allocates a fresh view set and
+/// revalidates every referenced view against the current compiled surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedViewSetTemplate {
+    pub id: String,
+    pub name: String,
+    pub composition: ViewSetSeedSpec,
+}
+
+pub fn validate_saved_view_set_templates(templates: &[SavedViewSetTemplate]) -> Result<(), String> {
+    let encoded = serde_json::to_vec(templates)
+        .map_err(|error| format!("saved_view_sets cannot be encoded: {error}"))?;
+    if encoded.len() > MAX_SAVED_VIEW_SET_LIBRARY_BYTES {
+        return Err(format!(
+            "saved_view_sets exceeds {MAX_SAVED_VIEW_SET_LIBRARY_BYTES} bytes"
+        ));
+    }
+    if templates.len() > MAX_SAVED_VIEW_SETS {
+        return Err(format!(
+            "saved_view_sets exceeds {MAX_SAVED_VIEW_SETS} entries"
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for (index, template) in templates.iter().enumerate() {
+        let location = format!("saved_view_sets[{index}]");
+        if template.id.is_empty()
+            || template.id.len() > MAX_SAVED_VIEW_SET_ID_BYTES
+            || !template
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !ids.insert(&template.id)
+        {
+            return Err(format!("{location}.id must be a unique bounded identifier"));
+        }
+        if template.name.trim().is_empty()
+            || template.name.len() > MAX_VIEW_SET_LABEL_BYTES
+            || template.name.chars().any(char::is_control)
+        {
+            return Err(format!("{location}.name must be a nonempty bounded label"));
+        }
+        validate_seeds(std::slice::from_ref(&template.composition))
+            .map_err(|error| format!("{location}.composition: {error}"))?;
+    }
+    Ok(())
 }
 
 pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {

@@ -25,6 +25,8 @@ export interface RyeOsWasmApi {
   ryeos_layout_preference_key(): string;
   ryeos_export_layout_preferences(): string;
   ryeos_restore_layout_preferences(encoded: string): RyeOsEnvelope;
+  ryeos_export_active_view_set_template(id: string, name: string): string;
+  ryeos_open_saved_view_set_template(encoded: string): RyeOsEnvelope;
 }
 
 export async function loadWasm(): Promise<RyeOsWasmApi> {
@@ -42,6 +44,7 @@ function isWasmApi(value: unknown): value is RyeOsWasmApi {
     "ryeos_key", "ryeos_seat_events", "ryeos_replay_seat_events",
     "ryeos_layout_preference_key", "ryeos_export_layout_preferences",
     "ryeos_restore_layout_preferences",
+    "ryeos_export_active_view_set_template", "ryeos_open_saved_view_set_template",
   ].every((name) => typeof exports[name] === "function");
 }
 
