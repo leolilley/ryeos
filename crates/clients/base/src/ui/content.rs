@@ -44,6 +44,11 @@ impl TimelineRole {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewBinding {
+    /// Canonical parent ref retained by the engine's effective composer as
+    /// provenance. The client consumes the already-composed fields and never
+    /// resolves this ref itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
     /// One of the closed widget primitives: rows | text | key_value |
     /// timeline | scene. Unknown widgets degrade (raw + provenance).
     #[serde(default)]
@@ -2120,7 +2125,8 @@ mod tests {
         // whole compacted response.
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Outcome",
-            "sources": { "default": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" } },
+            "source_channel": "detail",
+            "collection": "result",
             "projection": { "primary": "outcome_code", "meta": "error" }
         }))
         .unwrap();
@@ -2705,13 +2711,17 @@ mod tests {
     #[test]
     fn inputs_plural_list_form_is_rejected() {
         // Input is singular: there is no `inputs:` list. The unknown field
-        // must not silently parse a buffer.
-        let binding: ViewBinding = serde_json::from_value(json!({
+        // must fail the strict view schema, not silently parse a view with no
+        // input buffer.
+        let error = serde_json::from_value::<ViewBinding>(json!({
             "widget": "text",
             "inputs": [ { "id": "a" }, { "id": "b" } ]
         }))
-        .unwrap();
-        assert!(binding.input.is_none(), "`inputs:` must not populate input");
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unknown field `inputs`"),
+            "strict schema should identify the rejected plural field: {error}"
+        );
     }
 
     #[test]

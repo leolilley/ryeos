@@ -304,8 +304,18 @@ impl TopologyBuilder {
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
-    let project_root = caller
-        .project_path()?
+    let project_access = caller.project_access()?;
+    let project_resolution_root = project_access
+        .as_ref()
+        .map(|access| access.path().to_string_lossy().into_owned())
+        .or_else(|| {
+            params
+                .get("project_path")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+    let project_identity = caller
+        .project_query_identity()?
         .map(|path| path.to_string_lossy().into_owned())
         .or_else(|| {
             params
@@ -321,17 +331,25 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             .map(String::from),
     };
 
-    let graph = build_topology(&state, project_root, root_surface);
+    let graph = build_topology(
+        &state,
+        project_resolution_root,
+        project_identity,
+        root_surface,
+    );
     serde_json::to_value(graph).map_err(Into::into)
 }
 
 pub(crate) fn build_topology(
     state: &AppState,
-    project_root: Option<String>,
+    project_resolution_root: Option<String>,
+    project_identity: Option<String>,
     root_surface: Option<String>,
 ) -> TopologyGraph {
     let mut builder = TopologyBuilder::new();
-    let project_path = project_root.as_ref().map(std::path::PathBuf::from);
+    let project_path = project_resolution_root
+        .as_ref()
+        .map(std::path::PathBuf::from);
     let roots = state.engine.resolution_roots(project_path);
 
     for kind in state.engine.kinds.kinds() {
@@ -377,7 +395,7 @@ pub(crate) fn build_topology(
 
     builder.finish(TopologyMetadata {
         generated_at: lillux::time::iso8601_now(),
-        project_root,
+        project_root: project_identity,
         root_surface,
         spaces: roots
             .ordered

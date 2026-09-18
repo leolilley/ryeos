@@ -985,12 +985,54 @@ impl CheckedEngineGeneration<'_> {
         self.engine.effective_item_current(request)
     }
 
+    pub fn effective_item_under_project_authority(
+        &self,
+        request: EffectiveItemRequest,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<EffectiveItem, EngineError> {
+        self.engine
+            .effective_item_under_project_authority_current(request, project_content)
+    }
+
     pub fn verify(
         &self,
         ctx: &PlanContext,
         item: ResolvedItem,
     ) -> Result<VerifiedItem, EngineError> {
         self.engine.verify(ctx, item)
+    }
+
+    pub fn resolve_verified_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedItem, EngineError> {
+        let request_snapshot = self
+            .engine
+            .effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                &ctx.subject_resolution_authority,
+            )?;
+        let (resolved, source) = self
+            .engine
+            .resolve_current_with_request_snapshot_and_source(
+                ctx,
+                item_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+        let request_authority = authority_snapshot_from_request(&request_snapshot);
+        self.engine
+            .verify_static_cached_with_source_under_authority(
+                ctx,
+                resolved,
+                &source,
+                &request_authority,
+            )
     }
 
     pub fn build_plan(
@@ -1033,6 +1075,21 @@ impl CheckedEngineGeneration<'_> {
         parallel_map_ordered(requests, |request| {
             self.engine.effective_item_current(request.clone())
         })
+    }
+
+    pub fn effective_items_under_project_authority(
+        &self,
+        requests: &[EffectiveItemRequest],
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Vec<Result<EffectiveItem, EngineError>> {
+        requests
+            .iter()
+            .cloned()
+            .map(|request| {
+                self.engine
+                    .effective_item_under_project_authority_current(request, project_content)
+            })
+            .collect()
     }
 }
 
@@ -1656,6 +1713,38 @@ impl Engine {
         })
     }
 
+    fn effective_request_snapshot_from_project_content(
+        &self,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        subject_resolution_authority
+            .validate_for_materialized_root(Some(project_root))
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        let trust_base = self
+            .request_trust_base
+            .as_ref()
+            .unwrap_or(&self.trust_store);
+        let trust_store = trust_base.with_project_keys_from_content(project_content)?;
+        let parser_tools = self
+            .parser_dispatcher
+            .parser_tools
+            .with_project_overlay_from_content(project_content, &trust_store, &self.kinds)?;
+        let parser_dispatcher = self.parser_dispatcher.with_parser_tools(parser_tools);
+        let registry_fingerprint =
+            self.fingerprint_for(parser_dispatcher.parser_tools.fingerprint());
+        let effective_trust_identity = self.effective_trust_identity(&trust_store);
+        Ok(EffectiveRequestSnapshot {
+            trust_store,
+            parser_dispatcher,
+            registry_fingerprint,
+            effective_trust_identity,
+            request_engine_generation_identity: self.request_engine_generation_identity(),
+            subject_resolution_authority: subject_resolution_authority.clone(),
+        })
+    }
+
     fn effective_trust_identity(&self, effective: &TrustStore) -> String {
         let base = self
             .request_trust_base
@@ -1971,6 +2060,39 @@ impl Engine {
     ) -> Result<VerifiedItem, EngineError> {
         self.resolve_verified_source_under_admitted_authority(ctx, item_ref, project_root, admitted)
             .map(|(verified, _source)| verified)
+    }
+
+    /// Resolve and verify one live-project dispatch hop through an exact
+    /// owner-bearing project-content authority. No ambient project pathname
+    /// is reopened during discovery or source reads.
+    pub fn resolve_verified_under_project_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<VerifiedItem, EngineError> {
+        self.checked_bundle_generation(|| {
+            let request_snapshot = self.effective_request_snapshot_from_project_content(
+                project_root,
+                project_content,
+                &ctx.subject_resolution_authority,
+            )?;
+            let (resolved, source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                item_ref,
+                Some(project_root.to_path_buf()),
+                &request_snapshot,
+                Some(project_content),
+            )?;
+            let request_authority = authority_snapshot_from_request(&request_snapshot);
+            self.verify_static_cached_with_source_under_authority(
+                ctx,
+                resolved,
+                &source,
+                &request_authority,
+            )
+        })
     }
 
     fn resolve_verified_source_under_admitted_authority(
@@ -3107,12 +3229,68 @@ impl Engine {
         .map_err(|error| resolution_error_to_engine(error, &request.item_ref))
     }
 
+    fn effective_resolution_output_under_project_authority_current(
+        &self,
+        request: &EffectiveItemRequest,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
+        let project_root = request.project_root.as_deref().ok_or_else(|| {
+            EngineError::Internal("project content authority has no project root".to_string())
+        })?;
+        if let Some(expected) = &request.expected_kind
+            && expected != &request.item_ref.kind
+        {
+            return Err(EngineError::EffectiveItemWrongKind {
+                canonical_ref: request.item_ref.to_string(),
+                expected: expected.clone(),
+                found: request.item_ref.kind.clone(),
+            });
+        }
+        let roots = self.resolution_roots(request.project_root.clone());
+        let snapshot = self.effective_request_snapshot_from_project_content(
+            project_root,
+            project_content,
+            &request.subject_resolution_authority,
+        )?;
+        crate::resolution::run_effective_item_pipeline_with_probes_under_project_authority(
+            &request.item_ref,
+            &self.kinds,
+            &snapshot.parser_dispatcher,
+            &roots,
+            &snapshot.trust_store,
+            &self.composers,
+            project_root,
+            project_content,
+        )
+        .map(|(output, _)| output)
+        .map_err(|error| resolution_error_to_engine(error, &request.item_ref))
+    }
+
     fn effective_item_current(
         &self,
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
         let output = self.effective_resolution_output_current(&request)?;
+        self.effective_item_from_output(request, output)
+    }
 
+    fn effective_item_under_project_authority_current(
+        &self,
+        request: EffectiveItemRequest,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<EffectiveItem, EngineError> {
+        let output = self.effective_resolution_output_under_project_authority_current(
+            &request,
+            project_content,
+        )?;
+        self.effective_item_from_output(request, output)
+    }
+
+    fn effective_item_from_output(
+        &self,
+        request: EffectiveItemRequest,
+        output: crate::resolution::ResolutionOutput,
+    ) -> Result<EffectiveItem, EngineError> {
         let effective_definition_digest =
             output.effective_definition_digest().map_err(|error| {
                 EngineError::EffectiveItemCompositionFailed {

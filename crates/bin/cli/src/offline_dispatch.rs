@@ -1234,8 +1234,7 @@ mod tests {
             .unwrap();
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
-            ryeos_engine::trust::pin_key(&dev_key, "RyeOS Development", &trust_dir, None)
-                .unwrap();
+            ryeos_engine::trust::pin_key(&dev_key, "RyeOS Development", &trust_dir, None).unwrap();
             let core_key_pem = std::fs::read_to_string(
                 workspace_root().join(".dev-keys").join("PUBLISHER_DEV.pem"),
             )

@@ -8,6 +8,14 @@ import type { RyeOsRowVm } from "./RyeOsRowVm";
  * report it without the rows being present.
  */
 export interface RyeOsSectionVm {
+  /**
+   * Stable semantic identity of the authored section.
+   */
+  id: string;
+  /**
+   * Flat cursor coordinate of the section's header/first point.
+   */
+  cursor: bigint;
   title: string;
   count: bigint;
   collapsed: boolean;

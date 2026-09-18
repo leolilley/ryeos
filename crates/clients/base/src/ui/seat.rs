@@ -65,7 +65,17 @@ impl SeatLog {
 
     pub fn append_replayed(&mut self, event: SeatEvent) {
         self.next_seq = self.next_seq.max(event.seq.saturating_add(1));
-        self.events.push(event);
+        match self
+            .events
+            .binary_search_by_key(&event.seq, |retained| retained.seq)
+        {
+            // Durable replay is authoritative for an already-present sequence
+            // (for example a startup baseline emitted before reattachment).
+            Ok(index) => self.events[index] = event,
+            // Replay pages can arrive after provisional local mutations. Keep
+            // the braid ordered by authority sequence rather than arrival time.
+            Err(index) => self.events.insert(index, event),
+        }
     }
 
     pub fn events(&self) -> &[SeatEvent] {
@@ -260,6 +270,43 @@ mod tests {
 
         assert_eq!(seq, 8);
         assert_eq!(log.fold().get(KEY_SELECTION), Some(&json!({"item": "b"})));
+    }
+
+    #[test]
+    fn replay_orders_older_authority_before_newer_local_state_and_deduplicates_sequence() {
+        let mut log = SeatLog::default();
+        log.append_replayed(SeatEvent {
+            seq: 7,
+            kind: SeatEventKind::Facet {
+                key: KEY_SELECTION.to_string(),
+                value: json!({"item": "local-newer"}),
+            },
+        });
+        log.append_replayed(SeatEvent {
+            seq: 6,
+            kind: SeatEventKind::Facet {
+                key: KEY_SELECTION.to_string(),
+                value: json!({"item": "durable-older"}),
+            },
+        });
+        assert_eq!(
+            log.fold().get(KEY_SELECTION),
+            Some(&json!({"item": "local-newer"})),
+            "older replay must not win merely because it arrived later"
+        );
+
+        log.append_replayed(SeatEvent {
+            seq: 7,
+            kind: SeatEventKind::Facet {
+                key: KEY_SELECTION.to_string(),
+                value: json!({"item": "durable-authoritative"}),
+            },
+        });
+        assert_eq!(log.events().len(), 2);
+        assert_eq!(
+            log.fold().get(KEY_SELECTION),
+            Some(&json!({"item": "durable-authoritative"}))
+        );
     }
 
     #[test]

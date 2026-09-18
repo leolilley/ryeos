@@ -212,6 +212,425 @@ fn replace_binding_with_remote_owner(
     (remote.principal_id(), replacement_hash)
 }
 
+fn publish_binding_for_consumer(
+    state: &Arc<AppState>,
+    source_binding_hash: &str,
+    consumer: ExternalContentConsumerAuthority,
+) -> String {
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_exclusive_guard(true).unwrap();
+    let cas = authority.cas_store().unwrap();
+    let source =
+        ExternalContentBinding::from_value(&cas.get_object(source_binding_hash).unwrap().unwrap())
+            .unwrap();
+    let binding = ExternalContentBinding::active(
+        source.manifest_hash,
+        source.manifest_kind,
+        consumer,
+        source.target_node_fingerprint,
+        source.authorized_by,
+        source.authorizer_grant_digest,
+    )
+    .unwrap();
+    let binding_hash = cas.store_object(&binding.to_value().unwrap()).unwrap();
+    let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+    state
+        .state_store
+        .with_state_db(|db| {
+            db.ensure_current_external_content_binding_epoch(&guard)?;
+            db.advance_generic_head_ref(
+                ryeos_state::objects::EXTERNAL_CONTENT_BINDING_HEAD_NAMESPACE,
+                &binding.binding_subject_id,
+                &binding_hash,
+                None,
+                &signer,
+                &guard,
+            )
+        })
+        .unwrap();
+    binding_hash
+}
+
+fn fixture_bundle_engine(
+    bundle_root: &std::path::Path,
+    publisher: &NodeIdentity,
+) -> Arc<ryeos_engine::engine::Engine> {
+    let mut trust = ryeos_engine::test_support::live_trust_store();
+    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: publisher.fingerprint().to_owned(),
+            verifying_key: *publisher.verifying_key(),
+            label: Some("f05 fixture publisher".to_owned()),
+        },
+    ]));
+    let core = ryeos_engine::test_support::core_bundle_root();
+    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let ui = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
+        &[
+            core.join(".ai/node/engine/kinds"),
+            standard.join(".ai/node/engine/kinds"),
+        ],
+        &trust,
+    )
+    .unwrap();
+    let roots = vec![core, standard, ui, bundle_root.to_path_buf()];
+    let registered = ["core", "standard", "ryeos-ui", "f05-fixture"]
+        .into_iter()
+        .zip(roots.iter().cloned())
+        .map(
+            |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: name.to_owned(),
+                canonical_root,
+            },
+        )
+        .collect();
+    let (parsers, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds).unwrap();
+    let handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
+    let composers =
+        ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+    Arc::new(
+        ryeos_engine::engine::Engine::new(kinds, dispatcher, roots)
+            .with_registered_bundle_roots(registered)
+            .with_trust_store(trust.clone())
+            .with_node_trust_store(trust)
+            .with_composers(composers),
+    )
+}
+
+fn write_managed_activation_fixture_bundle(
+    bundle_root: &std::path::Path,
+    publisher: &NodeIdentity,
+    manifest_hash: &str,
+) {
+    let ai = bundle_root.join(".ai");
+    std::fs::create_dir_all(ai.join("tools/test")).unwrap();
+    let manifest = r#"name: f05-fixture
+version: "0.1.0"
+description: F05 managed activation authority fixture
+provides_kinds: []
+requires_kinds: [tool]
+uses_kinds: []
+"#;
+    std::fs::write(
+        ai.join("manifest.yaml"),
+        lillux::signature::sign_content(manifest, publisher.signing_key(), "#", None),
+    )
+    .unwrap();
+    let tool = format!(
+        r#"category: test
+name: source
+version: "1.0.0"
+description: Exact managed activation consumer fixture
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/opaque"
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: content
+    kind: tree
+    mode: pinned
+    digest: {manifest_hash}
+    mount_root: project
+    mount: content
+config:
+  command: "bin:ryeos-core-tools"
+  args: ["--help"]
+  input_data: "${{params_json}}"
+  timeout_secs: 10
+"#
+    );
+    std::fs::write(
+        ai.join("tools/test/source.yaml"),
+        lillux::signature::sign_content(&tool, publisher.signing_key(), "#", None),
+    )
+    .unwrap();
+}
+
+async fn bind_through_managed_activation_owner(
+    bundle: &tempfile::TempDir,
+    publisher: &NodeIdentity,
+    manifest_value: &serde_json::Value,
+) -> (
+    tempfile::TempDir,
+    Arc<AppState>,
+    String,
+    String,
+    ryeos_engine::resolution::ResolutionOutput,
+) {
+    let manifest_hash = ryeos_state::objects::canonical_value_digest(manifest_value).unwrap();
+    write_managed_activation_fixture_bundle(bundle.path(), publisher, &manifest_hash);
+    let engine = fixture_bundle_engine(bundle.path(), publisher);
+    let (state_dir, mut state) = test_state::build_test_state_with_engine(engine);
+    let closure = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
+        .unwrap()
+        .clone();
+    state.node_policy = Arc::new(
+        ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+            Arc::new(closure),
+            Arc::new(ExternalContentImportPolicyRecord {
+                schema: 1,
+                roots: Default::default(),
+                limits: ExternalContentImportLimits {
+                    max_depth: 4,
+                    max_entries: 16,
+                    max_file_bytes: 1024,
+                    max_total_bytes: 4096,
+                    store_budget_bytes: 8192,
+                    minimum_free_bytes: 1,
+                },
+                managed_activation: ManagedExternalContentPolicy {
+                    enabled: false,
+                    limits: None,
+                },
+            }),
+        ]),
+    );
+    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
+    ryeos_app::identity::write_authorized_key_toml(
+        &state.config.authorized_keys_dir,
+        operator.fingerprint(),
+        &base64::engine::general_purpose::STANDARD.encode(operator.verifying_key().as_bytes()),
+        &scopes,
+        "managed activation fixture operator",
+        state.identity.fingerprint(),
+        "2026-09-18T00:00:00Z",
+        state.identity.signing_key(),
+        WildcardPolicy::Reject,
+    )
+    .unwrap();
+
+    let request_digest = "f".repeat(64);
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let guard = authority.acquire_shared_guard().unwrap();
+    let cas = authority.cas_store().unwrap();
+    assert_eq!(cas.store_object(manifest_value).unwrap(), manifest_hash);
+    let key =
+        ryeos_state::DurableCasPublicationKey::external_content_import(&request_digest).unwrap();
+    let mut stage = authority
+        .require_recovery()
+        .unwrap()
+        .begin_durable_cas_upload_admitted(
+            &guard,
+            operator.fingerprint(),
+            "external-content-import",
+            &key,
+            None,
+        )
+        .unwrap();
+    stage
+        .protect_cas_closure(&guard, [manifest_hash.as_str()], std::iter::empty())
+        .unwrap();
+    let staging_id = stage.staging_id().to_owned();
+    drop(stage);
+    drop(guard);
+
+    let component = ryeos_app::managed_external_content::ManagedActivationComponent {
+        id: "content".to_owned(),
+        storage: ryeos_app::managed_external_content::ManagedComponentStorage::Content,
+        shape:
+            ryeos_app::managed_external_content::ManagedActivationComponentShape::WholeArchiveTree {
+                source: "archive".to_owned(),
+                prefix: "content".to_owned(),
+                bounds: ryeos_app::managed_external_content::ManagedActivationComponentBounds {
+                    maximum_entries: 16,
+                    maximum_depth: 4,
+                    maximum_file_bytes: 1024,
+                    maximum_total_bytes: 4096,
+                },
+            },
+    };
+    let activation =
+        ryeos_app::managed_external_content::ResolvedManagedExternalContentActivation {
+            activation_ref: "config:test/activation".to_owned(),
+            activation_program_digest: "1".repeat(64),
+            publisher_fingerprint: publisher.fingerprint().to_owned(),
+            document: ryeos_app::managed_external_content::ManagedExternalContentActivation {
+                schema: ryeos_app::managed_external_content::MANAGED_ACTIVATION_SCHEMA.to_owned(),
+                consumer_ref: "tool:test/source".to_owned(),
+                sources: Vec::new(),
+                components: vec![component.clone()],
+            },
+            components: vec![
+                ryeos_app::managed_external_content::ResolvedManagedActivationComponent {
+                    recipe: component,
+                    expected_manifest_hash: manifest_hash.clone(),
+                    expected_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND
+                        .to_owned(),
+                    declaration_kind: ryeos_engine::external_content::ExternalContentKind::Tree,
+                    capture_bounds:
+                        ryeos_app::managed_external_content::ManagedActivationComponentBounds {
+                            maximum_entries: 16,
+                            maximum_depth: 4,
+                            maximum_file_bytes: 1024,
+                            maximum_total_bytes: 4096,
+                        },
+                    expected_file_sha256: None,
+                },
+            ],
+        };
+    let state = Arc::new(state);
+    let binding = ryeos_app::operator_external_content::bind_managed_activation_component(
+        Arc::clone(&state),
+        operator.fingerprint().to_owned(),
+        &activation,
+        ryeos_app::operator_external_content::BindRequest {
+            staging_id,
+            request_digest,
+            manifest_hash: manifest_hash.clone(),
+            consumer_ref: "tool:test/source".to_owned(),
+            consumer_kind: ryeos_app::operator_external_content::BindConsumerKind::InstalledBundle,
+            project_snapshot_hash: None,
+            project_path: None,
+            product_selections: None,
+            product_owner_principal: None,
+        },
+    )
+    .await
+    .unwrap();
+    let resolution = state
+        .engine
+        .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("tool:test/source").unwrap(),
+            expected_kind: Some("tool".to_owned()),
+            project_root: None,
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        })
+        .unwrap();
+    (
+        state_dir,
+        state,
+        binding.binding_hash,
+        manifest_hash,
+        resolution,
+    )
+}
+
+fn portable_policy() -> ryeos_engine::runtime_registry::LaunchContentExternalPolicy {
+    ryeos_engine::runtime_registry::LaunchContentExternalPolicy {
+        allowed_mount_roots: vec![ryeos_state::objects::ExternalContentMountRoot::Project],
+        max_declarations: 1,
+        large_content_max_total_bytes: None,
+    }
+}
+
+#[tokio::test]
+async fn managed_bundle_binding_survives_pinned_preview_but_cannot_substitute_project_composition()
+{
+    use ryeos_app::external_content_admission::{
+        admit_portable_content_dependency_in_publication, preview_portable_content_dependency,
+    };
+    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
+    use ryeos_engine::resolution::TrustClass;
+
+    let bundle = tempfile::tempdir().unwrap();
+    let publisher = NodeIdentity::create(&bundle.path().join("publisher.pem")).unwrap();
+    let manifest_value = json!({
+        "kind": ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+        "schema": ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+        "entries": [],
+        "entry_count": 0,
+        "total_bytes": 0,
+    });
+    let (_state_dir, state, installed_binding_hash, _manifest_hash, fixed_bundle) =
+        bind_through_managed_activation_owner(&bundle, &publisher, &manifest_value).await;
+    let policy = portable_policy();
+    let generation = SubjectResolutionAuthority::PinnedGeneration {
+        snapshot_hash: "d".repeat(64),
+    };
+
+    // Managed activation publishes this exact InstalledBundle authority. An
+    // outer pinned execution does not reclassify an unchanged bundle-owned
+    // declaration, so preview and launch admission must select that head.
+    let preview =
+        preview_portable_content_dependency(&state, &fixed_bundle, &policy, &generation).unwrap();
+    assert!(preview.ready_for_admission);
+    assert_eq!(
+        preview.declarations[0].binding_digest.as_deref(),
+        Some(installed_binding_hash.as_str())
+    );
+    let mut admitted_fixed = fixed_bundle.clone();
+    let mut fixed_publication = None;
+    admit_portable_content_dependency_in_publication(
+        &state,
+        &mut admitted_fixed,
+        &policy,
+        &generation,
+        None,
+        &mut fixed_publication,
+    )
+    .unwrap();
+    assert!(fixed_publication.is_some());
+
+    // The same bundle root becomes generation-owned once its effective
+    // definition includes a project contributor. The installed binding is an
+    // incompatible authority, not a fallback candidate.
+    let mut composed = fixed_bundle;
+    let mut project_contributor = composed.root.clone();
+    project_contributor.requested_id = "project/relationship".into();
+    project_contributor.resolved_ref = "config:project/relationship".into();
+    project_contributor.source_space = ItemSpace::Project;
+    project_contributor.source_root = ItemSourceRoot::Project;
+    project_contributor.trust_class = TrustClass::TrustedProject;
+    project_contributor.signer_fingerprint = Some("e".repeat(64));
+    composed.ancestors.push(project_contributor);
+
+    let missing =
+        preview_portable_content_dependency(&state, &composed, &policy, &generation).unwrap();
+    assert!(!missing.ready_for_admission);
+    assert_eq!(missing.declarations[0].status, "missing_binding");
+    assert!(missing.declarations[0].binding_digest.is_none());
+    let error = admit_portable_content_dependency_in_publication(
+        &state,
+        &mut composed.clone(),
+        &policy,
+        &generation,
+        None,
+        &mut None,
+    )
+    .err()
+    .expect("installed binding must not substitute for project-composed authority");
+    assert!(error.downcast_ref::<ryeos_app::external_content_admission::ExternalContentBindingUnavailable>().is_some());
+
+    let project_consumer = ExternalContentConsumerAuthority::pinned_project(
+        composed.root.resolved_ref.clone(),
+        composed.root.signer_fingerprint.clone().unwrap(),
+        generation.operational_generation().unwrap().to_owned(),
+        ryeos_engine::external_content::pre_external_realization_consumer_digest(&composed)
+            .unwrap(),
+        None,
+    )
+    .unwrap();
+    let pinned_binding_hash =
+        publish_binding_for_consumer(&state, &installed_binding_hash, project_consumer);
+    let ready =
+        preview_portable_content_dependency(&state, &composed, &policy, &generation).unwrap();
+    assert!(ready.ready_for_admission);
+    assert_eq!(
+        ready.declarations[0].binding_digest.as_deref(),
+        Some(pinned_binding_hash.as_str())
+    );
+    let mut admitted_composed = composed;
+    let mut composed_publication = None;
+    admit_portable_content_dependency_in_publication(
+        &state,
+        &mut admitted_composed,
+        &policy,
+        &generation,
+        None,
+        &mut composed_publication,
+    )
+    .unwrap();
+    assert!(composed_publication.is_some());
+}
+
 #[test]
 fn portable_content_uses_the_admitted_project_generation_for_preview_and_launch() {
     use ryeos_app::external_content_admission::{

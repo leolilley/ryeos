@@ -48,6 +48,9 @@ pub struct RunCostSample {
     pub resource_owned_overhead_spend: String,
     pub resource_basis: CostBasis,
     pub resource_components: Vec<crate::accounting_db::ThreadResourceCostComponent>,
+    /// Component detail is paged independently of the exact whole-thread totals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_components_next_operation_id: Option<String>,
 }
 
 impl RunCostSample {
@@ -65,6 +68,7 @@ impl RunCostSample {
             resource_owned_overhead_spend: "0".to_string(),
             resource_basis: CostBasis::Direct,
             resource_components: Vec::new(),
+            resource_components_next_operation_id: None,
         }
     }
 }
@@ -120,6 +124,7 @@ pub fn run_cost_sample(
         )?
         .to_canonical_string();
         sample.resource_components = resource.components;
+        sample.resource_components_next_operation_id = resource.components_next_operation_id;
     }
     Ok(sample)
 }
@@ -153,6 +158,7 @@ fn project_cost_sample(
         resource_owned_overhead_spend: "0".to_string(),
         resource_basis: CostBasis::Direct,
         resource_components: Vec::new(),
+        resource_components_next_operation_id: None,
     })
 }
 

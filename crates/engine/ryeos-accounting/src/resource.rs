@@ -717,7 +717,18 @@ impl ResourceUsagePartition {
             .map_err(|_| "resource charge is outside partition range".to_string())?;
         let total_money = allocated_charge_usd_nanos;
         let mut ordered = attributions.to_vec();
-        ordered.sort_by_key(|attribution| attribution.interval.start_tick_ns);
+        ordered.sort_by(|left, right| {
+            (
+                left.interval.start_tick_ns,
+                left.interval.end_tick_ns,
+                left.attribution_id.as_str(),
+            )
+                .cmp(&(
+                    right.interval.start_tick_ns,
+                    right.interval.end_tick_ns,
+                    right.attribution_id.as_str(),
+                ))
+        });
         let mut previous_end = None;
         let mut attributed_ns = 0_u64;
         let mut attributed = Vec::with_capacity(ordered.len());

@@ -41,17 +41,10 @@ fn retained_session(
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))
 }
 
-fn retained_project_path(
+fn retained_project_access(
     session: &crate::browser_session::BrowserSession,
-) -> Result<Option<std::path::PathBuf>> {
-    session
-        .project_authority
-        .as_ref()
-        .map(|authority| {
-            authority.ensure_path_binding()?;
-            authority.descriptor_path()
-        })
-        .transpose()
+) -> Result<Option<crate::seat_auth::RetainedProjectAccess>> {
+    Ok(crate::seat_auth::session_project_access(session)?)
 }
 
 // ── remotes.list ──────────────────────────────────────────────────
@@ -62,8 +55,8 @@ pub async fn handle_remotes_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let session = retained_session(&ctx, &state)?;
-    let project_path = retained_project_path(&session)?;
-    let project = project_path.as_deref();
+    let project_access = retained_project_access(&session)?;
+    let project = project_access.as_ref().map(|access| access.path());
 
     let report =
         ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
@@ -112,8 +105,8 @@ pub async fn handle_remotes_probe(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let session = retained_session(&ctx, &state)?;
-    let project_path = retained_project_path(&session)?;
-    let project = project_path.as_deref();
+    let project_access = retained_project_access(&session)?;
+    let project = project_access.as_ref().map(|access| access.path());
 
     let req: ProbeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;

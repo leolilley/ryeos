@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
@@ -440,6 +441,15 @@ pub enum RyeOsViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<RyeOsTimelineEntryVm>,
+        /// Stable semantic identity per visible entry. Source-backed entries
+        /// use their source event key; presentation-only entries use a digest
+        /// of their semantic content.
+        #[serde(default)]
+        entry_ids: Vec<String>,
+        /// The exact list cursor coordinate for each visible entry. Timeline
+        /// cursors count visible entries from the bottom, unlike rows/tables.
+        #[serde(default)]
+        entry_cursors: Vec<usize>,
         #[serde(default)]
         entry_arrived_at_ms: Vec<Option<u64>>,
         /// Call-tree indent depth per entry (parallel to `entries`): a graph
@@ -534,6 +544,10 @@ pub struct RyeOsTextPositionVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTableRowVm {
     pub id: String,
+    /// Exact cursor coordinate in the current complete projection. Render
+    /// windows must never make their local array index look authoritative.
+    #[serde(default)]
+    pub cursor: usize,
     pub cells: Vec<String>,
     /// Structural position when the table declares `projections.hierarchy`.
     /// Renderers derive connector glyphs from this generic shape.
@@ -591,6 +605,11 @@ pub struct RyeOsRowDetailVm {
 /// report it without the rows being present.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsSectionVm {
+    /// Stable semantic identity of the authored section.
+    pub id: String,
+    /// Flat cursor coordinate of the section's header/first point.
+    #[serde(default)]
+    pub cursor: usize,
     pub title: String,
     pub count: usize,
     #[serde(default)]
@@ -606,6 +625,10 @@ pub struct RyeOsSectionVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRowVm {
     pub id: String,
+    /// Exact cursor coordinate in the current complete projection. Render
+    /// windows must never make their local array index look authoritative.
+    #[serde(default)]
+    pub cursor: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glyph: Option<String>,
     pub primary: String,
@@ -1379,6 +1402,7 @@ fn bound_view_vm_keyed(
             let mut fold_section = None;
             let mut sections = Vec::with_capacity(binding.sections.len());
             for (index, section) in binding.sections.iter().enumerate() {
+                let section_cursor = flat;
                 let is_collapsed = folds.is_some_and(|set| set.contains(&index));
                 // Row activation per section: the section names an affordance
                 // (in the host binding's `affordances`) the same way the rows
@@ -1434,7 +1458,8 @@ fn bound_view_vm_keyed(
                         }
                         flat += 1;
                         rows.push(RyeOsRowVm {
-                            id: format!("{view_ref}#{index}#{}", rows.len()),
+                            id: format!("{view_ref}#{row_key}"),
+                            cursor: flat - 1,
                             glyph: section
                                 .projection
                                 .get("glyph")
@@ -1476,6 +1501,8 @@ fn bound_view_vm_keyed(
                     }
                 }
                 sections.push(RyeOsSectionVm {
+                    id: section_identity(view_ref, section),
+                    cursor: section_cursor,
                     title: section.title.clone(),
                     count,
                     collapsed: is_collapsed,
@@ -1577,7 +1604,8 @@ fn bound_view_vm_keyed(
                         Default::default()
                     };
                     RyeOsRowVm {
-                        id: format!("{view_ref}#{index}"),
+                        id: format!("{view_ref}#{key}"),
+                        cursor: index,
                         glyph: binding
                             .projections
                             .get("glyph")
@@ -1680,6 +1708,7 @@ fn bound_view_vm_keyed(
             );
             let folded = windowed.folded;
             let selected = windowed.selected;
+            let entry_cursors = windowed.cursors;
             let arrival_by_key: std::collections::HashMap<&str, Option<u64>> = cached
                 .map(|cache| {
                     cache
@@ -1699,6 +1728,22 @@ fn bound_view_vm_keyed(
                     source.as_ref().and_then(|source| {
                         arrival_by_key.get(source.key.as_str()).copied().flatten()
                     })
+                })
+                .collect();
+            let entry_ids = folded
+                .entries
+                .iter()
+                .zip(folded.sources.iter())
+                .zip(folded.sections.iter())
+                .map(|((entry, source), section)| {
+                    source.as_ref().map_or_else(
+                        || {
+                            let semantic = serde_json::to_vec(&(entry, section))
+                                .expect("timeline presentation identity is serializable");
+                            format!("timeline-entry:{:x}", Sha256::digest(semantic))
+                        },
+                        |source| format!("timeline-entry:{}", source.key),
+                    )
                 })
                 .collect();
             // The foldable section under the point — what a fold key toggles.
@@ -1746,6 +1791,8 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_ids,
+                entry_cursors,
                 entry_arrived_at_ms,
                 entry_indents: folded.indents,
                 selected,
@@ -1799,6 +1846,7 @@ fn bound_view_vm_keyed(
                     };
                     RyeOsTableRowVm {
                         id: format!("{view_ref}#{key}"),
+                        cursor: index,
                         cells: record.cells,
                         hierarchy: hierarchy.as_ref().map(|tree| RyeOsTableHierarchyVm {
                             ancestor_continues: tree.ancestor_continues.clone(),
@@ -1859,6 +1907,7 @@ fn bound_view_vm_keyed(
                 .enumerate()
                 .map(|(index, (key, value))| RyeOsRowVm {
                     id: format!("{view_ref}#{key}"),
+                    cursor: index,
                     glyph: None,
                     primary: format!("{key}: {value}"),
                     secondary: None,
@@ -2007,6 +2056,113 @@ pub(crate) fn field_vm_for_instance(
     })
 }
 
+/// Project the exact currently mounted tile-or-dock view instance. Pointer
+/// reducers use this to validate semantic item identity against current Rust
+/// state rather than trusting a browser frame's position or intent payload.
+pub(crate) fn view_vm_for_instance(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+) -> Option<RyeOsViewVm> {
+    let workspace = &core.workspaces[core.active_workspace];
+    let active_tiles = workspace
+        .root
+        .as_ref()
+        .map(LayoutTree::active_tile_ids)
+        .unwrap_or_default();
+    if let Some((tile_id, view_ref)) = active_tiles.into_iter().find_map(|tile_id| {
+        workspace
+            .tiles
+            .get(&tile_id)
+            .filter(|tile| &tile.instance_key == instance_key)
+            .map(|tile| (tile_id, tile.view.view_ref.clone()))
+    }) {
+        return Some(bound_view_vm(core, tile_id, &view_ref));
+    }
+    let view_ref = core
+        .visible_dock_views()
+        .into_iter()
+        .find(|(key, _)| key == instance_key)
+        .map(|(_, view_ref)| view_ref)?;
+    Some(bound_view_vm_keyed(
+        core,
+        instance_key,
+        None,
+        dock_selected_state(core, instance_key),
+        &view_ref,
+        &core.ui.atlas,
+    ))
+}
+
+pub(crate) fn view_section(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    section_id: &str,
+) -> Option<(usize, usize, bool)> {
+    let RyeOsViewVm::Sections { sections, .. } = view_vm_for_instance(core, instance_key)? else {
+        return None;
+    };
+    sections
+        .into_iter()
+        .enumerate()
+        .find(|(_, section)| section.id == section_id)
+        .map(|(index, section)| (index, section.cursor, section.collapsed))
+}
+
+fn section_identity(view_ref: &str, section: &super::content::SectionBinding) -> String {
+    let semantic = serde_json::to_vec(&(
+        view_ref,
+        &section.title,
+        &section.source_channel,
+        &section.collection,
+        &section.projection,
+        &section.activate,
+    ))
+    .expect("section identity is serializable");
+    format!("view-section:{:x}", Sha256::digest(semantic))
+}
+
+/// Resolve one semantic pointer target to its current cursor coordinate and
+/// current intent. Only the reducer calls this; clients never carry intents
+/// across frames for activation.
+pub(crate) fn view_pointer_item(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    item_id: &str,
+) -> Option<(usize, Option<RyeOsUiIntent>)> {
+    match view_vm_for_instance(core, instance_key)? {
+        RyeOsViewVm::Rows { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id)
+            .map(|row| (row.cursor, row.intent)),
+        RyeOsViewVm::Table { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id)
+            .map(|row| (row.cursor, row.intent)),
+        RyeOsViewVm::Sections { sections, .. } => sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.id == item_id)
+            .map(|row| (row.cursor, row.intent)),
+        RyeOsViewVm::Timeline {
+            entries,
+            entry_ids,
+            entry_cursors,
+            ..
+        } => entry_ids
+            .into_iter()
+            .position(|id| id == item_id)
+            .and_then(|index| {
+                let cursor = *entry_cursors.get(index)?;
+                let intent = match entries.get(index) {
+                    Some(RyeOsTimelineEntryVm::Line { intent, .. }) => intent.clone(),
+                    _ => None,
+                };
+                Some((cursor, intent))
+            }),
+        _ => None,
+    }
+}
+
 /// The affordance a row's activation invokes, shared by the rows and table
 /// widgets. Activation is explicit — the view names it via `selection.activate`
 /// (no implicit "first affordance") — and the named affordance must be
@@ -2050,6 +2206,7 @@ fn status_notice_rows(
         .map(|(offset, notice)| RyeOsRowVm {
             glyph: None,
             id: format!("{view_ref}#{}", notice.id),
+            cursor: start_index + offset,
             primary: notice.message.clone(),
             secondary: None,
             meta: Some("notice".to_string()),
@@ -3094,11 +3251,11 @@ pub(crate) fn active_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> 
     };
     let query = core.ui.overlay.query.trim().to_lowercase();
     let items = overlay_source_items(core, &source_ref);
-    if query.is_empty() {
+    let mut visible = if query.is_empty() {
         // Tree presentation: a collapsed header hides its children. Flat
         // sources carry no headers, so everything passes.
         let mut hidden = false;
-        return items
+        items
             .into_iter()
             .filter(|item| {
                 if item.header {
@@ -3108,37 +3265,58 @@ pub(crate) fn active_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> 
                     !hidden
                 }
             })
-            .collect();
+            .collect()
+    } else {
+        // A live search matches over every child regardless of fold state and
+        // presents hits under their forced-open headers — a collapsed group
+        // can never hide a match, and Enter always lands on one (headers go
+        // inert while the query is live).
+        let mut out: Vec<RyeOsOverlayItemVm> = Vec::new();
+        let mut pending_header: Option<RyeOsOverlayItemVm> = None;
+        for item in items {
+            if item.header {
+                pending_header = Some(item);
+                continue;
+            }
+            let haystack = format!(
+                "{} {} {} {}",
+                item.category, item.primary, item.secondary, item.meta
+            )
+            .to_lowercase();
+            if !haystack.contains(&query) {
+                continue;
+            }
+            if let Some(mut header) = pending_header.take() {
+                header.expanded = true;
+                header.enabled = false;
+                header.intent = None;
+                header.secondary_intent = None;
+                out.push(header);
+            }
+            out.push(item);
+        }
+        out
+    };
+    for item in &mut visible {
+        item.id = overlay_item_identity(item);
     }
-    // A live search matches over every child regardless of fold state and
-    // presents hits under their forced-open headers — a collapsed group
-    // can never hide a match, and Enter always lands on one (headers go
-    // inert while the query is live).
-    let mut out: Vec<RyeOsOverlayItemVm> = Vec::new();
-    let mut pending_header: Option<RyeOsOverlayItemVm> = None;
-    for item in items {
-        if item.header {
-            pending_header = Some(item);
-            continue;
-        }
-        let haystack = format!(
-            "{} {} {} {}",
-            item.category, item.primary, item.secondary, item.meta
-        )
-        .to_lowercase();
-        if !haystack.contains(&query) {
-            continue;
-        }
-        if let Some(mut header) = pending_header.take() {
-            header.expanded = true;
-            header.enabled = false;
-            header.intent = None;
-            header.secondary_intent = None;
-            out.push(header);
-        }
-        out.push(item);
-    }
-    out
+    visible
+}
+
+fn overlay_item_identity(item: &RyeOsOverlayItemVm) -> String {
+    let semantic = serde_json::to_vec(&(
+        &item.category,
+        &item.primary,
+        &item.secondary,
+        &item.meta,
+        &item.disabled_reason,
+        item.depth,
+        item.header,
+        &item.intent,
+        &item.secondary_intent,
+    ))
+    .expect("overlay item identity is serializable");
+    format!("overlay-item:{:x}", Sha256::digest(semantic))
 }
 
 fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayItemVm> {
@@ -3156,12 +3334,14 @@ fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayI
 
 fn overlay_item_from_choice(item: RyeOsOverlayChoice) -> RyeOsOverlayItemVm {
     let (category, primary) = choice_category_and_label(&item.label);
+    let disabled_reason = (!item.enabled).then(|| item.hint.clone());
     RyeOsOverlayItemVm {
         category,
         primary,
         secondary: item.hint,
         meta: String::new(),
         enabled: item.enabled,
+        disabled_reason,
         intent: Some(item.intent),
         secondary_intent: item.secondary_intent,
         ..Default::default()

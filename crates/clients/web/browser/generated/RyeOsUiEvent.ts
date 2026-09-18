@@ -87,7 +87,16 @@ export type RyeOsUiEvent =
    */
   | { type: "submit_input_interrupt" }
   | { type: "move_overlay_selection"; delta: number }
+  /**
+   * Pointer selection names the exact projected overlay row; it must not
+   * derive a delta or trust a mutable index from a stale renderer frame.
+   */
+  | { type: "set_overlay_selection"; item_id: string }
   | { type: "choose_overlay"; secondary: boolean }
+  /**
+   * Atomically select and choose one exact projected overlay row.
+   */
+  | { type: "choose_overlay_at"; item_id: string; secondary: boolean }
   /**
    * Fold (`expand: false`) or unfold the launcher group under the
    * overlay selection. Folding from a leaf lands the selection on the
@@ -97,9 +106,37 @@ export type RyeOsUiEvent =
   | { type: "fold_overlay_group"; expand: boolean }
   | { type: "set_tile_cursor"; tile_id: string; index: bigint }
   /**
+   * Select a projected list point by its exact mounted view identity. This
+   * is the pointer-facing form: unlike `SetTileCursor`, it also addresses
+   * views mounted in a dock slot without inventing a tile id.
+   */
+  | { type: "set_view_cursor"; instance_key: RyeOsViewInstanceKey; index: bigint }
+  /**
+   * Atomically select one exact projected view item and, when requested,
+   * activate the intent attached to that same item in the reducer's
+   * current projection. A stale browser frame can therefore never select
+   * or invoke whichever record later occupied the old numeric index.
+   */
+  | { type: "choose_view_item"; instance_key: RyeOsViewInstanceKey; item_id: string; activate: boolean }
+  /**
+   * Dismiss one exact transient notice. Unknown/already-dismissed ids are
+   * idempotent no-ops so stale renderer frames cannot remove another one.
+   */
+  | { type: "dismiss_notice"; id: string }
+  /**
+   * Atomically toggle one exact authored section in the current mounted
+   * projection. The reducer resolves its current numeric position; stale
+   * section indices from a replaced/reordered binding are never trusted.
+   */
+  | { type: "toggle_view_section"; instance_key: RyeOsViewInstanceKey; section_id: string }
+  /**
    * Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
    */
   | { type: "set_fold"; tile_id: string; section: bigint; collapsed: boolean }
+  /**
+   * Fold a section in an exactly addressed tile or dock view instance.
+   */
+  | { type: "set_view_fold"; instance_key: RyeOsViewInstanceKey; section: bigint; collapsed: boolean }
   /**
    * Expand/collapse the selected row or timeline entry in the focused lens.
    * The reducer resolves the selected record/event to a stable key; keymaps

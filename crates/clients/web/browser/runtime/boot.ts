@@ -39,7 +39,15 @@ export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   let preferences: LayoutPreferencePersistence | null = null;
   let renderer: RyeOsRenderer;
   let closed = false;
-  const dispatchUi = (event: RyeOsUiEvent) => runtime.enqueueEvent({ type: "ui", event });
+  let seatAttached = false;
+  const queuedUiEvents: RyeOsUiEvent[] = [];
+  const dispatchUi = (event: RyeOsUiEvent) => {
+    if (!seatAttached) {
+      queuedUiEvents.push(event);
+      return;
+    }
+    runtime.enqueueEvent({ type: "ui", event });
+  };
   renderer = mountRyeOsRenderer(root, initial, dispatchUi);
 
   runtime = createCommitRuntime({
@@ -58,14 +66,17 @@ export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   });
 
   sessionRuntime = createSessionRuntime({
+    sessionId: sessionId(sessionUnknown),
     eventsUrl: sessionEventsUrl(sessionUnknown),
     seatEvents: () => wasm.ryeos_seat_events(),
     commitEvent: (event) => runtime.enqueueEvent(event),
     replaySeatEvents: (events) => runtime.commitMutation(() => wasm.ryeos_replay_seat_events(events)),
   });
   runtime.enqueueEnvelope(initial);
-  configurePreferences(wasm, runtime, (next) => { preferences = next; });
   await sessionRuntime.attachSeat();
+  seatAttached = true;
+  for (const event of queuedUiEvents.splice(0)) runtime.enqueueEvent({ type: "ui", event });
+  configurePreferences(wasm, runtime, (next) => { preferences = next; });
   if (location.hash) runtime.enqueueEvent({ type: "route_changed", route: location.hash.replace(/^#/, "") });
   const detachBrowserEvents = attachBrowserEvents(wasm, runtime);
 
@@ -89,6 +100,17 @@ function sessionEventsUrl(session: unknown): string | null {
   const value = (session as Record<string, unknown>).events_url;
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") throw new Error("authenticated browser session events_url is invalid");
+  return value;
+}
+
+function sessionId(session: unknown): string {
+  if (typeof session !== "object" || session === null || Array.isArray(session)) {
+    throw new Error("authenticated browser session is not an object");
+  }
+  const value = (session as Record<string, unknown>).session_id;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("authenticated browser session has no session_id");
+  }
   return value;
 }
 
@@ -119,6 +141,10 @@ function attachBrowserEvents(wasm: RyeOsWasmApi, runtime: UiRuntime): () => void
   const abort = new AbortController();
   const options = { signal: abort.signal };
   window.addEventListener("keydown", (event) => {
+    // Mounted controls may already have translated this key into an exact
+    // addressed shared event. Never feed the same physical key through the
+    // global keymap a second time.
+    if (event.defaultPrevented) return;
     if (isTypingTarget(event.target)) return;
     const key = keyEvent(event);
     if (!key) return;

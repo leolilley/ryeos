@@ -133,6 +133,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `OpenOverlay` | native | shared | exact overlay |
 | [x] `CloseOverlay` | native | shared | close overlay |
 | [x] `SetOverlayQuery` | native | shared | native/key input |
+| [x] `SetOverlaySelection` | native | gap | exact pointer-facing overlay row selection |
 | [x] `FocusInput` | native | shared | input focus |
 | [x] `BlurInput` | native | shared | input blur |
 | [x] `InsertInputChar` | shared | native | character key path |
@@ -146,9 +147,15 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SubmitInputInterrupt` | shared | shared | shared keymap |
 | [x] `MoveOverlaySelection` | shared | shared | shared keymap |
 | [x] `ChooseOverlay` | shared | shared | shared keymap |
+| [x] `ChooseOverlayAt` | native | gap | atomic exact pointer selection and choice |
 | [x] `FoldOverlayGroup` | shared | shared | shared keymap |
 | [x] `SetTileCursor` | native | shared | pointer/key selection |
+| [x] `SetViewCursor` | native | gap | exact tile-or-dock instance pointer selection |
+| [x] `ChooseViewItem` | native | gap | atomic semantic-identity selection and current-intent activation |
+| [x] `DismissNotice` | native | gap | exact idempotent browser notice dismissal |
+| [x] `ToggleViewSection` | native | gap | semantic section identity resolved atomically in current projection |
 | [x] `SetFold` | native | native | click/point fold |
+| [x] `SetViewFold` | native | gap | exact tile-or-dock instance fold |
 | [x] `ExpandSelectedRow` | shared | shared | shared keymap |
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `ActivateFocused` | shared | shared | shared keymap |

@@ -64,6 +64,13 @@ impl Presenter {
             Self::Tty(tty) => tty.stream_event(ev),
         }
     }
+
+    pub fn finish_stream(&mut self) -> io::Result<()> {
+        if let Self::Tty(tty) = self {
+            tty.finish_stream()?;
+        }
+        Ok(())
+    }
 }
 
 pub struct TtyPresenter {
@@ -129,5 +136,12 @@ impl TtyPresenter {
                 Ok(outcome)
             }
         }
+    }
+
+    fn finish_stream(&mut self) -> io::Result<()> {
+        if let Some(stream) = self.stream.as_mut() {
+            stream.finish()?;
+        }
+        Ok(())
     }
 }

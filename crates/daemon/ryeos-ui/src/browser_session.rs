@@ -51,9 +51,10 @@ pub struct BrowserSession {
     pub compiled_binding: Arc<crate::compiled_binding::SessionCompiledUiBinding>,
     pub effective_surface: serde_json::Value,
     pub granted_caps: Vec<String>,
-    /// Cached projections of `compiled_binding`, retained for existing seat
-    /// and project-resolution callers. They are immutable and are not
-    /// independent authority.
+    /// Stable display projection of `compiled_binding`. Filesystem consumers
+    /// use the retained directory authority, while projection consumers use
+    /// the validated query identity exposed by `seat_auth`; this string is
+    /// immutable but is never independent authority.
     pub project_root: Option<String>,
     pub surface_ref: String,
     pub user_principal_id: Option<String>,

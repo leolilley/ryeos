@@ -1409,7 +1409,10 @@ mod tests {
             )
             .encode()
         );
-        assert_eq!(view_ref, "view:test/items");
+        assert_eq!(
+            view_ref, "view:test/filter",
+            "the source coordinate names the authored view, never its service ref"
+        );
         assert_eq!(channel, "default");
         assert_eq!(params["query"], "wid");
         assert_eq!(params["limit"], 50);

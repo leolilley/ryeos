@@ -11,6 +11,11 @@ import type { RyeOsUiIntent } from "./RyeOsUiIntent";
  */
 export interface RyeOsTableRowVm {
   id: string;
+  /**
+   * Exact cursor coordinate in the current complete projection. Render
+   * windows must never make their local array index look authoritative.
+   */
+  cursor: bigint;
   cells: string[];
   /**
    * Structural position when the table declares `projections.hierarchy`.

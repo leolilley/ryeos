@@ -108,7 +108,375 @@ function createCommitRuntime(options) {
 	};
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/shared/utils.js
+//#region browser/runtime/transport.ts
+var UnknownDeliveryError = class extends Error {
+	outcome = "unknown";
+};
+var HttpResponseError = class extends Error {
+	status;
+	constructor(status, message) {
+		super(message);
+		this.status = status;
+	}
+};
+/**
+* Encode the generated Rust/WASM value domain without losing u64 values.
+*
+* `serde-wasm-bindgen` deliberately exposes Rust u64 values as BigInt. Native
+* JSON.stringify rejects them, while converting through Number can silently
+* change an identity. This encoder emits BigInt as an exact JSON integer token
+* and rejects values outside the JSON data model before a request is sent.
+*/
+function encodeJsonBody(value) {
+	return encodeJson(value, false);
+}
+/** Deterministic JSON key/string spelling; numeric protocol digests use the typed encoder below. */
+function encodeCanonicalJsonBody(value) {
+	return encodeJson(value, true);
+}
+/**
+* Canonical typed bytes for the durable seat payload digest.
+*
+* JSON text is not a cross-language canonical number representation: JS and
+* serde_json legitimately spell the same f64 differently around exponent
+* thresholds. This format instead distinguishes exact integers from f64s and
+* commits floats by their IEEE-754 bits. Length framing makes strings and
+* containers unambiguous, and the prefix keeps this protocol out of other hash
+* domains.
+*/
+function encodeSeatPayloadDigest(value) {
+	const active = /* @__PURE__ */ new Set();
+	function encode(current) {
+		if (current === null) return "n";
+		switch (typeof current) {
+			case "string":
+				assertValidUnicode(current);
+				return `s${encodedByteLength$1(current)}:${current}`;
+			case "boolean": return current ? "t" : "f";
+			case "bigint":
+				assertJsonIntegerRange(current);
+				return `i${current.toString(10)};`;
+			case "number":
+				if (!Number.isFinite(current)) throw new TypeError("seat digest contains a non-finite number");
+				if (Number.isInteger(current)) {
+					if (!Number.isSafeInteger(current)) throw new TypeError("seat digest contains an unsafe integer; use BigInt for exact identity");
+					return `i${Object.is(current, -0) ? "0" : String(current)};`;
+				}
+				return `d${float64Bits(current)};`;
+			case "object": break;
+			default: throw new TypeError(`seat digest contains unsupported ${typeof current}`);
+		}
+		const object = current;
+		if (active.has(object)) throw new TypeError("seat digest contains a cycle");
+		active.add(object);
+		try {
+			if (Array.isArray(current)) return `a${current.length}:{${current.map(encode).join("")}}`;
+			const prototype = Object.getPrototypeOf(current);
+			if (prototype !== Object.prototype && prototype !== null) throw new TypeError("seat digest contains a non-record object");
+			const record = current;
+			const keys = Object.keys(record).sort(compareCanonicalKeys);
+			return `o${keys.length}:{${keys.map((key) => `${encode(key)}${encode(record[key])}`).join("")}}`;
+		} finally {
+			active.delete(object);
+		}
+	}
+	return `ryeos.seat.payload.v1|${encode(value)}`;
+}
+function encodeJson(value, sortKeys) {
+	const active = /* @__PURE__ */ new Set();
+	function encode(current) {
+		if (current === null) return "null";
+		switch (typeof current) {
+			case "string":
+				assertValidUnicode(current);
+				return sortKeys ? encodeCanonicalString(current) : JSON.stringify(current);
+			case "boolean": return current ? "true" : "false";
+			case "number":
+				if (!Number.isFinite(current)) throw new TypeError("JSON body contains a non-finite number");
+				if (Number.isInteger(current) && !Number.isSafeInteger(current)) throw new TypeError("JSON body contains an unsafe integer; use BigInt for exact identity");
+				return Object.is(current, -0) ? "0" : String(current);
+			case "bigint":
+				assertJsonIntegerRange(current);
+				return current.toString(10);
+			case "object": break;
+			default: throw new TypeError(`JSON body contains unsupported ${typeof current}`);
+		}
+		const object = current;
+		if (active.has(object)) throw new TypeError("JSON body contains a cycle");
+		active.add(object);
+		try {
+			if (Array.isArray(current)) return `[${current.map(encode).join(",")}]`;
+			const prototype = Object.getPrototypeOf(current);
+			if (prototype !== Object.prototype && prototype !== null) throw new TypeError("JSON body contains a non-record object");
+			const record = current;
+			const keys = Object.keys(record);
+			for (const key of keys) assertValidUnicode(key);
+			if (sortKeys) keys.sort(compareCanonicalKeys);
+			return `{${keys.map((key) => `${sortKeys ? encodeCanonicalString(key) : JSON.stringify(key)}:${encode(record[key])}`).join(",")}}`;
+		} finally {
+			active.delete(object);
+		}
+	}
+	return encode(value === void 0 ? {} : value);
+}
+/** Rust `String::cmp` orders valid Unicode scalar values by their UTF-8 bytes. */
+function compareCanonicalKeys(left, right) {
+	assertValidUnicode(left);
+	assertValidUnicode(right);
+	const leftScalars = [...left];
+	const rightScalars = [...right];
+	const shared = Math.min(leftScalars.length, rightScalars.length);
+	for (let index = 0; index < shared; index += 1) {
+		const ordering = scalarValue(leftScalars[index]) - scalarValue(rightScalars[index]);
+		if (ordering !== 0) return ordering;
+	}
+	return leftScalars.length - rightScalars.length;
+}
+/** Match `lillux::canonical_json`, including its lowercase non-ASCII escapes. */
+function encodeCanonicalString(value) {
+	assertValidUnicode(value);
+	let encoded = "\"";
+	for (const scalar of value) {
+		const value = scalarValue(scalar);
+		switch (value) {
+			case 34:
+				encoded += "\\\"";
+				break;
+			case 92:
+				encoded += "\\\\";
+				break;
+			case 8:
+				encoded += "\\b";
+				break;
+			case 12:
+				encoded += "\\f";
+				break;
+			case 10:
+				encoded += "\\n";
+				break;
+			case 13:
+				encoded += "\\r";
+				break;
+			case 9:
+				encoded += "\\t";
+				break;
+			default: if (value < 32) encoded += `\\u${hex4(value)}`;
+			else if (value <= 127) encoded += scalar;
+			else if (value <= 65535) encoded += `\\u${hex4(value)}`;
+			else {
+				const supplementary = value - 65536;
+				encoded += `\\u${hex4(55296 + (supplementary >> 10))}`;
+				encoded += `\\u${hex4(56320 + (supplementary & 1023))}`;
+			}
+		}
+	}
+	return `${encoded}"`;
+}
+function assertValidUnicode(value) {
+	for (let index = 0; index < value.length; index += 1) {
+		const unit = value.charCodeAt(index);
+		if (unit >= 55296 && unit <= 56319) {
+			const trail = value.charCodeAt(index + 1);
+			if (!(trail >= 56320 && trail <= 57343)) throw new TypeError("JSON contains an unpaired high surrogate");
+			index += 1;
+		} else if (unit >= 56320 && unit <= 57343) throw new TypeError("JSON contains an unpaired low surrogate");
+	}
+}
+function scalarValue(scalar) {
+	return scalar.codePointAt(0);
+}
+function hex4(value) {
+	return value.toString(16).padStart(4, "0");
+}
+var JSON_INTEGER_MIN = -(1n << 63n);
+var JSON_INTEGER_MAX = (1n << 64n) - 1n;
+function assertJsonIntegerRange(value) {
+	if (value < JSON_INTEGER_MIN || value > JSON_INTEGER_MAX) throw new TypeError("JSON integer is outside the daemon i64/u64 value domain");
+}
+function encodedByteLength$1(value) {
+	return new TextEncoder().encode(value).byteLength;
+}
+function float64Bits(value) {
+	const bytes = /* @__PURE__ */ new Uint8Array(8);
+	new DataView(bytes.buffer).setFloat64(0, value, false);
+	return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+/**
+* Parse JSON without first coercing integer tokens through an IEEE-754 Number.
+* Integer tokens become BigInt, while strings, booleans, null and fractional /
+* exponent-form f64 tokens retain their ordinary JSON meaning.
+*/
+function decodeJsonBody(encoded) {
+	let cursor = 0;
+	let depth = 0;
+	function fail(message) {
+		throw new SyntaxError(`invalid JSON at offset ${cursor}: ${message}`);
+	}
+	function whitespace() {
+		while (cursor < encoded.length) {
+			const unit = encoded.charCodeAt(cursor);
+			if (unit !== 9 && unit !== 10 && unit !== 13 && unit !== 32) return;
+			cursor += 1;
+		}
+	}
+	function literal(token, value) {
+		if (!encoded.startsWith(token, cursor)) fail(`expected ${token}`);
+		cursor += token.length;
+		return value;
+	}
+	function string() {
+		const start = cursor;
+		cursor += 1;
+		while (cursor < encoded.length) {
+			const unit = encoded.charCodeAt(cursor);
+			if (unit === 34) {
+				cursor += 1;
+				return JSON.parse(encoded.slice(start, cursor));
+			}
+			if (unit < 32) fail("unescaped control character in string");
+			if (unit === 92) {
+				cursor += 1;
+				const escape = encoded[cursor];
+				if (escape === "u") {
+					const scalar = encoded.slice(cursor + 1, cursor + 5);
+					if (!/^[0-9a-fA-F]{4}$/.test(scalar)) fail("invalid Unicode escape");
+					cursor += 5;
+					continue;
+				}
+				if (!escape || !"\"\\/bfnrt".includes(escape)) fail("invalid string escape");
+			}
+			cursor += 1;
+		}
+		fail("unterminated string");
+	}
+	function number() {
+		const tail = encoded.slice(cursor);
+		const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(tail);
+		if (!match) fail("invalid number");
+		const token = match[0];
+		cursor += token.length;
+		if (!token.includes(".") && !/[eE]/.test(token)) {
+			if (token === "-0") return -0;
+			const value = BigInt(token);
+			if (value < JSON_INTEGER_MIN || value > JSON_INTEGER_MAX) fail("integer is outside the daemon i64/u64 value domain");
+			return value;
+		}
+		const value = Number(token);
+		if (!Number.isFinite(value)) fail("number is outside the finite f64 domain");
+		return value;
+	}
+	function array() {
+		cursor += 1;
+		depth += 1;
+		if (depth > 128) fail("container nesting exceeds the daemon JSON limit");
+		try {
+			whitespace();
+			if (encoded[cursor] === "]") {
+				cursor += 1;
+				return [];
+			}
+			const result = [];
+			while (true) {
+				result.push(value());
+				whitespace();
+				if (encoded[cursor] === "]") {
+					cursor += 1;
+					return result;
+				}
+				if (encoded[cursor] !== ",") fail("expected ',' or ']'");
+				cursor += 1;
+				whitespace();
+			}
+		} finally {
+			depth -= 1;
+		}
+	}
+	function object() {
+		cursor += 1;
+		depth += 1;
+		if (depth > 128) fail("container nesting exceeds the daemon JSON limit");
+		try {
+			whitespace();
+			if (encoded[cursor] === "}") {
+				cursor += 1;
+				return Object.create(null);
+			}
+			const result = Object.create(null);
+			while (true) {
+				if (encoded[cursor] !== "\"") fail("expected object key");
+				const key = string();
+				if (Object.hasOwn(result, key)) fail(`duplicate object key ${JSON.stringify(key)}`);
+				whitespace();
+				if (encoded[cursor] !== ":") fail("expected ':'");
+				cursor += 1;
+				result[key] = value();
+				whitespace();
+				if (encoded[cursor] === "}") {
+					cursor += 1;
+					return result;
+				}
+				if (encoded[cursor] !== ",") fail("expected ',' or '}'");
+				cursor += 1;
+				whitespace();
+			}
+		} finally {
+			depth -= 1;
+		}
+	}
+	function value() {
+		whitespace();
+		const token = encoded[cursor];
+		if (token === "\"") return string();
+		if (token === "{") return object();
+		if (token === "[") return array();
+		if (token === "t") return literal("true", true);
+		if (token === "f") return literal("false", false);
+		if (token === "n") return literal("null", null);
+		if (token === "-" || token !== void 0 && token >= "0" && token <= "9") return number();
+		fail("expected a JSON value");
+	}
+	const result = value();
+	whitespace();
+	if (cursor !== encoded.length) fail("trailing input");
+	return result;
+}
+async function getJson(url, signal) {
+	const response = await fetch(url, {
+		credentials: "same-origin",
+		...signal ? { signal } : {}
+	});
+	if (!response.ok) throw new HttpResponseError(response.status, `${url}: ${response.status} ${await response.text()}`);
+	return decodeJsonBody(await response.text());
+}
+async function postJson(url, body, signal) {
+	return postEncodedJson(url, encodeJsonBody(body), signal);
+}
+/** Send bytes that have already been validated and measured by the caller. */
+async function postEncodedJson(url, encodedBody, signal) {
+	let response;
+	try {
+		response = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: encodedBody,
+			credentials: "same-origin",
+			...signal ? { signal } : {}
+		});
+	} catch (error) {
+		throw new UnknownDeliveryError(`${url}: delivery outcome is unknown: ${errorMessage(error)}`);
+	}
+	if (!response.ok) throw new HttpResponseError(response.status, `${url}: ${response.status} ${await response.text()}`);
+	try {
+		return decodeJsonBody(await response.text());
+	} catch (error) {
+		throw new UnknownDeliveryError(`${url}: response outcome is unknown: ${errorMessage(error)}`);
+	}
+}
+function errorMessage(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+//#endregion
+//#region node_modules/svelte/src/internal/shared/utils.js
 var is_array = Array.isArray;
 var index_of = Array.prototype.indexOf;
 var includes = Array.prototype.includes;
@@ -186,7 +554,7 @@ var STALE_REACTION = new class StaleReactionError extends Error {
 }();
 var IS_XHTML = !!globalThis.document?.contentType && /* @__PURE__ */ globalThis.document.contentType.includes("xml");
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/constants.js
+//#region node_modules/svelte/src/constants.js
 var HYDRATION_ERROR = {};
 var UNINITIALIZED = Symbol("uninitialized");
 var NAMESPACE_HTML = "http://www.w3.org/1999/xhtml";
@@ -210,7 +578,7 @@ function svelte_boundary_reset_noop() {
 	console.warn(`https://svelte.dev/e/svelte_boundary_reset_noop`);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/hydration.js
+//#region node_modules/svelte/src/internal/client/dom/hydration.js
 /** @import { TemplateNode } from '#client' */
 /**
 * Use this variable to guard everything related to hydration code so it can be treeshaken out
@@ -289,7 +657,7 @@ function read_hydration_instruction(node) {
 	return node.data;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/equality.js
+//#region node_modules/svelte/src/internal/client/reactivity/equality.js
 /** @import { Equals } from '#client' */
 /** @type {Equals} */
 function equals(value) {
@@ -316,7 +684,7 @@ function lifecycle_outside_component(name) {
 	throw new Error(`https://svelte.dev/e/lifecycle_outside_component`);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/errors.js
+//#region node_modules/svelte/src/internal/client/errors.js
 /**
 * Cannot create a `$derived(...)` with an `await` expression outside of an effect tree
 * @returns {never}
@@ -400,13 +768,13 @@ function svelte_boundary_reset_onerror() {
 	throw new Error(`https://svelte.dev/e/svelte_boundary_reset_onerror`);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/flags/index.js
+//#region node_modules/svelte/src/internal/flags/index.js
 /** True if experimental.async=true */
 var async_mode_flag = false;
 /** True if we're not certain that we only have Svelte 5 code in the compilation */
 var legacy_mode_flag = false;
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/shared/context.js
+//#region node_modules/svelte/src/internal/shared/context.js
 /**
 * @typedef {{ p: Context | null, c: Map<unknown, unknown> | null }} Context
 */
@@ -429,7 +797,7 @@ function get_or_init_context_map(context, name) {
 	return context.c ??= new Map(get_parent_context(context) || void 0);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/context.js
+//#region node_modules/svelte/src/internal/client/context.js
 /** @import { ComponentContext, DevStackEntry, Effect } from '#client' */
 /** @type {ComponentContext | null} */
 var component_context = null;
@@ -527,7 +895,7 @@ function is_runes() {
 	return !legacy_mode_flag || component_context !== null && component_context.l === null;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/task.js
+//#region node_modules/svelte/src/internal/client/dom/task.js
 /** @type {Array<() => void>} */
 var micro_tasks = [];
 function run_micro_tasks() {
@@ -548,7 +916,7 @@ function queue_micro_task(fn) {
 	micro_tasks.push(fn);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/status.js
+//#region node_modules/svelte/src/internal/client/reactivity/status.js
 /** @import { Derived, Signal } from '#client' */
 var STATUS_MASK = ~(DIRTY | MAYBE_DIRTY | CLEAN);
 /**
@@ -567,7 +935,7 @@ function update_derived_status(derived) {
 	else set_signal_status(derived, MAYBE_DIRTY);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/utils.js
+//#region node_modules/svelte/src/internal/client/reactivity/utils.js
 /** @import { Derived, Effect, Value } from '#client' */
 /**
 * @param {Value[] | null} deps
@@ -595,14 +963,14 @@ function defer_effect(effect, dirty_effects, maybe_dirty_effects) {
 	set_signal_status(effect, CLEAN);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/store.js
+//#region node_modules/svelte/src/internal/client/reactivity/store.js
 /**
 * We set this to `true` when updating a store so that we correctly
 * schedule effects if the update takes place inside a `$:` effect
 */
 var legacy_is_updating_store = false;
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/misc.js
+//#region node_modules/svelte/src/internal/client/dom/elements/misc.js
 /**
 * The child of a textarea actually corresponds to the defaultValue property, so we need
 * to remove it upon hydration to avoid a bug when someone resets the form value.
@@ -625,7 +993,7 @@ function add_form_reset_listener() {
 	}
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
+//#region node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js
 /**
 * @template T
 * @param {() => T} fn
@@ -643,7 +1011,7 @@ function without_reactive_context(fn) {
 	}
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/async.js
+//#region node_modules/svelte/src/internal/client/reactivity/async.js
 /** @import { Blocker, Effect, Source, Value } from '#client' */
 /**
 * @param {Blocker[]} blockers
@@ -932,7 +1300,7 @@ function unfreeze_derived_effects(derived) {
 	for (const e of derived.effects) if (e.teardown && e.fn !== null) update_effect(e);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/batch.js
+//#region node_modules/svelte/src/internal/client/reactivity/batch.js
 /** @import { Fork } from 'svelte' */
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /** @type {Batch | null} */
@@ -1647,7 +2015,7 @@ function reset_all(effect) {
 	}
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/sources.js
+//#region node_modules/svelte/src/internal/client/reactivity/sources.js
 /** @import { Derived, Effect, Source, Value } from '#client' */
 /** @type {Set<Effect>} */
 var eager_effects = /* @__PURE__ */ new Set();
@@ -1946,7 +2314,7 @@ function proxy(value) {
 	});
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/operations.js
+//#region node_modules/svelte/src/internal/client/dom/operations.js
 /** @import { Effect, TemplateNode } from '#client' */
 /** @type {Window} */
 var $window;
@@ -2171,7 +2539,7 @@ function invoke_error_boundary(error, effect) {
 	throw error;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/reactivity/effects.js
+//#region node_modules/svelte/src/internal/client/reactivity/effects.js
 /** @import { Blocker, ComponentContext, ComponentContextLegacy, Derived, Effect, TemplateNode, TransitionManager } from '#client' */
 /**
 * @param {'$effect' | '$effect.pre' | '$inspect'} rune
@@ -2551,14 +2919,14 @@ function move_effect(effect, fragment) {
 	}
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/legacy.js
+//#region node_modules/svelte/src/internal/client/legacy.js
 /**
 * @type {Set<Value> | null}
 * @deprecated
 */
 var captured_signals = null;
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/runtime.js
+//#region node_modules/svelte/src/internal/client/runtime.js
 /** @import { Derived, Effect, Reaction, Source, Value } from '#client' */
 /**
 * True if updating in an effect context that is reactive (i.e. not branch/root effects)
@@ -2933,7 +3301,7 @@ function is_passive_event(name) {
 	return PASSIVE_EVENTS.includes(name);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/events.js
+//#region node_modules/svelte/src/internal/client/dom/elements/events.js
 /**
 * Used on elements, as a map of event type -> event handler,
 * and on events themselves to track which element handled an event
@@ -3081,7 +3449,7 @@ function handle_event_propagation(event) {
 	}
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/reconciler.js
+//#region node_modules/svelte/src/internal/client/dom/reconciler.js
 var policy = globalThis?.window?.trustedTypes && /* @__PURE__ */ globalThis.window.trustedTypes.createPolicy("svelte-trusted-html", {
 /** @param {string} html */
 createHTML: (html) => {
@@ -3100,7 +3468,7 @@ function create_fragment_from_html(html) {
 	return elem.content;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/template.js
+//#region node_modules/svelte/src/internal/client/dom/template.js
 /** @import { Effect, EffectNodes, TemplateNode } from '#client' */
 /** @import { TemplateStructure } from './types' */
 /**
@@ -3197,6 +3565,24 @@ function from_svg(content, flags) {
 	return /* @__PURE__ */ from_namespace(content, flags, "svg");
 }
 /**
+* Don't mark this as side-effect-free, hydration needs to walk all nodes
+* @param {any} value
+*/
+function text(value = "") {
+	if (!hydrating) {
+		var t = create_text(value + "");
+		assign_nodes(t, t);
+		return t;
+	}
+	var node = hydrate_node;
+	if (node.nodeType !== 3) {
+		node.before(node = create_text());
+		set_hydrate_node(node);
+	} else merge_text_nodes(node);
+	assign_nodes(node, node);
+	return node;
+}
+/**
 * @returns {TemplateNode | DocumentFragment}
 */
 function comment() {
@@ -3228,7 +3614,7 @@ function append(anchor, dom) {
 	anchor.before(dom);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/reactivity/create-subscriber.js
+//#region node_modules/svelte/src/reactivity/create-subscriber.js
 /**
 * Returns a `subscribe` function that integrates external event-based systems with Svelte's reactivity.
 * It's particularly useful for integrating with web APIs like `MediaQuery`, `IntersectionObserver`, or `WebSocket`.
@@ -3301,7 +3687,7 @@ function createSubscriber(start) {
 	};
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/boundary.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/boundary.js
 /** @import { Effect, Source, TemplateNode, } from '#client' */
 /**
 * @typedef {{
@@ -3804,7 +4190,7 @@ function unmount(component, options) {
 	return Promise.resolve();
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/branches.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/branches.js
 /** @import { Effect, TemplateNode } from '#client' */
 /**
 * @typedef {{ effect: Effect, fragment: DocumentFragment }} Branch
@@ -3952,7 +4338,7 @@ var BranchManager = class {
 	}
 };
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/if.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/if.js
 /** @import { TemplateNode } from '#client' */
 /**
 * @param {TemplateNode} node
@@ -3998,7 +4384,7 @@ function if_block(node, fn, elseif = false) {
 	}, flags);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/blocks/each.js
+//#region node_modules/svelte/src/internal/client/dom/blocks/each.js
 /** @import { EachItem, EachOutroGroup, EachState, Effect, EffectNodes, MaybeSource, Source, TemplateNode, TransitionManager, Value } from '#client' */
 /** @import { Batch } from '../../reactivity/batch.js'; */
 /**
@@ -4415,7 +4801,7 @@ function link(state, prev, next) {
 	else next.prev = prev;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/shared/attributes.js
+//#region node_modules/svelte/src/internal/shared/attributes.js
 var whitespace = [..." 	\n\r\f\xA0\v﻿"];
 /**
 * @param {any} value
@@ -4525,7 +4911,7 @@ function to_style(value, styles) {
 	return value == null ? null : String(value);
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/class.js
+//#region node_modules/svelte/src/internal/client/dom/elements/class.js
 /**
 * @param {Element} dom
 * @param {boolean | number} is_html
@@ -4552,7 +4938,7 @@ function set_class(dom, is_html, value, hash, prev_classes, next_classes) {
 	return next_classes;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/style.js
+//#region node_modules/svelte/src/internal/client/dom/elements/style.js
 /**
 * @param {Element & ElementCSSInlineStyle} dom
 * @param {Record<string, any>} prev
@@ -4592,7 +4978,7 @@ function set_style(dom, value, prev_styles, next_styles) {
 	return next_styles;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/attributes.js
+//#region node_modules/svelte/src/internal/client/dom/elements/attributes.js
 /** @import { Blocker, Effect } from '#client' */
 var IS_CUSTOM_ELEMENT = Symbol("is custom element");
 var IS_HTML = Symbol("is html");
@@ -4684,7 +5070,7 @@ function get_setters(element) {
 	return setters;
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
+//#region node_modules/svelte/src/internal/client/dom/elements/bindings/this.js
 /** @import { ComponentContext, Effect } from '#client' */
 /**
 * @param {any} bound_value
@@ -4771,7 +5157,7 @@ function init_update_callbacks(context) {
 	};
 }
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/svelte/src/internal/disclose-version.js
+//#region node_modules/svelte/src/internal/disclose-version.js
 if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 //#endregion
 //#region browser/runtime/context.ts
@@ -4784,18 +5170,18 @@ function dispatchUi() {
 }
 //#endregion
 //#region browser/app/Navigation.svelte
-var root$15 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$7 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
+var root$17 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root_1$7();
+	var aside = root_1$9();
 	var div = child(aside);
 	var text = only_child(sibling(child(div)), true);
 	reset(div);
 	var nav = sibling(div, 2);
 	each(nav, 21, () => $$props.model.items, (item) => item.id, ($$anchor, item) => {
-		var button = root$15();
+		var button = root$17();
 		let classes;
 		var span_1 = sibling(child(button), 2);
 		var text_1 = only_child(child(span_1), true);
@@ -4818,6 +5204,255 @@ function Navigation($$anchor, $$props) {
 	pop();
 }
 delegate(["click"]);
+//#endregion
+//#region browser/app/Notices.svelte
+var root$16 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
+var root_1$8 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+function Notices($$anchor, $$props) {
+	push($$props, true);
+	const dispatch = dispatchUi();
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent = ($$anchor) => {
+		var aside = root_1$8();
+		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
+			var div = root$16();
+			var span = child(div);
+			var text = only_child(span, true);
+			var button = sibling(span, 2);
+			reset(div);
+			template_effect(() => {
+				set_attribute(div, "data-tone", get(notice).tone);
+				set_attribute(div, "role", get(notice).tone === "danger" ? "alert" : "status");
+				set_text(text, get(notice).message);
+				set_attribute(button, "data-focus-key", `notice:${get(notice).id}:dismiss`);
+			});
+			delegated("click", button, () => dispatch({
+				type: "dismiss_notice",
+				id: get(notice).id
+			}));
+			append($$anchor, div);
+		});
+		reset(aside);
+		append($$anchor, aside);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.notices.length > 0) $$render(consequent);
+	});
+	append($$anchor, fragment);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region browser/app/OverlayLayer.svelte
+var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
+var root_2$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
+var root_3$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
+var root_4$4 = /* @__PURE__ */ from_html(`<small> </small>`);
+var root_5$4 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
+var root_6$4 = /* @__PURE__ */ from_html(`<div><button role="option"><span class="overlay-primary"><!> </span> <!> <!> <!></button> <!></div>`);
+var root_7$3 = /* @__PURE__ */ from_html(`<p class="overlay-empty">No matching entries</p>`);
+var root_8$3 = /* @__PURE__ */ from_html(`<footer> </footer>`);
+var root_9$2 = /* @__PURE__ */ from_html(`<div class="overlay-scrim" role="presentation"><div class="overlay-panel" role="dialog" aria-modal="true" tabindex="-1"><header><div><small> </small><h2> </h2></div> <button class="overlay-close">×</button></header> <input class="overlay-query" type="search" autocomplete="off" spellcheck="false"/> <!> <div class="overlay-items" role="listbox"></div> <!></div></div>`);
+function OverlayLayer($$anchor, $$props) {
+	push($$props, true);
+	let queryInput;
+	let panel;
+	const dispatch = dispatchUi();
+	onMount(() => queryInput?.focus());
+	function select(itemId) {
+		dispatch({
+			type: "set_overlay_selection",
+			item_id: itemId
+		});
+	}
+	function choose(itemId, secondary) {
+		dispatch({
+			type: "choose_overlay_at",
+			item_id: itemId,
+			secondary
+		});
+	}
+	function handleKey(event) {
+		if (event.isComposing) return;
+		if (event.key === "Escape") {
+			event.preventDefault();
+			dispatch({ type: "close_overlay" });
+		} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+			event.preventDefault();
+			dispatch({
+				type: "move_overlay_selection",
+				delta: event.key === "ArrowDown" ? 1 : -1
+			});
+		} else if (event.key === "Enter") {
+			event.preventDefault();
+			dispatch({
+				type: "choose_overlay",
+				secondary: event.shiftKey || event.altKey
+			});
+		} else if (event.key === "Tab" && panel) {
+			const focusable = [...panel.querySelectorAll("input,button:not([disabled])")];
+			if (focusable.length === 0) return;
+			const current = focusable.indexOf(document.activeElement);
+			const next = event.shiftKey ? current <= 0 ? focusable.length - 1 : current - 1 : current >= focusable.length - 1 ? 0 : current + 1;
+			event.preventDefault();
+			focusable[next]?.focus();
+		}
+	}
+	var div = root_9$2();
+	var div_1 = child(div);
+	var header = child(div_1);
+	var div_2 = child(header);
+	var small = child(div_2);
+	var text$1 = only_child(small, true);
+	var h2 = sibling(small);
+	var text_1 = only_child(h2, true);
+	reset(div_2);
+	var button = sibling(div_2, 2);
+	reset(header);
+	var input = sibling(header, 2);
+	remove_input_defaults(input);
+	bind_this(input, ($$value) => queryInput = $$value, () => queryInput);
+	var node = sibling(input, 2);
+	var consequent = ($$anchor) => {
+		var div_3 = root_1$7();
+		each(div_3, 21, () => $$props.model.columns, index, ($$anchor, column) => {
+			var span = root$15();
+			var text_2 = only_child(span, true);
+			template_effect(() => set_text(text_2, get(column)));
+			append($$anchor, span);
+		});
+		reset(div_3);
+		template_effect(() => set_style(div_3, `--columns:${$$props.model.columns.length}`));
+		append($$anchor, div_3);
+	};
+	if_block(node, ($$render) => {
+		if ($$props.model.columns.length > 0) $$render(consequent);
+	});
+	var div_4 = sibling(node, 2);
+	each(div_4, 23, () => $$props.model.items, (item, index) => `${item.category}:${item.primary}:${index}`, ($$anchor, item, index) => {
+		var div_5 = root_6$4();
+		let classes;
+		var button_1 = child(div_5);
+		var span_1 = child(button_1);
+		var node_1 = child(span_1);
+		var consequent_1 = ($$anchor) => {
+			var text_3 = text();
+			template_effect(() => set_text(text_3, get(item).expanded ? "▾" : "▸"));
+			append($$anchor, text_3);
+		};
+		if_block(node_1, ($$render) => {
+			if (get(item).header) $$render(consequent_1);
+		});
+		var text_4 = sibling(node_1, 1, true);
+		reset(span_1);
+		var node_2 = sibling(span_1, 2);
+		var consequent_2 = ($$anchor) => {
+			var span_2 = root_2$4();
+			var text_5 = only_child(span_2, true);
+			template_effect(() => set_text(text_5, get(item).secondary));
+			append($$anchor, span_2);
+		};
+		if_block(node_2, ($$render) => {
+			if (get(item).secondary && !get(item).disabled_reason) $$render(consequent_2);
+		});
+		var node_3 = sibling(node_2, 2);
+		var consequent_3 = ($$anchor) => {
+			var span_3 = root_3$4();
+			var text_6 = only_child(span_3, true);
+			template_effect(() => {
+				set_attribute(span_3, "id", `overlay-reason-${get(item).id}`);
+				set_text(text_6, get(item).disabled_reason);
+			});
+			append($$anchor, span_3);
+		};
+		if_block(node_3, ($$render) => {
+			if (get(item).disabled_reason) $$render(consequent_3);
+		});
+		var node_4 = sibling(node_3, 2);
+		var consequent_4 = ($$anchor) => {
+			var small_1 = root_4$4();
+			var text_7 = only_child(small_1, true);
+			template_effect(() => set_text(text_7, get(item).meta));
+			append($$anchor, small_1);
+		};
+		if_block(node_4, ($$render) => {
+			if (get(item).meta) $$render(consequent_4);
+		});
+		reset(button_1);
+		var node_5 = sibling(button_1, 2);
+		var consequent_5 = ($$anchor) => {
+			var button_2 = root_5$4();
+			template_effect(() => {
+				set_attribute(button_2, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}:alternate`);
+				set_attribute(button_2, "aria-label", `Alternate action for ${get(item).primary}`);
+			});
+			delegated("click", button_2, () => choose(get(item).id, true));
+			append($$anchor, button_2);
+		};
+		if_block(node_5, ($$render) => {
+			if (get(item).secondary_intent && get(item).enabled) $$render(consequent_5);
+		});
+		reset(div_5);
+		template_effect(($0, $1) => {
+			classes = set_class(div_5, 1, "overlay-item", null, classes, {
+				selected: $0,
+				header: get(item).header
+			});
+			set_style(div_5, `--depth:${get(item).depth}`);
+			set_attribute(button_1, "aria-selected", $1);
+			set_attribute(button_1, "aria-describedby", get(item).disabled_reason ? `overlay-reason-${get(item).id}` : void 0);
+			set_attribute(button_1, "data-focus-key", `overlay:${$$props.model.id}:item:${get(item).id}`);
+			button_1.disabled = !get(item).enabled;
+			set_text(text_4, get(item).primary);
+		}, [() => $$props.model.selected === BigInt(get(index)), () => $$props.model.selected === BigInt(get(index))]);
+		delegated("click", button_1, () => choose(get(item).id, false));
+		event("pointerenter", button_1, () => select(get(item).id));
+		append($$anchor, div_5);
+	}, ($$anchor) => {
+		append($$anchor, root_7$3());
+	});
+	reset(div_4);
+	var node_6 = sibling(div_4, 2);
+	var consequent_6 = ($$anchor) => {
+		var footer = root_8$3();
+		var text_8 = only_child(footer, true);
+		template_effect(() => set_text(text_8, $$props.model.hint));
+		append($$anchor, footer);
+	};
+	if_block(node_6, ($$render) => {
+		if ($$props.model.hint) $$render(consequent_6);
+	});
+	reset(div_1);
+	bind_this(div_1, ($$value) => panel = $$value, () => panel);
+	reset(div);
+	template_effect(() => {
+		set_attribute(div_1, "aria-labelledby", `overlay-title-${$$props.model.id}`);
+		set_text(text$1, $$props.model.widget);
+		set_attribute(h2, "id", `overlay-title-${$$props.model.id}`);
+		set_text(text_1, $$props.model.title);
+		set_attribute(button, "aria-label", `Close ${$$props.model.title}`);
+		set_attribute(input, "data-focus-key", `overlay:${$$props.model.id}:query`);
+		set_value(input, $$props.model.query);
+		set_attribute(input, "aria-label", `Filter ${$$props.model.title}`);
+		set_attribute(div_4, "aria-label", $$props.model.title);
+	});
+	delegated("click", div, (event) => event.target === event.currentTarget && dispatch({ type: "close_overlay" }));
+	delegated("keydown", div_1, handleKey);
+	delegated("click", button, () => dispatch({ type: "close_overlay" }));
+	delegated("input", input, (event) => dispatch({
+		type: "set_overlay_query",
+		query: event.currentTarget.value
+	}));
+	append($$anchor, div);
+	pop();
+}
+delegate([
+	"click",
+	"keydown",
+	"input"
+]);
 //#endregion
 //#region \0vite/preload-helper.js
 var scriptRel = "modulepreload";
@@ -8154,10 +8789,10 @@ var root_7 = /* @__PURE__ */ from_html(`<span role="cell"> </span>`);
 var root_8 = /* @__PURE__ */ from_html(`<button role="row"></button>`);
 var root_9 = /* @__PURE__ */ from_html(`<div class="table-view" role="table"><div class="table-head" role="row"></div> <!></div>`);
 var root_10 = /* @__PURE__ */ from_html(`<p> </p>`);
-var root_11 = /* @__PURE__ */ from_html(`<button><strong> </strong><!></button>`);
+var root_11 = /* @__PURE__ */ from_html(`<strong> </strong><!>`, 1);
 var root_12 = /* @__PURE__ */ from_html(`<span> </span><!>`, 1);
 var root_13 = /* @__PURE__ */ from_html(`<span class="timeline-separator"> </span>`);
-var root_14 = /* @__PURE__ */ from_html(`<div><!></div>`);
+var root_14 = /* @__PURE__ */ from_html(`<button><!></button>`);
 var root_15 = /* @__PURE__ */ from_html(`<div class="timeline-view"></div>`);
 var root_16 = /* @__PURE__ */ from_html(`<button><span> </span><small> </small></button>`);
 var root_17 = /* @__PURE__ */ from_html(`<section><button><span> </span><span> </span></button> <!></section>`);
@@ -8166,10 +8801,15 @@ var root_19 = /* @__PURE__ */ from_html(`<div class="view"><!></div>`);
 function ViewRenderer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	const activate = (intent) => dispatch({
-		type: "activate",
-		intent
-	});
+	const select = (itemId) => {
+		if (!itemId) return;
+		dispatch({
+			type: "choose_view_item",
+			instance_key: $$props.instanceKey,
+			item_id: itemId,
+			activate: true
+		});
+	};
 	var div = root_19();
 	var node = child(div);
 	var consequent = ($$anchor) => {
@@ -8189,7 +8829,7 @@ function ViewRenderer($$anchor, $$props) {
 	};
 	var consequent_3 = ($$anchor) => {
 		var div_3 = root_5$1();
-		each(div_3, 21, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+		each(div_3, 23, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
 			var button = root_4$1();
 			let classes;
 			var span = child(button);
@@ -8220,13 +8860,13 @@ function ViewRenderer($$anchor, $$props) {
 			});
 			reset(button);
 			template_effect(() => {
+				set_attribute(button, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 				set_attribute(button, "data-tone", get(row).tone);
-				button.disabled = !get(row).intent;
 				classes = set_class(button, 1, "", null, classes, { selected: get(row).selected });
 				set_text(text_1, get(row).glyph ?? "◇");
 				set_text(text_2, get(row).primary);
 			});
-			delegated("click", button, () => get(row).intent && activate(get(row).intent));
+			delegated("click", button, () => select(get(row).id));
 			append($$anchor, button);
 		});
 		reset(div_3);
@@ -8243,10 +8883,10 @@ function ViewRenderer($$anchor, $$props) {
 			append($$anchor, span_3);
 		});
 		reset(div_5);
-		each(sibling(div_5, 2), 17, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
+		each(sibling(div_5, 2), 19, () => $$props.model.rows, (row) => row.id, ($$anchor, row) => {
 			var button_1 = root_8();
 			let classes_1;
-			each(button_1, 21, () => get(row).cells, index, ($$anchor, cell, index) => {
+			each(button_1, 21, () => get(row).cells, index, ($$anchor, cell, index, $$array) => {
 				var span_4 = root_7();
 				var text_6 = only_child(span_4, true);
 				template_effect(() => {
@@ -8257,11 +8897,11 @@ function ViewRenderer($$anchor, $$props) {
 			});
 			reset(button_1);
 			template_effect(() => {
+				set_attribute(button_1, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 				set_attribute(button_1, "data-tone", get(row).tone);
-				button_1.disabled = !get(row).intent;
 				classes_1 = set_class(button_1, 1, "", null, classes_1, { selected: get(row).selected });
 			});
-			delegated("click", button_1, () => get(row).intent && activate(get(row).intent));
+			delegated("click", button_1, () => select(get(row).id));
 			append($$anchor, button_1);
 		});
 		reset(div_4);
@@ -8274,9 +8914,9 @@ function ViewRenderer($$anchor, $$props) {
 	var consequent_10 = ($$anchor) => {
 		var div_6 = root_15();
 		each(div_6, 21, () => $$props.model.entries, index, ($$anchor, entry, index) => {
-			var div_7 = root_14();
+			var button_2 = root_14();
 			let classes_2;
-			var node_4 = child(div_7);
+			var node_4 = child(button_2);
 			var consequent_5 = ($$anchor) => {
 				var p = root_10();
 				var text_7 = only_child(p, true);
@@ -8287,8 +8927,8 @@ function ViewRenderer($$anchor, $$props) {
 				append($$anchor, p);
 			};
 			var consequent_7 = ($$anchor) => {
-				var button_2 = root_11();
-				var strong_1 = child(button_2);
+				var fragment = root_11();
+				var strong_1 = first_child(fragment);
 				var text_8 = only_child(strong_1, true);
 				var node_5 = sibling(strong_1);
 				var consequent_6 = ($$anchor) => {
@@ -8300,17 +8940,12 @@ function ViewRenderer($$anchor, $$props) {
 				if_block(node_5, ($$render) => {
 					if (get(entry).meta) $$render(consequent_6);
 				});
-				reset(button_2);
-				template_effect(() => {
-					button_2.disabled = !get(entry).intent;
-					set_text(text_8, get(entry).primary);
-				});
-				delegated("click", button_2, () => get(entry).intent && activate(get(entry).intent));
-				append($$anchor, button_2);
+				template_effect(() => set_text(text_8, get(entry).primary));
+				append($$anchor, fragment);
 			};
 			var consequent_9 = ($$anchor) => {
-				var fragment = root_12();
-				var span_5 = first_child(fragment);
+				var fragment_1 = root_12();
+				var span_5 = first_child(fragment_1);
 				var text_10 = only_child(span_5, true);
 				var node_6 = sibling(span_5);
 				var consequent_8 = ($$anchor) => {
@@ -8323,7 +8958,7 @@ function ViewRenderer($$anchor, $$props) {
 					if (get(entry).meta) $$render(consequent_8);
 				});
 				template_effect(() => set_text(text_10, get(entry).summary));
-				append($$anchor, fragment);
+				append($$anchor, fragment_1);
 			};
 			var alternate = ($$anchor) => {
 				var span_6 = root_13();
@@ -8337,21 +8972,23 @@ function ViewRenderer($$anchor, $$props) {
 				else if (get(entry).type === "pair") $$render(consequent_9, 2);
 				else $$render(alternate, -1);
 			});
-			reset(div_7);
+			reset(button_2);
 			template_effect(($0) => {
-				classes_2 = set_class(div_7, 1, "timeline-entry", null, classes_2, { selected: $0 });
-				set_attribute(div_7, "data-kind", get(entry).type);
-				set_style(div_7, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
+				set_attribute(button_2, "data-focus-key", `view:${$$props.instanceKey}:item:${$$props.model.entry_ids[index]}`);
+				classes_2 = set_class(button_2, 1, "timeline-entry", null, classes_2, { selected: $0 });
+				set_attribute(button_2, "data-kind", get(entry).type);
+				set_style(button_2, `--indent:${$$props.model.entry_indents[index] ?? 0}`);
 			}, [() => $$props.model.selected === BigInt(index)]);
-			append($$anchor, div_7);
+			delegated("click", button_2, () => select($$props.model.entry_ids[index]));
+			append($$anchor, button_2);
 		});
 		reset(div_6);
 		template_effect(() => set_attribute(div_6, "aria-label", $$props.model.title));
 		append($$anchor, div_6);
 	};
 	var consequent_12 = ($$anchor) => {
-		var div_8 = root_18();
-		each(div_8, 21, () => $$props.model.sections, index, ($$anchor, section, sectionIndex) => {
+		var div_7 = root_18();
+		each(div_7, 21, () => $$props.model.sections, index, ($$anchor, section) => {
 			var section_1 = root_17();
 			let classes_3;
 			var button_3 = child(section_1);
@@ -8362,8 +8999,8 @@ function ViewRenderer($$anchor, $$props) {
 			reset(button_3);
 			var node_7 = sibling(button_3, 2);
 			var consequent_11 = ($$anchor) => {
-				var fragment_1 = comment();
-				each(first_child(fragment_1), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
+				var fragment_2 = comment();
+				each(first_child(fragment_2), 17, () => get(section).rows, (row) => row.id, ($$anchor, row) => {
 					var button_4 = root_16();
 					let classes_5;
 					var span_9 = child(button_4);
@@ -8371,15 +9008,15 @@ function ViewRenderer($$anchor, $$props) {
 					var text_16 = only_child(sibling(span_9), true);
 					reset(button_4);
 					template_effect(() => {
+						set_attribute(button_4, "data-focus-key", `view:${$$props.instanceKey}:item:${get(row).id}`);
 						classes_5 = set_class(button_4, 1, "section-row", null, classes_5, { selected: get(row).selected });
-						button_4.disabled = !get(row).intent;
 						set_text(text_15, get(row).primary);
 						set_text(text_16, get(row).meta ?? get(row).secondary ?? "");
 					});
-					delegated("click", button_4, () => get(row).intent && activate(get(row).intent));
+					delegated("click", button_4, () => select(get(row).id));
 					append($$anchor, button_4);
 				});
-				append($$anchor, fragment_1);
+				append($$anchor, fragment_2);
 			};
 			if_block(node_7, ($$render) => {
 				if (!get(section).collapsed) $$render(consequent_11);
@@ -8387,21 +9024,21 @@ function ViewRenderer($$anchor, $$props) {
 			reset(section_1);
 			template_effect(($0) => {
 				classes_3 = set_class(section_1, 1, "", null, classes_3, { collapsed: get(section).collapsed });
+				set_attribute(button_3, "data-focus-key", `view:${$$props.instanceKey}:section:${get(section).id}`);
 				classes_4 = set_class(button_3, 1, "", null, classes_4, { selected: get(section).header_selected });
 				set_text(text_13, `${get(section).collapsed ? "▸" : "▾"} ${get(section).title ?? ""}`);
 				set_text(text_14, $0);
 			}, [() => String(get(section).count).padStart(2, "0")]);
 			delegated("click", button_3, () => dispatch({
-				type: "set_fold",
-				tile_id: $$props.tileId,
-				section: BigInt(sectionIndex),
-				collapsed: !get(section).collapsed
+				type: "toggle_view_section",
+				instance_key: $$props.instanceKey,
+				section_id: get(section).id
 			}));
 			append($$anchor, section_1);
 		});
-		reset(div_8);
-		template_effect(() => set_attribute(div_8, "aria-label", $$props.model.title));
-		append($$anchor, div_8);
+		reset(div_7);
+		template_effect(() => set_attribute(div_7, "aria-label", $$props.model.title));
+		append($$anchor, div_7);
 	};
 	var consequent_13 = ($$anchor) => {
 		EmptyState($$anchor, {
@@ -8449,6 +9086,7 @@ delegate(["click"]);
 var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!></aside>`);
 function DockSlot($$anchor, $$props) {
 	push($$props, true);
+	const dispatch = dispatchUi();
 	var aside = root$4();
 	let classes;
 	var header = child(aside);
@@ -8488,9 +9126,22 @@ function DockSlot($$anchor, $$props) {
 		set_text(text, $$props.model.title);
 		set_text(text_1, $$props.model.edge);
 	});
+	delegated("pointerdown", aside, () => {
+		if (!$$props.model.focused) dispatch({
+			type: "focus_dock",
+			edge: $$props.model.edge
+		});
+	});
+	delegated("focusin", aside, () => {
+		if (!$$props.model.focused) dispatch({
+			type: "focus_dock",
+			edge: $$props.model.edge
+		});
+	});
 	append($$anchor, aside);
 	pop();
 }
+delegate(["pointerdown", "focusin"]);
 //#endregion
 //#region browser/layout/TileFrame.svelte
 var root$3 = /* @__PURE__ */ from_html(`<button role="tab"> </button>`);
@@ -8514,7 +9165,7 @@ function TileFrame($$anchor, $$props) {
 		var node_1 = sibling(div, 2);
 		var consequent = ($$anchor) => {
 			var div_1 = root_1$1();
-			each(div_1, 23, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab, index) => {
+			each(div_1, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
 				var button = root$3();
 				let classes_1;
 				var text_1 = only_child(button, true);
@@ -8524,11 +9175,8 @@ function TileFrame($$anchor, $$props) {
 					set_text(text_1, get(tab).title);
 				});
 				delegated("click", button, () => dispatch({
-					type: "activate",
-					intent: {
-						type: "switch_tab",
-						index: BigInt(get(index))
-					}
+					type: "focus_changed",
+					target: get(tab).tile_id
 				}));
 				append($$anchor, button);
 			});
@@ -8613,10 +9261,26 @@ function TileFrame($$anchor, $$props) {
 		set_attribute(article, "data-instance", $$props.model.instance_key);
 		set_attribute(article, "data-scroll-key", `tile:${$$props.model.instance_key}`);
 	});
+	delegated("pointerdown", article, () => {
+		if (!$$props.model.focused) dispatch({
+			type: "focus_changed",
+			target: $$props.model.tile_id
+		});
+	});
+	delegated("focusin", article, () => {
+		if (!$$props.model.focused) dispatch({
+			type: "focus_changed",
+			target: $$props.model.tile_id
+		});
+	});
 	append($$anchor, article);
 	pop();
 }
-delegate(["click"]);
+delegate([
+	"pointerdown",
+	"focusin",
+	"click"
+]);
 //#endregion
 //#region browser/layout/LayoutNode.svelte
 var root$2 = /* @__PURE__ */ from_html(`<div class="split"><!> <div class="split-divider" role="separator"></div> <!></div>`);
@@ -8722,7 +9386,7 @@ function Workspace($$anchor, $$props) {
 }
 //#endregion
 //#region browser/app/RyeOs.svelte
-var root = /* @__PURE__ */ from_html(`<div class="ryeos-shell"><!> <!> <!> <div class="shell-body"><!> <!></div> <!></div>`);
+var root = /* @__PURE__ */ from_html(`<div class="ryeos-shell"><!> <!> <!> <div><!> <!></div> <!> <!> <!></div>`);
 function RyeOs($$anchor, $$props) {
 	push($$props, true);
 	let replacement = /* @__PURE__ */ state(null);
@@ -8765,21 +9429,38 @@ function RyeOs($$anchor, $$props) {
 		return get(envelope).view_model.presentation.chrome.top_bar;
 	} });
 	var div_1 = sibling(node_2, 2);
+	let classes;
 	var node_3 = child(div_1);
-	Navigation(node_3, { get model() {
-		return get(envelope).view_model.navigation;
-	} });
+	var consequent_1 = ($$anchor) => {
+		Navigation($$anchor, { get model() {
+			return get(envelope).view_model.navigation;
+		} });
+	};
+	if_block(node_3, ($$render) => {
+		if (get(envelope).view_model.navigation.items.length > 0) $$render(consequent_1);
+	});
 	Workspace(sibling(node_3, 2), { get model() {
 		return get(envelope).view_model.workspace;
 	} });
 	reset(div_1);
-	StatusBar(sibling(div_1, 2), { get model() {
+	var node_5 = sibling(div_1, 2);
+	StatusBar(node_5, { get model() {
 		return get(envelope).view_model.presentation.chrome.status_bar;
 	} });
+	var node_6 = sibling(node_5, 2);
+	Notices(node_6, { get notices() {
+		return get(envelope).view_model.notices;
+	} });
+	each(sibling(node_6, 2), 17, () => get(envelope).view_model.overlays, (overlay) => overlay.id, ($$anchor, overlay) => {
+		OverlayLayer($$anchor, { get model() {
+			return get(overlay);
+		} });
+	});
 	reset(div);
 	template_effect(($0) => {
 		set_attribute(div, "data-generation", $0);
 		set_attribute(div, "data-theme", get(envelope).view_model.presentation.theme.id);
+		classes = set_class(div_1, 1, "shell-body", null, classes, { "with-navigation": get(envelope).view_model.navigation.items.length > 0 });
 	}, [() => String(get(envelope).generation)]);
 	append($$anchor, div);
 	return pop($$exports);
@@ -8810,6 +9491,7 @@ function mountRyeOsRenderer(target, initialEnvelope, dispatchUi) {
 }
 //#endregion
 //#region browser/runtime/browser-state.ts
+var modalReturnFocus = /* @__PURE__ */ new WeakMap();
 function captureBrowserPresentation(root) {
 	const active = document.activeElement;
 	const key = active instanceof HTMLElement && root.contains(active) ? active.dataset.focusKey ?? null : null;
@@ -8840,13 +9522,24 @@ function restoreBrowserPresentation(root, snapshot) {
 		node.scrollTop = state.atTail ? node.scrollHeight : state.top;
 		node.scrollLeft = state.left;
 	}
-	if (!snapshot.focus) return;
-	const target = root.querySelector(`[data-focus-key="${cssEscape(snapshot.focus.key)}"]`);
+	if (root.querySelector("[role=\"dialog\"][aria-modal=\"true\"]")) {
+		if (snapshot.focus && !snapshot.focus.key.startsWith("overlay:")) modalReturnFocus.set(root, snapshot.focus);
+		return;
+	}
+	let focus = snapshot.focus ?? modalReturnFocus.get(root) ?? null;
+	if (!focus) return;
+	let target = root.querySelector(`[data-focus-key="${cssEscape(focus.key)}"]`);
+	if (!target) {
+		focus = modalReturnFocus.get(root) ?? null;
+		if (!focus) return;
+		target = root.querySelector(`[data-focus-key="${cssEscape(focus.key)}"]`);
+	}
 	target?.focus({ preventScroll: true });
 	if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-		const start = snapshot.focus.selectionStart;
-		if (start !== null) target.setSelectionRange(start, snapshot.focus.selectionEnd ?? start);
+		const start = focus.selectionStart;
+		if (start !== null) target.setSelectionRange(start, focus.selectionEnd ?? start);
 	}
+	if (target) modalReturnFocus.delete(root);
 }
 function selection(element, field) {
 	if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) return element[field];
@@ -8854,42 +9547,6 @@ function selection(element, field) {
 }
 function cssEscape(value) {
 	return CSS.escape(value);
-}
-//#endregion
-//#region browser/runtime/transport.ts
-var UnknownDeliveryError = class extends Error {
-	outcome = "unknown";
-};
-async function getJson(url, signal) {
-	const response = await fetch(url, {
-		credentials: "same-origin",
-		...signal ? { signal } : {}
-	});
-	if (!response.ok) throw new Error(`${url}: ${response.status} ${await response.text()}`);
-	return response.json();
-}
-async function postJson(url, body, signal) {
-	let response;
-	try {
-		response = await fetch(url, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(body ?? {}),
-			credentials: "same-origin",
-			...signal ? { signal } : {}
-		});
-	} catch (error) {
-		throw new UnknownDeliveryError(`${url}: delivery outcome is unknown: ${errorMessage(error)}`);
-	}
-	if (!response.ok) throw new Error(`${url}: ${response.status} ${await response.text()}`);
-	try {
-		return await response.json();
-	} catch (error) {
-		throw new UnknownDeliveryError(`${url}: response outcome is unknown: ${errorMessage(error)}`);
-	}
-}
-function errorMessage(error) {
-	return error instanceof Error ? error.message : String(error);
 }
 //#endregion
 //#region browser/runtime/effects.ts
@@ -8932,10 +9589,10 @@ function failedEffectResult(effect, error) {
 async function dispatchBinding(request, bounds) {
 	const maximum = safeBound(bounds.max_request_bytes, "max_request_bytes");
 	const inputMaximum = safeBound(bounds.max_input_bytes, "max_input_bytes");
-	const encoded = JSON.stringify(request);
+	const encoded = encodeJsonBody(request);
 	if (new TextEncoder().encode(encoded).byteLength > maximum) throw new Error("UI binding request exceeds the session bound");
 	if (request.payload.kind === "input" && new TextEncoder().encode(request.payload.value).byteLength > inputMaximum) throw new Error("UI binding input exceeds the session bound");
-	return postJson("/ui/api/invocations/dispatch", request);
+	return postEncodedJson("/ui/api/invocations/dispatch", encoded);
 }
 function safeBound(value, name) {
 	if (value <= 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`invalid UI binding ${name}`);
@@ -9064,10 +9721,25 @@ function createLayoutPreferencePersistence(options) {
 }
 //#endregion
 //#region browser/runtime/session.ts
+var MAX_SEAT_BATCH_EVENTS = 64;
+var MAX_SEAT_APPEND_ATTEMPTS = 5;
+var MAX_SEAT_APPEND_BODY_BYTES = 65536;
+var MAX_PENDING_SEAT_EVENTS = 512;
+var MAX_PENDING_SEAT_BYTES = 524288;
 function createSessionRuntime(options) {
+	const pendingStorageKey = `ryeos.ui.seat.pending.v1:${options.sessionId}`;
 	let seatThreadId = null;
-	let seatSynced = 0;
+	let seatProducer = null;
+	let nextEngineSeq = 0n;
+	let seatObserved = 0;
+	const pendingSeatEvents = [];
+	let pendingSeatBytes = 0;
+	let seatAttaching = false;
+	let seatReady = false;
 	let seatSyncing = false;
+	let seatSyncBlocked = false;
+	let closed = false;
+	let seatEpoch = 0;
 	let heartbeat = null;
 	let events = null;
 	let eventsOpened = false;
@@ -9086,18 +9758,70 @@ function createSessionRuntime(options) {
 		});
 	}
 	async function attachSeat() {
+		const epoch = ++seatEpoch;
+		seatAttaching = true;
+		seatSyncBlocked = false;
+		const startupBaseline = options.seatEvents().slice();
+		seatObserved = startupBaseline.length;
+		await reconcileRetainedAppend();
+		if (closed || epoch !== seatEpoch) return;
 		const opened = unwrapResult(await invokeSeat("open", {}));
+		if (closed || epoch !== seatEpoch) return;
 		seatThreadId = stringField(opened, "thread_id");
 		if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
+		seatProducer = requiredStringField(opened, "producer_incarnation");
+		nextEngineSeq = exactIntegerField(opened, "next_engine_seq");
+		capturePendingSeatEvents();
+		if (heartbeat !== null) window.clearInterval(heartbeat);
 		heartbeat = window.setInterval(() => {
 			if (seatThreadId) invokeSeat("touch", { thread_id: seatThreadId });
 		}, 6e4);
 		if (opened.reattached === true) {
-			const replay = unwrapResult(await invokeSeat("replay", { chain_root_id: seatThreadId }));
-			const replayEvents = Array.isArray(replay.events) ? replay.events : [];
-			if (replayEvents.length > 0) options.replaySeatEvents(replayEvents);
-		}
-		seatSynced = options.seatEvents().length;
+			let cursor = null;
+			do {
+				const replay = unwrapResult(await invokeSeat("replay", {
+					chain_root_id: seatThreadId,
+					after_chain_seq: cursor,
+					limit: 500
+				}));
+				if (closed || epoch !== seatEpoch) return;
+				capturePendingSeatEvents();
+				const replayEvents = Array.isArray(replay.events) ? replay.events : [];
+				if (replayEvents.length > 0) options.replaySeatEvents(replayEvents);
+				seatObserved = options.seatEvents().length;
+				cursor = optionalExactIntegerField(replay, "next_cursor");
+			} while (cursor !== null);
+			if (nextEngineSeq === 0n) prependPendingSeatEvents(startupBaseline);
+			else if (pendingSeatEvents.length > 0) {
+				const rebased = wireSeatEvents(pendingSeatEvents, nextEngineSeq).map((event) => ({
+					event_type: event.event_type,
+					payload: {
+						seq: event.engine_seq,
+						payload: event.payload
+					}
+				}));
+				options.replaySeatEvents(rebased);
+				seatObserved = options.seatEvents().length;
+			}
+		} else prependPendingSeatEvents(startupBaseline);
+		capturePendingSeatEvents();
+		seatAttaching = false;
+		seatReady = true;
+		syncSeat();
+	}
+	async function reconcileRetainedAppend() {
+		const retained = loadRetainedAppend(pendingStorageKey);
+		if (!retained) return;
+		if (retained.session_id !== options.sessionId) throw new Error("retained seat append belongs to a different browser session");
+		await appendWithExactRetry(retained.encoded_request, {
+			producer: retained.producer_incarnation,
+			operationId: retained.operation_id,
+			firstEngineSeq: BigInt(retained.first_engine_seq),
+			lastEngineSeq: BigInt(retained.last_engine_seq),
+			eventCount: retained.event_count,
+			payloadDigest: retained.payload_digest
+		}, options.sessionId);
+		clearRetainedAppend(pendingStorageKey);
 	}
 	function attachEvents() {
 		if (!options.eventsUrl) return;
@@ -9112,7 +9836,7 @@ function createSessionRuntime(options) {
 				});
 				options.commitEvent({
 					type: "daemon_event",
-					payload: JSON.parse(event.data)
+					payload: decodeJsonBody(event.data)
 				});
 			} catch (error) {
 				console.warn("Failed to process RyeOS session event", error);
@@ -9122,7 +9846,7 @@ function createSessionRuntime(options) {
 		source.addEventListener("ui_intent.applied", forward);
 		source.addEventListener("thread.hint", ((event) => {
 			try {
-				const payload = JSON.parse(event.data);
+				const payload = decodeJsonBody(event.data);
 				const kind = isRecord(payload) && typeof payload.kind === "string" ? payload.kind : null;
 				if (!kind) return;
 				options.commitEvent({
@@ -9155,7 +9879,57 @@ function createSessionRuntime(options) {
 	}
 	function observe(model) {
 		syncTail(model);
+		if (!seatSyncBlocked && (seatAttaching || seatReady)) capturePendingSeatEvents();
 		syncSeat();
+	}
+	function capturePendingSeatEvents() {
+		if (seatSyncBlocked) return;
+		const all = options.seatEvents();
+		if (all.length < seatObserved) {
+			seatSyncBlocked = true;
+			reportSeatFailure(/* @__PURE__ */ new Error("RyeOS seat event log moved backwards"), false);
+			return;
+		}
+		while (seatObserved < all.length) {
+			const event = all[seatObserved];
+			if (!event || !appendPendingSeatEvent(event)) return;
+			seatObserved += 1;
+		}
+	}
+	function appendPendingSeatEvent(event) {
+		let encodedBytes;
+		try {
+			encodedBytes = encodedSeatEventBytes(event);
+		} catch (error) {
+			seatSyncBlocked = true;
+			reportSeatFailure(error, false);
+			return false;
+		}
+		if (pendingSeatEvents.length >= MAX_PENDING_SEAT_EVENTS || pendingSeatBytes + encodedBytes > MAX_PENDING_SEAT_BYTES) {
+			seatSyncBlocked = true;
+			reportSeatFailure(/* @__PURE__ */ new Error(`unsaved seat history exceeds the pending limit (${MAX_PENDING_SEAT_EVENTS} events / ${MAX_PENDING_SEAT_BYTES} bytes)`), false);
+			return false;
+		}
+		pendingSeatEvents.push(event);
+		pendingSeatBytes += encodedBytes;
+		return true;
+	}
+	function prependPendingSeatEvents(events) {
+		let encodedBytes;
+		try {
+			encodedBytes = events.reduce((total, event) => total + encodedSeatEventBytes(event), 0);
+		} catch (error) {
+			seatSyncBlocked = true;
+			reportSeatFailure(error, false);
+			return;
+		}
+		if (pendingSeatEvents.length + events.length > MAX_PENDING_SEAT_EVENTS || pendingSeatBytes + encodedBytes > MAX_PENDING_SEAT_BYTES) {
+			seatSyncBlocked = true;
+			reportSeatFailure(/* @__PURE__ */ new Error(`unsaved seat history exceeds the pending limit (${MAX_PENDING_SEAT_EVENTS} events / ${MAX_PENDING_SEAT_BYTES} bytes)`), false);
+			return;
+		}
+		pendingSeatEvents.unshift(...events);
+		pendingSeatBytes += encodedBytes;
 	}
 	function syncTail(model) {
 		tailThreadId = model.tail_thread_id ?? model.tail_chain_root_id ?? null;
@@ -9170,7 +9944,7 @@ function createSessionRuntime(options) {
 		let opened = false;
 		source.addEventListener("message", (event) => {
 			try {
-				const frame = JSON.parse(event.data);
+				const frame = decodeJsonBody(event.data);
 				if (!isRecord(frame) || typeof frame.event_type !== "string" || !tailThreadId) return;
 				options.commitEvent({
 					type: "thread_tail",
@@ -9189,37 +9963,126 @@ function createSessionRuntime(options) {
 		source.addEventListener("error", () => commitTransport("focused_tail", "reconnecting"));
 	}
 	async function syncSeat() {
-		if (!seatThreadId || seatSyncing) return;
-		const all = options.seatEvents();
-		if (all.length <= seatSynced) return;
-		const target = all.length;
-		const batch = all.slice(seatSynced).map((event) => ({
-			event_type: eventType(event),
-			payload: {
-				seq: event.seq,
-				payload: eventPayload(event)
-			}
-		}));
+		if (closed || !seatThreadId || !seatProducer || seatSyncing || seatSyncBlocked) return;
+		capturePendingSeatEvents();
+		if (seatSyncBlocked) return;
+		if (pendingSeatEvents.length === 0) return;
+		let batchEvents = pendingSeatEvents.slice(0, MAX_SEAT_BATCH_EVENTS);
+		const firstEngineSeq = nextEngineSeq;
 		seatSyncing = true;
+		let operationId;
+		let payloadDigest;
+		let encodedRequest;
+		let batch = [];
+		let lastEngineSeq = firstEngineSeq;
+		const threadId = seatThreadId;
+		const producer = seatProducer;
+		const epoch = seatEpoch;
 		try {
-			await invokeSeat("append", {
-				thread_id: seatThreadId,
+			operationId = crypto.randomUUID();
+			while (batchEvents.length > 0) {
+				const candidate = wireSeatEvents(batchEvents, firstEngineSeq);
+				const candidateLast = firstEngineSeq + BigInt(candidate.length - 1);
+				if (encodedByteLength(encodeJsonBody({
+					thread_id: threadId,
+					producer_incarnation: producer,
+					operation_id: operationId,
+					first_engine_seq: firstEngineSeq,
+					last_engine_seq: candidateLast,
+					event_count: candidate.length,
+					payload_digest: "0".repeat(64),
+					events: candidate
+				})) <= MAX_SEAT_APPEND_BODY_BYTES) break;
+				batchEvents = batchEvents.slice(0, -1);
+			}
+			if (batchEvents.length === 0) throw new Error(`one seat event exceeds the ${MAX_SEAT_APPEND_BODY_BYTES}-byte append route limit`);
+			batch = wireSeatEvents(batchEvents, firstEngineSeq);
+			lastEngineSeq = firstEngineSeq + BigInt(batch.length - 1);
+			payloadDigest = await sha256Hex(encodeSeatPayloadDigest(batch));
+			encodedRequest = encodeJsonBody({
+				thread_id: threadId,
+				producer_incarnation: producer,
+				operation_id: operationId,
+				first_engine_seq: firstEngineSeq,
+				last_engine_seq: lastEngineSeq,
+				event_count: batch.length,
+				payload_digest: payloadDigest,
 				events: batch
 			});
-			seatSynced = target;
+			if (encodedByteLength(encodedRequest) > MAX_SEAT_APPEND_BODY_BYTES) throw new Error("seat append exceeded its route limit after final encoding");
+			retainAppend(pendingStorageKey, {
+				schema_version: "ryeos.ui.seat.pending-append.v1",
+				session_id: options.sessionId,
+				thread_id: threadId,
+				producer_incarnation: producer,
+				operation_id: operationId,
+				first_engine_seq: firstEngineSeq.toString(),
+				last_engine_seq: lastEngineSeq.toString(),
+				event_count: batch.length,
+				payload_digest: payloadDigest,
+				encoded_request: encodedRequest
+			});
 		} catch (error) {
-			console.warn("RyeOS seat sync failed", error);
-		} finally {
+			seatSyncBlocked = true;
 			seatSyncing = false;
-			if (options.seatEvents().length > seatSynced) syncSeat();
+			reportSeatFailure(error, false);
+			return;
+		}
+		let acknowledged = false;
+		try {
+			await appendWithExactRetry(encodedRequest, {
+				producer,
+				operationId,
+				firstEngineSeq,
+				lastEngineSeq,
+				eventCount: batch.length,
+				payloadDigest
+			}, options.sessionId);
+			if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
+			clearRetainedAppend(pendingStorageKey);
+			pendingSeatEvents.splice(0, batch.length);
+			pendingSeatBytes -= batchEvents.reduce((total, event) => total + encodedSeatEventBytes(event), 0);
+			nextEngineSeq = lastEngineSeq + 1n;
+			acknowledged = true;
+		} catch (error) {
+			if (closed || epoch !== seatEpoch || threadId !== seatThreadId) return;
+			seatSyncBlocked = true;
+			reportSeatFailure(error, error instanceof UnknownDeliveryError || isRetryableResponse(error));
+			console.warn("RyeOS seat sync stopped with unsaved history", error);
+		} finally {
+			if (epoch === seatEpoch) seatSyncing = false;
+			if (acknowledged && !closed) {
+				capturePendingSeatEvents();
+				if (pendingSeatEvents.length > 0) syncSeat();
+			}
 		}
 	}
+	function reportSeatFailure(error, retryable) {
+		const unknown = error instanceof UnknownDeliveryError;
+		options.commitEvent({
+			type: "transport_state_changed",
+			channel: "session",
+			freshness: "reconnecting",
+			observed_at_ms: BigInt(Date.now()),
+			error: {
+				code: unknown ? "seat_append_outcome_unknown" : "seat_append_refused",
+				error: `Seat history is not confirmed durable: ${errorMessage(error)}`,
+				retryable,
+				outcome: unknown ? "unknown" : "refused",
+				remediation: "Relaunch or reconcile the UI session before submitting more seat mutations.",
+				details: null
+			}
+		});
+	}
 	function close() {
+		if (closed) return;
+		closed = true;
+		seatEpoch += 1;
 		events?.close();
 		tail?.close();
 		if (heartbeat !== null) window.clearInterval(heartbeat);
 		if (hintTimer !== null) window.clearTimeout(hintTimer);
-		if (seatThreadId) {
+		if (seatThreadId && !seatSyncing && pendingSeatEvents.length === 0 && !hasRetainedAppend(pendingStorageKey)) {
 			const body = JSON.stringify({ thread_id: seatThreadId });
 			navigator.sendBeacon?.("/ui/api/session/seat/close", new Blob([body], { type: "application/json" }));
 		}
@@ -9238,6 +10101,73 @@ function createSessionRuntime(options) {
 async function invokeSeat(operation, body) {
 	return postJson(`/ui/api/session/seat/${operation}`, body);
 }
+async function appendWithExactRetry(encodedRequest, expected, sessionId) {
+	const url = "/ui/api/session/seat/append";
+	let authenticationReconciled = false;
+	for (let attempt = 1;; attempt += 1) try {
+		let response;
+		try {
+			response = unwrapResult(await postEncodedJson(url, encodedRequest));
+		} catch (error) {
+			if (error instanceof UnknownDeliveryError || error instanceof HttpResponseError) throw error;
+			throw new UnknownDeliveryError(`seat append acknowledgement is unreadable: ${errorMessage(error)}`);
+		}
+		requireAppendAcknowledgement(response, expected);
+		return;
+	} catch (error) {
+		if (isAuthenticationResponse(error) && !authenticationReconciled) {
+			await requireCurrentSession(sessionId);
+			authenticationReconciled = true;
+			continue;
+		}
+		if (!isRetryableResponse(error) || attempt >= MAX_SEAT_APPEND_ATTEMPTS) throw error;
+		await new Promise((resolve) => {
+			globalThis.setTimeout(resolve, Math.min(2e3, 100 * 2 ** (attempt - 1)));
+		});
+	}
+}
+function isAuthenticationResponse(error) {
+	return error instanceof HttpResponseError && (error.status === 401 || error.status === 403);
+}
+async function requireCurrentSession(expectedSessionId) {
+	if (requiredStringField(unwrapResult(await getJson("/ui/api/session/current")), "session_id") !== expectedSessionId) throw new Error("browser session changed while reconciling a seat append");
+}
+function isRetryableResponse(error) {
+	return error instanceof UnknownDeliveryError || error instanceof HttpResponseError && error.status >= 500;
+}
+async function sha256Hex(encoded) {
+	const bytes = new TextEncoder().encode(encoded);
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function retainAppend(key, retained) {
+	localStorage.setItem(key, JSON.stringify(retained));
+}
+function clearRetainedAppend(key) {
+	localStorage.removeItem(key);
+}
+function loadRetainedAppend(key) {
+	const encoded = localStorage.getItem(key);
+	if (encoded === null) return null;
+	let value;
+	try {
+		value = JSON.parse(encoded);
+	} catch (error) {
+		throw new Error(`retained seat append is malformed: ${errorMessage(error)}`);
+	}
+	if (!isRecord(value) || value.schema_version !== "ryeos.ui.seat.pending-append.v1" || typeof value.session_id !== "string" || typeof value.thread_id !== "string" || typeof value.producer_incarnation !== "string" || typeof value.operation_id !== "string" || typeof value.first_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.first_engine_seq) || typeof value.last_engine_seq !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.last_engine_seq) || typeof value.event_count !== "number" || !Number.isSafeInteger(value.event_count) || value.event_count <= 0 || typeof value.payload_digest !== "string" || typeof value.encoded_request !== "string") throw new Error("retained seat append has an invalid schema");
+	return value;
+}
+function hasRetainedAppend(key) {
+	try {
+		return loadRetainedAppend(key) !== null;
+	} catch {
+		return true;
+	}
+}
+function requireAppendAcknowledgement(response, expected) {
+	if (requiredStringField(response, "producer_incarnation") !== expected.producer || requiredStringField(response, "operation_id") !== expected.operationId || exactIntegerField(response, "first_engine_seq") !== expected.firstEngineSeq || exactIntegerField(response, "last_engine_seq") !== expected.lastEngineSeq || exactIntegerField(response, "event_count") !== BigInt(expected.eventCount) || exactIntegerField(response, "appended") !== BigInt(expected.eventCount) || requiredStringField(response, "payload_digest") !== expected.payloadDigest) throw new UnknownDeliveryError("seat append acknowledgement does not match the submitted operation");
+}
 function unwrapResult(value) {
 	if (!isRecord(value)) throw new Error("seat service returned a non-object response");
 	const first = isRecord(value.result) ? value.result : value;
@@ -9246,11 +10176,49 @@ function unwrapResult(value) {
 function stringField(value, name) {
 	return typeof value[name] === "string" ? value[name] : null;
 }
+function requiredStringField(value, name) {
+	const field = stringField(value, name);
+	if (field === null || field.length === 0) throw new Error(`seat service returned no ${name}`);
+	return field;
+}
+function optionalExactIntegerField(value, name) {
+	const field = value[name];
+	if (field === null || field === void 0) return null;
+	return parseExactInteger(field, name);
+}
+function exactIntegerField(value, name) {
+	const field = value[name];
+	if (field === null || field === void 0) throw new Error(`seat service returned no ${name}`);
+	return parseExactInteger(field, name);
+}
+function parseExactInteger(value, name) {
+	if (typeof value === "bigint" && value >= 0n) return value;
+	if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+	if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) return BigInt(value);
+	throw new Error(`seat service returned an invalid exact integer for ${name}`);
+}
 function eventType(event) {
 	return event.event_type;
 }
 function eventPayload(event) {
 	return event.payload;
+}
+function wireSeatEvents(events, firstEngineSeq) {
+	return events.map((event, offset) => ({
+		engine_seq: firstEngineSeq + BigInt(offset),
+		event_type: eventType(event),
+		payload: eventPayload(event)
+	}));
+}
+function encodedSeatEventBytes(event) {
+	return encodedByteLength(encodeJsonBody({
+		engine_seq: event.seq,
+		event_type: eventType(event),
+		payload: eventPayload(event)
+	}));
+}
+function encodedByteLength(encoded) {
+	return new TextEncoder().encode(encoded).byteLength;
 }
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -9306,10 +10274,18 @@ async function bootRyeOs(root) {
 	let preferences = null;
 	let renderer;
 	let closed = false;
-	const dispatchUi = (event) => runtime.enqueueEvent({
-		type: "ui",
-		event
-	});
+	let seatAttached = false;
+	const queuedUiEvents = [];
+	const dispatchUi = (event) => {
+		if (!seatAttached) {
+			queuedUiEvents.push(event);
+			return;
+		}
+		runtime.enqueueEvent({
+			type: "ui",
+			event
+		});
+	};
 	renderer = mountRyeOsRenderer(root, initial, dispatchUi);
 	runtime = createCommitRuntime({
 		reduce: (event) => wasm.ryeos_dispatch(event),
@@ -9326,16 +10302,22 @@ async function bootRyeOs(root) {
 		}
 	});
 	sessionRuntime = createSessionRuntime({
+		sessionId: sessionId(sessionUnknown),
 		eventsUrl: sessionEventsUrl(sessionUnknown),
 		seatEvents: () => wasm.ryeos_seat_events(),
 		commitEvent: (event) => runtime.enqueueEvent(event),
 		replaySeatEvents: (events) => runtime.commitMutation(() => wasm.ryeos_replay_seat_events(events))
 	});
 	runtime.enqueueEnvelope(initial);
+	await sessionRuntime.attachSeat();
+	seatAttached = true;
+	for (const event of queuedUiEvents.splice(0)) runtime.enqueueEvent({
+		type: "ui",
+		event
+	});
 	configurePreferences(wasm, runtime, (next) => {
 		preferences = next;
 	});
-	await sessionRuntime.attachSeat();
 	if (location.hash) runtime.enqueueEvent({
 		type: "route_changed",
 		route: location.hash.replace(/^#/, "")
@@ -9356,6 +10338,12 @@ function sessionEventsUrl(session) {
 	const value = session.events_url;
 	if (value === void 0 || value === null) return null;
 	if (typeof value !== "string") throw new Error("authenticated browser session events_url is invalid");
+	return value;
+}
+function sessionId(session) {
+	if (typeof session !== "object" || session === null || Array.isArray(session)) throw new Error("authenticated browser session is not an object");
+	const value = session.session_id;
+	if (typeof value !== "string" || value.length === 0) throw new Error("authenticated browser session has no session_id");
 	return value;
 }
 function configurePreferences(wasm, runtime, assign) {
@@ -9384,6 +10372,7 @@ function attachBrowserEvents(wasm, runtime) {
 	const abort = new AbortController();
 	const options = { signal: abort.signal };
 	window.addEventListener("keydown", (event) => {
+		if (event.defaultPrevented) return;
 		if (isTypingTarget(event.target)) return;
 		const key = keyEvent(event);
 		if (!key) return;
@@ -9459,4 +10448,4 @@ function renderBootFailure(root, error) {
 //#region browser/entry.ts
 bootRyeOsDocument();
 //#endregion
-export { bootRyeOs, bootRyeOsDocument, createCommitRuntime, mountRyeOsRenderer };
+export { bootRyeOs, bootRyeOsDocument, captureBrowserPresentation, createCommitRuntime, decodeJsonBody, encodeCanonicalJsonBody, encodeJsonBody, encodeSeatPayloadDigest, mountRyeOsRenderer, restoreBrowserPresentation };

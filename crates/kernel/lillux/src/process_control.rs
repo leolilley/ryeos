@@ -38,6 +38,267 @@ pub struct ExactProcessIdentity {
     pub group_leader_start_time_ticks: u64,
 }
 
+/// Descriptor-owned access to one exact live process's filesystem and mount
+/// namespace. This is the only Lillux operation permitted to follow procfs's
+/// `root` and `ns/mnt` magic links. Ordinary secure filesystem traversal keeps
+/// rejecting every symlink component.
+///
+/// The pidfd and proc directory remain owned for the complete lifetime of this
+/// value. Every descendant is subsequently opened no-follow from the retained
+/// root descriptor, and the process incarnation is checked on both sides of
+/// magic-link acquisition.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct ExactProcessRoot {
+    identity: ExactProcessIdentity,
+    pidfd: std::os::fd::OwnedFd,
+    process_directory: crate::PinnedDirectory,
+    root: crate::PinnedDirectory,
+    root_identity: crate::PinnedDirectoryIdentity,
+    namespace_directory: crate::PinnedDirectory,
+    mount_namespace: std::fs::File,
+    mount_namespace_identity: (u64, u64),
+    membership: std::fs::File,
+}
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug)]
+pub struct ExactProcessRoot;
+
+impl ExactProcessRoot {
+    #[cfg(target_os = "linux")]
+    fn open(identity: &ExactProcessIdentity) -> Result<Self, String> {
+        use std::os::fd::AsFd as _;
+
+        identity.validate()?;
+        let pidfd = linux::open_pidfd(identity.target_pid)?;
+        let observed = linux::capture_from_pidfd(
+            identity.target_pid,
+            Some(identity.group_leader_pid),
+            pidfd.as_fd(),
+        )?;
+        if observed != *identity {
+            return Err("process incarnation changed before process-root acquisition".to_owned());
+        }
+
+        let proc = crate::PinnedDirectory::open(std::path::Path::new("/proc"))
+            .map_err(|error| format!("open procfs root: {error}"))?
+            .ok_or("procfs root is absent")?;
+        let pid_name = identity.target_pid.to_string();
+        let process = proc
+            .open_child_directory(std::ffi::OsStr::new(&pid_name))
+            .map_err(|error| format!("open exact proc process directory: {error}"))?
+            .ok_or("exact proc process directory is absent")?;
+        let process_fd = process
+            .try_clone_descriptor()
+            .map_err(|error| format!("retain exact proc process directory: {error}"))?;
+
+        // These are procfs magic links. Following them is intentionally local
+        // to this exact-process primitive and is fenced by the retained pidfd.
+        let root_file = open_proc_magic_file(
+            &process_fd,
+            c"root",
+            libc::O_PATH | libc::O_DIRECTORY,
+            "process root",
+        )?;
+        let root = crate::PinnedDirectory::from_open_directory(
+            std::path::PathBuf::from(format!("/proc/{}/root", identity.target_pid)),
+            root_file,
+        )
+        .map_err(|error| format!("pin exact process root: {error}"))?;
+        let root_identity = root
+            .identity()
+            .map_err(|error| format!("identify exact process root: {error}"))?;
+
+        let namespace_directory = process
+            .open_child_directory(std::ffi::OsStr::new("ns"))
+            .map_err(|error| format!("open exact process namespace directory: {error}"))?
+            .ok_or("exact process namespace directory is absent")?;
+        let namespace_fd = namespace_directory
+            .try_clone_descriptor()
+            .map_err(|error| format!("retain exact process namespace directory: {error}"))?;
+        let mount_namespace =
+            open_proc_magic_file(&namespace_fd, c"mnt", libc::O_RDONLY, "mount namespace")?;
+        use std::os::unix::fs::MetadataExt as _;
+        let namespace_metadata = mount_namespace
+            .metadata()
+            .map_err(|error| format!("identify exact process mount namespace: {error}"))?;
+        let mount_namespace_identity = (namespace_metadata.dev(), namespace_metadata.ino());
+        let membership = process
+            .open_regular(std::ffi::OsStr::new("cgroup"), false)
+            .map_err(|error| format!("open exact process cgroup membership: {error}"))?
+            .ok_or("exact process cgroup membership is absent")?;
+
+        let observed = linux::capture_from_pidfd(
+            identity.target_pid,
+            Some(identity.group_leader_pid),
+            pidfd.as_fd(),
+        )?;
+        if observed != *identity {
+            return Err("process incarnation changed during process-root acquisition".to_owned());
+        }
+        Ok(Self {
+            identity: identity.clone(),
+            pidfd,
+            process_directory: process,
+            root,
+            root_identity,
+            namespace_directory,
+            mount_namespace,
+            mount_namespace_identity,
+            membership,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn open(_identity: &ExactProcessIdentity) -> Result<Self, String> {
+        Err("exact process-root access is unavailable on this OS".to_owned())
+    }
+
+    pub fn require_live(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsFd as _;
+            // Keep the proc directory itself in the liveness proof: losing its
+            // backing process while retaining only derived descriptors must
+            // not be interpreted as a reusable numeric PID.
+            self.process_directory
+                .try_clone_descriptor()
+                .map_err(|error| format!("retain exact proc process directory: {error}"))?;
+            let observed = linux::capture_from_pidfd(
+                self.identity.target_pid,
+                Some(self.identity.group_leader_pid),
+                self.pidfd.as_fd(),
+            )?;
+            if observed != self.identity {
+                return Err("exact process-root owner changed incarnation".to_owned());
+            }
+            let process = self
+                .process_directory
+                .try_clone_descriptor()
+                .map_err(|error| format!("retain exact proc process directory: {error}"))?;
+            let current_root = open_proc_magic_file(
+                &process,
+                c"root",
+                libc::O_PATH | libc::O_DIRECTORY,
+                "process root",
+            )?;
+            let current_root = crate::PinnedDirectory::from_open_directory(
+                self.root.path().to_path_buf(),
+                current_root,
+            )
+            .map_err(|error| format!("repin exact process root: {error}"))?;
+            if current_root
+                .identity()
+                .map_err(|error| format!("reidentify exact process root: {error}"))?
+                != self.root_identity
+            {
+                return Err("exact process filesystem root changed".to_owned());
+            }
+            let namespace = self
+                .namespace_directory
+                .try_clone_descriptor()
+                .map_err(|error| format!("retain exact process namespace directory: {error}"))?;
+            let current_namespace =
+                open_proc_magic_file(&namespace, c"mnt", libc::O_RDONLY, "mount namespace")?;
+            use std::os::unix::fs::MetadataExt as _;
+            let current_namespace = current_namespace
+                .metadata()
+                .map_err(|error| format!("reidentify exact process mount namespace: {error}"))?;
+            if (current_namespace.dev(), current_namespace.ino()) != self.mount_namespace_identity {
+                return Err("exact process mount namespace changed".to_owned());
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("exact process-root access is unavailable on this OS".to_owned())
+    }
+
+    /// Re-probe only the retained pidfd. This remains valid after the hook has
+    /// entered a mount namespace whose procfs does not expose the host PID.
+    pub fn require_retained_lifetime(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            linux::pidfd_signal(self.pidfd.as_raw_fd(), 0, 0)
+                .map_err(|error| format!("probe retained process-root lifetime: {error}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("exact process-root access is unavailable on this OS".to_owned())
+    }
+
+    /// Open a normalized relative directory below the pinned process root.
+    /// Every descendant component remains no-follow.
+    pub fn open_directory(
+        &self,
+        relative: &std::path::Path,
+    ) -> Result<crate::PinnedDirectory, String> {
+        self.require_live()?;
+        if relative.is_absolute() || relative.as_os_str().is_empty() {
+            return Err("process-root descendant must be a nonempty relative path".to_owned());
+        }
+        let mut directory = self
+            .root
+            .try_clone()
+            .map_err(|error| format!("retain exact process root: {error}"))?;
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err("process-root descendant path is not canonical".to_owned());
+            };
+            directory = directory
+                .open_child_directory(name)
+                .map_err(|error| format!("open process-root descendant: {error}"))?
+                .ok_or("process-root descendant directory is absent")?;
+        }
+        self.require_live()?;
+        Ok(directory)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mount_namespace(&self) -> Result<std::fs::File, String> {
+        self.require_live()?;
+        self.mount_namespace
+            .try_clone()
+            .map_err(|error| format!("retain exact process mount namespace: {error}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn membership(&self) -> Result<std::fs::File, String> {
+        self.require_live()?;
+        self.membership
+            .try_clone()
+            .map_err(|error| format!("retain exact process cgroup membership: {error}"))
+    }
+
+    pub(crate) fn identity(&self) -> &ExactProcessIdentity {
+        #[cfg(target_os = "linux")]
+        {
+            &self.identity
+        }
+        #[cfg(not(target_os = "linux"))]
+        unreachable!("no exact process root exists on this OS")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_proc_magic_file(
+    parent: &std::fs::File,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+    description: &str,
+) -> Result<std::fs::File, String> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let descriptor =
+        unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(format!(
+            "open exact {description}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+}
+
 /// Best-effort liveness classification for diagnostic metadata. This never
 /// returns signal authority and must not be used to authorize a lifecycle
 /// mutation; callers that need that use an authenticated/pinned process.
@@ -832,6 +1093,36 @@ mod tests {
     #[test]
     fn libc_process_group_pidfd_flag_matches_linux_uapi() {
         assert_eq!(libc::PIDFD_SIGNAL_PROCESS_GROUP, 1_u32 << 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exact_process_root_follows_only_the_fenced_proc_magic_link() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let result = (|| -> Result<(), String> {
+            let identity = capture_exact_process_identity(child.id(), None)?;
+            let root = ExactProcessRoot::open(&identity)?;
+            root.require_live()?;
+            root.open_directory(std::path::Path::new("tmp"))?;
+            assert!(
+                root.open_directory(std::path::Path::new("proc/self"))
+                    .is_err(),
+                "ordinary descendants must still reject symlinks"
+            );
+            assert!(
+                root.open_directory(std::path::Path::new("../tmp")).is_err(),
+                "process-root descendants must remain normalized"
+            );
+            Ok(())
+        })();
+        let _ = child.kill();
+        let _ = child.wait();
+        result.unwrap();
     }
 
     #[cfg(target_os = "linux")]

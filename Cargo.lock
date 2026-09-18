@@ -2595,6 +2595,7 @@ name = "ryeos-client-base"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "ryeos-engine",
  "serde",
  "serde_json",
  "serde_yaml",

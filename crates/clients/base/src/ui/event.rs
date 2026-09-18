@@ -331,7 +331,17 @@ pub enum RyeOsUiEvent {
     MoveOverlaySelection {
         delta: i32,
     },
+    /// Pointer selection names the exact projected overlay row; it must not
+    /// derive a delta or trust a mutable index from a stale renderer frame.
+    SetOverlaySelection {
+        item_id: String,
+    },
     ChooseOverlay {
+        secondary: bool,
+    },
+    /// Atomically select and choose one exact projected overlay row.
+    ChooseOverlayAt {
+        item_id: String,
         secondary: bool,
     },
     /// Fold (`expand: false`) or unfold the launcher group under the
@@ -345,9 +355,43 @@ pub enum RyeOsUiEvent {
         tile_id: String,
         index: usize,
     },
+    /// Select a projected list point by its exact mounted view identity. This
+    /// is the pointer-facing form: unlike `SetTileCursor`, it also addresses
+    /// views mounted in a dock slot without inventing a tile id.
+    SetViewCursor {
+        instance_key: RyeOsViewInstanceKey,
+        index: usize,
+    },
+    /// Atomically select one exact projected view item and, when requested,
+    /// activate the intent attached to that same item in the reducer's
+    /// current projection. A stale browser frame can therefore never select
+    /// or invoke whichever record later occupied the old numeric index.
+    ChooseViewItem {
+        instance_key: RyeOsViewInstanceKey,
+        item_id: String,
+        activate: bool,
+    },
+    /// Dismiss one exact transient notice. Unknown/already-dismissed ids are
+    /// idempotent no-ops so stale renderer frames cannot remove another one.
+    DismissNotice {
+        id: String,
+    },
+    /// Atomically toggle one exact authored section in the current mounted
+    /// projection. The reducer resolves its current numeric position; stale
+    /// section indices from a replaced/reordered binding are never trusted.
+    ToggleViewSection {
+        instance_key: RyeOsViewInstanceKey,
+        section_id: String,
+    },
     /// Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
     SetFold {
         tile_id: String,
+        section: usize,
+        collapsed: bool,
+    },
+    /// Fold a section in an exactly addressed tile or dock view instance.
+    SetViewFold {
+        instance_key: RyeOsViewInstanceKey,
         section: usize,
         collapsed: bool,
     },

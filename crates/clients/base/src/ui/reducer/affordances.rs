@@ -1180,9 +1180,16 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "sections",
+                "sources": {
+                    "threads": {
+                        "ref": "service:ui/ryeos-ui/threads/list",
+                        "collection": "rows"
+                    }
+                },
                 "sections": [{
                     "title": "Threads",
-                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" } },
+                    "source_channel": "threads",
+                    "collection": "rows",
                     "projection": { "primary": "thread_id" }
                 }]
             }),

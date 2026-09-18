@@ -196,7 +196,14 @@ fn compile_session_binding(
     };
     let canonical_project_root =
         project_authority.map(|authority| authority.path().to_string_lossy().into_owned());
-    let prepared = prepare_item_ref(ctx, state, &project_path)?;
+    let prepared = prepare_item_ref(
+        ctx,
+        state,
+        &project_path,
+        project_authority
+            .map(lillux::PinnedDirectory::try_clone)
+            .transpose()?,
+    )?;
     let surface_ref = CanonicalRef::parse(&req.surface_ref)
         .map_err(|error| HandlerError::BadRequest(format!("invalid surface ref: {error}")))?;
     let project_subject = project_authority.map(|_| project_path.as_path());
@@ -205,18 +212,32 @@ fn compile_session_binding(
         .exec_ctx
         .engine
         .with_checked_bundle_generation(|generation| -> Result<_> {
-            let mut surface = generation.effective_item(EffectiveItemRequest {
+            let request = EffectiveItemRequest {
                 item_ref: surface_ref,
                 expected_kind: Some("surface".to_string()),
                 project_root: project_authority.map(|_| project_path.clone()),
                 subject_resolution_authority:
                     SubjectResolutionAuthority::for_live_project_root(project_subject),
-            })?;
-            let embedded = ryeos_api::surface_views::embed_effective_surface_views_in_generation(
-                generation,
-                project_subject,
-                &mut surface,
-            );
+            };
+            let mut surface = match project_authority {
+                Some(authority) => {
+                    generation.effective_item_under_project_authority(request, authority)?
+                }
+                None => generation.effective_item(request)?,
+            };
+            let embedded = match project_authority {
+                Some(authority) => ryeos_api::surface_views::embed_effective_surface_views_in_generation_under_project_authority(
+                    generation,
+                    &project_path,
+                    authority,
+                    &mut surface,
+                ),
+                None => ryeos_api::surface_views::embed_effective_surface_views_in_generation(
+                    generation,
+                    None,
+                    &mut surface,
+                ),
+            };
             for (view_ref, reason) in &embedded.failures {
                 tracing::warn!(%view_ref, %reason, "view binding degraded during session compilation");
             }
@@ -242,25 +263,39 @@ pub(crate) fn revalidate_binding_authority(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     compiled: &SessionCompiledUiBinding,
     resolution_root: Option<&std::path::Path>,
+    project_content: Option<&lillux::PinnedDirectory>,
 ) -> Result<()> {
     use ryeos_engine::canonical_ref::CanonicalRef;
     use ryeos_engine::contracts::SubjectResolutionAuthority;
     use ryeos_engine::engine::EffectiveItemRequest;
 
     let project_root = resolution_root;
-    let mut surface = generation.effective_item(EffectiveItemRequest {
+    let request = EffectiveItemRequest {
         item_ref: CanonicalRef::parse(&compiled.binding.surface.canonical_ref)?,
         expected_kind: Some("surface".to_string()),
         project_root: project_root.map(std::path::Path::to_path_buf),
         subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
             project_root,
         ),
-    })?;
-    let current = ryeos_api::surface_views::embed_effective_surface_views_in_generation(
-        generation,
-        project_root,
-        &mut surface,
-    )
+    };
+    let mut surface = match project_content {
+        Some(content) => generation.effective_item_under_project_authority(request, content)?,
+        None => generation.effective_item(request)?,
+    };
+    let current = match (project_root, project_content) {
+        (Some(root), Some(content)) => ryeos_api::surface_views::embed_effective_surface_views_in_generation_under_project_authority(
+            generation,
+            root,
+            content,
+            &mut surface,
+        ),
+        (None, None) => ryeos_api::surface_views::embed_effective_surface_views_in_generation(
+            generation,
+            None,
+            &mut surface,
+        ),
+        _ => return Err(HandlerError::Internal("project binding lost its retained content authority".into()).into()),
+    }
     .identity;
     if current.surface != compiled.binding.surface || current.views != compiled.binding.views {
         return Err(HandlerError::Structured {
@@ -293,7 +328,7 @@ pub(crate) fn compile_target(
 
     let item_ref = CanonicalRef::parse(target_ref)
         .with_context(|| format!("invalid binding target ref `{target_ref}`"))?;
-    let effective = generation.effective_item(EffectiveItemRequest {
+    let request = EffectiveItemRequest {
         item_ref: item_ref.clone(),
         expected_kind: None,
         project_root: Some(prepared.project.effective_path.clone()),
@@ -302,14 +337,26 @@ pub(crate) fn compile_target(
             .plan_ctx
             .subject_resolution_authority
             .clone(),
-    })?;
+    };
+    let effective = match prepared.project_content.as_ref() {
+        Some(content) => generation.effective_item_under_project_authority(request, content)?,
+        None => generation.effective_item(request)?,
+    };
     if !effective.trusted {
         anyhow::bail!("binding target `{target_ref}` is not trusted");
     }
-    let verified = generation.verify(
-        &prepared.exec_ctx.plan_ctx,
-        generation.resolve(&prepared.exec_ctx.plan_ctx, &item_ref)?,
-    )?;
+    let verified = match prepared.project_content.as_ref() {
+        Some(content) => generation.resolve_verified_under_project_authority(
+            &prepared.exec_ctx.plan_ctx,
+            &item_ref,
+            &prepared.project.effective_path,
+            content,
+        )?,
+        None => generation.verify(
+            &prepared.exec_ctx.plan_ctx,
+            generation.resolve(&prepared.exec_ctx.plan_ctx, &item_ref)?,
+        )?,
+    };
     let metadata = &verified.resolved.metadata.extra;
     let dispatch_class = match extract_ui_dispatch(metadata)? {
         UiDispatchMode::Verified => CompiledUiDispatchClass::Verified,

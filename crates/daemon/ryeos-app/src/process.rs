@@ -1416,9 +1416,22 @@ mod tests {
             "boot_id": "fixture-boot", "target_pid": 40,
             "target_start_time_ticks": 200, "group_leader_pid": 39,
             "group_leader_start_time_ticks": 190, "process_scope": null,
+            "resource_selections": [], "resource_operations": [],
+            "resource_allocation_limit": null,
+            "resource_occupancy_start": null, "resource_occupancy_limit": null,
+            "resource_cleanup_allowance_ms": null,
         });
         let identity: ExecutionProcessIdentity = serde_json::from_value(value.clone()).unwrap();
         validate_execution_process_identity_shape(&identity).unwrap();
+        let mut missing_resource_authority = value.clone();
+        missing_resource_authority
+            .as_object_mut()
+            .unwrap()
+            .remove("resource_selections");
+        assert!(
+            serde_json::from_value::<ExecutionProcessIdentity>(missing_resource_authority).is_err(),
+            "current identity schema must carry explicit empty resource authority"
+        );
         value.as_object_mut().unwrap().remove("process_scope");
         assert!(serde_json::from_value::<ExecutionProcessIdentity>(value.clone()).is_err());
         value["process_scope"] = serde_json::Value::Null;

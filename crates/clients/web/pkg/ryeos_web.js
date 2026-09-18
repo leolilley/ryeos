@@ -216,6 +216,10 @@ function __wbg_get_imports() {
             const ret = typeof(arg0) === 'function';
             return ret;
         },
+        __wbg___wbindgen_is_null_52ff4ec04186736f: function(arg0) {
+            const ret = arg0 === null;
+            return ret;
+        },
         __wbg___wbindgen_is_object_63322ec0cd6ea4ef: function(arg0) {
             const val = arg0;
             const ret = typeof(val) === 'object' && val !== null;
@@ -262,6 +266,10 @@ function __wbg_get_imports() {
             const ret = arg0.codePointAt(arg1 >>> 0);
             return ret;
         },
+        __wbg_defineProperty_1559a6029ff5d44e: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.defineProperty(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_done_9158f7cc8751ba32: function(arg0) {
             const ret = arg0.done;
             return ret;
@@ -274,7 +282,15 @@ function __wbg_get_imports() {
             const ret = String.fromCodePoint(arg0 >>> 0);
             return ret;
         }, arguments); },
+        __wbg_from_0dbf29f09e7fb200: function(arg0) {
+            const ret = Array.from(arg0);
+            return ret;
+        },
         __wbg_get_1affdbdd5573b16a: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(arg0, arg1);
+            return ret;
+        }, arguments); },
+        __wbg_get_6011fa3a58f61074: function() { return handleError(function (arg0, arg1) {
             const ret = Reflect.get(arg0, arg1);
             return ret;
         }, arguments); },
@@ -332,6 +348,10 @@ function __wbg_get_imports() {
             const ret = Symbol.iterator;
             return ret;
         },
+        __wbg_keys_2fd1bfdda7e278ca: function(arg0) {
+            const ret = Object.keys(arg0);
+            return ret;
+        },
         __wbg_length_3d4ecd04bd8d22f1: function(arg0) {
             const ret = arg0.length;
             return ret;
@@ -360,6 +380,10 @@ function __wbg_get_imports() {
             const ret = new Object();
             return ret;
         },
+        __wbg_new_with_length_223c4ea248649e55: function(arg0) {
+            const ret = new Array(arg0 >>> 0);
+            return ret;
+        },
         __wbg_next_0340c4ae324393c3: function() { return handleError(function (arg0) {
             const ret = arg0.next();
             return ret;
@@ -371,6 +395,10 @@ function __wbg_get_imports() {
         __wbg_prototypesetcall_a6b02eb00b0f4ce2: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
+        __wbg_set_022bee52d0b05b19: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_set_3bf1de9fab0cd644: function(arg0, arg1, arg2) {
             arg0[arg1 >>> 0] = arg2;
         },

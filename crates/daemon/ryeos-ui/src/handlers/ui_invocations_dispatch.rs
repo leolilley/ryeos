@@ -49,6 +49,7 @@ fn invocation_context_for_session(session: &BrowserSession) -> HandlerContext {
 pub(crate) struct PreparedInvocation {
     pub(crate) project: ryeos_executor::execution::project_source::ResolvedProjectContext,
     pub(crate) exec_ctx: ryeos_executor::executor::ExecutionContext,
+    pub(crate) project_content: Option<lillux::PinnedDirectory>,
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -82,23 +83,31 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     }
     enforce_request_bounds(&state, &req, &input)?;
     authorize_route_context(&ctx, &state, &session, &req)?;
-    let project_path = match session.project_authority.as_deref() {
-        Some(authority) => {
-            authority.ensure_path_binding().map_err(|_| {
-                binding_stale("the selected project path no longer names its retained authority")
-            })?;
-            authority.descriptor_path()?
-        }
+    let project_access = crate::seat_auth::session_project_access(&session).map_err(|_| {
+        binding_stale("the selected project path no longer names its retained authority")
+    })?;
+    let project_path = match project_access.as_ref() {
+        Some(access) => access.path().to_path_buf(),
         None => state.config.app_root.clone(),
     };
-    let project_marker = session
-        .project_authority
-        .as_ref()
-        .map(|_| project_path.to_string_lossy().into_owned());
+    // Authored source parameters and projection filters receive the stable
+    // validated project identity.  The descriptor-rooted path above remains
+    // solely the filesystem resolution coordinate and must never escape into
+    // a request or durable row.
+    let project_marker = crate::seat_auth::session_project_query_identity(&session)?
+        .map(|path| path.to_string_lossy().into_owned());
     let bound = resolve_binding_request(&session, &req, project_marker.as_deref())?;
     let item_ref = bound.target.identity.canonical_ref.clone();
     let invocation_ctx = invocation_context_for_session(&session);
-    let prepared = prepare_item_ref(&invocation_ctx, &state, &project_path)?;
+    let prepared = prepare_item_ref(
+        &invocation_ctx,
+        &state,
+        &project_path,
+        project_access
+            .as_ref()
+            .map(|access| access.try_clone_directory())
+            .transpose()?,
+    )?;
     let current = prepared
         .exec_ctx
         .engine
@@ -120,6 +129,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
                     .project_authority
                     .as_ref()
                     .map(|_| project_path.as_path()),
+                prepared.project_content.as_ref(),
             )?;
             super::ui_launch_mint::compile_target(generation, &prepared, &item_ref)
         })?;
@@ -128,13 +138,25 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             "a signed binding target changed after session mint",
         ));
     }
-    let verified = ryeos_executor::executor::resolve_and_verify(
-        &prepared.exec_ctx.engine,
-        &prepared.exec_ctx.plan_ctx,
-        &item_ref,
-        None,
-    )
-    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let verified = match prepared.project_content.as_ref() {
+        Some(project_content) => prepared
+            .exec_ctx
+            .engine
+            .resolve_verified_under_project_authority(
+                &prepared.exec_ctx.plan_ctx,
+                &CanonicalRef::parse(&item_ref)?,
+                &prepared.project.effective_path,
+                project_content,
+            )
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+        None => ryeos_executor::executor::resolve_and_verify(
+            &prepared.exec_ctx.engine,
+            &prepared.exec_ctx.plan_ctx,
+            &item_ref,
+            None,
+        )
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?,
+    };
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
     let trusted_handler_context = select_trusted_handler_context(
@@ -720,6 +742,7 @@ pub(crate) fn prepare_item_ref(
     ctx: &HandlerContext,
     state: &AppState,
     project_path: &std::path::Path,
+    project_content: Option<lillux::PinnedDirectory>,
 ) -> Result<PreparedInvocation> {
     // Resolution is not project execution. The verified descriptor decides
     // whether this request belongs to the daemon-local read lane or the
@@ -770,6 +793,7 @@ pub(crate) fn prepare_item_ref(
     Ok(PreparedInvocation {
         project: project_ctx,
         exec_ctx,
+        project_content,
     })
 }
 

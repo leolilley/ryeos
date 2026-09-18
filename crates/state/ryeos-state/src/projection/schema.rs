@@ -92,6 +92,18 @@ CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
 CREATE INDEX IF NOT EXISTS idx_events_thread_type_seq ON events(thread_id, event_type, thread_seq);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 
+-- Bounded addressing for operation-keyed control events. This is a derived
+-- index into the authoritative event chain, rebuilt with the projection.
+CREATE TABLE IF NOT EXISTS event_operation_index (
+    event_hash TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_operation_lookup
+    ON event_operation_index(thread_id, event_type, operation_id, chain_seq);
+
 -- Event replay index: track indexed position per thread
 CREATE TABLE IF NOT EXISTS event_replay_index (
     thread_id TEXT PRIMARY KEY,
@@ -742,6 +754,41 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "updated_at",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "event_operation_index",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "event_hash",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event_type",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: true,
                     },
@@ -1611,6 +1658,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_events_ts",
                 table: "events",
                 columns: &["ts"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_event_operation_lookup",
+                table: "event_operation_index",
+                columns: &["thread_id", "event_type", "operation_id", "chain_seq"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {

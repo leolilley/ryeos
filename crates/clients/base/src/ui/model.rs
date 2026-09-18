@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -2548,7 +2549,8 @@ pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
             return format!("{field}:{value}");
         }
     }
-    format!("index:{index}")
+    let encoded = serde_json::to_vec(record).unwrap_or_else(|_| index.to_string().into_bytes());
+    format!("value:{:x}", Sha256::digest(encoded))
 }
 
 /// Per-row `(signature, projected tone)` — the signature detects change,

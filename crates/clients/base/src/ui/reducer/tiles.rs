@@ -342,6 +342,31 @@ impl RyeOsCore {
         }
     }
 
+    pub(crate) fn set_view_cursor(
+        &mut self,
+        instance_key: &crate::ids::RyeOsViewInstanceKey,
+        index: usize,
+    ) -> bool {
+        if let Some(tile_id) = instance_key.workspace_tile_id() {
+            return self.set_tile_cursor(tile_id, index);
+        }
+        let Some(local) = self.workspaces[self.active_workspace]
+            .dock_local
+            .get_mut(instance_key)
+        else {
+            return false;
+        };
+        match local {
+            ViewLocalState::GenericList { cursor, .. } if *cursor != index => {
+                *cursor = index;
+                true
+            }
+            ViewLocalState::GenericList { .. }
+            | ViewLocalState::None
+            | ViewLocalState::Field(_) => false,
+        }
+    }
+
     pub(crate) fn set_tile_fold(
         &mut self,
         tile_id: TileId,
@@ -365,6 +390,34 @@ impl RyeOsCore {
                 }
             }
             ViewLocalState::None | ViewLocalState::Field(_) => false,
+        }
+    }
+
+    pub(crate) fn set_view_fold(
+        &mut self,
+        instance_key: &crate::ids::RyeOsViewInstanceKey,
+        section: usize,
+        collapsed: bool,
+    ) -> bool {
+        if let Some(tile_id) = instance_key.workspace_tile_id() {
+            return self.set_tile_fold(tile_id, section, collapsed);
+        }
+        let Some(local) = self.workspaces[self.active_workspace]
+            .dock_local
+            .get_mut(instance_key)
+        else {
+            return false;
+        };
+        let ViewLocalState::GenericList {
+            collapsed: folds, ..
+        } = local
+        else {
+            return false;
+        };
+        if collapsed {
+            folds.insert(section)
+        } else {
+            folds.remove(&section)
         }
     }
 
@@ -585,6 +638,39 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> RyeOsSplitAxisVm {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    #[test]
+    fn exact_view_pointer_state_addresses_dock_instances() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let instance_key = crate::ids::RyeOsViewInstanceKey::surface_slot("right");
+        core.workspaces[core.active_workspace].dock_local.insert(
+            instance_key.clone(),
+            ViewSpec::bound("view:test/dock").initial_local_state(),
+        );
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetViewCursor {
+                instance_key: instance_key.clone(),
+                index: 7,
+            },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetViewFold {
+                instance_key: instance_key.clone(),
+                section: 2,
+                collapsed: true,
+            },
+        });
+
+        let ViewLocalState::GenericList {
+            cursor, collapsed, ..
+        } = &core.workspaces[core.active_workspace].dock_local[&instance_key]
+        else {
+            panic!("dock should retain generic list state");
+        };
+        assert_eq!(*cursor, 7);
+        assert_eq!(collapsed.iter().copied().collect::<Vec<_>>(), vec![2]);
+    }
 
     #[test]
     fn field_view_added_mid_session_gets_field_local_state_before_fetch() {

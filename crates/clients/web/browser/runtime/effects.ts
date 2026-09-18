@@ -5,7 +5,7 @@ import type {
   UiBindingRequest,
   UiBindingRequestBounds,
 } from "../generated";
-import { errorMessage, postJson, UnknownDeliveryError } from "./transport";
+import { encodeJsonBody, errorMessage, postEncodedJson, UnknownDeliveryError } from "./transport";
 
 export async function runEffect(effect: RyeOsEffect): Promise<RyeOsEffectResult> {
   const kind = effect.kind;
@@ -56,7 +56,7 @@ export function failedEffectResult(effect: RyeOsEffect, error: unknown): RyeOsEf
 async function dispatchBinding(request: UiBindingRequest, bounds: UiBindingRequestBounds): Promise<unknown> {
   const maximum = safeBound(bounds.max_request_bytes, "max_request_bytes");
   const inputMaximum = safeBound(bounds.max_input_bytes, "max_input_bytes");
-  const encoded = JSON.stringify(request);
+  const encoded = encodeJsonBody(request);
   if (new TextEncoder().encode(encoded).byteLength > maximum) {
     throw new Error("UI binding request exceeds the session bound");
   }
@@ -64,7 +64,7 @@ async function dispatchBinding(request: UiBindingRequest, bounds: UiBindingReque
     && new TextEncoder().encode(request.payload.value).byteLength > inputMaximum) {
     throw new Error("UI binding input exceeds the session bound");
   }
-  return postJson("/ui/api/invocations/dispatch", request);
+  return postEncodedJson("/ui/api/invocations/dispatch", encoded);
 }
 
 function safeBound(value: bigint, name: string): number {

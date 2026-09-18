@@ -18,7 +18,7 @@ export type RyeOsViewVm =
    * through rows (typed widget variants arrive with the render pass).
    */
   | { type: "rows"; title: string; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsRowVm[] }
-  | { type: "timeline"; title: string; provenance?: string | null; affordance_hints: string[]; entries: RyeOsTimelineEntryVm[]; entry_arrived_at_ms: (bigint | null)[]; entry_indents: number[]; selected?: bigint | null; fold_section?: bigint | null; entry_expandable?: boolean[]; entry_expanded?: boolean[]; entry_details?: RyeOsRowDetailVm[][] }
+  | { type: "timeline"; title: string; provenance?: string | null; affordance_hints: string[]; entries: RyeOsTimelineEntryVm[]; entry_ids: string[]; entry_cursors: bigint[]; entry_arrived_at_ms: (bigint | null)[]; entry_indents: number[]; selected?: bigint | null; fold_section?: bigint | null; entry_expandable?: boolean[]; entry_expanded?: boolean[]; entry_details?: RyeOsRowDetailVm[][] }
   | { type: "map"; scene: RyeOsSceneModel }
   | { type: "atlas"; scene: RyeOsSceneModel }
   /**

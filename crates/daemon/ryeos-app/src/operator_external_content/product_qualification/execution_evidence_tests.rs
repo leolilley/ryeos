@@ -85,7 +85,12 @@ fn static_action_preserves_inputs_but_refuses_every_unsupported_control() {
             "product_selections",
             json!([{
                 "target":{"kind":"root"},
-                "selection":{"declaration_id":"subject", "witness_hash":"b".repeat(64), "qualification_hash":null}
+                "selection":{
+                    "declaration_id":"subject",
+                    "witness_hash":"b".repeat(64),
+                    "witness_source":{"kind":"local_capture"},
+                    "qualification_hash":null
+                }
             }]),
         ),
         ("unrecognized_control", json!(true)),

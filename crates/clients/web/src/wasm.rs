@@ -5,6 +5,7 @@
 //! for fetch/EventSource/DOM/Three.js and returns events/effect results.
 
 use serde::Serialize;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use ryeos_client_base::ui::{
@@ -16,11 +17,74 @@ use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 use std::cell::RefCell;
 
 fn to_js_value<T: Serialize + ?Sized>(value: &T, context: &str) -> Result<JsValue, JsValue> {
-    let serializer =
-        serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true);
-    value
+    let serializer = serde_wasm_bindgen::Serializer::new()
+        .serialize_missing_as_null(true)
+        // Maps first cross as real JS Maps so prototype-sensitive string keys
+        // cannot invoke Object.prototype setters. normalize_js_data then turns
+        // every map/record into the plain-object ABI generated TS declares,
+        // defining each field as an own data property.
+        .serialize_maps_as_objects(false)
+        .serialize_large_number_types_as_bigints(true);
+    let serialized = value
         .serialize(&serializer)
-        .map_err(|error| JsValue::from_str(&format!("{context}: {error}")))
+        .map_err(|error| JsValue::from_str(&format!("{context}: {error}")))?;
+    normalize_js_data(serialized)
+        .map_err(|error| JsValue::from_str(&format!("{context}: normalize JS data: {error:?}")))
+}
+
+fn normalize_js_data(value: JsValue) -> Result<JsValue, JsValue> {
+    if value.is_null() || value.is_undefined() || !value.is_object() {
+        return Ok(value);
+    }
+    if js_sys::Array::is_array(&value) {
+        let source: js_sys::Array = value.unchecked_into();
+        let result = js_sys::Array::new_with_length(source.length());
+        for index in 0..source.length() {
+            result.set(index, normalize_js_data(source.get(index))?);
+        }
+        return Ok(result.into());
+    }
+
+    let result = js_sys::Object::new();
+    if value.is_instance_of::<js_sys::Map>() {
+        let entries = js_sys::try_iter(&value)?
+            .ok_or_else(|| JsValue::from_str("serialized map is not iterable"))?;
+        for entry in entries {
+            let entry = js_sys::Array::from(&entry?);
+            let key = entry
+                .get(0)
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("serialized map has a non-string key"))?;
+            define_data_property(&result, &key, normalize_js_data(entry.get(1))?)?;
+        }
+    } else {
+        let source: js_sys::Object = value.unchecked_into();
+        let keys = js_sys::Object::keys(&source);
+        for index in 0..keys.length() {
+            let key = keys
+                .get(index)
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("serialized object has a non-string key"))?;
+            let field = js_sys::Reflect::get(&source, &JsValue::from_str(&key))?;
+            define_data_property(&result, &key, normalize_js_data(field)?)?;
+        }
+    }
+    Ok(result.into())
+}
+
+fn define_data_property(target: &js_sys::Object, key: &str, value: JsValue) -> Result<(), JsValue> {
+    let descriptor = js_sys::Object::new();
+    js_sys::Reflect::set(&descriptor, &JsValue::from_str("value"), &value)?;
+    for attribute in ["enumerable", "configurable", "writable"] {
+        js_sys::Reflect::set(&descriptor, &JsValue::from_str(attribute), &JsValue::TRUE)?;
+    }
+    if js_sys::Reflect::define_property(target, &JsValue::from_str(key), &descriptor)? {
+        Ok(())
+    } else {
+        Err(JsValue::from_str(
+            "failed to define serialized object field",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

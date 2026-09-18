@@ -17195,6 +17195,49 @@ impl StateStore {
             .collect::<Result<Vec<_>>>()
     }
 
+    pub fn latest_thread_event_by_type(
+        &self,
+        thread_id: &str,
+        event_type: &str,
+    ) -> Result<Option<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let row =
+            queries::latest_thread_event_by_type(g.state_db.projection(), thread_id, event_type)?;
+        row.map(persisted_event_from_projection_row).transpose()
+    }
+
+    pub fn latest_thread_event_by_type_prefix(
+        &self,
+        thread_id: &str,
+        event_type_prefix: &str,
+    ) -> Result<Option<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let row = queries::latest_thread_event_by_type_prefix(
+            g.state_db.projection(),
+            thread_id,
+            event_type_prefix,
+        )?;
+        row.map(persisted_event_from_projection_row).transpose()
+    }
+
+    pub fn thread_events_by_type_operation_id(
+        &self,
+        thread_id: &str,
+        event_type: &str,
+        operation_id: &str,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        queries::thread_events_by_type_operation_id(
+            g.state_db.projection(),
+            thread_id,
+            event_type,
+            operation_id,
+        )?
+        .into_iter()
+        .map(persisted_event_from_projection_row)
+        .collect()
+    }
+
     pub fn append_bundle_event(
         &self,
         request: ryeos_state::BundleEventAppendRequest,

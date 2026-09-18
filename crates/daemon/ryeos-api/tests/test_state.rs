@@ -47,7 +47,8 @@ pub fn build_test_state_with_bundles() -> (tempfile::TempDir, AppState) {
     build_test_state_with_engine(Arc::new(build_live_bundle_engine()))
 }
 
-fn build_test_state_with_engine(
+#[allow(dead_code)]
+pub fn build_test_state_with_engine(
     engine: Arc<ryeos_engine::engine::Engine>,
 ) -> (tempfile::TempDir, AppState) {
     let tmpdir = tempfile::TempDir::new().unwrap();

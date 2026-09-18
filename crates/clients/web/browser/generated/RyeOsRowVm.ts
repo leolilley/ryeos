@@ -6,6 +6,11 @@ import type { RyeOsUiIntent } from "./RyeOsUiIntent";
 
 export interface RyeOsRowVm {
   id: string;
+  /**
+   * Exact cursor coordinate in the current complete projection. Render
+   * windows must never make their local array index look authoritative.
+   */
+  cursor: bigint;
   glyph?: string | null;
   primary: string;
   secondary: string | null;

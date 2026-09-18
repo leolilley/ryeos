@@ -1,145 +1,199 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ryeos_client_base::ui::content::views_from_surface;
 use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
 use ryeos_client_base::ui::view_model::build_view_model;
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::composers::ComposerRegistry;
+use ryeos_engine::item_resolution::{RegisteredBundleRoot, ResolutionRoots};
+use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
+use ryeos_engine::resolution::run_effective_item_pipeline;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/atlas",
-        "06b0fd9479ee06f3e9fca8e8fea473691b392281e9dd8136eaa8d611fabb5e39",
+        "31bbcf35045292c0823ba05c9ccc4ac463ef978d7f8f3797cf14416246db0e42",
     ),
     (
         "view:ryeos/backdrop/prism",
-        "f00e10fe11425ec4f708e124bc5f931e6158162593dbbc435c620642d5bbb4cd",
+        "6bf6cdd137e3798549ca2845ebee31a7a55488f9097c3add50dc43f91ee6cb37",
     ),
     (
         "view:ryeos/backdrop/prism-shards",
-        "a3a10b68b35af1672145289189ab9e0c54caa167ff14f95e815fef39f43128c7",
+        "185338ff7aed11b4c4ef4d2ec46625c31d7cddc940f047b71d45659bc3ed1289",
     ),
     (
         "view:ryeos/backdrop/splash",
-        "2cead8769d3a01371fdabee15f8733ca921699bc7363feb6abb2f2015f24d728",
+        "a0f7760c221ebf075840de3d2e7c56a99e66ef88f92d8f7e578ca5eece00a32a",
     ),
     (
         "view:ryeos/bundles/list",
-        "f14e74408627efd3d284c21ac925830639b67b66d90f61f4f7c0ec566f49f7f6",
+        "1618d2b9159a78eebdc0cf99d6094e2aba86fee7f2d2d9cc11482df854c7485e",
     ),
     (
         "view:ryeos/chain/timeline",
-        "415a093fa80bf196acc7e1ee9990190693dc83ed6268389d8ed723a8c6bad3d5",
+        "c34ba90d9f56a40e694505e14081cbe8e4a7670391561ed7957035afc88f73b4",
     ),
     (
         "view:ryeos/commands/grammar",
-        "605ee964151b681c1a63381a8189d55784a13490876adb1ec5bbeeb3652b8810",
+        "7df858b185e9c4624e38926803f9856fbc2162f3df934bfdd534d4f65557a8d3",
     ),
     (
         "view:ryeos/files/list",
-        "b81180135ffee5c7a3609d16db310cc340a8a3ebae056dc6d174336d143519c3",
+        "a1cfeb5071fe718b74c321461646e7a9b058c1217f5e4c0496f5e95bffb62922",
     ),
     (
         "view:ryeos/gc/status",
-        "8c37e3fbea502ae64bb90690577b9012249c4173d05d5ff643e728e2c906c56e",
+        "5d0ac6fb8432d5107306096aaa95f15d8f4c66a3d5bdbf78d3a643c712b611a2",
     ),
     (
         "view:ryeos/graph/topology",
-        "c470e5e0de935a46577250f64797d212969637ed4c35aba0e8338730d1de114f",
+        "f44a505d2883ef3f9fdf671ad67d2bac1cf3174b94dd95dbd6f56712ce30c957",
+    ),
+    (
+        "view:ryeos/home/overview",
+        "f44c0df9a28371735252ed48a6d7bb52e69a03cf57ff6ba27f6fa6cf8265b5f3",
     ),
     (
         "view:ryeos/input",
-        "6e78036639f3d35b0e36f31ac16a1421d9b65839658e5635b0532a77866bf31b",
+        "01a6f116ecd744015dfbd890e535e5cd3432689a2db14fee57d8b9da5715c0d8",
     ),
     (
         "view:ryeos/item/explain",
-        "2cab28db91a3a7eb2919ce1e0dc1ae4bad92aea24efabf2749bdb89dff55809e",
+        "6dfaca7af100f4a96bd3a82bb8292e21c56c4db9b8524727480267d58c586bda",
     ),
     (
         "view:ryeos/item/inspector",
-        "c7570b11507e9c7ac0218d613404a85b8a75e476281f7ee551a37338e08ceb66",
+        "f9b7023efed6713202383eb23c5016f34e2ece0ff246509425c1c927322ab8c2",
     ),
     (
         "view:ryeos/items/space",
-        "2c3c8c6e470421dd7aec4e63ac97cd44d245f704c935901c86921497adf65881",
+        "71a24207033ab85872cc1273427ec8b570fda53455d7933e578f7a1ce71313b7",
     ),
     (
         "view:ryeos/node/bundles",
-        "f0287ecb969497dd931f37ea4b5d53c3673835c119d079eab99042eefef639d7",
+        "8a4f233e0ec46db3395863bb17789460566c7f173b662a163a08e94d1aead5ac",
     ),
     (
         "view:ryeos/node/events",
-        "fbcb8b39076262bba1afb1dc80aded5adc3306b36f7866b1343111244fed47d8",
+        "5655ec6dbdcbbb80d60cf5d9c70d0f2292db1fddacd80117d460c8f916031546",
     ),
     (
         "view:ryeos/node/gc",
-        "8cd3694592b206fe5ba7d98b056d664e1118046509295b604d660077d4022017",
+        "34d7140d95f9f72bbf859797d95beb1c4770a7c2c64f5f9d2505de409d4c477c",
     ),
     (
         "view:ryeos/node/remotes",
-        "43b6f36e4ade3b92ddfd124779cae33bd0a20805485b3c03ebd1628c89c0e355",
+        "6bc1700111efbf1b1645dc93a39239dbd6cd7a28ef745247b704d7de65e5760c",
     ),
     (
         "view:ryeos/node/status",
-        "b23635495a49ab27a63fa4cf49fa1caec229965f47aa1b14cf2e80328585149c",
+        "20c6e823a763c66aad6b3c65921c6e089193aef14813b67ecfc2b6037dc5e4f2",
     ),
     (
         "view:ryeos/node/threads/history",
-        "00bcd524373903ef2839d31d4e8d79091a02f856c2fb8c370f7532d4004a0357",
+        "25e3cfe016465b13d9add55a6e8865a98d90e8e2ff36ddec06df1c2a904631ec",
+    ),
+    (
+        "view:ryeos/programs/list",
+        "b036d149ab102440cb13c0eabba5f3ad42f5fb1661e1d81ff4d562dd875bd393",
     ),
     (
         "view:ryeos/project/files",
-        "d969b7ca212a49a631214e3e2cd68deffa0303ac466f7db9b99474a42da3bb4b",
+        "526b28a0daa5cd033771d4d94f324bb80fdd012abf2fb960ce39738d3aa68d67",
     ),
     (
         "view:ryeos/project/items",
-        "f66cd36a31b21232766b31bd8c42e1f543b7d48a8d6ee4979aa29d9261e506e3",
+        "487268298d4577a6b841c3c197e087904eb7aefe2fa566d15f72a45fb395456e",
     ),
     (
         "view:ryeos/project/schedules",
-        "a34a3795e8e83cea680b07dfdbf4d004f3b8d743fe9a0d0d7fb99ee218250704",
+        "dae2b20ef979e642499f1aac82a92684fc67b8b219523f73c4243adeae8e1d37",
     ),
     (
         "view:ryeos/projects/list",
-        "673dffeb47f4968775a3750e59120d222bc5e1f0a92be493b48d501c2ab0d510",
+        "1e411af2f9be00603682126885c473fda0850c9e2b966052152193096144156f",
     ),
     (
         "view:ryeos/remotes/list",
-        "f5c876713b06bf61d23a77120c52ac0b8b97a1e617a71a8607d785dc7ef7c573",
+        "8ab247206b9e0fd39522140e0997aad0037d3008ab19cac4eaae36f38ab5daf2",
+    ),
+    (
+        "view:ryeos/review/history",
+        "bb6ed665d5b4ccb3e97957a3800de356569a0fe5b490a27a2debf584d8535fd6",
+    ),
+    (
+        "view:ryeos/review/pending",
+        "df87ecd782ebdc271d805c6c114250d88f9d110411e66d98c0820f11c7bd79cd",
     ),
     (
         "view:ryeos/runs/comparison",
-        "92ead02db906229f1b0b904911a3f4f3d4cf7ff6d4d3bc639650fcd94feb19ab",
+        "3bf35cdbb392b4a7deddc6c40c03f904f1a7f6c19492d2e02749cc8fdee1e4d8",
     ),
     (
         "view:ryeos/schedules/list",
-        "cb0a1007c69df01d78813ef410fe8372f8d5c785ffaa2995dc65cdeb596a1635",
+        "65c1f49bd315da32ca5aefad3803df118698a95e0368c43c36226021fe879cda",
+    ),
+    (
+        "view:ryeos/sites/list",
+        "8bf2c2e33222af4cc505cfa0f139daea560be3dbed1751381c00c482e58192bf",
+    ),
+    (
+        "view:ryeos/thread/conversation",
+        "0a6c6627089b99ad57a0f3c192bb17d502d5c5b9810ae38733f575f7f73ef8a8",
     ),
     (
         "view:ryeos/thread/transcript",
-        "0539ed2b695679bdaa7b53fc078e6d1970d994061e22678d0ecf57999124a43e",
+        "b0a1f4967833f9242574fd0a74b78bcfbf4bccc6cea3da5b1d30d3b2041edda1",
     ),
     (
         "view:ryeos/thread/tree",
-        "d0dd02c41ca2cc007beddbae1f5bbc04c1eac2ef31135fbc81456068bb13e0bc",
+        "a5f0beadbe0c7b1451f2838aecbf8246bbc38d53689780af85a309908672a7e2",
     ),
     (
         "view:ryeos/threads/detail",
-        "5afb1a9013e41b2ed00b888d03ea1512928be2b51fb13c939aa8f540471796cd",
+        "1030d5260053ff000c0bab2e96f48edec2a3b94e69ed6eea19b7d0b2b0135ffd",
     ),
     (
         "view:ryeos/threads/history",
-        "8e75bf1a628e2aeaa50214d727ef612900b573ddc864c8fcca2bb15023d06511",
+        "b36eed0f8d9d52ad58730f257f53395b7c4caa5fdc707f3bef8a147ce4dcfbdf",
     ),
     (
         "view:ryeos/threads/list",
-        "ec030055cc8728c402e45333af7d08ee9e4c022095e3da144ea1a464a1227c2f",
+        "fd116bc2343417a0a741e215f7cff14e65dba0378084fe2c3340afceca0b80eb",
     ),
     (
         "view:ryeos/ui/status",
-        "aba29d55e8d750a1b95d62bcc94a6d84b5993faabfc10c5877b98e80162371b9",
+        "b48e2fd29ef1b7138d2980253b7aac6a471a7751719b23db53acf6d5200cd51b",
+    ),
+    (
+        "view:ryeos/work/approvals",
+        "06fd44368920826d0c1242f823f05b529999ceb497de71cf5c2d59155e00f582",
+    ),
+    (
+        "view:ryeos/work/candidate",
+        "baca1aba9b73f820f8a31ab447bf4bc1d04cbfcbec31f35e494a6c8b5fb5000d",
+    ),
+    (
+        "view:ryeos/work/children",
+        "ad60c9eecb8294627614ddc3635fff6b186944e62acb4b759198ca904240f488",
+    ),
+    (
+        "view:ryeos/work/evidence",
+        "4c3d237f74026c58dd4b64231401c78365846cf73265dcb555c3a125542a3597",
+    ),
+    (
+        "view:ryeos/work/list",
+        "f316afa1eb5bde978811682962980312a2175ec0ac9181c71ebbda24edca2bf5",
+    ),
+    (
+        "view:ryeos/work/overview",
+        "54f04225dd33c48cd9ca33aad21515a5869183874be21e4b4e2216fbb257eafb",
     ),
 ];
 
@@ -170,17 +224,17 @@ fn yaml_files_below(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn every_bundled_view_uses_and_validates_under_the_named_source_contract() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
+    let repository = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .expect("canonical repository root");
     let views_root = repository.join("bundles/ryeos-ui/.ai/views");
     let files = yaml_files_below(&views_root);
     assert_eq!(
         files.len(),
-        33,
+        45,
         "the complete signed view inventory changed"
     );
 
-    let mut embedded = Map::new();
     let mut raw_by_ref = BTreeMap::new();
     for path in files {
         let relative = path
@@ -221,7 +275,65 @@ fn every_bundled_view_uses_and_validates_under_the_named_source_contract() {
         let value: Value = serde_yaml::from_str(&text)
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
         raw_by_ref.insert(view_ref.clone(), value.clone());
-        embedded.insert(view_ref, value);
+    }
+
+    // Exercise the same signed parser + extends composer path that produces
+    // the effective view values embedded by the daemon. Raw authored YAML is
+    // not a ViewBinding: it may still contain `extends` and omit inherited
+    // fields, so validating it directly would test the wrong boundary.
+    let trust_store = ryeos_engine::test_support::live_trust_store();
+    let core_bundle = repository.join("bundles/core");
+    let standard_bundle = repository.join("bundles/standard");
+    let ui_bundle = repository.join("bundles/ryeos-ui");
+    let bundle_roots = vec![
+        core_bundle.clone(),
+        standard_bundle.clone(),
+        ui_bundle.clone(),
+    ];
+    let kinds = ryeos_engine::test_support::load_live_kind_registry();
+    let (parser_registry, parser_diagnostics) =
+        ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
+            .expect("load live signed parser registry");
+    assert!(
+        parser_diagnostics.is_empty(),
+        "live parser registry diagnostics: {parser_diagnostics:?}"
+    );
+    let handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let parsers = ParserDispatcher::new(parser_registry, Arc::clone(&handlers));
+    let composers =
+        ComposerRegistry::from_kinds(&kinds, &handlers).expect("bind live signed composers");
+    let roots = ResolutionRoots::from_registered(
+        None,
+        &[
+            RegisteredBundleRoot {
+                name: "core".to_string(),
+                canonical_root: core_bundle,
+            },
+            RegisteredBundleRoot {
+                name: "standard".to_string(),
+                canonical_root: standard_bundle,
+            },
+            RegisteredBundleRoot {
+                name: "ryeos-ui".to_string(),
+                canonical_root: ui_bundle,
+            },
+        ],
+    );
+
+    let mut embedded = Map::new();
+    for view_ref in raw_by_ref.keys() {
+        let item_ref = CanonicalRef::parse(view_ref)
+            .unwrap_or_else(|error| panic!("parse canonical ref {view_ref}: {error}"));
+        let effective = run_effective_item_pipeline(
+            &item_ref,
+            &kinds,
+            &parsers,
+            &roots,
+            &trust_store,
+            &composers,
+        )
+        .unwrap_or_else(|error| panic!("resolve and compose {view_ref}: {error}"));
+        embedded.insert(view_ref.clone(), effective.composed.composed);
     }
 
     let surface = json!({ "views": embedded });
@@ -233,7 +345,7 @@ fn every_bundled_view_uses_and_validates_under_the_named_source_contract() {
             binding.degraded, None,
             "{view_ref} does not validate under the current binding contract"
         );
-        let raw = &raw_by_ref[&view_ref];
+        let raw = &surface["views"][&view_ref];
         assert_eq!(
             raw.get("sources").is_some(),
             !binding.sources.is_empty(),

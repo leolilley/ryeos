@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:29:56Z:18b5fab624042d67475c2fed04bfd49366b338d3d99d05e119ea848d7ecdc12a:M5pePsDb1721mQRPpM5smVzy0AaI9Kom1A5s6S/U+2O6aa1fDrh9KxcAEvYQfgRSO6SPcdPO0JSLYx6sfc65Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T04:20:55Z:b745977fb3f9750cc69f429a08dee15d693f95009dd45c2199d75116e7d3d88b:wi1quJ7OBadXQckUr+0VNVyNgkP02yx4sGq3qdPGjofJ9ZuBuKPwUzXS/LU41RT1qEnEaMGMDXaszAxW5Y1yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/view"
 version: "1.0.0"
 location:
@@ -70,6 +70,9 @@ composed_value_contract:
       type: single
       prim: string
   optional:
+    extends:
+      type: union
+      prims: [string, "null"]
     sources:
       type: mapping
       values:

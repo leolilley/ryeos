@@ -132,7 +132,24 @@ impl RyeOsCore {
         if previous.as_ref() == Some(&state) {
             return Vec::new();
         }
+        let newly_visible_error = state.error.as_ref().and_then(|error| {
+            let already_visible = previous
+                .as_ref()
+                .and_then(|previous| previous.error.as_ref())
+                == Some(error);
+            (!already_visible).then(|| {
+                let tone = if error.outcome == super::effect::RyeOsEffectOutcome::Unknown {
+                    RyeOsTone::Warn
+                } else {
+                    RyeOsTone::Danger
+                };
+                (error.message.clone(), tone)
+            })
+        });
         self.runtime.transport.channels.insert(channel, state);
+        if let Some((message, tone)) = newly_visible_error {
+            self.notice_deduped(message, tone);
+        }
         if freshness == super::event::RyeOsTransportFreshness::ExpiredOrRevoked {
             self.notice_deduped(
                 "This UI session expired or was revoked. Relaunch it to continue.",
@@ -577,6 +594,29 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiEvent::SetOverlaySelection { item_id } => {
+                let items = super::view_model::active_overlay_items(self);
+                if let Some(index) = items
+                    .iter()
+                    .position(|item| item.id == item_id && item.enabled)
+                    && self.ui.overlay.selected != index
+                {
+                    self.ui.overlay.selected = index;
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::ChooseOverlayAt { item_id, secondary } => {
+                let items = super::view_model::active_overlay_items(self);
+                let Some(index) = items
+                    .iter()
+                    .position(|item| item.id == item_id && item.enabled)
+                else {
+                    return Vec::new();
+                };
+                self.ui.overlay.selected = index;
+                self.dispatch_ui(RyeOsUiEvent::ChooseOverlay { secondary })
+            }
             RyeOsUiEvent::ChooseOverlay { secondary } => {
                 let items = super::view_model::active_overlay_items(self);
                 let selected = self.ui.overlay.selected.min(items.len().saturating_sub(1));
@@ -650,6 +690,57 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiEvent::SetViewCursor {
+                instance_key,
+                index,
+            } => {
+                if self.set_view_cursor(&instance_key, index) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::ChooseViewItem {
+                instance_key,
+                item_id,
+                activate,
+            } => {
+                let Some((cursor, intent)) =
+                    super::view_model::view_pointer_item(self, &instance_key, &item_id)
+                else {
+                    return Vec::new();
+                };
+                if self.set_view_cursor(&instance_key, cursor) {
+                    self.bump_generation();
+                }
+                if activate && let Some(intent) = intent {
+                    return self.dispatch_intent(intent);
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::DismissNotice { id } => {
+                let before = self.ui.notices.len();
+                self.ui.notices.retain(|notice| notice.id != id);
+                if self.ui.notices.len() != before {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::ToggleViewSection {
+                instance_key,
+                section_id,
+            } => {
+                let Some((section, cursor, collapsed)) =
+                    super::view_model::view_section(self, &instance_key, &section_id)
+                else {
+                    return Vec::new();
+                };
+                let cursor_changed = collapsed && self.set_view_cursor(&instance_key, cursor);
+                let fold_changed = self.set_view_fold(&instance_key, section, !collapsed);
+                if cursor_changed || fold_changed {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             RyeOsUiEvent::SetFold {
                 tile_id,
                 section,
@@ -659,6 +750,16 @@ impl RyeOsCore {
                     return Vec::new();
                 };
                 if self.set_tile_fold(tile_id, section, collapsed) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiEvent::SetViewFold {
+                instance_key,
+                section,
+                collapsed,
+            } => {
+                if self.set_view_fold(&instance_key, section, collapsed) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -1077,6 +1178,15 @@ impl RyeOsCore {
                         );
                         return Vec::new();
                     };
+                    if command == crate::ui::dto::ThreadControlCommand::Cancel
+                        && self.has_pending_thread_command(&thread_id, command, &coordinate)
+                    {
+                        self.notice(
+                            format!("Cancel {thread_id} is already pending."),
+                            RyeOsTone::Warn,
+                        );
+                        return Vec::new();
+                    }
                     let (request, request_bounds) = self.compiled_binding_operation(
                         coordinate,
                         crate::ui::binding::UiBindingPayload::Selection {
@@ -1170,6 +1280,19 @@ impl RyeOsCore {
         let Some(coordinate) = self.thread_control_coordinate() else {
             return false;
         };
+        self.has_pending_thread_command(
+            thread_id,
+            crate::ui::dto::ThreadControlCommand::Cancel,
+            &coordinate,
+        )
+    }
+
+    fn has_pending_thread_command(
+        &self,
+        thread_id: &str,
+        command: crate::ui::dto::ThreadControlCommand,
+        coordinate: &crate::ui::binding::UiBindingCoordinate,
+    ) -> bool {
         self.pending_effects.values().any(|kind| {
             matches!(
                 kind,
@@ -1180,9 +1303,9 @@ impl RyeOsCore {
                         ..
                     },
                     ..
-                } if pending_coordinate == &coordinate
+                } if pending_coordinate == coordinate
                     && record.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
-                    && record.get("command_type").and_then(serde_json::Value::as_str) == Some("cancel")
+                    && record.get("command_type").and_then(serde_json::Value::as_str) == Some(command.as_str())
             )
         })
     }
@@ -1881,6 +2004,26 @@ mod tests {
     #[test]
     fn duplicate_cancel_is_rejected_while_pending() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/thread-control",
+            serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "thread_control": "control" },
+                "affordances": [{
+                    "id": "control",
+                    "producer": "selection",
+                    "invoke": {
+                        "plane": "rye",
+                        "ref": "service:commands/submit",
+                        "args": {
+                            "thread_id": "{record.thread_id}",
+                            "command_type": "{record.command_type}"
+                        }
+                    }
+                }]
+            }),
+        );
         core.seat.append_facet(
             crate::ui::seat::KEY_INPUT_ROUTE,
             serde_json::json!({ "thread": "T-run" }),
@@ -1889,9 +2032,14 @@ mod tests {
             threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
         });
         let first = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::InterruptHead,
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::SubmitThreadCommand {
+                    command: crate::ui::dto::ThreadControlCommand::Cancel,
+                },
+            },
         });
         assert_eq!(first.len(), 1);
+        assert!(core.has_pending_cancel("T-run"));
 
         let duplicate = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::InterruptHead,
@@ -1990,6 +2138,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn transport_outcome_error_is_projected_as_a_visible_notice_once() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let event = RyeOsEvent::TransportStateChanged {
+            channel: crate::ui::event::RyeOsTransportChannel::Session,
+            freshness: crate::ui::event::RyeOsTransportFreshness::Reconnecting,
+            observed_at_ms: Some(12),
+            error: Some(crate::ui::effect::RyeOsUiError::outcome_unknown(
+                "seat_append_outcome_unknown",
+                "Seat history is not confirmed durable.",
+            )),
+        };
+        core.dispatch(event.clone());
+        core.dispatch(event);
+
+        let matching = core
+            .notices_vm()
+            .into_iter()
+            .filter(|notice| notice.message == "Seat history is not confirmed durable.")
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].tone, crate::ui::view_model::RyeOsTone::Warn);
+    }
+
     /// Two derived launcher groups (`alpha`, `beta`) with the views
     /// overlay open — items: [alpha header, one, two, beta header, one].
     fn fold_fixture() -> RyeOsCore {
@@ -2003,6 +2175,32 @@ mod tests {
             },
         });
         core
+    }
+
+    #[test]
+    fn exact_overlay_choice_is_not_relative_to_a_stale_rendered_selection() {
+        let mut core = fold_fixture();
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let hovered = items[1].id.clone();
+        let chosen = items[2].id.clone();
+        // A pointer can enter one row and click another before the renderer
+        // publishes the intermediate envelope. Both events carry exact
+        // semantic identities, so the click cannot apply a stale relative move.
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetOverlaySelection { item_id: hovered },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ChooseOverlayAt {
+                item_id: chosen,
+                secondary: false,
+            },
+        });
+
+        assert!(core.ui.overlay.active.is_none());
+        assert!(matches!(
+            core.workspaces[core.active_workspace].focused_view(),
+            Some(ViewSpec { view_ref }) if view_ref == "view:test/alpha/two"
+        ));
     }
 
     #[test]
@@ -2336,5 +2534,233 @@ mod tests {
                 .iter()
                 .any(|n| n.message.contains("compiled operation binding"))
         );
+    }
+
+    #[test]
+    fn exact_view_choice_revalidates_identity_and_intent_after_reorder() {
+        let mut browser = writable_session();
+        browser.effective_surface = Some(serde_json::json!({
+            "name": "exact-pointer",
+            "tiles": ["view:test/exact"],
+            "views": {
+                "view:test/exact": {
+                    "widget": "rows",
+                    "sources": { "default": {
+                        "ref": "service:test/rows",
+                        "collection": "rows"
+                    } },
+                    "projections": { "primary": "id" },
+                    "selection": { "activate": "choose" },
+                    "affordances": [{
+                        "id": "choose",
+                        "invoke": {
+                            "plane": "ui",
+                            "facet": "active.thread",
+                            "value": "{record.id}"
+                        }
+                    }]
+                }
+            }
+        }));
+        let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
+        let tile_id = core.workspaces[core.active_workspace].focused_tile;
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+            .instance_key
+            .clone();
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "default")
+                .encode();
+        core.data.sources.insert(
+            source_key.clone(),
+            serde_json::json!({ "rows": [{"id": "a"}, {"id": "b"}] }),
+        );
+        let b_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
+            .expect("mounted rows view")
+        {
+            crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows[1].id.clone(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+
+        // The producer changes after this browser frame: B moves from index 1
+        // to index 0. The reducer must resolve the semantic id against its
+        // current projection and invoke B's current intent atomically.
+        core.data.sources.insert(
+            source_key.clone(),
+            serde_json::json!({ "rows": [{"id": "b"}, {"id": "a"}] }),
+        );
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ChooseViewItem {
+                instance_key: instance_key.clone(),
+                item_id: b_id,
+                activate: true,
+            },
+        });
+        let crate::workspace::ViewLocalState::GenericList { cursor, .. } =
+            &core.workspaces[core.active_workspace].tiles[&tile_id].local
+        else {
+            panic!("rows view retains generic-list state");
+        };
+        assert_eq!(*cursor, 0, "selection follows B, not its stale index");
+        assert_eq!(core.seat.fold().get("active.thread").unwrap(), "b");
+
+        // A removed stale target is an exact no-op; it cannot fall through to
+        // whichever row remains at the old position.
+        let a_id = format!("view:test/exact#id:a");
+        core.data
+            .sources
+            .insert(source_key, serde_json::json!({ "rows": [{"id": "b"}] }));
+        let generation = core.generation;
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ChooseViewItem {
+                instance_key,
+                item_id: a_id,
+                activate: true,
+            },
+        });
+        assert_eq!(core.generation, generation);
+        assert_eq!(core.seat.fold().get("active.thread").unwrap(), "b");
+    }
+
+    #[test]
+    fn delayed_choice_from_a_hidden_group_tab_is_rejected() {
+        let mut browser = writable_session();
+        browser.effective_surface = Some(serde_json::json!({
+            "name": "group-pointer",
+            "tiles": ["view:test/a", "view:test/b"],
+            "views": {
+                "view:test/a": { "widget": "text", "body": { "lines": ["A"] } },
+                "view:test/b": {
+                    "widget": "rows",
+                    "sources": { "default": { "ref": "service:test/b", "collection": "rows" } },
+                    "projections": { "primary": "id" },
+                    "selection": { "activate": "choose" },
+                    "affordances": [{ "id": "choose", "invoke": {
+                        "plane": "ui", "facet": "active.thread", "value": "{record.id}"
+                    }}]
+                }
+            }
+        }));
+        let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
+        let workspace = &core.workspaces[core.active_workspace];
+        let a = workspace
+            .tiles
+            .iter()
+            .find(|(_, tile)| tile.view.view_ref == "view:test/a")
+            .map(|(id, _)| *id)
+            .unwrap();
+        let b = workspace
+            .tiles
+            .iter()
+            .find(|(_, tile)| tile.view.view_ref == "view:test/b")
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(core.workspaces[core.active_workspace].move_tile_to_group(b, a, 1));
+        let b_instance = core.workspaces[core.active_workspace].tiles[&b]
+            .instance_key
+            .clone();
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(b_instance.clone(), "default")
+                .encode();
+        core.data
+            .sources
+            .insert(source_key, serde_json::json!({ "rows": [{"id": "b"}] }));
+        let item_id = match crate::ui::view_model::view_vm_for_instance(&core, &b_instance)
+            .expect("active B tab projects")
+        {
+            crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows[0].id.clone(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+
+        assert!(
+            core.workspaces[core.active_workspace]
+                .root
+                .as_mut()
+                .unwrap()
+                .select_tab(a)
+        );
+        core.workspaces[core.active_workspace].focused_tile = a;
+        let generation = core.generation;
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ChooseViewItem {
+                instance_key: b_instance,
+                item_id,
+                activate: true,
+            },
+        });
+        assert_eq!(core.generation, generation);
+        assert!(core.seat.fold().get("active.thread").is_none());
+    }
+
+    #[test]
+    fn exact_section_toggle_resolves_current_position_after_binding_reorder() {
+        let mut browser = writable_session();
+        browser.effective_surface = Some(serde_json::json!({
+            "name": "section-pointer",
+            "tiles": ["view:test/sections"],
+            "views": {
+                "view:test/sections": {
+                    "widget": "sections",
+                    "sources": {
+                        "a": { "ref": "service:test/a" },
+                        "b": { "ref": "service:test/b" }
+                    },
+                    "sections": [
+                        { "title": "A", "source_channel": "a", "collection": "rows", "projection": { "primary": "id" } },
+                        { "title": "B", "source_channel": "b", "collection": "rows", "projection": { "primary": "id" } }
+                    ]
+                }
+            }
+        }));
+        let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
+        let tile_id = core.workspaces[core.active_workspace].focused_tile;
+        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+            .instance_key
+            .clone();
+        let section_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
+            .expect("sections view projects")
+        {
+            crate::ui::view_model::RyeOsViewVm::Sections { sections, .. } => sections[0].id.clone(),
+            other => panic!("expected sections, got {other:?}"),
+        };
+        core.views
+            .get_mut("view:test/sections")
+            .unwrap()
+            .sections
+            .swap(0, 1);
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ToggleViewSection {
+                instance_key,
+                section_id,
+            },
+        });
+        let crate::workspace::ViewLocalState::GenericList { collapsed, .. } =
+            &core.workspaces[core.active_workspace].tiles[&tile_id].local
+        else {
+            panic!("sections view retains generic-list state");
+        };
+        assert_eq!(collapsed.iter().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn dismiss_notice_is_exact_and_idempotent() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        core.notice("first", crate::ui::view_model::RyeOsTone::Neutral);
+        core.notice("second", crate::ui::view_model::RyeOsTone::Warn);
+        let first_id = core.ui.notices[0].id.clone();
+        let second_id = core.ui.notices[1].id.clone();
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::DismissNotice {
+                id: first_id.clone(),
+            },
+        });
+        assert_eq!(core.ui.notices.len(), 1);
+        assert_eq!(core.ui.notices[0].id, second_id);
+        let generation = core.generation;
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::DismissNotice { id: first_id },
+        });
+        assert_eq!(core.generation, generation, "repeat dismiss is a no-op");
     }
 }

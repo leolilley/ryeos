@@ -954,6 +954,7 @@ mod tests {
                 resource_owned_overhead_spend: "0.005".to_string(),
                 resource_basis: CostBasis::Direct,
                 resource_components: Vec::new(),
+                resource_components_next_operation_id: None,
             },
         }
     }

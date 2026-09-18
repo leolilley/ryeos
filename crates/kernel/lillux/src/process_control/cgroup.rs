@@ -25,6 +25,8 @@ const HOST_SERVICE_DELEGATIONS: &str = "lillux-host-services";
 // Bounded kernel interface records, not workload output or acquisition policy.
 const MAX_CONTROL_RECORD_BYTES: usize = 4096;
 const OCI_CONTROLLER_ROOT: &str = "ryeos-controller-root";
+const MAX_OCI_RETIREMENT_ENTRIES: usize = 16_384;
+const MAX_OCI_RETIREMENT_DEPTH: usize = 64;
 
 pub(crate) struct PreparedOciCgroup {
     pub(crate) init_process: super::ExactProcessIdentity,
@@ -215,7 +217,13 @@ pub(crate) fn prepare_oci_controller_root(
     Ok(prepared)
 }
 
-pub(crate) fn retire_interrupted_oci_controller(
+/// Reconcile a preparation for which only the pre-mutation intent became
+/// durable. The intent proves C, but cannot contain the identity of R because
+/// R did not exist when it was written. Consequently an absent R is the only
+/// recoverable result. A present same-named child may be either the interrupted
+/// creation or a later replacement and must remain quarantined until exact
+/// external evidence resolves it.
+pub(crate) fn reconcile_interrupted_oci_controller_absence(
     lifecycle_path: &Path,
     lifecycle_identity: PinnedDirectoryIdentity,
     controller_path: &Path,
@@ -224,32 +232,30 @@ pub(crate) fn retire_interrupted_oci_controller(
         return Ok(());
     };
     if lifecycle.identity().map_err(display)? != lifecycle_identity {
-        return Ok(());
+        return Err("interrupted OCI lifecycle cgroup was replaced".to_owned());
     }
     let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
     let events = open_control(&lifecycle_fd, c"cgroup.events", libc::O_RDONLY)?;
     if parse_events(&read_control(&events)?)?.populated {
         return Err("interrupted OCI lifetime still has live descendants".to_owned());
     }
+    reconcile_unidentified_oci_controller_absence(&lifecycle, controller_path)
+}
+
+fn reconcile_unidentified_oci_controller_absence(
+    lifecycle: &PinnedDirectory,
+    controller_path: &Path,
+) -> Result<(), String> {
     let name = controller_path
         .file_name()
         .ok_or("OCI controller path has no child name")?;
-    let Some(controller) = lifecycle.open_child_directory(name).map_err(display)? else {
+    let Some(_controller) = lifecycle.open_child_directory(name).map_err(display)? else {
         return Ok(());
     };
-    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
-    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
-    if parse_events(&read_control(&events)?)?.populated {
-        return Err("interrupted OCI controller still has live descendants".to_owned());
-    }
-    let name = child_name(name.to_str().ok_or("OCI controller name is not UTF-8")?)?;
-    if unsafe { libc::unlinkat(lifecycle_fd.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-        return Err(format!(
-            "retire interrupted OCI controller: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(())
+    Err(
+        "interrupted OCI controller root has no durable identity; refusing to retire a same-named incarnation"
+            .to_owned(),
+    )
 }
 
 pub(crate) fn rollback_empty_oci_controller(prepared: &PreparedOciCgroup) -> Result<(), String> {
@@ -282,7 +288,7 @@ pub(crate) fn retire_ended_oci_controller(
         return Ok(());
     };
     if lifecycle.identity().map_err(display)? != lifecycle_identity {
-        return Ok(());
+        return Err("OCI lifecycle cgroup was replaced before retirement".to_owned());
     }
     let lifecycle_fd = lifecycle.try_clone_descriptor().map_err(display)?;
     require_cgroup2(&lifecycle_fd)?;
@@ -299,11 +305,7 @@ pub(crate) fn retire_ended_oci_controller(
     if controller.identity().map_err(display)? != controller_identity {
         return Err("OCI controller path was replaced before retirement".to_owned());
     }
-    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
-    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
-    if parse_events(&read_control(&events)?)?.populated {
-        return Err("OCI controller still has live descendants".to_owned());
-    }
+    retire_empty_oci_descendants(&controller)?;
     let name = child_name(
         name.to_str()
             .ok_or("OCI controller child name is not UTF-8")?,
@@ -317,6 +319,135 @@ pub(crate) fn retire_ended_oci_controller(
     Ok(())
 }
 
+/// Retake namespace mutation authority after exact init death, then remove
+/// every empty cgroup descendant bottom-up. Control pseudo-files are retained
+/// kernel interfaces and are never unlinked. Reclaiming each directory before
+/// enumeration excludes the former controller UID from racing a replacement
+/// through a retained descriptor; any administrator mutation remains an
+/// explicit ambiguous failure at the identity/removal checks.
+fn retire_empty_oci_descendants(root: &PinnedDirectory) -> Result<(), String> {
+    let root_device = root
+        .try_clone_descriptor()
+        .map_err(display)?
+        .metadata()
+        .map_err(display)?
+        .dev();
+    let mut remaining = MAX_OCI_RETIREMENT_ENTRIES;
+    retire_empty_oci_directory(root, root_device, 0, &mut remaining)
+}
+
+fn retire_empty_oci_directory(
+    directory: &PinnedDirectory,
+    root_device: u64,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), String> {
+    if depth > MAX_OCI_RETIREMENT_DEPTH {
+        return Err("OCI controller retirement exceeds the bounded depth".to_owned());
+    }
+    let descriptor = directory.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&descriptor)?;
+    require_domain(&descriptor)?;
+    let events = open_control(&descriptor, c"cgroup.events", libc::O_RDONLY)?;
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("OCI controller retirement encountered a populated descendant".to_owned());
+    }
+    if unsafe { libc::fchown(descriptor.as_raw_fd(), 0, 0) } != 0
+        || unsafe { libc::fchmod(descriptor.as_raw_fd(), 0o700) } != 0
+    {
+        return Err(format!(
+            "exclude OCI controller writers before retirement: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let placement = open_control(&descriptor, c"cgroup.procs", libc::O_RDWR)?;
+    if unsafe { libc::fchown(placement.as_raw_fd(), 0, 0) } != 0 {
+        return Err(format!(
+            "revoke OCI controller placement before retirement: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    if placement.metadata().map_err(display)?.mode() & 0o022 != 0 {
+        return Err("OCI controller placement retains shared write access".to_owned());
+    }
+
+    let entries = directory
+        .entries_no_follow_bounded((*remaining).saturating_add(1))
+        .map_err(display)?;
+    if entries.len() > *remaining {
+        return Err("OCI controller retirement exceeds the bounded entry count".to_owned());
+    }
+    *remaining -= entries.len();
+    for entry in entries {
+        if entry.containing_device != root_device {
+            return Err("OCI controller retirement encountered another filesystem".to_owned());
+        }
+        match entry.entry_type {
+            crate::PinnedEntryType::Regular => {
+                // cgroupfs control interfaces are regular pseudo-files.
+            }
+            crate::PinnedEntryType::Directory => {
+                let child = directory
+                    .open_child_directory(&entry.name)
+                    .map_err(display)?
+                    .ok_or("OCI controller descendant disappeared during retirement")?;
+                let expected = child.identity().map_err(display)?;
+                let child_metadata = child
+                    .try_clone_descriptor()
+                    .map_err(display)?
+                    .metadata()
+                    .map_err(display)?;
+                if child_metadata.dev() != entry.containing_device
+                    || child_metadata.ino() != entry.inode
+                {
+                    return Err("OCI controller descendant changed during retirement".to_owned());
+                }
+                retire_empty_oci_directory(&child, root_device, depth + 1, remaining)?;
+                let current = directory
+                    .open_child_directory(&entry.name)
+                    .map_err(display)?
+                    .ok_or("OCI controller descendant disappeared before exact removal")?;
+                if current.identity().map_err(display)? != expected {
+                    return Err("OCI controller descendant was replaced before removal".to_owned());
+                }
+                let name = child_name(
+                    entry
+                        .name
+                        .to_str()
+                        .ok_or("OCI controller descendant name is not UTF-8")?,
+                )?;
+                if unsafe {
+                    libc::unlinkat(descriptor.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                } != 0
+                {
+                    return Err(format!(
+                        "retire exact OCI controller descendant: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
+            }
+            _ => {
+                return Err(
+                    "OCI controller retirement encountered an unsupported namespace entry"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if parse_events(&read_control(&events)?)?.populated {
+        return Err("OCI controller descendant became populated during retirement".to_owned());
+    }
+    if directory
+        .entries_no_follow_bounded(MAX_OCI_RETIREMENT_ENTRIES)
+        .map_err(display)?
+        .iter()
+        .any(|entry| entry.entry_type == crate::PinnedEntryType::Directory)
+    {
+        return Err("OCI controller descendants changed during retirement".to_owned());
+    }
+    Ok(())
+}
+
 /// Replace the container's read-only view of C with a bind view rooted at R.
 /// The mount mutation occurs in a short-lived child after joining only the
 /// exact init mount namespace; the host adapter never changes its own mount
@@ -324,23 +455,21 @@ pub(crate) fn retire_ended_oci_controller(
 /// sibling or lifecycle-parent control to the container.
 pub(crate) fn install_oci_controller_mount(
     prepared: &PreparedOciCgroup,
-    init_pid: u32,
+    process_root: &super::ExactProcessRoot,
 ) -> Result<(), String> {
-    let namespace = File::open(format!("/proc/{init_pid}/ns/mnt"))
-        .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
-    let membership = open_oci_membership(init_pid)?;
-    let target = PinnedDirectory::open(Path::new(&format!("/proc/{init_pid}/root/sys/fs/cgroup")))
-        .map_err(display)?
-        .ok_or("OCI init cgroup mount target is absent")?;
+    if process_root.identity() != &prepared.init_process {
+        return Err("OCI process-root authority names another init generation".to_owned());
+    }
+    let namespace = process_root.mount_namespace()?;
+    let membership = process_root.membership()?;
+    let target = process_root.open_directory(Path::new("sys/fs/cgroup"))?;
     let target = target.try_clone_descriptor().map_err(display)?;
     let source = prepared
         .controller
         .try_clone_descriptor()
         .map_err(display)?;
-    if super::capture_exact_process_identity(init_pid, None)? != prepared.init_process {
-        return Err("OCI init changed before controller mount installation".to_owned());
-    }
-    require_oci_membership(init_pid, &prepared.lifecycle_path)?;
+    process_root.require_live()?;
+    require_oci_membership_file(&membership, &prepared.lifecycle_path)?;
     const OPEN_TREE_CLONE: libc::c_uint = 1;
     const AT_EMPTY_PATH: libc::c_uint = 0x1000;
     const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
@@ -407,6 +536,11 @@ pub(crate) fn install_oci_controller_mount(
     }
     if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
         return Err("install writable OCI controller-root mount failed".to_owned());
+    }
+    process_root.require_live()?;
+    let installed = process_root.open_directory(Path::new("sys/fs/cgroup"))?;
+    if installed.identity().map_err(display)? != prepared.controller_scope {
+        return Err("installed OCI controller mount does not expose the prepared root".to_owned());
     }
     Ok(())
 }
@@ -643,6 +777,115 @@ pub(crate) fn provision_controller(
                 io::Error::last_os_error()
             ));
         }
+    }
+    Ok(ControllerBootstrap {
+        parent,
+        placement,
+        uid,
+        gid,
+    })
+}
+
+/// Administrator-side validation of the exact delegation prepared by the OCI
+/// hook. The expected controller is an observed owner, not the current caller.
+/// Normal controller opening remains strict about the current effective UID.
+pub(crate) fn validate_administrator_oci_delegation(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    expected: PinnedDirectoryIdentity,
+) -> Result<PinnedDirectory, String> {
+    if unsafe { libc::geteuid() } != 0 || uid == 0 || gid == 0 {
+        return Err(
+            "OCI delegation validation requires administrator authority and an explicit controller account"
+                .to_owned(),
+        );
+    }
+    let directory = PinnedDirectory::open(path)
+        .map_err(display)?
+        .ok_or("prepared OCI controller delegation is absent")?;
+    if directory.identity().map_err(display)? != expected {
+        return Err("prepared OCI controller delegation was replaced".to_owned());
+    }
+    let descriptor = directory.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&descriptor)?;
+    require_domain(&descriptor)?;
+    let metadata = descriptor.metadata().map_err(display)?;
+    if metadata.uid() != uid || metadata.gid() != gid || metadata.mode() & 0o077 != 0 {
+        return Err(
+            "prepared OCI delegation does not belong privately to the selected controller"
+                .to_owned(),
+        );
+    }
+    for name in [c"cgroup.freeze", c"cgroup.kill"] {
+        let control = open_control(&descriptor, name, libc::O_PATH)?;
+        let metadata = control.metadata().map_err(display)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(
+                "prepared OCI delegation exposes ancestor lifecycle control to the controller"
+                    .to_owned(),
+            );
+        }
+    }
+    let placement = open_control(&descriptor, c"cgroup.procs", libc::O_RDWR)?;
+    let placement_metadata = placement.metadata().map_err(display)?;
+    if placement_metadata.uid() != uid
+        || placement_metadata.gid() != gid
+        || placement_metadata.mode() & 0o022 != 0
+    {
+        return Err("prepared OCI delegation has wrong placement ownership".to_owned());
+    }
+    if !read_control(&placement)?.trim().is_empty() {
+        return Err("prepared OCI delegation directly contains processes".to_owned());
+    }
+    let events = open_control(&descriptor, c"cgroup.events", libc::O_RDONLY)?;
+    let events = parse_events(&read_control(&events)?)?;
+    if events.populated || events.frozen {
+        return Err("prepared OCI delegation is occupied or frozen".to_owned());
+    }
+    Ok(directory)
+}
+
+/// Place the controller beneath an already prepared OCI delegation. This does
+/// not infer an administrator-owned native parent or change ownership of R.
+pub(crate) fn adopt_prepared_oci_controller(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    expected: PinnedDirectoryIdentity,
+) -> Result<ControllerBootstrap, String> {
+    let parent = validate_administrator_oci_delegation(path, uid, gid, expected)?;
+    let parent_fd = parent.try_clone_descriptor().map_err(display)?;
+    if unsafe { libc::mkdirat(parent_fd.as_raw_fd(), c"controller".as_ptr(), 0o700) } != 0
+        && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+    {
+        return Err(format!(
+            "create prepared OCI controller leaf: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let controller = parent
+        .open_child_directory("controller".as_ref())
+        .map_err(display)?
+        .ok_or("prepared OCI controller leaf disappeared")?;
+    let controller_fd = controller.try_clone_descriptor().map_err(display)?;
+    require_cgroup2(&controller_fd)?;
+    require_domain(&controller_fd)?;
+    let metadata = controller_fd.metadata().map_err(display)?;
+    if metadata.uid() != 0 || metadata.gid() != 0 || metadata.mode() & 0o077 != 0 {
+        return Err(
+            "prepared OCI controller leaf must remain administrator-owned and private".to_owned(),
+        );
+    }
+    let events = open_control(&controller_fd, c"cgroup.events", libc::O_RDONLY)?;
+    let observed = parse_events(&read_control(&events)?)?;
+    if observed.populated || observed.frozen {
+        return Err("prepared OCI controller leaf is occupied or frozen".to_owned());
+    }
+    let placement = open_control(&controller_fd, c"cgroup.procs", libc::O_WRONLY)?;
+    let retained = validate_administrator_oci_delegation(path, uid, gid, expected)?;
+    if retained.identity().map_err(display)? != parent.identity().map_err(display)? {
+        return Err("prepared OCI delegation changed during controller adoption".to_owned());
     }
     Ok(ControllerBootstrap {
         parent,
@@ -1749,6 +1992,48 @@ pub(super) mod tests {
         }
         assert!(child_name(&"a".repeat(161)).is_err());
         assert!(child_name("execution-123").is_ok());
+    }
+
+    #[test]
+    fn intent_only_crash_recovery_preserves_a_same_named_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let lifecycle_path = fixture.path().join("container-lifetime");
+        std::fs::create_dir(&lifecycle_path).unwrap();
+        let lifecycle = PinnedDirectory::open(&lifecycle_path).unwrap().unwrap();
+        let controller_path = lifecycle_path.join(OCI_CONTROLLER_ROOT);
+
+        // Model the crash cut after R was created but before its identity was
+        // durably attached to the lifecycle generation. Keep the deleted
+        // original pinned so the replacement demonstrably has another inode.
+        std::fs::create_dir(&controller_path).unwrap();
+        let original = PinnedDirectory::open(&controller_path).unwrap().unwrap();
+        let original_identity = original.identity().unwrap();
+        std::fs::remove_dir(&controller_path).unwrap();
+        std::fs::create_dir(&controller_path).unwrap();
+        std::fs::write(controller_path.join("replacement-marker"), b"replacement").unwrap();
+        let replacement = PinnedDirectory::open(&controller_path).unwrap().unwrap();
+        assert_ne!(replacement.identity().unwrap(), original_identity);
+
+        let error = reconcile_unidentified_oci_controller_absence(&lifecycle, &controller_path)
+            .unwrap_err();
+        assert!(error.contains("no durable identity"), "{error}");
+        assert_eq!(
+            std::fs::read(controller_path.join("replacement-marker")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            PinnedDirectory::open(&controller_path)
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap(),
+            replacement.identity().unwrap()
+        );
+
+        // Absence is the sole unambiguous intent-only recovery outcome.
+        std::fs::remove_file(controller_path.join("replacement-marker")).unwrap();
+        std::fs::remove_dir(&controller_path).unwrap();
+        reconcile_unidentified_oci_controller_absence(&lifecycle, &controller_path).unwrap();
     }
 
     #[test]

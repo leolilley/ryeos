@@ -92,9 +92,8 @@ pub fn render_event(
     }
 }
 
-/// Failure lifecycle events still receive the compact generic milestone, but
-/// their actionable diagnostic is rendered separately without the 32-character
-/// scalar truncation used by ordinary one-line summaries.
+/// Failure lifecycle events still receive the compact generic milestone, and
+/// their actionable diagnostic is rendered separately as a complete line.
 fn nonterminal_failure_detail(event: &str, payload: &Value) -> Option<String> {
     let status = payload.get("status").and_then(Value::as_str);
     if event != "graph_step_completed" || !matches!(status, Some("error" | "retry")) {
@@ -147,14 +146,9 @@ fn human_text(payload: &Value) -> Option<String> {
     None
 }
 
-/// Max rendered length of a single field value before it is elided.
-const FIELD_VALUE_MAX: usize = 32;
-/// Soft cap on total summary width so a fat payload can't blow the line.
-const SUMMARY_WIDTH_CAP: usize = 120;
-
 /// A generic one-line summary of a payload's scalar fields: `key=value` pairs,
-/// with one level of nesting flattened dotted (`cost.tokens=…`), each value
-/// truncated and the whole line width-capped.
+/// with one level of nesting flattened dotted (`cost.tokens=…`). The summary
+/// remains one complete logical line; the terminal owns visual wrapping.
 ///
 /// This carries NO per-event knowledge — it reflects whatever fields the
 /// payload happens to hold, in the payload's own key order — so a new event
@@ -166,52 +160,33 @@ fn payload_summary(payload: &Value) -> String {
         return String::new();
     };
     let mut parts: Vec<String> = Vec::new();
-    let mut width = 0usize;
     for (key, value) in obj {
         match value {
             Value::String(_) | Value::Number(_) | Value::Bool(_) => {
-                push_field(&mut parts, &mut width, key, value);
+                push_field(&mut parts, key, value);
             }
             // One level of descent: flatten a nested object's own scalars dotted.
             Value::Object(sub) => {
                 for (subkey, subval) in sub {
                     if matches!(subval, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
-                        push_field(&mut parts, &mut width, &format!("{key}.{subkey}"), subval);
-                        if width >= SUMMARY_WIDTH_CAP {
-                            break;
-                        }
+                        push_field(&mut parts, &format!("{key}.{subkey}"), subval);
                     }
                 }
             }
             // Arrays, null, deeper nesting: skipped (kept off the one-liner).
             _ => {}
         }
-        if width >= SUMMARY_WIDTH_CAP {
-            break;
-        }
     }
     parts.join(" ")
 }
 
-/// Format one `key=value` field (value truncated) and account its width.
-fn push_field(parts: &mut Vec<String>, width: &mut usize, key: &str, value: &Value) {
+/// Format one complete `key=value` field.
+fn push_field(parts: &mut Vec<String>, key: &str, value: &Value) {
     let raw = match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    let field = format!("{key}={}", truncate_value(&raw, FIELD_VALUE_MAX));
-    *width += field.chars().count() + 1;
-    parts.push(field);
-}
-
-/// Truncate a value on a char boundary, marking elision with a single ellipsis.
-fn truncate_value(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
+    parts.push(format!("{key}={raw}"));
 }
 
 #[cfg(test)]
@@ -313,7 +288,7 @@ mod tests {
     #[test]
     fn payload_summary_renders_scalars_and_one_level_nesting() {
         // Scalars become key=value in payload order; a nested object flattens
-        // dotted; a long value is elided; arrays/deeper nesting are skipped.
+        // dotted; arrays/deeper nesting are skipped.
         let p = serde_json::json!({
             "call_id": "gr-eb7d9e3da2bc:30:aim",
             "step": 30,
@@ -331,10 +306,10 @@ mod tests {
             "one level of nesting, dotted"
         );
         assert!(!s.contains("items="), "arrays are skipped");
-        // The long hash is present but truncated with an ellipsis.
-        assert!(s.contains("effective_definition_digest=1154"));
-        assert!(s.contains('…'), "long values are elided");
-        assert!(!s.contains("c40a328fcec67ac8"), "no untruncated tail");
+        assert!(s.contains(
+            "effective_definition_digest=1154fd1bf7f56dfe623e3ec8c0a6b5f12c561fad7a4398a4c40a328fcec67ac8"
+        ));
+        assert!(!s.contains('…'), "values are not presentation-truncated");
     }
 
     #[test]

@@ -33,7 +33,7 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${address.port}`);
   const result = await page.evaluate(async () => {
-    const { mountRyeOsRenderer } = await import("/ui/assets/ryeos_ui.js");
+    const { mountRyeOsRenderer, captureBrowserPresentation, restoreBrowserPresentation } = await import("/ui/assets/ryeos_ui.js");
     const fixture = (generation) => ({
       schema_version: "test", generation, effects: [], scene_model: { objects: [] },
       view_model: {
@@ -59,16 +59,67 @@ try {
       },
     });
     const root = document.getElementById("root");
-    const renderer = mountRyeOsRenderer(root, fixture(1n), () => {});
+    const dispatched = [];
+    const renderer = mountRyeOsRenderer(root, fixture(1n), (event) => dispatched.push(event));
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const first = root.firstElementChild;
     renderer.replaceEnvelope(fixture(2n));
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const observed = { firstGeneration: "1", secondGeneration: first?.getAttribute("data-generation"), reused: root.firstElementChild === first };
+    const returnButton = document.createElement("button");
+    returnButton.dataset.focusKey = "test:return";
+    returnButton.textContent = "return";
+    first?.append(returnButton);
+    returnButton.focus();
+    const beforeModal = captureBrowserPresentation(root);
+    const modal = fixture(3n);
+    modal.view_model.notices = [{ id: "n1", message: "Exact refusal", tone: "warn" }];
+    modal.view_model.overlays = [{
+      id: "views", title: "Views", widget: "palette", columns: [], query: "", selected: 0n, hint: "Choose a view",
+      items: [
+        { id: "overlay-one", category: "a", primary: "One", secondary: "", meta: "", enabled: true, intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+        { id: "overlay-two", category: "a", primary: "Two", secondary: "", meta: "", enabled: true, intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+        { id: "overlay-disabled", category: "a", primary: "Blocked", secondary: "", meta: "", enabled: false, disabled_reason: "Exact authority required", intent: null, secondary_intent: null, depth: 0, header: false, expanded: false },
+      ],
+    }];
+    renderer.replaceEnvelope(modal);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    restoreBrowserPresentation(root, beforeModal);
+    const item = root.querySelectorAll(".overlay-item > button")[1];
+    item?.dispatchEvent(new PointerEvent("pointerenter", { bubbles: true }));
+    item?.click();
+    const notice = root.querySelector(".notice span")?.textContent;
+    const queryFocused = document.activeElement?.classList.contains("overlay-query") ?? false;
+    root.querySelector(".notice button")?.click();
+    const overlay = {
+      dialog: root.querySelector('[role="dialog"][aria-modal="true"]') !== null,
+      notice,
+      queryFocused,
+      navigationAbsent: root.querySelector(".navigation") === null,
+      disabledReason: root.querySelector(".overlay-disabled-reason")?.textContent,
+      disabledDescribed: root.querySelector('button[aria-describedby="overlay-reason-overlay-disabled"]') !== null,
+      events: dispatched.map((event) => ({ type: event.type, itemId: "item_id" in event ? event.item_id : null })),
+    };
+    const beforeClose = captureBrowserPresentation(root);
+    renderer.replaceEnvelope(fixture(4n));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    restoreBrowserPresentation(root, beforeClose);
+    overlay.returnFocused = document.activeElement === returnButton;
     await renderer.destroy();
-    return { ...observed, children: root.childElementCount };
+    return { ...observed, overlay, children: root.childElementCount };
   });
-  assert.deepEqual(result, { firstGeneration: "1", secondGeneration: "2", reused: true, children: 0 });
+  assert.deepEqual(result, {
+    firstGeneration: "1", secondGeneration: "2", reused: true,
+    overlay: {
+      dialog: true, notice: "Exact refusal", queryFocused: true, navigationAbsent: true, disabledReason: "Exact authority required", disabledDescribed: true, returnFocused: true,
+      events: [
+        { type: "set_overlay_selection", itemId: "overlay-two" },
+        { type: "choose_overlay_at", itemId: "overlay-two" },
+        { type: "dismiss_notice", itemId: null },
+      ],
+    },
+    children: 0,
+  });
 
   const ordering = await page.evaluate(async () => {
     const { createCommitRuntime } = await import("/ui/assets/ryeos_ui.js");
@@ -97,7 +148,28 @@ try {
     return { startsBeforeRender, rendered };
   });
   assert.deepEqual(ordering, { startsBeforeRender: [1, 2, 3], rendered: [2, 5] });
-  console.log(JSON.stringify({ root: result, ordering }));
+  const encoding = await page.evaluate(async () => {
+    const { encodeCanonicalJsonBody, encodeJsonBody } = await import("/ui/assets/ryeos_ui.js");
+    const nested = Object.create(null);
+    nested["__proto__"] = "inert";
+    const encoded = encodeJsonBody({ exact: 9007199254740993n, nested, values: [null, true, -0] });
+    const canonical = encodeCanonicalJsonBody({
+      "😀": "é",
+      "𐀀": "supplementary",
+      "": "bmp",
+      a: "\u0001\n\t\"\\",
+    });
+    let mapRejected = false;
+    try { encodeJsonBody(new Map([["lost", "value"]])); } catch { mapRejected = true; }
+    let surrogateRejected = false;
+    try { encodeCanonicalJsonBody({ bad: "\ud800" }); } catch { surrogateRejected = true; }
+    return { encoded, canonical, mapRejected, surrogateRejected };
+  });
+  assert.equal(encoding.encoded, '{"exact":9007199254740993,"nested":{"__proto__":"inert"},"values":[null,true,0]}');
+  assert.equal(encoding.canonical, '{"a":"\\u0001\\n\\t\\\"\\\\","\\ue000":"bmp","\\ud800\\udc00":"supplementary","\\ud83d\\ude00":"\\u00e9"}');
+  assert.equal(encoding.mapRejected, true);
+  assert.equal(encoding.surrogateRejected, true);
+  console.log(JSON.stringify({ root: result, ordering, encoding }));
 } finally {
   await browser?.close();
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
