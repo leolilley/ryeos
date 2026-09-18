@@ -226,6 +226,12 @@ catalog checkpoint, another already-trusted observation, or an explicitly
 accepted first-contact policy. Without one of those, a compromised source can
 serve an older valid publisher snapshot even though it cannot forge a new one.
 
+Publisher signatures also do not prevent the publisher from signing sibling
+successors for the same predecessor. The publisher service serializes against
+its admitted expected predecessor to prevent accidental equivocation; exact
+deployment coordinates and consumer checkpoints make observed forks visible.
+A globally consistent transparency service is not part of the first slice.
+
 ## Native production lifecycle
 
 The intended producer is a RyeOS development node:
