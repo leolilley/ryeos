@@ -11,7 +11,9 @@
 .tile-header, .dock-slot > header { display: flex; align-items: center; min-height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line); font: 9px var(--font-data); letter-spacing: .11em; text-transform: uppercase; }
 .tile-identity { display: flex; align-items: center; gap: 10px; }
 .tile-signal { width: 5px; height: 5px; background: var(--accent-bright); }
-.tile-tools { margin-left: auto; color: var(--muted); }
+.tile-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); }
+.tile-tool { padding: 2px; color: inherit; line-height: 1; }
+.tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
 .view-tabs button { padding: 0 13px; color: var(--muted); border-bottom: 1px solid transparent; text-transform: none; letter-spacing: 0; }
 .view-tabs button.active { color: var(--text); border-color: var(--yellow); }

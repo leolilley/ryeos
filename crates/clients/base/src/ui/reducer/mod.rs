@@ -851,6 +851,15 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiIntent::ToggleTileMaximized { tile_id } => {
+                let Some(tile_id) = parse_tile_id(&tile_id) else {
+                    return Vec::new();
+                };
+                if self.view_sets[self.active_view_set].toggle_maximized(tile_id) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             RyeOsUiIntent::ToggleFocusedMaster => {
                 if self.view_sets[self.active_view_set].zoom_focused() {
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {

@@ -45,6 +45,9 @@ pub enum RyeOsUiIntent {
     CloseTile {
         tile_id: String,
     },
+    ToggleTileMaximized {
+        tile_id: String,
+    },
     ToggleFocusedMaster,
     MoveFocusedTile {
         direction: RyeOsStackMoveDirection,

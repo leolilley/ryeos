@@ -26,6 +26,7 @@ export type RyeOsUiIntent =
   | { type: "toggle_overlay_group"; group: string }
   | { type: "close_focused" }
   | { type: "close_tile"; tile_id: string }
+  | { type: "toggle_tile_maximized"; tile_id: string }
   | { type: "toggle_focused_master" }
   | { type: "move_focused_tile"; direction: RyeOsStackMoveDirection }
   /**
@@ -40,6 +41,7 @@ export type RyeOsUiIntent =
   | { type: "new_view_set" }
   | { type: "select_view_set"; view_set_id: bigint }
   | { type: "rename_view_set"; view_set_id: bigint; title: string }
+  | { type: "duplicate_view_set"; view_set_id: bigint }
   | { type: "close_view_set"; view_set_id: bigint }
   | { type: "move_tile_to_view_set"; layout_guard: string; tile_id: string; view_set_id: bigint }
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }

@@ -350,6 +350,9 @@ pub struct ViewSet {
     pub tiles: HashMap<TileId, TileState>,
     /// Focused tile. Dangling when the center is empty.
     pub focused_tile: TileId,
+    /// Presentation-only isolation of one mounted tile. The canonical layout
+    /// remains intact, so restore is exact and distinct from master promotion.
+    pub maximized_tile: Option<TileId>,
     /// Step-in return stack (single-lens surfaces). A drill pushes the view it
     /// left and the facet context it read; a pop restores them. Empty at the
     /// top of the tree. The default is part of the optional lens contract,
@@ -403,6 +406,7 @@ impl ViewSet {
             root,
             tiles,
             focused_tile,
+            maximized_tile: None,
             lens_stack: Vec::new(),
             lens_label: None,
         }
@@ -513,6 +517,27 @@ impl ViewSet {
         self.root.clone()
     }
 
+    /// Render-only layout. Mutations continue to address `root`; maximising a
+    /// tile never installs another placement authority.
+    pub fn presentation_layout(&self) -> Option<LayoutTree> {
+        self.maximized_tile
+            .map(LayoutTree::single)
+            .or_else(|| self.root.clone())
+    }
+
+    pub fn toggle_maximized(&mut self, tile_id: TileId) -> bool {
+        if !self.tiles.contains_key(&tile_id) {
+            return false;
+        }
+        self.maximized_tile = if self.maximized_tile == Some(tile_id) {
+            None
+        } else {
+            Some(tile_id)
+        };
+        self.focus_tile(tile_id);
+        true
+    }
+
     /// An explicit arrange action is the only operation that reconstructs
     /// all geometry from a tiling recipe. Ordinary edits preserve nesting.
     pub fn arrange(&mut self, tiling: TilingSpec) -> bool {
@@ -606,6 +631,9 @@ impl ViewSet {
         let next_source = source_root.clone().without_tile(tile);
         let state = self.tiles.remove(&tile).expect("staged mounted view");
         self.root = next_source;
+        if self.maximized_tile == Some(tile) {
+            self.maximized_tile = None;
+        }
         destination.root = target_root;
         destination.tiles.insert(tile, state);
         let keys: Vec<_> = self
@@ -690,6 +718,7 @@ impl ViewSet {
         self.root = None;
         self.tiles.clear();
         self.focused_tile = TileId::new(0);
+        self.maximized_tile = None;
         self.focus_target = None;
     }
 
@@ -761,6 +790,9 @@ impl ViewSet {
         };
         self.root = self.root.take().and_then(|root| root.without_tile(tile_id));
         self.tiles.remove(&tile_id);
+        if self.maximized_tile == Some(tile_id) {
+            self.maximized_tile = None;
+        }
         if self.focused_tile == tile_id {
             self.focused_tile = self
                 .tile_ids()
@@ -1279,6 +1311,22 @@ mod tests {
         // Zooming the leader swaps it with the runner-up.
         assert!(ws.zoom_tile(order[2]));
         assert_eq!(ws.tile_ids(), vec![order[0], order[2], order[1]]);
+    }
+
+    #[test]
+    fn maximize_is_reversible_without_rewriting_the_layout() {
+        let mut ws = view_set_with(3);
+        let original = ws.layout().unwrap();
+        let target = ws.tile_ids()[1];
+
+        assert!(ws.toggle_maximized(target));
+        assert_eq!(ws.layout(), Some(original.clone()));
+        assert_eq!(ws.presentation_layout(), Some(LayoutTree::single(target)));
+        assert_eq!(ws.focused_tile, target);
+
+        assert!(ws.toggle_maximized(target));
+        assert_eq!(ws.maximized_tile, None);
+        assert_eq!(ws.presentation_layout(), Some(original));
     }
 
     #[test]

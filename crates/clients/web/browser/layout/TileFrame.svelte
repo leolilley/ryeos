@@ -14,7 +14,14 @@
     <header class="tile-header">
       <div class="tile-identity"><span class="tile-signal"></span><strong>{model.title}</strong></div>
       {#if model.tabs.length > 1}<div class="view-tabs" role="tablist">{#each model.tabs as tab (tab.tile_id)}<button role="tab" aria-selected={tab.active} class:active={tab.active} onclick={() => dispatch({ type: "focus_changed", target: tab.tile_id })}>{tab.title}</button>{/each}</div>{/if}
-      <div class="tile-tools">↗ <span aria-hidden="true">⋮</span></div>
+      <div class="tile-tools">
+        <button
+          class="tile-tool"
+          aria-label={model.maximized ? "Restore view" : "Maximize view"}
+          title={model.maximized ? "Restore view" : "Maximize view"}
+          onclick={() => dispatch({ type: "activate", intent: { type: "toggle_tile_maximized", tile_id: model.tile_id } })}
+        >{model.maximized ? "↙" : "↗"}</button>
+      </div>
     </header>
   {/if}
   {#if model.heading}<div class="content-heading"><small>{model.heading.eyebrow}</small><h1>{model.heading.title}</h1>{#if model.heading.summary}<p>{model.heading.summary}</p>{/if}{#if model.heading.metadata.length}<div class="heading-meta">{model.heading.metadata.join("  /  ")}</div>{/if}</div>{/if}

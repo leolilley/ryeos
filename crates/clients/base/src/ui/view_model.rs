@@ -310,6 +310,7 @@ pub enum RyeOsLayoutNodeVm {
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
         focused: bool,
+        maximized: bool,
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<RyeOsViewHeadingVm>,
@@ -1110,7 +1111,7 @@ fn view_set_vm(core: &RyeOsCore) -> RyeOsViewSetVm {
         split_min_ratio: crate::layout::MIN_SPLIT_RATIO,
         split_max_ratio: crate::layout::MAX_SPLIT_RATIO,
         root: core.view_sets[core.active_view_set]
-            .layout()
+            .presentation_layout()
             .map(|layout| layout_node_vm(&layout, core)),
         focused_tile: tile_id_text(core.view_sets[core.active_view_set].focused_tile),
         center_is_empty,
@@ -2579,6 +2580,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                     .unwrap_or_else(|| RyeOsViewInstanceKey::view_set_tile(*tile_id)),
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.view_sets[core.active_view_set].focused_tile,
+                maximized: core.view_sets[core.active_view_set].maximized_tile == Some(*tile_id),
                 title,
                 heading: core.view_sets[core.active_view_set]
                     .tiles
@@ -3468,7 +3470,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         ),
         entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
         entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
-        entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
+        entry("Layout", "Alt+M", "Promote the focused tile to master"),
         entry(
             "Layout",
             "Alt+T / Alt+B",
