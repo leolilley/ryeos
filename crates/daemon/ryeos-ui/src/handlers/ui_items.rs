@@ -162,12 +162,16 @@ pub async fn handle_items_list(
     // Dual-lane (browser session OR verified operator) like the other
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_path: Option<PathBuf> = caller.project_path()?.or_else(|| {
-        params
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-    });
+    let project_access = caller.project_access()?;
+    let project_path: Option<PathBuf> = project_access
+        .as_ref()
+        .map(|access| access.path().to_path_buf())
+        .or_else(|| {
+            params
+                .get("project_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+        });
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");
@@ -320,12 +324,16 @@ pub async fn handle_item_inspect(
     // Dual-lane (browser session OR verified operator) like the other
     // ui/ryeos-ui sources — the TUI calls as a signed operator.
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
-    let project_path: Option<PathBuf> = caller.project_path()?.or_else(|| {
-        params
-            .get("project_path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-    });
+    let project_access = caller.project_access()?;
+    let project_path: Option<PathBuf> = project_access
+        .as_ref()
+        .map(|access| access.path().to_path_buf())
+        .or_else(|| {
+            params
+                .get("project_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+        });
     let mut params = params;
     if let Some(map) = params.as_object_mut() {
         map.remove("project_path");

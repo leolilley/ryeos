@@ -26239,6 +26239,8 @@ mod tests {
             "adapter_protocol": "ryeos.isolation-adapter/v8",
             "payloads": {},
             "effective_capabilities": [],
+            "process_scope_capabilities": [],
+            "network_runtime_files": {},
             "plan_digest": null
         });
         let raw = lillux::canonical_json(&metadata).unwrap();

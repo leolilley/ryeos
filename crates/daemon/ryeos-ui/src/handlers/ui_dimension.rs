@@ -164,16 +164,18 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
             HandlerError::Forbidden("compiled UI session required for ryeos-ui dimension".into())
         })?;
 
-    let project_path = session
-        .project_authority
+    let project_access = crate::seat_auth::session_project_access(&session)?;
+    let project_path = project_access
         .as_ref()
-        .map(|authority| {
-            authority.ensure_path_binding()?;
-            authority.descriptor_path()
-        })
-        .transpose()?;
+        .map(|access| access.path().to_path_buf());
+    let project_identity = crate::seat_auth::session_project_query_identity(&session)?;
 
-    let projection = build_dimension_projection(&state, &session, project_path.as_ref())?;
+    let projection = build_dimension_projection(
+        &state,
+        &session,
+        project_path.as_ref(),
+        project_identity.as_ref(),
+    )?;
 
     serde_json::to_value(projection).map_err(Into::into)
 }
@@ -182,6 +184,7 @@ fn build_dimension_projection(
     state: &AppState,
     session: &crate::browser_session::BrowserSession,
     project_path: Option<&PathBuf>,
+    project_identity: Option<&PathBuf>,
 ) -> Result<RyeOsDimensionProjection> {
     // ── Identity ──
     let identity = IdentityInfo {
@@ -272,7 +275,7 @@ fn build_dimension_projection(
         .collect();
 
     // ── Project ──
-    let project = project_path.map(|path| ProjectInfo {
+    let project = project_identity.map(|path| ProjectInfo {
         path: path.to_string_lossy().into_owned(),
     });
 

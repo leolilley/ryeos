@@ -146,3 +146,135 @@ impl AuthoritativeProjectContent for ryeos_state::PinnedProjectMaterialization {
             .map_err(|error| EngineError::Internal(error.to_string()))
     }
 }
+
+/// Live project authority rooted in one exact open directory descriptor.
+///
+/// This implementation is deliberately on the typed owner, never on a
+/// `/proc/self/fd/N` pathname. Every lookup keeps the root descriptor alive
+/// and traverses descendants with Lillux's component-wise no-follow APIs.
+impl AuthoritativeProjectContent for lillux::PinnedDirectory {
+    fn list_files(
+        &self,
+        prefix: &Path,
+        recursive: bool,
+        max_entries: usize,
+    ) -> Result<Vec<ProjectContentEntry>, EngineError> {
+        let Some(root) = open_project_subdirectory(self, prefix)? else {
+            return Ok(Vec::new());
+        };
+        let mut entries = Vec::new();
+        root.visit_regular_files_bounded(
+            lillux::DirectoryTraversalBudget::new(max_entries, 64),
+            |_relative, is_directory| Ok(is_directory && !recursive),
+            |relative, mut file| {
+                let before = file.metadata()?;
+                let size = before.len();
+                let normalized_mode = lillux::normalized_portable_regular_mode(&before)?;
+                let (content_hash, after) =
+                    lillux::digest_open_regular_file_stable_exact(&mut file, size)?;
+                if after.len() != size {
+                    anyhow::bail!("live project file changed while it was enumerated");
+                }
+                entries.push(ProjectContentEntry {
+                    relative_path: relative.to_path_buf(),
+                    content_hash,
+                    size,
+                    normalized_mode,
+                });
+                Ok(())
+            },
+        )
+        .map_err(project_content_error)?;
+        Ok(entries)
+    }
+
+    fn read_file(
+        &self,
+        relative_path: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, EngineError> {
+        self.open_pinned_regular_descendant(relative_path, false)
+            .map_err(project_content_error)?
+            .map(|file| file.read_bounded(max_bytes).map_err(project_content_error))
+            .transpose()
+    }
+
+    fn validates_file(
+        &self,
+        relative_path: &Path,
+        content_hash: &str,
+    ) -> Result<bool, EngineError> {
+        let Some(file) = self
+            .open_pinned_regular_descendant(relative_path, false)
+            .map_err(project_content_error)?
+        else {
+            return Ok(false);
+        };
+        let observation = file.observation().map_err(project_content_error)?;
+        Ok(file
+            .digest_stable_exact(&observation)
+            .map_err(project_content_error)?
+            == content_hash)
+    }
+
+    fn validates_absence(&self, relative_path: &Path) -> Result<bool, EngineError> {
+        Ok(self
+            .open_pinned_regular_descendant(relative_path, false)
+            .map_err(project_content_error)?
+            .is_none())
+    }
+}
+
+fn open_project_subdirectory(
+    root: &lillux::PinnedDirectory,
+    relative: &Path,
+) -> Result<Option<lillux::PinnedDirectory>, EngineError> {
+    let mut directory = root.try_clone().map_err(project_content_error)?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(EngineError::Internal(format!(
+                "project content path is not normalized: {}",
+                relative.display()
+            )));
+        };
+        let Some(child) = directory
+            .open_child_directory(name)
+            .map_err(project_content_error)?
+        else {
+            return Ok(None);
+        };
+        directory = child;
+    }
+    Ok(Some(directory))
+}
+
+fn project_content_error(error: impl std::fmt::Display) -> EngineError {
+    EngineError::Internal(format!("descriptor-rooted project content: {error}"))
+}
+
+#[cfg(test)]
+mod live_project_tests {
+    use super::AuthoritativeProjectContent;
+
+    #[test]
+    fn pinned_live_project_never_rebinds_to_a_replacement_path() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("value"), b"retained").unwrap();
+        let pinned = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
+
+        std::fs::rename(&project, parent.path().join("displaced")).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("value"), b"replacement").unwrap();
+
+        assert_eq!(
+            pinned.read_file("value".as_ref(), 64).unwrap().unwrap(),
+            b"retained"
+        );
+        assert_eq!(
+            std::fs::read(project.join("value")).unwrap(),
+            b"replacement"
+        );
+    }
+}

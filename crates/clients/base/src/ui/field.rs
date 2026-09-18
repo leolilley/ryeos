@@ -2958,8 +2958,12 @@ mod tests {
 
     #[test]
     fn identical_cross_source_facts_converge_despite_distinct_provenance() {
-        let project = document("project", "definition:graph:test/build@same");
-        let execution = document("execution", "definition:graph:test/build@same");
+        // Digest-bearing identity shells are strict: use a real canonical
+        // digest so this test reaches cross-source convergence rather than
+        // exercising the parser's fail-closed identity validation.
+        let identity = format!("definition:graph:test/build@{}", "ab".repeat(32));
+        let project = document("project", &identity);
+        let execution = document("execution", &identity);
         let binding = binding();
         let field = project_field(
             "field:test",
@@ -2990,7 +2994,17 @@ mod tests {
         );
 
         assert_eq!(field.entities.len(), 1);
-        assert_eq!(field.entities[0].id, "definition:graph:test/build@same");
+        assert_eq!(field.entities[0].id, identity);
+        assert_eq!(
+            field.sources.len(),
+            2,
+            "both accepted sources remain visible"
+        );
+        assert_eq!(
+            field.provenance,
+            vec!["service:execution", "service:project"],
+            "convergence must retain the document-level provenance set"
+        );
         assert!(
             field
                 .warnings

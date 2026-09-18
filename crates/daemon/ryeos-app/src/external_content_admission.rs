@@ -75,19 +75,21 @@ pub(crate) fn consumer_authority(
             ryeos_engine::contracts::ItemSpace::Bundle,
             ryeos_engine::contracts::ItemSourceRoot::Bundle { .. },
         ) => {
-            // A bundle-provided consumer can deliberately compose product
-            // relationship definitions from a pinned project. In that case
-            // the executable bytes remain bundle-owned, but the effective
-            // pre-realization program and its relationship closure are
-            // generation-scoped.
-            let Some(project_snapshot_hash) = subject_resolution_authority.operational_generation()
-            else {
-                return ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
+            if bundle_consumer_depends_on_project(resolution) {
+                let project_snapshot_hash = subject_resolution_authority
+                    .operational_generation()
+                    .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "project-composed bundle consumer requires exact generation authority"
+                    )
+                })?;
+                pinned_project_consumer_authority(resolution, publisher, project_snapshot_hash)
+            } else {
+                ryeos_state::objects::ExternalContentConsumerAuthority::installed_bundle(
                     resolution.root.resolved_ref.clone(),
                     publisher,
-                );
-            };
-            pinned_project_consumer_authority(resolution, publisher, project_snapshot_hash)
+                )
+            }
         }
         (
             ryeos_engine::contracts::ItemSpace::Project,
@@ -106,6 +108,31 @@ pub(crate) fn consumer_authority(
             "external-content consumer has incoherent or unsupported source authority"
         ),
     }
+}
+
+/// Whether the admitted effective bundle definition contains any project-
+/// scoped contributor. The outer execution subject alone is deliberately not
+/// evidence of this: fixed bundle pins remain reusable under a pinned launch.
+/// Conversely, a project contributor or a resolved product projection is
+/// committed by the effective definition and must retain generation scope.
+/// A source closure is owned by the resolution root itself; its mere presence
+/// therefore cannot turn a bundle root into project authority.
+fn bundle_consumer_depends_on_project(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> bool {
+    let project_source = |ancestor: &ryeos_engine::resolution::ResolvedAncestor| {
+        ancestor.source_space == ryeos_engine::contracts::ItemSpace::Project
+            || matches!(
+                &ancestor.source_root,
+                ryeos_engine::contracts::ItemSourceRoot::Project
+            )
+    };
+    resolution.ancestors.iter().any(project_source)
+        || resolution.referenced_items.iter().any(project_source)
+        || resolution
+            .composed
+            .derived
+            .contains_key(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY)
 }
 
 fn pinned_project_consumer_authority(
@@ -1245,20 +1272,128 @@ mod consumer_authority_tests {
             name: "standard".into(),
         };
         resolution.root.trust_class = TrustClass::TrustedBundle;
-        let bundle_with_project_relationships =
-            consumer_authority(&resolution, &generation).unwrap();
+        // The outer execution generation can be pinned while this declaration-
+        // bearing consumer remains bundle-owned. Project relationship/product
+        // evidence is retained by the separate selection/binding contract; it
+        // must not rename literal bundle pins into a generation-specific
+        // consumer that managed bundle activation can never satisfy.
+        let bundle_under_pinned_context = consumer_authority(&resolution, &generation).unwrap();
         assert!(matches!(
-            bundle_with_project_relationships,
-            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
+            bundle_under_pinned_context,
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
         ));
-        assert_eq!(
-            bundle_with_project_relationships.source_closure(),
-            Some(&source)
+        assert!(
+            bundle_under_pinned_context.source_closure().is_none(),
+            "bundle source closure is authorized by installed bundle identity, not copied into project authority"
         );
         assert!(matches!(
             consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).unwrap(),
             ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
         ));
+
+        resolution
+            .composed
+            .derived
+            .remove(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
+
+        let mut project_contributor = resolution.root.clone();
+        project_contributor.source_space = ItemSpace::Project;
+        project_contributor.source_root = ItemSourceRoot::Project;
+        project_contributor.trust_class = TrustClass::TrustedProject;
+        project_contributor.resolved_ref = "config:project/relationship".into();
+        resolution.ancestors.push(project_contributor);
+        let project_composed_bundle = consumer_authority(&resolution, &generation).unwrap();
+        assert!(matches!(
+            project_composed_bundle,
+            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
+        ));
+        assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
+        resolution.ancestors.clear();
+
+        // A completed product projection is also generation-scoped even when
+        // every executable source contributor remains bundle-owned. Keep this
+        // fixture a closed, valid projection so the assertion covers the
+        // effective-definition identity path rather than mere key presence.
+        let selections = serde_json::json!({
+            "runtime": {
+                "schema": ryeos_state::external_content::products::composition::RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA,
+                "declaration_id": "runtime",
+                "relationship_name": "runtime_to_worker",
+                "relationship_ref": "config:fixture/recipe",
+                "relationship_raw_content_digest": "2".repeat(64),
+                "relationship": {
+                    "name": "runtime_to_worker",
+                    "producer": {
+                        "canonical_ref": "graph:fixture/build",
+                        "recipe_binding": "product_recipe",
+                        "product_name": "runtime",
+                        "parameters": {}
+                    },
+                    "consumer": {
+                        "canonical_ref": "tool:project/build",
+                        "declaration_id": "runtime"
+                    },
+                    "required_product": {
+                        "shape": "tree",
+                        "storage": "content",
+                        "bounds": {
+                            "maximum_entries": 8,
+                            "maximum_depth": 4,
+                            "maximum_file_bytes": 1024,
+                            "maximum_total_bytes": 4096
+                        }
+                    },
+                    "qualification": {"policy_ref": null, "required_claims": []}
+                },
+                "witness_hash": "3".repeat(64),
+                "witness_source": {"kind": "local_capture"},
+                "witness_coordinate": {
+                    "owner_principal": format!("fp:{}", "4".repeat(64)),
+                    "chain_root_id": "T-root",
+                    "thread_id": "T-terminal",
+                    "recipe_binding": "product_recipe",
+                    "product_name": "runtime"
+                },
+                "qualification": null,
+                "producer": {
+                    "canonical_ref": "graph:fixture/build",
+                    "effective_definition_digest": "5".repeat(64),
+                    "exact_program_hash": "6".repeat(64),
+                    "producer_project_snapshot_hash": "7".repeat(64),
+                    "launch_authority_digest": "8".repeat(64),
+                    "admitted_parameters_digest": ryeos_state::objects::canonical_value_digest(&serde_json::json!({})).unwrap()
+                },
+                "owner_principal": format!("fp:{}", "4".repeat(64)),
+                "consumer_source": {
+                    "kind": "installed_bundle",
+                    "consumer_ref": "tool:project/build",
+                    "publisher_fingerprint": "a".repeat(64)
+                },
+                "pre_selection_effective_definition_digest": "9".repeat(64),
+                "manifest_hash": "1".repeat(64),
+                "manifest_kind": ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+                "declaration": {
+                    "id": "runtime",
+                    "kind": "tree",
+                    "manifest_hash": "1".repeat(64),
+                    "mount_root": "project",
+                    "mount": "environment/runtime"
+                }
+            }
+        });
+        resolution.composed.derived.insert(
+            ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
+            selections,
+        );
+        assert!(matches!(
+            consumer_authority(&resolution, &generation).unwrap(),
+            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject { .. }
+        ));
+        assert!(consumer_authority(&resolution, &SubjectResolutionAuthority::Projectless).is_err());
+        resolution
+            .composed
+            .derived
+            .remove(ryeos_engine::external_content::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY);
 
         resolution.root.source_space = ItemSpace::Project;
         resolution.root.source_root = ItemSourceRoot::Project;

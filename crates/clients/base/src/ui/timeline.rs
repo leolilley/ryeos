@@ -137,6 +137,8 @@ pub(crate) struct FoldedTimelineWindow {
     pub folded: FoldedTimeline,
     /// Selected entry index inside `folded.entries`.
     pub selected: Option<usize>,
+    /// Distance-from-bottom cursor coordinate per visible window entry.
+    pub cursors: Vec<usize>,
 }
 
 /// Apply the operator's folds to a coalesced timeline. A section is foldable
@@ -260,6 +262,7 @@ pub(crate) fn fold_timeline_window(
             collapsible: collapsible.clone(),
         },
         selected: None,
+        cursors: Vec::new(),
     };
     if total == 0 {
         return empty();
@@ -270,6 +273,7 @@ pub(crate) fn fold_timeline_window(
     // transcript has fewer visible entries than that (cursor pinned to the
     // top), mirroring the old `cursor_from_bottom.min(last_visible)` clamp.
     let mut selected_index = None;
+    let mut selected_cursor = 0usize;
     let mut remaining = cursor_from_bottom;
     let mut i = total;
     while i > 0 {
@@ -280,6 +284,7 @@ pub(crate) fn fold_timeline_window(
                 break;
             }
             remaining -= 1;
+            selected_cursor += 1;
         }
     }
     let Some(selected_index) = selected_index else {
@@ -334,7 +339,8 @@ pub(crate) fn fold_timeline_window(
     let mut sections = Vec::with_capacity(visible_full_indices.len());
     let mut indents = Vec::with_capacity(visible_full_indices.len());
     let mut sources = Vec::with_capacity(visible_full_indices.len());
-    for i in visible_full_indices {
+    let mut cursors = Vec::with_capacity(visible_full_indices.len());
+    for (visible_index, i) in visible_full_indices.into_iter().enumerate() {
         let sec = section_at(i);
         let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
         let Some(source_entry) = entry_at(i) else {
@@ -358,6 +364,11 @@ pub(crate) fn fold_timeline_window(
         } else {
             None
         });
+        cursors.push(
+            selected_cursor
+                .saturating_add(selected_visible)
+                .saturating_sub(visible_index),
+        );
     }
 
     FoldedTimelineWindow {
@@ -369,6 +380,7 @@ pub(crate) fn fold_timeline_window(
             collapsible: collapsible.clone(),
         },
         selected: Some(selected_visible),
+        cursors,
     }
 }
 

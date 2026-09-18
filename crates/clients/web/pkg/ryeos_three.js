@@ -10,7 +10,7 @@ var __exportAll = (all, no_symbols) => {
 	return target;
 };
 //#endregion
-//#region ../../../.worktrees/ui-visual-system/crates/clients/web/node_modules/three/build/three.module.js
+//#region node_modules/three/build/three.module.js
 var three_module_exports = /* @__PURE__ */ __exportAll({
 	ACESFilmicToneMapping: () => 4,
 	AddEquation: () => 100,

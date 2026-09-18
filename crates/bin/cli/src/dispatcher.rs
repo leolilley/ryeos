@@ -695,7 +695,7 @@ async fn follow_stream_descriptor(
         },
         previous_lines,
     )?;
-    crate::transport::http::get_streaming(&url, &headers, |ev| {
+    let transport = crate::transport::http::get_streaming(&url, &headers, |ev| {
         let outcome = match presenter.stream_event(ev) {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -719,7 +719,9 @@ async fn follow_stream_descriptor(
             }
         }
     })
-    .await?;
+    .await;
+    presenter.finish_stream()?;
+    transport?;
 
     match terminal {
         Some(Err(StreamTerminalFailure::Io(error))) => Err(CliError::Io(error)),
@@ -1059,35 +1061,38 @@ async fn post_to_daemon_streaming(
         },
         0,
     )?;
-    crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
-        if ev.event == "stream_started"
-            && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
-        {
-            thread_id = v
-                .get("thread_id")
-                .and_then(|t| t.as_str())
-                .map(String::from);
-        }
-        let outcome = match presenter.stream_event(ev) {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                terminal = Some(Err(StreamTerminalFailure::Io(err)));
-                return true;
+    let transport =
+        crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
+            if ev.event == "stream_started"
+                && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
+            {
+                thread_id = v
+                    .get("thread_id")
+                    .and_then(|t| t.as_str())
+                    .map(String::from);
             }
-        };
-        match outcome {
-            StreamOutcome::Continue => false,
-            StreamOutcome::Done => {
-                terminal = Some(Ok(()));
-                true
+            let outcome = match presenter.stream_event(ev) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    terminal = Some(Err(StreamTerminalFailure::Io(err)));
+                    return true;
+                }
+            };
+            match outcome {
+                StreamOutcome::Continue => false,
+                StreamOutcome::Done => {
+                    terminal = Some(Ok(()));
+                    true
+                }
+                StreamOutcome::Failed(detail) => {
+                    terminal = Some(Err(StreamTerminalFailure::Outcome(detail)));
+                    true
+                }
             }
-            StreamOutcome::Failed(detail) => {
-                terminal = Some(Err(StreamTerminalFailure::Outcome(detail)));
-                true
-            }
-        }
-    })
-    .await?;
+        })
+        .await;
+    presenter.finish_stream()?;
+    transport?;
 
     match terminal {
         Some(Err(StreamTerminalFailure::Io(error))) => return Err(CliError::Io(error)),

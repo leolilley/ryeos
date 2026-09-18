@@ -12,6 +12,72 @@ use ryeos_app::state::AppState;
 use crate::browser_session::BrowserSession;
 use crate::state::get_ui_state;
 
+/// An exact project traversal coordinate whose descriptor owner remains alive
+/// for at least as long as the pathname.  The path is intentionally not
+/// exposed without this owner: `/proc/self/fd/N` becomes ambient and unsafe as
+/// soon as the directory descriptor is dropped and the number can be reused.
+#[derive(Debug, Clone)]
+pub struct RetainedProjectAccess {
+    authority: std::sync::Arc<lillux::PinnedDirectory>,
+    descriptor_path: std::path::PathBuf,
+}
+
+impl RetainedProjectAccess {
+    pub fn path(&self) -> &std::path::Path {
+        &self.descriptor_path
+    }
+
+    pub fn try_clone_directory(&self) -> anyhow::Result<lillux::PinnedDirectory> {
+        self.authority.try_clone()
+    }
+}
+
+fn validate_session_project(
+    session: &BrowserSession,
+) -> Result<Option<&std::sync::Arc<lillux::PinnedDirectory>>, HandlerError> {
+    match (
+        session.project_authority.as_ref(),
+        session.compiled_binding.binding.project_root.as_deref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(authority), Some(project_root)) => {
+            authority
+                .ensure_path_binding()
+                .map_err(|_| HandlerError::Forbidden("project authority changed".into()))?;
+            if authority.path() != std::path::Path::new(project_root) {
+                return Err(HandlerError::Forbidden(
+                    "project authority contradicts the compiled project identity".into(),
+                ));
+            }
+            Ok(Some(authority))
+        }
+        _ => Err(HandlerError::Forbidden(
+            "project authority contradicts the compiled project identity".into(),
+        )),
+    }
+}
+
+pub(crate) fn session_project_access(
+    session: &BrowserSession,
+) -> Result<Option<RetainedProjectAccess>, HandlerError> {
+    validate_session_project(session)?
+        .map(|authority| {
+            Ok(RetainedProjectAccess {
+                authority: authority.clone(),
+                descriptor_path: authority
+                    .descriptor_path()
+                    .map_err(|error| HandlerError::Internal(error.to_string()))?,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn session_project_query_identity(
+    session: &BrowserSession,
+) -> Result<Option<std::path::PathBuf>, HandlerError> {
+    Ok(validate_session_project(session)?.map(|authority| authority.path().to_path_buf()))
+}
+
 tokio::task_local! {
     /// Daemon-retained authority for one compiled UI dispatch. This sideband
     /// is scoped by `ui.invocations.dispatch`; it is neither serialized into
@@ -46,37 +112,23 @@ impl SeatCaller {
         }
     }
 
-    /// Exact project path derived from the retained directory descriptor.
-    /// UI handlers must use this for project-aware work; the session's
-    /// `project_root` string is a display projection and must not be reopened
-    /// as authority.
-    pub fn project_path(&self) -> Result<Option<std::path::PathBuf>, HandlerError> {
-        Ok(self
-            .project_directory()?
-            .map(|authority| authority.descriptor_path())
-            .transpose()
-            .map_err(|error| HandlerError::Internal(error.to_string()))?)
-    }
-
-    /// Clone the retained project directory authority without resolving its
-    /// diagnostic pathname. File-serving handlers must keep traversal rooted
-    /// in this handle rather than converting it to a path and reopening it.
-    pub fn project_directory(&self) -> Result<Option<lillux::PinnedDirectory>, HandlerError> {
+    /// Exact descriptor-rooted project access with its owner retained.  This
+    /// is for filesystem resolution only, never projection filtering.
+    pub fn project_access(&self) -> Result<Option<RetainedProjectAccess>, HandlerError> {
         let Self::Session(session) = self else {
             return Ok(None);
         };
-        session
-            .project_authority
-            .as_ref()
-            .map(|authority| {
-                authority
-                    .ensure_path_binding()
-                    .map_err(|_| HandlerError::Forbidden("project authority changed".into()))?;
-                authority
-                    .try_clone()
-                    .map_err(|error| HandlerError::Internal(error.to_string()))
-            })
-            .transpose()
+        session_project_access(session)
+    }
+
+    /// Stable validated identity used by thread and field projections.  This
+    /// pathname is not filesystem authority and must never be reopened to
+    /// grant access.
+    pub fn project_query_identity(&self) -> Result<Option<std::path::PathBuf>, HandlerError> {
+        let Self::Session(session) = self else {
+            return Ok(None);
+        };
+        session_project_query_identity(session)
     }
 }
 
@@ -154,6 +206,22 @@ mod tests {
         }
     }
 
+    fn session_with_project(path: &std::path::Path) -> BrowserSession {
+        let canonical = path.canonicalize().expect("canonical fixture project");
+        let mut session = session();
+        Arc::get_mut(&mut session.compiled_binding)
+            .expect("fixture owns compiled binding")
+            .binding
+            .project_root = Some(canonical.display().to_string());
+        session.project_root = Some(canonical.display().to_string());
+        session.project_authority = Some(Arc::new(
+            lillux::PinnedDirectory::open(&canonical)
+                .expect("open fixture project")
+                .expect("fixture project exists"),
+        ));
+        session
+    }
+
     #[tokio::test]
     async fn compiled_session_authority_exists_only_inside_dispatch_scope() {
         assert!(compiled_ui_session().is_none());
@@ -164,5 +232,98 @@ mod tests {
         })
         .await;
         assert!(compiled_ui_session().is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_project_access_owns_descriptor_across_yield_and_fd_churn() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("marker"), b"retained").expect("write project marker");
+        let caller = SeatCaller::Session(session_with_project(project.path()));
+        let access = caller
+            .project_access()
+            .expect("project access")
+            .expect("bound project");
+        drop(caller);
+
+        tokio::task::yield_now().await;
+        let churn = (0..256)
+            .map(|_| std::fs::File::open("/dev/null").expect("open churn descriptor"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            std::fs::read(access.path().join("marker")).expect("read through retained descriptor"),
+            b"retained"
+        );
+        drop(churn);
+    }
+
+    #[test]
+    fn query_identity_is_stable_across_independent_descriptors() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let first = SeatCaller::Session(session_with_project(project.path()));
+        let second = SeatCaller::Session(session_with_project(project.path()));
+
+        assert_ne!(
+            first
+                .project_access()
+                .expect("first access")
+                .expect("first project")
+                .path(),
+            second
+                .project_access()
+                .expect("second access")
+                .expect("second project")
+                .path()
+        );
+        assert_eq!(
+            first.project_query_identity().expect("first identity"),
+            second.project_query_identity().expect("second identity")
+        );
+    }
+
+    #[test]
+    fn replacement_is_refused_without_invalidating_already_retained_access() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let project = parent.path().join("project");
+        let moved = parent.path().join("moved");
+        std::fs::create_dir(&project).expect("create project");
+        std::fs::write(project.join("marker"), b"original").expect("write marker");
+        let caller = SeatCaller::Session(session_with_project(&project));
+        let access = caller
+            .project_access()
+            .expect("initial access")
+            .expect("bound project");
+
+        std::fs::rename(&project, &moved).expect("move original project");
+        std::fs::create_dir(&project).expect("create replacement project");
+        std::fs::write(project.join("marker"), b"replacement").expect("write replacement marker");
+
+        assert!(caller.project_access().is_err());
+        assert!(caller.project_query_identity().is_err());
+        assert_eq!(
+            std::fs::read(access.path().join("marker")).expect("read pinned original"),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn compiled_identity_cannot_be_paired_with_a_different_directory_authority() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let other = tempfile::tempdir().expect("other tempdir");
+        let mut session = session_with_project(project.path());
+        Arc::get_mut(&mut session.compiled_binding)
+            .expect("fixture owns compiled binding")
+            .binding
+            .project_root = Some(
+            other
+                .path()
+                .canonicalize()
+                .expect("canonical other project")
+                .display()
+                .to_string(),
+        );
+        let caller = SeatCaller::Session(session);
+
+        assert!(caller.project_access().is_err());
+        assert!(caller.project_query_identity().is_err());
     }
 }

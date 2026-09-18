@@ -115,6 +115,34 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         .into());
     }
 
+    if let Some(operation_id) = event
+        .payload
+        .get("operation_id")
+        .and_then(|value| value.as_str())
+        && !operation_id.is_empty()
+        && operation_id.len() <= 128
+    {
+        db.connection()
+            .execute(
+                "INSERT INTO event_operation_index (
+                    event_hash, thread_id, event_type, operation_id, chain_seq
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(event_hash) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    event_type = excluded.event_type,
+                    operation_id = excluded.operation_id,
+                    chain_seq = excluded.chain_seq",
+                rusqlite::params![
+                    &event_hash,
+                    &event.thread_id,
+                    &event.event_type,
+                    operation_id,
+                    event.chain_seq,
+                ],
+            )
+            .context("project event operation identity")?;
+    }
+
     // Derive artifact row from artifact_published events (CAS-truth derived)
     if event.event_type == crate::event_types::ARTIFACT_PUBLISHED
         && let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str())

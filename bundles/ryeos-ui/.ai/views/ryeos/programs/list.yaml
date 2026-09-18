@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:05:35Z:e8cca0d0b2bc1796e0a730cc850ea02c4a8ab624c3eab20ab248ec566751dbb5:NGYSv66vSf6hJTd5lTN4Z0CjPZvw5ExeQVhBQx7f/zy3PzbCiFcbyGFmlGUfnpu7V8AsJiX7ijC5BiIgOGmCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T04:20:55Z:33bdaf9ff83632876601a7b6fd8b0fbe98df7343b25bcd591046f068bd1a8049:jlhEt7wUNmD0PJWbMSfWXopOdju8JJOGDLkMKN2iMBzxjysJSEzikLofZerVb1hFHYeNPeGFQr7asWhX80jnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-programs
 title: Programs
 version: "1.0.0"
@@ -6,7 +6,6 @@ description: Honest boundary until RyeOS supplies project program and readiness 
 
 widget: text
 presentation:
-  chrome: thin
   background: transparent
   position: { x: 0.5, y: 0.5 }
 body:

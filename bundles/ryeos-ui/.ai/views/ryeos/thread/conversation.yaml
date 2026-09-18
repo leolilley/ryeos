@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-17T00:05:36Z:a556a18e2ceb9878c52747fb51b18429345c98025ab57eab15018a101916ad49:0HJG6CXpgkGyMONB6AJtjudvvyW3j1fp7afIAj9NCrdVSqIGq69qT2XPQSDdAUwxjC5RjMl3L0t9JvM/hoO5CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T04:22:35Z:7cce3771509f4b56bc48bb0aa8299458a0c9023c36a52b24f507c35c69a1d708:/qYocdM+czuHMxVvyp/mvHUigi4h0tilLyQoiLVlm+fRH38IFlSIuSP6eXcLKWcy9w5H9niou+rXWql+geAKDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-conversation
 title: Conversation
 version: "1.0.0"
 description: Activity and composer for the same explicitly selected seat route
 extends: view:ryeos/thread/transcript
+widget: timeline
 
 # The source and composer both follow the existing seat input.route. This
 # does not create a second target, command dispatcher or worker permission.

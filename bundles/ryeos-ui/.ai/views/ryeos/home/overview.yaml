@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:11:43Z:5b38bf89bd70311aadc2b1f77648e0435bfe5aa63af7ee667c0758c63ddaab30:D2fvBvQGnkrkxXhvR08NkTF7OtArSMwgiN/jNf6Yf20BZfKypjtw4ACbw3b02a1IKJ1SeV02nPFADKZ3dqa4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T05:27:26Z:d76fe909e63a0e25a25470d887c433a4a0d88f05024fc9b9122fec51da2caa1f:j/rLZbGAjhG3gO9v4EX98GrGRNmJJEUv0LFynvwa9oEvKOFL+sY4eIH5RhCRx+ARErnpUwM7HTF7JSBTMmojBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-home
 title: Home
 version: "1.0.0"
@@ -90,6 +90,7 @@ sections:
     source_channel: movement
     collection: events
     projection:
+      identity: event_hash
       primary: event_type
       meta: thread_id
   - title: Projects

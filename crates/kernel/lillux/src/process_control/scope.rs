@@ -294,12 +294,30 @@ impl ControllerAccount {
         #[cfg(unix)]
         {
             let AccountBackend::Unix { uid, gid } = self.0;
-            if unsafe { libc::getuid() } != uid
-                || unsafe { libc::geteuid() } != uid
-                || unsafe { libc::getgid() } != gid
-                || unsafe { libc::getegid() } != gid
+            let (mut real_uid, mut effective_uid, mut saved_uid) = (u32::MAX, u32::MAX, u32::MAX);
+            let (mut real_gid, mut effective_gid, mut saved_gid) = (u32::MAX, u32::MAX, u32::MAX);
+            if unsafe { libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) } != 0
+                || unsafe { libc::getresgid(&mut real_gid, &mut effective_gid, &mut saved_gid) }
+                    != 0
+                || [real_uid, effective_uid, saved_uid]
+                    .into_iter()
+                    .any(|observed| observed != uid)
+                || [real_gid, effective_gid, saved_gid]
+                    .into_iter()
+                    .any(|observed| observed != gid)
             {
                 anyhow::bail!("controller process does not run as its selected non-root account");
+            }
+            let supplementary = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            if supplementary != 0 {
+                if supplementary < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                anyhow::bail!("controller process retained supplementary groups");
+            }
+            #[cfg(target_os = "linux")]
+            if unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1 {
+                anyhow::bail!("controller process did not retain the no-new-privileges transition");
             }
             Ok(())
         }
@@ -546,15 +564,18 @@ impl ProcessScopeConfiguration {
     pub fn enter_oci_mount_namespace(
         state: &super::OciHookState,
         intent: &super::OciLifecycleIntent,
+        process_root: &super::ExactProcessRoot,
     ) -> Result<(), String> {
         state.validate_prestart()?;
         intent.require_live()?;
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd as _;
-            let membership = super::cgroup::open_oci_membership(state.init_pid()?)?;
-            let namespace = std::fs::File::open(format!("/proc/{}/ns/mnt", state.init_pid()?))
-                .map_err(|error| format!("open OCI init mount namespace: {error}"))?;
+            if process_root.identity() != intent.init_process() {
+                return Err("OCI process-root authority differs from lifecycle intent".to_owned());
+            }
+            let membership = process_root.membership()?;
+            let namespace = process_root.mount_namespace()?;
             intent.require_live()?;
             super::cgroup::require_oci_membership(
                 intent.init_process().target_pid,
@@ -567,6 +588,7 @@ impl ProcessScopeConfiguration {
                 ));
             }
             super::cgroup::require_oci_membership_file(&membership, intent.lifecycle_path())?;
+            process_root.require_retained_lifetime()?;
             // The namespace and proc-membership descriptors pin the exact
             // objects selected between exact-process checks. The post-setns
             // check uses the retained proc descriptor rather than assuming
@@ -584,6 +606,7 @@ impl ProcessScopeConfiguration {
         state: &super::OciHookState,
         account: &ControllerAccount,
         intent: &super::OciLifecycleIntent,
+        process_root: &super::ExactProcessRoot,
     ) -> Result<(Self, super::OciLifecycleGeneration), String> {
         state.validate_prestart()?;
         super::require_administrator().map_err(|error| error.to_string())?;
@@ -594,8 +617,10 @@ impl ProcessScopeConfiguration {
             if intent.container_id() != state.id {
                 return Err("OCI state differs from the durable lifecycle intent".to_owned());
             }
+            if process_root.identity() != intent.init_process() {
+                return Err("OCI process-root authority differs from lifecycle intent".to_owned());
+            }
             let AccountBackend::Unix { uid, gid } = account.0;
-            let init_pid = state.init_pid()?;
             let prepared = super::cgroup::prepare_oci_controller_root(intent, uid, gid)?;
             let lifecycle = (|| {
                 let host_lifetime = intent.host_lifetime().clone();
@@ -647,7 +672,8 @@ impl ProcessScopeConfiguration {
                     "{error}; OCI controller-root rollback: {rollback:?}"
                 ));
             }
-            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, init_pid) {
+            if let Err(error) = super::cgroup::install_oci_controller_mount(&prepared, process_root)
+            {
                 let rollback = super::cgroup::rollback_empty_oci_controller(&prepared);
                 return Err(format!(
                     "{error}; OCI controller-root rollback: {rollback:?}"
@@ -659,10 +685,14 @@ impl ProcessScopeConfiguration {
         Err("OCI lifecycle preparation is unavailable on this OS".to_owned())
     }
 
-    pub fn require_oci_generation(
+    pub fn require_oci_generation_as_controller(
         &self,
+        account: &ControllerAccount,
         lifecycle: &super::OciLifecycleGeneration,
     ) -> Result<(), String> {
+        account
+            .require_current_process()
+            .map_err(|error| error.to_string())?;
         lifecycle.validate()?;
         let provider = ProcessScopeProvider::open(self)?;
         match &provider.backend {
@@ -679,6 +709,38 @@ impl ProcessScopeConfiguration {
             #[cfg(not(target_os = "linux"))]
             _ => Err("OCI lifecycle validation is unavailable on this OS".to_owned()),
         }
+    }
+
+    /// Root-side validation observes the selected non-root account without
+    /// entering the normal controller opener as that account.
+    pub fn require_oci_generation_as_administrator(
+        &self,
+        account: &ControllerAccount,
+        lifecycle: &super::OciLifecycleGeneration,
+    ) -> Result<(), String> {
+        self.validate()?;
+        account.validate()?;
+        lifecycle.validate()?;
+        super::require_administrator().map_err(|error| error.to_string())?;
+        #[cfg(target_os = "linux")]
+        {
+            let BackendConfiguration::LinuxCgroupV2 { parent } = &self.backend;
+            if parent != std::path::Path::new("/sys/fs/cgroup") {
+                return Err(
+                    "OCI controller delegation has a noncanonical container path".to_owned(),
+                );
+            }
+            let AccountBackend::Unix { uid, gid } = account.0;
+            super::cgroup::validate_administrator_oci_delegation(
+                parent,
+                uid,
+                gid,
+                lifecycle.controller_scope(),
+            )?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("OCI lifecycle validation is unavailable on this OS".to_owned())
     }
 
     /// Provision one administrator-owned host-service delegation and compile
@@ -730,7 +792,7 @@ impl ProcessScopeConfiguration {
         cwd: &crate::PinnedDirectory,
         environment: &[(String, String)],
     ) -> Result<std::convert::Infallible, String> {
-        self.exec_controller_inner(account, executable, arguments, cwd, environment, None)
+        self.exec_controller_inner(account, executable, arguments, cwd, environment, None, None)
     }
 
     /// External-supervisor entry using one exact administrator-owned launch
@@ -753,6 +815,32 @@ impl ProcessScopeConfiguration {
             cwd,
             environment,
             Some((document, descriptor_env_name)),
+            None,
+        )
+    }
+
+    /// External-supervisor entry for an exact OCI delegation prepared before
+    /// container start. This is deliberately distinct from native delegation
+    /// creation and is authorized by the retained lifecycle generation.
+    pub fn exec_prepared_oci_controller_with_inherited_document(
+        &self,
+        account: &ControllerAccount,
+        lifecycle: &super::OciLifecycleGeneration,
+        executable: &crate::PinnedRegularFile,
+        arguments: &[String],
+        cwd: &crate::PinnedDirectory,
+        environment: &[(String, String)],
+        document: crate::InheritedReadonlyDocument,
+        descriptor_env_name: &str,
+    ) -> Result<std::convert::Infallible, String> {
+        self.exec_controller_inner(
+            account,
+            executable,
+            arguments,
+            cwd,
+            environment,
+            Some((document, descriptor_env_name)),
+            Some(lifecycle),
         )
     }
 
@@ -764,6 +852,7 @@ impl ProcessScopeConfiguration {
         cwd: &crate::PinnedDirectory,
         environment: &[(String, String)],
         inherited_document: Option<(crate::InheritedReadonlyDocument, &str)>,
+        oci_lifecycle: Option<&super::OciLifecycleGeneration>,
     ) -> Result<std::convert::Infallible, String> {
         self.validate()?;
         account.validate()?;
@@ -811,7 +900,18 @@ impl ProcessScopeConfiguration {
                 &mut command,
                 std::slice::from_ref(&image),
             )?;
-            let bootstrap = super::cgroup::provision_controller(parent, uid, gid)?;
+            let bootstrap = match oci_lifecycle {
+                Some(lifecycle) => {
+                    self.require_oci_generation_as_administrator(account, lifecycle)?;
+                    super::cgroup::adopt_prepared_oci_controller(
+                        parent,
+                        uid,
+                        gid,
+                        lifecycle.controller_scope(),
+                    )?
+                }
+                None => super::cgroup::provision_controller(parent, uid, gid)?,
+            };
             command
                 .args(arguments)
                 .env_clear()
@@ -829,7 +929,7 @@ impl ProcessScopeConfiguration {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (account, arguments, inherited_document);
+            let _ = (account, arguments, inherited_document, oci_lifecycle);
             Err("scope controller provisioning is unavailable on this OS".to_owned())
         }
     }
@@ -1719,9 +1819,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let selected = ControllerAccount::unix(uid, gid);
-        if uid != 0 && gid != 0 {
-            selected.require_current_process().unwrap();
-        } else {
+        if uid == 0 || gid == 0 {
             assert!(selected.require_current_process().is_err());
         }
         assert!(
@@ -1735,6 +1833,30 @@ mod tests {
                 .require_current_process()
                 .is_err()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires administrator credential transition in a disposable child process"]
+    fn controller_transition_clears_all_credentials_and_sets_no_new_privileges() {
+        const CHILD: &str = "LILLUX_TEST_CONTROLLER_CREDENTIAL_TRANSITION";
+        let selected = ControllerAccount::unix(65_534, 65_534);
+        if std::env::var_os(CHILD).is_some() {
+            selected.require_current_process().unwrap();
+            return;
+        }
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "process_control::scope::tests::controller_transition_clears_all_credentials_and_sets_no_new_privileges",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(CHILD, "1");
+        selected.configure_command(&mut command).unwrap();
+        assert!(command.status().unwrap().success());
     }
 
     #[test]

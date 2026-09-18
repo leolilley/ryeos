@@ -106,7 +106,6 @@ impl LifecycleProgress {
 
     pub fn finish_start(mut self, report: &StartReport) -> io::Result<()> {
         self.line.clear()?;
-        let width = self.line.live_width();
         let elapsed = human_duration(self.line.started.elapsed());
         let qualifier = if report.already_running {
             "already online"
@@ -120,11 +119,7 @@ impl LifecycleProgress {
             self.line.success("NODE ONLINE"),
             self.line.dim(&format!("{qualifier} · {elapsed}")),
         );
-        writeln!(
-            out,
-            "{}",
-            super::clamp_visible(&summary, width.saturating_sub(1).max(1))
-        )?;
+        writeln!(out, "{summary}")?;
         if let LifecycleStatus::Running { metadata, .. } = &report.status {
             let mut details = Vec::new();
             if let Some(pid) = metadata.pid {
@@ -138,11 +133,7 @@ impl LifecycleProgress {
             }
             if !details.is_empty() {
                 let details = format!("   {}", self.line.dim(&details.join("  ·  ")));
-                writeln!(
-                    out,
-                    "{}",
-                    super::clamp_visible(&details, width.saturating_sub(1).max(1))
-                )?;
+                writeln!(out, "{details}")?;
             }
         }
         out.flush()
@@ -150,7 +141,6 @@ impl LifecycleProgress {
 
     pub fn finish_stop(mut self, report: &StopReport) -> io::Result<()> {
         self.line.clear()?;
-        let width = self.line.live_width();
         let elapsed = human_duration(self.line.started.elapsed());
         let qualifier = if report.already_stopped {
             "already offline"
@@ -164,11 +154,7 @@ impl LifecycleProgress {
             self.line.success("NODE OFFLINE"),
             self.line.dim(&format!("{qualifier} · {elapsed}")),
         );
-        writeln!(
-            out,
-            "{}",
-            super::clamp_visible(&summary, width.saturating_sub(1).max(1))
-        )?;
+        writeln!(out, "{summary}")?;
         out.flush()
     }
 }

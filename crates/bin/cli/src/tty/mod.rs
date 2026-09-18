@@ -162,47 +162,20 @@ impl Console {
                 });
             let heading = theme::style(heading, tone, self.capabilities.color);
             lines.push(format!("{glyph}  RYEOS  {heading}"));
-            lines.extend(
-                wrap_words(
-                    &diagnostic.message,
-                    self.capabilities.width.saturating_sub(4).max(8),
-                )
-                .into_iter()
-                .map(|value| {
-                    format!(
-                        "   {}",
-                        theme::style(&value, Tone::Neutral, self.capabilities.color)
-                    )
-                }),
-            );
+            lines.push(format!(
+                "   {}",
+                theme::style(&diagnostic.message, Tone::Neutral, self.capabilities.color)
+            ));
             for value in &diagnostic.context {
-                lines.extend(
-                    wrap_words(value, self.capabilities.width.saturating_sub(4).max(8))
-                        .into_iter()
-                        .map(|value| {
-                            format!(
-                                "   {}",
-                                theme::style(&value, Tone::Secondary, self.capabilities.color,)
-                            )
-                        }),
-                );
+                lines.push(format!(
+                    "   {}",
+                    theme::style(value, Tone::Secondary, self.capabilities.color)
+                ));
             }
             if let Some(hint) = &diagnostic.hint {
                 lines.push(String::new());
-                let prefix = "   hint  ";
-                let available = self
-                    .capabilities
-                    .width
-                    .saturating_sub(visible_width(prefix) + 1)
-                    .max(8);
-                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
-                    let value = theme::style(&value, Tone::Secondary, self.capabilities.color);
-                    lines.push(if index == 0 {
-                        format!("{prefix}{value}")
-                    } else {
-                        format!("{}{value}", " ".repeat(visible_width(prefix)))
-                    });
-                }
+                let value = theme::style(&hint.0, Tone::Secondary, self.capabilities.color);
+                lines.push(format!("   hint  {value}"));
             }
         } else {
             let prefix = match diagnostic.level {
@@ -261,24 +234,11 @@ impl Console {
                     lines.push(hint.0.clone());
                     continue;
                 }
-                let prefix = "hint  ";
-                let available = self
-                    .capabilities
-                    .width
-                    .saturating_sub(visible_width(prefix) + 1)
-                    .max(8);
-                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
-                    let line = if index == 0 {
-                        format!("{prefix}{value}")
-                    } else {
-                        format!("{}{value}", " ".repeat(visible_width(prefix)))
-                    };
-                    lines.push(theme::style(
-                        &line,
-                        Tone::Secondary,
-                        self.capabilities.color,
-                    ));
-                }
+                lines.push(theme::style(
+                    &format!("hint  {}", hint.0),
+                    Tone::Secondary,
+                    self.capabilities.color,
+                ));
             }
         }
         lines
@@ -286,20 +246,12 @@ impl Console {
 
     fn write_stdout(&self, lines: &[String]) -> io::Result<()> {
         let mut out = io::stdout().lock();
-        write_lines(
-            &mut out,
-            lines,
-            self.capabilities.tty().then_some(self.capabilities.width),
-        )
+        write_lines(&mut out, lines)
     }
 
     fn write_stderr(&self, lines: &[String]) -> io::Result<()> {
         let mut out = io::stderr().lock();
-        write_lines(
-            &mut out,
-            lines,
-            self.capabilities.tty().then_some(self.capabilities.width),
-        )
+        write_lines(&mut out, lines)
     }
 }
 
@@ -313,20 +265,6 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
     for row in rows {
         match &row.key {
             Some(key) if capabilities.tty() => {
-                if visible_width(key) > key_width {
-                    lines.push(format!(
-                        "  {}",
-                        theme::style(key, Tone::Secondary, capabilities.color)
-                    ));
-                    for value in wrap_words(&row.value, capabilities.width.saturating_sub(5).max(8))
-                    {
-                        lines.push(format!(
-                            "    {}",
-                            theme::style(&value, row.tone, capabilities.color)
-                        ));
-                    }
-                    continue;
-                }
                 let marker = if let Some(marker) = &row.marker {
                     theme::style(marker, row.tone, capabilities.color)
                 } else if row.tone == Tone::Neutral {
@@ -344,147 +282,25 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
                     capabilities.color,
                 );
                 let prefix = format!("{marker} {key}  ");
-                let available = capabilities
-                    .width
-                    .saturating_sub(visible_width(&prefix) + 1)
-                    .max(8);
-                for (index, value) in wrap_words(&row.value, available).into_iter().enumerate() {
-                    let value = theme::style(&value, row.tone, capabilities.color);
-                    lines.push(if index == 0 {
-                        format!("{prefix}{value}")
-                    } else {
-                        format!("{}{value}", " ".repeat(visible_width(&prefix)))
-                    });
-                }
+                let value = theme::style(&row.value, row.tone, capabilities.color);
+                lines.push(format!("{prefix}{value}"));
             }
             Some(key) => {
-                let prefix = format!("{key}: ");
-                let available = capabilities
-                    .width
-                    .saturating_sub(visible_width(&prefix) + 1)
-                    .max(8);
-                for (index, value) in wrap_words(&row.value, available).into_iter().enumerate() {
-                    lines.push(if index == 0 {
-                        format!("{prefix}{value}")
-                    } else {
-                        format!("{}{value}", " ".repeat(visible_width(&prefix)))
-                    });
-                }
+                lines.push(format!("{key}: {}", row.value));
             }
             None if capabilities.tty() => {
-                for value in wrap_words(&row.value, capabilities.width.saturating_sub(3).max(8)) {
-                    let value = theme::style(&value, row.tone, capabilities.color);
-                    lines.push(format!("  {value}"));
-                }
+                let value = theme::style(&row.value, row.tone, capabilities.color);
+                lines.push(format!("  {value}"));
             }
-            None => lines.extend(wrap_words(
-                &row.value,
-                capabilities.width.saturating_sub(1).max(8),
-            )),
+            None => lines.push(row.value.clone()),
         }
     }
 }
-
-fn wrap_words(value: &str, width: usize) -> Vec<String> {
-    if value.is_empty() {
-        return vec![String::new()];
-    }
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for mut word in value.split_whitespace() {
-        let separator = usize::from(!line.is_empty());
-        if visible_width(&line) + separator + visible_width(word) <= width {
-            if separator == 1 {
-                line.push(' ');
-            }
-            line.push_str(word);
-        } else {
-            if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-            }
-            while visible_width(word) > width {
-                let split = visible_prefix_end(word, width);
-                lines.push(word[..split].to_string());
-                word = &word[split..];
-            }
-            line.push_str(word);
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-fn visible_prefix_end(value: &str, max_width: usize) -> usize {
-    let mut width = 0;
-    let mut end = 0;
-    for (index, ch) in value.char_indices() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        width += ch_width;
-        end = index + ch.len_utf8();
-    }
-    end.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
-}
-
-fn write_lines(
-    out: &mut impl Write,
-    lines: &[String],
-    terminal_width: Option<usize>,
-) -> io::Result<()> {
+fn write_lines(out: &mut impl Write, lines: &[String]) -> io::Result<()> {
     for line in lines {
-        if let Some(width) = terminal_width {
-            for wrapped in wrap_visible_preserving(line, width.saturating_sub(1).max(1)) {
-                writeln!(out, "{wrapped}")?;
-            }
-        } else {
-            writeln!(out, "{line}")?;
-        }
+        writeln!(out, "{line}")?;
     }
     out.flush()
-}
-
-fn wrap_visible_preserving(value: &str, max_width: usize) -> Vec<&str> {
-    if value.is_empty() {
-        return vec![value];
-    }
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut width = 0;
-    let mut escape = 0_u8;
-    for (index, ch) in value.char_indices() {
-        let ch_width = match escape {
-            1 if ch == '[' => {
-                escape = 2;
-                0
-            }
-            1 => {
-                escape = 0;
-                0
-            }
-            2 if ('@'..='~').contains(&ch) => {
-                escape = 0;
-                0
-            }
-            2 => 0,
-            _ if ch == '\x1b' => {
-                escape = 1;
-                0
-            }
-            _ => ch.width().unwrap_or(0),
-        };
-        if ch_width > 0 && width + ch_width > max_width {
-            lines.push(&value[start..index]);
-            start = index;
-            width = 0;
-        }
-        width += ch_width;
-    }
-    lines.push(&value[start..]);
-    lines
 }
 
 pub(crate) fn visible_width(value: &str) -> usize {
@@ -565,10 +381,10 @@ pub async fn run(
     let remote_url = remote_daemon_url();
 
     let mut loading_frame = 0;
-    let mut rendered_lines = render(
+    let mut rendered_frame = render(
         console,
         &loading_projection(screen, &project, loading_frame),
-        0,
+        FrameState::default(),
     )?;
     let live = build_live_projection(app_root, &project, screen, remote_url.as_deref());
     tokio::pin!(live);
@@ -580,15 +396,15 @@ pub async fn run(
             live = &mut live => break live,
             _ = ticker.tick() => {
                 loading_frame = loading_frame.wrapping_add(1);
-                rendered_lines = render(
+                rendered_frame = render(
                     console,
                     &loading_projection(screen, &project, loading_frame),
-                    rendered_lines,
+                    rendered_frame,
                 )?;
             }
         }
     };
-    render(console, &live, rendered_lines)?;
+    render_final_home(console, &live, rendered_frame)?;
 
     Ok(())
 }
@@ -1087,7 +903,7 @@ pub fn render_command_result(
         },
         console.capabilities(),
     );
-    render_command_frame(console, &lines, previous_lines)
+    render_final_command_frame(console, &lines, previous_lines, None)
 }
 
 pub(crate) fn structured_result_failure(payload: &Value) -> Option<String> {
@@ -1105,12 +921,14 @@ pub struct TtyStreamPresenter {
     console: Console,
     command: String,
     previous_lines: usize,
+    previous_width: Option<usize>,
     thread_id: Option<String>,
     status: String,
     events: Vec<(String, String)>,
     /// Bounded, separately retained child failures. Ordinary event churn must
     /// not evict the original child error when a graph subsequently retries.
     failure_diagnostics: Vec<(String, String)>,
+    needs_final_render: bool,
     last_render: Option<std::time::Instant>,
 }
 
@@ -1124,14 +942,18 @@ impl TtyStreamPresenter {
         command: impl Into<String>,
         previous_lines: usize,
     ) -> io::Result<Self> {
+        let previous_width = (previous_lines > 0)
+            .then(|| capabilities::live_terminal_width(console.capabilities().width));
         let mut presenter = Self {
             console,
             command: command.into(),
             previous_lines,
+            previous_width,
             thread_id: None,
             status: "opening stream".to_string(),
             events: Vec::new(),
             failure_diagnostics: Vec::new(),
+            needs_final_render: true,
             last_render: None,
         };
         presenter.render()?;
@@ -1162,21 +984,21 @@ impl TtyStreamPresenter {
                 let detail = format!("{code}: {msg}");
                 self.status = "error".to_string();
                 self.push_event("stream_error", &detail);
-                self.render()?;
+                self.render_final()?;
                 Ok(StreamOutcome::Failed(detail))
             }
             event => match thread_terminal_outcome(event) {
                 Some(ThreadOutcomeKind::Success) => {
                     self.status = "complete".to_string();
                     self.push_event(event, &value_summary(inner));
-                    self.render()?;
+                    self.render_final()?;
                     Ok(StreamOutcome::Done)
                 }
                 Some(ThreadOutcomeKind::Failure) => {
                     let detail = stream_failure_reason(inner, event);
                     self.status = "error".to_string();
                     self.push_event(event, &detail);
-                    self.render()?;
+                    self.render_final()?;
                     Ok(StreamOutcome::Failed(detail))
                 }
                 None => {
@@ -1194,6 +1016,7 @@ impl TtyStreamPresenter {
     }
 
     fn push_event(&mut self, event: &str, detail: &str) {
+        self.needs_final_render = true;
         self.events.push((event.to_string(), detail.to_string()));
         if self.events.len() > 10 {
             let excess = self.events.len() - 10;
@@ -1202,6 +1025,7 @@ impl TtyStreamPresenter {
     }
 
     fn push_failure(&mut self, event: &str, detail: &str) {
+        self.needs_final_render = true;
         self.failure_diagnostics
             .push((format!("{event} failure"), detail.to_string()));
         if self.failure_diagnostics.len() > 4 {
@@ -1224,6 +1048,23 @@ impl TtyStreamPresenter {
     }
 
     fn render(&mut self) -> io::Result<()> {
+        self.render_with(false)
+    }
+
+    fn render_final(&mut self) -> io::Result<()> {
+        if !self.needs_final_render {
+            return Ok(());
+        }
+        self.render_with(true)?;
+        self.needs_final_render = false;
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> io::Result<()> {
+        self.render_final()
+    }
+
+    fn render_with(&mut self, final_frame: bool) -> io::Result<()> {
         let mut owned = Vec::new();
         if let Some(thread_id) = &self.thread_id {
             owned.push(("thread".to_string(), thread_id.clone()));
@@ -1249,7 +1090,24 @@ impl TtyStreamPresenter {
             },
             self.console.capabilities(),
         );
-        self.previous_lines = render_command_frame(&self.console, &lines, self.previous_lines)?;
+        if final_frame {
+            self.previous_lines = render_final_command_frame(
+                &self.console,
+                &lines,
+                self.previous_lines,
+                self.previous_width,
+            )?;
+            self.previous_width = None;
+        } else {
+            let frame = render_command_frame(
+                &self.console,
+                &lines,
+                self.previous_lines,
+                self.previous_width,
+            )?;
+            self.previous_lines = frame.lines;
+            self.previous_width = Some(frame.width);
+        }
         self.last_render = Some(std::time::Instant::now());
         Ok(())
     }
@@ -1326,16 +1184,14 @@ fn append_frame_row(
     capabilities: TerminalCapabilities,
 ) {
     const KEY_WIDTH: usize = 13;
-    let label = clamp_visible(label, KEY_WIDTH);
+    let label = sanitize_terminal_inline(label);
     let label = format!("{label:<width$}", width = KEY_WIDTH);
     let key = theme::style(&label, Tone::Secondary, capabilities.color);
     let prefix = format!("  {key} ");
-    let available = capabilities
-        .width
-        .saturating_sub(visible_width(&prefix) + 1)
-        .max(8);
-    for (index, value) in wrap_words(value, available).into_iter().enumerate() {
-        let value = theme::style(&value, tone, capabilities.color);
+    for (index, logical_line) in value.split('\n').enumerate() {
+        let logical_line = logical_line.strip_suffix('\r').unwrap_or(logical_line);
+        let logical_line = sanitize_terminal_inline(logical_line);
+        let value = theme::style(&logical_line, tone, capabilities.color);
         lines.push(if index == 0 {
             format!("{prefix}{value}")
         } else {
@@ -1357,17 +1213,55 @@ fn render_command_frame(
     console: &Console,
     lines: &[String],
     previous_lines: usize,
-) -> io::Result<usize> {
-    let width = console.capabilities().width;
+    previous_width: Option<usize>,
+) -> io::Result<FrameState> {
+    let width = capabilities::live_terminal_width(console.capabilities().width);
     let lines = lines
         .iter()
         .map(|line| clamp_visible(line, width.saturating_sub(1).max(1)))
         .collect::<Vec<_>>();
+    let previous_lines = if previous_width == Some(width) {
+        previous_lines
+    } else {
+        0
+    };
     write_frame(&mut io::stdout(), &lines, previous_lines)?;
-    Ok(lines.len())
+    Ok(FrameState {
+        lines: lines.len(),
+        width,
+    })
 }
 
-fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>, width: usize) {
+fn render_final_command_frame(
+    console: &Console,
+    lines: &[String],
+    previous_lines: usize,
+    previous_width: Option<usize>,
+) -> io::Result<usize> {
+    let width = capabilities::live_terminal_width(console.capabilities().width);
+    let mut out = io::stdout().lock();
+    write_durable_frame(
+        &mut out,
+        lines,
+        previous_lines,
+        previous_width == Some(width),
+    )?;
+    Ok(0)
+}
+
+fn write_durable_frame(
+    out: &mut impl Write,
+    lines: &[String],
+    previous_lines: usize,
+    clear_previous: bool,
+) -> io::Result<()> {
+    if clear_previous && previous_lines > 0 {
+        write_frame(out, &[], previous_lines)?;
+    }
+    write_lines(out, lines)
+}
+
+fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>, _width: usize) {
     match value {
         Value::Object(map) => {
             if map.is_empty() {
@@ -1433,19 +1327,7 @@ fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String
                     })
                 });
             if tabular {
-                let available = width.saturating_sub(18).max(12);
-                let column_width = available
-                    .saturating_sub((columns.len() - 1) * 3)
-                    .checked_div(columns.len())
-                    .unwrap_or(4)
-                    .max(4);
-                let format_cells = |cells: Vec<String>| {
-                    cells
-                        .into_iter()
-                        .map(|cell| clamp_visible(&cell, column_width))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                };
+                let format_cells = |cells: Vec<String>| cells.join(" | ");
                 rows.push((
                     "".to_string(),
                     format_cells(columns.iter().map(|v| (*v).to_string()).collect()),
@@ -1560,15 +1442,44 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
         .to_string()
 }
 
-fn render(console: &Console, home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
+#[derive(Debug, Clone, Copy, Default)]
+struct FrameState {
+    lines: usize,
+    width: usize,
+}
+
+fn render(console: &Console, home: &TtyHomeFile, previous: FrameState) -> io::Result<FrameState> {
     let capabilities = console.capabilities();
-    let width = capabilities.width;
+    let width = capabilities::live_terminal_width(capabilities.width);
     let lines = render_lines(home, capabilities)
         .into_iter()
         .map(|line| clamp_visible(&line, width.saturating_sub(1).max(1)))
         .collect::<Vec<_>>();
+    let previous_lines = if previous.width == 0 || previous.width == width {
+        previous.lines
+    } else {
+        0
+    };
     write_frame(&mut io::stdout(), &lines, previous_lines)?;
-    Ok(lines.len())
+    Ok(FrameState {
+        lines: lines.len(),
+        width,
+    })
+}
+
+fn render_final_home(
+    console: &Console,
+    home: &TtyHomeFile,
+    previous: FrameState,
+) -> io::Result<()> {
+    let width = capabilities::live_terminal_width(console.capabilities().width);
+    let mut out = io::stdout().lock();
+    write_durable_frame(
+        &mut out,
+        &render_lines(home, console.capabilities()),
+        previous.lines,
+        previous.width == width,
+    )
 }
 
 fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<String> {
@@ -1684,6 +1595,19 @@ fn render_help_items(
 }
 
 fn write_frame(out: &mut impl Write, lines: &[String], previous_lines: usize) -> io::Result<()> {
+    if lines.is_empty() && previous_lines > 0 {
+        write!(out, "\x1b[{previous_lines}F")?;
+        for index in 0..previous_lines {
+            write!(out, "\x1b[2K")?;
+            if index + 1 < previous_lines {
+                write!(out, "\x1b[1E")?;
+            }
+        }
+        if previous_lines > 1 {
+            write!(out, "\x1b[{}F", previous_lines - 1)?;
+        }
+        return out.flush();
+    }
     if previous_lines == 0 {
         for line in lines {
             writeln!(out, "{line}")?;
@@ -1814,7 +1738,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_help_wraps_descriptions_instead_of_truncating_them() {
+    fn compact_help_preserves_descriptions_for_terminal_reflow() {
         let capabilities = TerminalCapabilities {
             mode: capabilities::HumanOutputMode::Tty,
             color: false,
@@ -1845,10 +1769,12 @@ mod tests {
         };
 
         let lines = render_lines(&home, capabilities);
-        assert!(lines.iter().any(|line| line.contains("preserving")));
-        assert!(lines.iter().any(|line| line.contains("metadata")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("preserving verified metadata"))
+        );
         assert!(!lines.iter().any(|line| line.contains("pack...")));
-        assert!(lines.iter().all(|line| visible_width(line) < 60));
     }
 
     #[test]
@@ -1886,32 +1812,86 @@ mod tests {
     }
 
     #[test]
-    fn word_wrapping_preserves_long_error_tokens() {
-        let token = format!("vault:{}", "x".repeat(160));
-        let lines = wrap_words(&token, 24);
-        assert!(lines.iter().all(|line| visible_width(line) <= 24));
-        assert_eq!(lines.concat(), token);
-    }
-
-    #[test]
-    fn plain_line_output_preserves_complete_error_bodies() {
+    fn line_output_preserves_one_complete_logical_line() {
         let line = format!(
             "ryeos: daemon returned HTTP 500: {{\"error\":\"inventory build failed: {}\"}}",
             "x".repeat(256)
         );
         let mut plain = Vec::new();
-        write_lines(&mut plain, std::slice::from_ref(&line), None).expect("write plain line");
-        assert_eq!(
-            String::from_utf8(plain).expect("utf-8 output"),
-            format!("{line}\n")
+        write_lines(&mut plain, std::slice::from_ref(&line)).expect("write plain line");
+        let rendered = String::from_utf8(plain).expect("utf-8 output");
+        assert_eq!(rendered, format!("{line}\n"));
+        assert_eq!(rendered.lines().count(), 1);
+    }
+
+    #[test]
+    fn long_document_keys_and_values_remain_one_logical_line() {
+        let key = "effective_definition_digest_coordinate";
+        let value = "1154fd1bf7f56dfe623e3ec8c0a6b5f12c561fad7a4398a4c40a328fcec67ac8";
+        let mut lines = Vec::new();
+        append_rows(
+            &mut lines,
+            &[Row::key_value(key, value)],
+            TerminalCapabilities {
+                mode: capabilities::HumanOutputMode::Tty,
+                color: false,
+                unicode: true,
+                width: 24,
+            },
         );
 
-        let mut tty = Vec::new();
-        write_lines(&mut tty, std::slice::from_ref(&line), Some(80)).expect("write tty line");
-        let tty = String::from_utf8(tty).expect("utf-8 output");
-        assert!(tty.contains("inventory build failed"));
-        assert_eq!(tty.lines().collect::<String>(), line);
-        assert!(tty.lines().all(|line| visible_width(line) < 80));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains(key));
+        assert!(lines[0].contains(value));
+    }
+
+    #[test]
+    fn completed_command_frame_preserves_values_beyond_terminal_width() {
+        let tail = "diagnostic-tail-marker".repeat(8);
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS COMMAND",
+                phase: "live",
+                command: "execute",
+                status: "complete",
+                detail: None,
+                payload: &[("result", tail.as_str())],
+            },
+            TerminalCapabilities::plain(40),
+        );
+
+        assert!(lines.iter().any(|line| line.contains(&tail)));
+        assert!(!lines.iter().any(|line| line.contains("...")));
+
+        let mut output = Vec::new();
+        write_durable_frame(&mut output, &lines, 3, true).expect("write durable frame");
+        let output = String::from_utf8(output).expect("utf-8 frame");
+        assert!(output.starts_with("\x1b[3F\x1b[2K\x1b[1E\x1b[2K\x1b[1E\x1b[2K\x1b[2F"));
+        assert!(output.contains("\x1b[2FRYEOS COMMAND\n"));
+        assert!(output.contains(&tail));
+        assert!(!output.contains("..."));
+    }
+
+    #[test]
+    fn command_frame_tracks_hard_line_breaks_and_sanitizes_controls() {
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS STREAM",
+                phase: "live",
+                command: "execute",
+                status: "error",
+                detail: None,
+                payload: &[("stream_error", "first\nsecond\r\nthird\u{7}")],
+            },
+            TerminalCapabilities::plain(40),
+        );
+
+        assert!(lines.iter().any(|line| line.contains("first")));
+        assert!(lines.iter().any(|line| line.contains("second")));
+        assert!(lines.iter().any(|line| line.contains("third�")));
+        assert!(lines.iter().all(|line| {
+            !line.contains('\n') && !line.contains('\r') && !line.contains('\u{7}')
+        }));
     }
 
     #[test]

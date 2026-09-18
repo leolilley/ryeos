@@ -35,8 +35,8 @@ fn resolve_allowed_root(
     caller: &crate::seat_auth::SeatCaller,
     operator_project_path: Option<&str>,
 ) -> Result<PinnedDirectory> {
-    let project = match caller.project_directory()? {
-        Some(project) => project,
+    let project = match caller.project_access()? {
+        Some(project) => project.try_clone_directory()?,
         None => {
             let path = operator_project_path
                 .ok_or_else(|| anyhow::anyhow!("no project bound to this invocation"))?;

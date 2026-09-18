@@ -1770,19 +1770,17 @@ mod tests {
     #[test]
     fn attestation_reaches_subject_hash() {
         let subject = h("34");
-        let links = object_links(&json!({
-            "kind": "attestation",
-            "schema": 1,
-            "subject_hash": subject,
-            "claim": "accepted",
-            "policy": "test",
-            "issuer": "fp:test",
-            "issued_at": "2026-05-29T00:00:00Z",
-            "expires_at": null,
-            "evidence": {},
-            "signature": "test"
-        }))
+        let attestation = crate::objects::Attestation::unsigned(
+            subject.clone(),
+            "accepted".into(),
+            "test".into(),
+            "2026-05-29T00:00:00Z".into(),
+            None,
+            json!({}),
+        )
+        .sign(&crate::signer::TestSigner::new())
         .unwrap();
+        let links = object_links(&attestation.to_value()).unwrap();
         assert_eq!(links.object_hashes, vec![subject]);
     }
 
@@ -1793,30 +1791,30 @@ mod tests {
         };
 
         let resolution = product_selection_resolution();
-        let evidence = resolution["composed"]["derived"]
-            ["effective_external_product_selections"]["runtime"]["qualification"]["evidence"]
-            .clone();
+        let evidence =
+            resolution["composed"]["derived"]["effective_external_product_selections"]["auxiliary"]
+                ["qualification"]["evidence"]
+                .clone();
         let subject = evidence["result"]["subject_manifest_hash"]
             .as_str()
             .unwrap()
             .to_owned();
-        let attestation = json!({
-            "kind": "attestation",
-            "schema": 1,
-            "subject_hash": subject,
-            "claim": PRODUCT_QUALIFICATION_CLAIM,
-            "policy": PRODUCT_QUALIFICATION_ATTESTATION_POLICY,
-            "issuer": format!("fp:{}", h("11")),
-            "issued_at": "2026-09-08T00:00:00Z",
-            "expires_at": null,
-            "evidence": evidence,
-            "signature": "test"
-        });
+        let attestation = crate::objects::Attestation::unsigned(
+            subject,
+            PRODUCT_QUALIFICATION_CLAIM.into(),
+            PRODUCT_QUALIFICATION_ATTESTATION_POLICY.into(),
+            "2026-09-08T00:00:00Z".into(),
+            None,
+            evidence,
+        )
+        .sign(&crate::signer::TestSigner::new())
+        .unwrap()
+        .to_value();
         let edges = typed_object_edges(&attestation).unwrap();
         assert!(edges.iter().any(|edge| {
-            edge.hash == h("33") && edge.expected == ExpectedObject::Kind("attestation")
+            edge.hash == "6".repeat(64) && edge.expected == ExpectedObject::Kind("attestation")
         }));
-        for historical in [h("61"), h("67"), h("55")] {
+        for historical in ["d".repeat(64), "4".repeat(64), "5".repeat(64)] {
             assert!(!edges.iter().any(|edge| edge.hash == historical));
         }
 
@@ -1837,7 +1835,11 @@ mod tests {
             )
             .unwrap();
         let edges = typed_object_edges(&attestation.to_value()).unwrap();
-        for retained in [evidence.product_witness_hash.clone(), h("6"), h("8")] {
+        for retained in [
+            evidence.product_witness_hash.clone(),
+            "6".repeat(64),
+            "8".repeat(64),
+        ] {
             assert!(edges.iter().any(|edge| {
                 edge.hash == retained && edge.expected == ExpectedObject::Kind("attestation")
             }));
@@ -2037,73 +2039,8 @@ mod tests {
     }
 
     fn product_selection_resolution() -> Value {
-        use crate::external_content::products::composition::{
-            RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA, ResolvedExternalProductSelections,
-        };
-        use crate::external_content::products::qualification::{
-            PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, PRODUCT_QUALIFICATION_POLICY_SCHEMA,
-            PRODUCT_QUALIFICATION_RESULT_SCHEMA,
-        };
-        let parameters_digest = crate::objects::canonical_value_digest(&json!({})).unwrap();
-        let coordinate = json!({"owner_principal": format!("fp:{}", h("11")),
-            "chain_root_id":"T-producer", "thread_id":"T-producer-terminal",
-            "recipe_binding":"product_recipe", "product_name":"runtime"});
-        let result = json!({"schema": PRODUCT_QUALIFICATION_RESULT_SCHEMA,
-            "subject_manifest_hash":h("22"), "claims":["probe"], "probe_evidence":{}});
-        let result_digest = crate::objects::canonical_value_digest(&result).unwrap();
-        let qualification = json!({"attestation_hash":h("44"), "evidence": {
-            "schema": PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA,
-            "product_witness_hash":h("33"), "product_coordinate":coordinate,
-            "witness_source":{"kind":"local_capture"},
-            "policy_source": {
-                "canonical_ref":"config:test/qualification", "raw_content_digest":h("55"),
-                "effective_definition_digest":h("56"), "publisher_fingerprint":h("57"),
-                "policy":{"schema":PRODUCT_QUALIFICATION_POLICY_SCHEMA,
-                    "verifier_ref":"tool:test/probe", "subject_declaration_id":"runtime",
-                    "allowed_claims":["probe"], "verifier_parameters":{}}
-            },
-            "verifier": {
-                "chain_root_id":"T-verifier", "thread_id":"T-verifier-terminal",
-                "admitted_launch_capsule_hash":h("61"), "canonical_ref":"tool:test/probe",
-                "effective_definition_digest":h("62"), "exact_program_hash":h("63"),
-                "admitted_parameters_digest":parameters_digest, "launch_authority_digest":h("64"),
-                "execution_realization_hash":h("65"), "substrate_identity_hash":h("66"),
-                "subject_declaration_id":"runtime", "subject_manifest_hash":h("22"),
-                "terminal_snapshot_hash":h("67"), "result_digest":result_digest
-            }, "verifier_root_selections":null, "result":result
-        }});
-        let selections = json!({"runtime": {
-            "schema":RESOLVED_EXTERNAL_PRODUCT_SELECTION_SCHEMA, "declaration_id":"runtime",
-            "relationship_name":"runtime_to_consumer", "relationship_ref":"config:test/recipe",
-            "relationship_raw_content_digest":h("71"), "relationship": {
-                "name":"runtime_to_consumer", "producer": {
-                    "canonical_ref":"graph:test/build", "recipe_binding":"product_recipe",
-                    "product_name":"runtime", "parameters":{}
-                }, "consumer":{"canonical_ref":"config:test/environment", "declaration_id":"runtime"},
-                "required_product":{"shape":"tree", "storage":"content", "bounds":{
-                    "maximum_entries":8, "maximum_depth":4, "maximum_file_bytes":1024,
-                    "maximum_total_bytes":4096
-                }}, "qualification":{"policy_ref":"config:test/qualification", "required_claims":["probe"]}
-            }, "witness_hash":h("33"), "witness_coordinate":coordinate,
-            "witness_source":{"kind":"local_capture"},
-            "qualification":qualification, "producer": {
-                "canonical_ref":"graph:test/build", "effective_definition_digest":h("72"),
-                "exact_program_hash":h("73"), "producer_project_snapshot_hash":h("74"),
-                "launch_authority_digest":h("75"), "admitted_parameters_digest":parameters_digest
-            }, "owner_principal":format!("fp:{}", h("11")), "consumer_source":{
-                "kind":"pinned_project", "consumer_ref":"config:test/environment",
-                "publisher_fingerprint":h("76"), "project_snapshot_hash":h("77"),
-                "source_closure":null
-            },
-            "pre_selection_effective_definition_digest":h("78"), "manifest_hash":h("22"),
-            "manifest_kind":"external_content_manifest", "declaration": {
-                "id":"runtime", "kind":"tree", "manifest_hash":h("22"),
-                "mount_root":"execution_runtime", "mount":"runtime"
-            }
-        }});
-        let parsed: ResolvedExternalProductSelections =
-            serde_json::from_value(selections.clone()).unwrap();
-        parsed.validate().unwrap();
+        let evidence = crate::external_content::products::qualification::tests::dynamic_evidence_with_auxiliary_proof();
+        let selections = serde_json::to_value(evidence.verifier_root_selections.unwrap()).unwrap();
         json!({"composed":{"derived":{"effective_external_product_selections":selections}}})
     }
 
@@ -2113,7 +2050,9 @@ mod tests {
         let source = json!({"kind":"received", "acceptance_hash":h("88")});
         resolution["composed"]["derived"]["effective_external_product_selections"]["runtime"]["witness_source"] =
             source.clone();
-        resolution["composed"]["derived"]["effective_external_product_selections"]["runtime"]["qualification"]
+        resolution["composed"]["derived"]["effective_external_product_selections"]["auxiliary"]["witness_source"] =
+            source.clone();
+        resolution["composed"]["derived"]["effective_external_product_selections"]["auxiliary"]["qualification"]
             ["evidence"]["witness_source"] = source;
         let semantic = crate::external_content::products::composition::project_resolution_product_selections_for_identity(&resolution).unwrap();
         let outer = json!({
@@ -2137,11 +2076,16 @@ mod tests {
         });
         for capsule in [&outer, &dependency, &persistent] {
             let edges = typed_object_edges(capsule).unwrap();
-            for proof in [h("33"), h("44"), h("88")] {
+            for proof in ["b".repeat(64), "6".repeat(64), "8".repeat(64), h("88")] {
                 assert!(edges.iter().any(|edge| edge.hash == proof
                     && edge.expected == ExpectedObject::Kind("attestation")));
             }
-            for historical in [h("61"), h("67"), h("74"), h("55")] {
+            for historical in [
+                "d".repeat(64),
+                "4".repeat(64),
+                "1".repeat(64),
+                "5".repeat(64),
+            ] {
                 assert!(!edges.iter().any(|edge| edge.hash == historical));
             }
         }
@@ -2164,7 +2108,7 @@ mod tests {
             );
         }
         let mut missing_proof = valid.clone();
-        missing_proof["composed"]["derived"]["effective_external_product_selections"]["runtime"]
+        missing_proof["composed"]["derived"]["effective_external_product_selections"]["auxiliary"]
             ["qualification"] = Value::Null;
         assert!(retained_resolution_product_proof_hashes(&missing_proof).is_err());
         let unrelated = json!({"composed":{"derived":{"custom":{"witness_hash":h("33"), "attestation_hash":h("44")}}}});

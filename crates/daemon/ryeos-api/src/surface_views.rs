@@ -351,6 +351,71 @@ pub fn embed_effective_surface_views_in_generation(
     )
 }
 
+/// Descriptor-authority variant of
+/// [`embed_effective_surface_views_in_generation`]. The typed content owner
+/// remains borrowed across resolution of the complete surface/view closure.
+pub fn embed_effective_surface_views_in_generation_under_project_authority(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: &Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    effective_surface: &mut EffectiveItem,
+) -> EmbeddedSurfaceViews {
+    let surface = EffectiveUiItemIdentity::from_effective_item(effective_surface);
+    if !effective_surface.composed_value.is_object() {
+        return EmbeddedSurfaceViews {
+            identity: EmbeddedSurfaceIdentity {
+                request_engine_generation_identity: generation
+                    .request_engine_generation_identity()
+                    .to_string(),
+                surface,
+                views: BTreeMap::new(),
+            },
+            failures: Vec::new(),
+        };
+    }
+
+    let mut resolved = Vec::new();
+    let mut requests = Vec::new();
+    let mut valid_refs = Vec::new();
+    for view_ref in unique_view_refs(&effective_surface.composed_value) {
+        match CanonicalRef::parse(&view_ref) {
+            Ok(item_ref) => {
+                valid_refs.push(view_ref);
+                requests.push(EffectiveItemRequest {
+                    item_ref,
+                    expected_kind: Some("view".to_string()),
+                    project_root: Some(project_root.to_path_buf()),
+                    subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
+                });
+            }
+            Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
+        }
+    }
+    resolved.extend(
+        valid_refs
+            .into_iter()
+            .zip(generation.effective_items_under_project_authority(&requests, project_content))
+            .map(|(view_ref, result)| {
+                (
+                    view_ref,
+                    result
+                        .map(|effective| {
+                            let identity = EffectiveUiItemIdentity::from_effective_item(&effective);
+                            (effective.composed_value, identity)
+                        })
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+    );
+    resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
+    embed_identity_view_results(
+        &mut effective_surface.composed_value,
+        generation.request_engine_generation_identity().to_string(),
+        surface,
+        resolved,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

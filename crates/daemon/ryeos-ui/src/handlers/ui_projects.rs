@@ -147,7 +147,7 @@ pub async fn handle_projects_list(
     let caller = require_seat_caller(&ctx, &state)?;
     let project_path = string_param(&params, "project_path");
     let retained_project = caller
-        .project_path()?
+        .project_query_identity()?
         .map(|path| path.to_string_lossy().into_owned());
     let current_project = retained_project.as_deref().or(project_path.as_deref());
     let store = resolve_principal_store(&ctx, &state)?;
@@ -288,7 +288,7 @@ pub async fn handle_projects_open(
     let caller = require_seat_caller(&ctx, &state)?;
     let req: OpenProjectRequest = parse_request(params)?;
     let current_project = caller
-        .project_path()?
+        .project_query_identity()?
         .map(|path| path.to_string_lossy().into_owned());
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;

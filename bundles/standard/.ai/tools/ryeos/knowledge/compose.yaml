@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T06:38:03Z:23671c48c18e7eae6b0480e1e774aabcd57c3321b8043bdf07ff753bf3a8f2c9:mRAP4/XQFdgfWSlzRngWE5I+7BUD/s3v2DQYdmNSEWK3fPb0ZUv4ZaIgaNIF1bI8N9U1I8LsIIpTILQqHogXDQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-18T02:33:39Z:23671c48c18e7eae6b0480e1e774aabcd57c3321b8043bdf07ff753bf3a8f2c9:433ol86A5r2XJfbJPpFUvZ41cwILuS8x9K9xk9zcrrg2njHXnmIiw0ugvKN3lp916QeZIbaRtsTeiFC88LG2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/knowledge"
 version: "1.0.0"
 description: "Recall a knowledge item composed into text within a token budget. Use this at runtime to load a specific knowledge doc on demand — e.g. a per-run model written by an upstream step whose ref is only known now."

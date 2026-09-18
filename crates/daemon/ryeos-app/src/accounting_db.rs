@@ -60,7 +60,7 @@ use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
-const ACCOUNTING_SCHEMA_VERSION: i32 = 6;
+const ACCOUNTING_SCHEMA_VERSION: i32 = 7;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
@@ -444,9 +444,25 @@ CREATE INDEX idx_resource_financial_operation_gate
 PRAGMA user_version=6;
 "#;
 
+const SCHEMA_V7_SQL: &str = r#"
+ALTER TABLE resource_request_attribution ADD COLUMN start_tick_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE resource_request_attribution ADD COLUMN end_tick_key TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_resource_attribution_chronology
+    ON resource_request_attribution(operation_id, start_tick_key, end_tick_key, attribution_id);
+CREATE TABLE resource_usage_partition_page (
+    operation_id TEXT NOT NULL,
+    page_index INTEGER NOT NULL,
+    page_json TEXT NOT NULL,
+    PRIMARY KEY (operation_id, page_index),
+    FOREIGN KEY (operation_id) REFERENCES resource_usage_partition(operation_id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+PRAGMA user_version=7;
+"#;
+
 fn current_schema_sql() -> String {
     format!(
-        "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}"
+        "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}\n{SCHEMA_V7_SQL}"
     )
 }
 
@@ -777,6 +793,16 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("request_digest", "TEXT", false, true),
                     col("attribution_json", "TEXT", false, true),
                     col("created_at_ms", "INTEGER", false, true),
+                    col("start_tick_key", "TEXT", false, true),
+                    col("end_tick_key", "TEXT", false, true),
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "resource_usage_partition_page",
+                columns: &[
+                    col("operation_id", "TEXT", true, true),
+                    col("page_index", "INTEGER", true, true),
+                    col("page_json", "TEXT", false, true),
                 ],
             },
             sqlite_schema::TableSpec {
@@ -789,6 +815,17 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
             },
         ],
         indexes: &[
+            sqlite_schema::IndexSpec {
+                name: "idx_resource_attribution_chronology",
+                table: "resource_request_attribution",
+                columns: &[
+                    "operation_id",
+                    "start_tick_key",
+                    "end_tick_key",
+                    "attribution_id",
+                ],
+                unique: false,
+            },
             sqlite_schema::IndexSpec {
                 name: "idx_budget_account_execution",
                 table: "budget_account",
@@ -1000,6 +1037,21 @@ pub struct ThreadResourceCostSample {
     /// physically owns. This remains visibly separate from request shares.
     pub owned_overhead_usd_nanos: u64,
     pub components: Vec<ThreadResourceCostComponent>,
+    /// Exclusive operation-id cursor for the next bounded component page.
+    /// Totals above always cover the whole thread, not just this page.
+    pub components_next_operation_id: Option<String>,
+}
+
+const RESOURCE_COST_COMPONENT_PAGE_OPERATIONS: usize = 128;
+
+fn push_resource_cost_component(
+    sample: &mut ThreadResourceCostSample,
+    retain: bool,
+    component: ThreadResourceCostComponent,
+) {
+    if retain {
+        sample.components.push(component);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1733,6 +1785,204 @@ fn validate_execution_resource_budgets(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+const RESOURCE_PARTITION_PAGE_ROWS: usize = 256;
+const RESOURCE_PARTITION_PAGE_BYTES: usize = 256 * 1024;
+
+/// F08: v1 remains byte-for-byte unchanged for small partitions. A v2 header
+/// commits the exact ordered pages and whole-operation totals. Page boundaries
+/// never introduce tariff rounding or additional financial operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PagedResourceUsagePartition {
+    pub version: u32,
+    pub summary: ResourceUsagePartition,
+    pub attribution_count: u64,
+    pub page_count: u64,
+    pub pages_digest: String,
+}
+
+fn derive_paged_resource_partition(
+    conn: &Connection,
+    usage: &ResourceUsageObservation,
+    charge: &ResourceRatedCharge,
+    allocated_charge: u64,
+    mut page_sink: impl FnMut(u64, &str) -> Result<()>,
+) -> Result<PagedResourceUsagePartition> {
+    let mut summary = ResourceUsagePartition::derive(usage, charge, allocated_charge, &[])
+        .map_err(anyhow::Error::msg)?;
+    let mut statement = conn.prepare(
+        "SELECT attribution_id, thread_id, request_digest, attribution_json, start_tick_key, end_tick_key
+           FROM resource_request_attribution WHERE operation_id=?1
+          ORDER BY start_tick_key, end_tick_key, attribution_id",
+    )?;
+    let mut rows = statement.query([&usage.operation_id])?;
+    let mut previous_end = None;
+    let mut page = Vec::with_capacity(RESOURCE_PARTITION_PAGE_ROWS);
+    let mut count = 0_u64;
+    let mut page_count = 0_u64;
+    let mut pages_digest = "0".repeat(64);
+    loop {
+        let row = rows.next()?;
+        if let Some(row) = row {
+            let encoded: String = row.get(3)?;
+            let attribution: ResourceRequestAttribution = serde_json::from_str(&encoded)?;
+            attribution.validate().map_err(anyhow::Error::msg)?;
+            if attribution.attribution_id.as_str() != row.get::<_, String>(0)?
+                || attribution.thread_id != row.get::<_, String>(1)?
+                || attribution.request_digest.as_str() != row.get::<_, String>(2)?
+                || format!("{:020}", attribution.interval.start_tick_ns)
+                    != row.get::<_, String>(4)?
+                || format!("{:020}", attribution.interval.end_tick_ns) != row.get::<_, String>(5)?
+                || attribution.operation_id.as_str() != usage.operation_id
+            {
+                bail!("resource attribution columns contradict retained evidence");
+            }
+            if previous_end.is_some_and(|end| attribution.interval.start_tick_ns < end) {
+                bail!("resource attribution overlaps across partition pages");
+            }
+            previous_end = Some(attribution.interval.end_tick_ns);
+            page.push(attribution);
+            count = count
+                .checked_add(1)
+                .context("resource attribution count overflow")?;
+        }
+        if page.len() == RESOURCE_PARTITION_PAGE_ROWS || (row.is_none() && !page.is_empty()) {
+            let partition = ResourceUsagePartition::derive(usage, charge, allocated_charge, &page)
+                .map_err(anyhow::Error::msg)?;
+            for share in &partition.attributed {
+                summary.overhead_nanoseconds = summary
+                    .overhead_nanoseconds
+                    .checked_sub(share.observed_nanoseconds)
+                    .context("partition time exceeds usage")?;
+                summary.overhead_usd_nanos = summary
+                    .overhead_usd_nanos
+                    .checked_sub(share.allocated_usd_nanos)
+                    .context("partition shares exceed debit")?;
+            }
+            let encoded = canonical_json_string(&serde_json::to_value(&partition.attributed)?)?;
+            if encoded.len() > RESOURCE_PARTITION_PAGE_BYTES {
+                bail!("resource partition page exceeds byte bound");
+            }
+            pages_digest = HexDigest::of_canonical_json(&serde_json::json!({
+                "previous": pages_digest, "page_index": page_count, "page": encoded,
+            }))
+            .map_err(anyhow::Error::msg)?
+            .as_str()
+            .to_owned();
+            page_sink(page_count, &encoded)?;
+            page_count = page_count
+                .checked_add(1)
+                .context("partition page count overflow")?;
+            page.clear();
+        }
+        if row.is_none() {
+            break;
+        }
+    }
+    Ok(PagedResourceUsagePartition {
+        version: 2,
+        summary,
+        attribution_count: count,
+        page_count,
+        pages_digest,
+    })
+}
+
+fn verify_paged_resource_partition(
+    conn: &Connection,
+    encoded: &str,
+    usage: &ResourceUsageObservation,
+    charge: &ResourceRatedCharge,
+    allocated_charge: u64,
+) -> Result<PagedResourceUsagePartition> {
+    let retained: PagedResourceUsagePartition = serde_json::from_str(encoded)?;
+    let expected = derive_paged_resource_partition(
+        conn,
+        usage,
+        charge,
+        allocated_charge,
+        |index, page| {
+            let stored: String = conn.query_row(
+            "SELECT page_json FROM resource_usage_partition_page WHERE operation_id=?1 AND page_index=?2",
+            rusqlite::params![usage.operation_id, index], |row| row.get(0),
+        )?;
+            if stored != page {
+                bail!("resource partition page contradicts retained evidence");
+            }
+            Ok(())
+        },
+    )?;
+    let count: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_usage_partition_page WHERE operation_id=?1",
+        [&usage.operation_id],
+        |row| row.get(0),
+    )?;
+    if retained != expected || count != expected.page_count {
+        bail!("resource partition header or page count contradicts retained evidence");
+    }
+    Ok(retained)
+}
+
+fn visit_resource_partition_shares(
+    conn: &Connection,
+    operation_id: &str,
+    encoded: &str,
+    mut visitor: impl FnMut(&ryeos_accounting::ResourceAttributedShare) -> Result<()>,
+) -> Result<ResourceUsagePartition> {
+    let value: serde_json::Value = serde_json::from_str(encoded)?;
+    if value["version"] == 1 {
+        let partition: ResourceUsagePartition = serde_json::from_value(value)?;
+        for share in &partition.attributed {
+            visitor(share)?;
+        }
+        return Ok(partition);
+    }
+    let header: PagedResourceUsagePartition = serde_json::from_value(value)?;
+    if header.version != 2 {
+        bail!("unsupported resource partition version");
+    }
+    verify_paged_partition_read(conn, operation_id, encoded)?;
+    for index in 0..header.page_count {
+        let page: String = conn.query_row(
+            "SELECT page_json FROM resource_usage_partition_page WHERE operation_id=?1 AND page_index=?2",
+            rusqlite::params![header.summary.operation_id.as_str(), index], |row| row.get(0),
+        )?;
+        if page.len() > RESOURCE_PARTITION_PAGE_BYTES {
+            bail!("resource partition page exceeds byte bound");
+        }
+        let shares: Vec<ryeos_accounting::ResourceAttributedShare> = serde_json::from_str(&page)?;
+        if shares.len() > RESOURCE_PARTITION_PAGE_ROWS {
+            bail!("resource partition page exceeds row bound");
+        }
+        for share in &shares {
+            visitor(share)?;
+        }
+    }
+    Ok(header.summary)
+}
+
+fn verify_paged_partition_read(
+    conn: &Connection,
+    operation_id: &str,
+    encoded: &str,
+) -> Result<PagedResourceUsagePartition> {
+    let (usage, charge, debit): (String, String, Option<i64>) = conn.query_row(
+        "SELECT usage_json, rated_charge_json, budget_charge_usd_nanos FROM resource_financial_operation WHERE operation_id=?1",
+        [operation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let usage: ResourceUsageObservation = serde_json::from_str(&usage)?;
+    if usage.operation_id != operation_id {
+        bail!("resource partition names another operation");
+    }
+    verify_paged_resource_partition(
+        conn,
+        encoded,
+        &usage,
+        &serde_json::from_str(&charge)?,
+        debit.map(u64::try_from).transpose()?.unwrap_or(0),
+    )
+}
+
 fn persist_resource_usage_partition(
     conn: &Connection,
     usage: &ResourceUsageObservation,
@@ -1741,6 +1991,46 @@ fn persist_resource_usage_partition(
     now_ms: i64,
 ) -> Result<()> {
     if usage.coverage != ResourceUsageCoverage::Complete {
+        return Ok(());
+    }
+    let count: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_request_attribution WHERE operation_id=?1",
+        [&usage.operation_id],
+        |row| row.get(0),
+    )?;
+    if count > 1024 {
+        let allocated = budget_charge_nanos
+            .map(u64::try_from)
+            .transpose()?
+            .unwrap_or(0);
+        let retained: Option<String> = conn
+            .query_row(
+                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                [&usage.operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(retained) = retained {
+            verify_paged_resource_partition(conn, &retained, usage, charge, allocated)?;
+            return Ok(());
+        }
+        let header = derive_paged_resource_partition(
+            conn,
+            usage,
+            charge,
+            allocated,
+            |index, page| {
+                conn.execute(
+                "INSERT INTO resource_usage_partition_page(operation_id,page_index,page_json) VALUES (?1,?2,?3)",
+                rusqlite::params![usage.operation_id,index,page],
+            )?;
+                Ok(())
+            },
+        )?;
+        conn.execute(
+            "INSERT INTO resource_usage_partition(operation_id,partition_json,created_at_ms) VALUES (?1,?2,?3)",
+            rusqlite::params![usage.operation_id, canonical_json_string(&serde_json::to_value(header)?)?, now_ms],
+        )?;
         return Ok(());
     }
     let mut statement = conn.prepare(
@@ -2056,58 +2346,54 @@ fn validate_resource_financial_operations(conn: &Connection) -> Result<()> {
 }
 
 fn validate_resource_usage_partitions(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare(
-        "SELECT attribution_id, operation_id, thread_id, request_digest, attribution_json
-           FROM resource_request_attribution ORDER BY operation_id, attribution_id",
+    let orphan_pages: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_usage_partition_page page
+           LEFT JOIN resource_usage_partition header ON header.operation_id=page.operation_id
+          WHERE header.operation_id IS NULL OR json_extract(header.partition_json,'$.version') != 2",
+        [], |row| row.get(0),
     )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(statement);
-    let mut by_operation: std::collections::BTreeMap<String, Vec<ResourceRequestAttribution>> =
-        std::collections::BTreeMap::new();
-    for (attribution_id, operation_id, thread_id, request_digest, encoded) in rows {
+    if orphan_pages != 0 {
+        bail!("resource partition pages lack an exact v2 header");
+    }
+    let mut statement = conn.prepare(
+        "SELECT attribution_id, operation_id, thread_id, request_digest, attribution_json, start_tick_key, end_tick_key
+           FROM resource_request_attribution ORDER BY operation_id, start_tick_key, end_tick_key, attribution_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut previous: Option<(String, u64)> = None;
+    while let Some(row) = rows.next()? {
+        let attribution_id: String = row.get(0)?;
+        let operation_id: String = row.get(1)?;
+        let thread_id: String = row.get(2)?;
+        let request_digest: String = row.get(3)?;
+        let encoded: String = row.get(4)?;
         let attribution: ResourceRequestAttribution = serde_json::from_str(&encoded)?;
         attribution.validate().map_err(anyhow::Error::msg)?;
         if attribution.attribution_id.as_str() != attribution_id
             || attribution.operation_id.as_str() != operation_id
             || attribution.thread_id != thread_id
             || attribution.request_digest.as_str() != request_digest
+            || format!("{:020}", attribution.interval.start_tick_ns) != row.get::<_, String>(5)?
+            || format!("{:020}", attribution.interval.end_tick_ns) != row.get::<_, String>(6)?
         {
             bail!("resource request-attribution columns contradict retained evidence");
         }
-        by_operation
-            .entry(operation_id)
-            .or_default()
-            .push(attribution);
-    }
-    for (operation_id, attributions) in &mut by_operation {
-        attributions.sort_by_key(|item| item.interval.start_tick_ns);
-        if attributions
-            .windows(2)
-            .any(|pair| pair[1].interval.start_tick_ns < pair[0].interval.end_tick_ns)
-        {
+        if previous.as_ref().is_some_and(|(op, end)| {
+            op == &operation_id && attribution.interval.start_tick_ns < *end
+        }) {
             bail!("resource request attributions overlap for {operation_id}");
         }
+        previous = Some((operation_id, attribution.interval.end_tick_ns));
     }
+    drop(rows);
+    drop(statement);
     let mut statement = conn.prepare(
         "SELECT operation_id, partition_json FROM resource_usage_partition ORDER BY operation_id",
     )?;
-    let partitions = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(statement);
-    for (operation_id, encoded) in partitions {
+    let mut partitions = statement.query([])?;
+    while let Some(row) = partitions.next()? {
+        let operation_id: String = row.get(0)?;
+        let encoded: String = row.get(1)?;
         let (usage_json, charge_json, budget_charge): (String, String, Option<i64>) = conn.query_row(
             "SELECT usage_json, rated_charge_json, budget_charge_usd_nanos FROM resource_financial_operation
               WHERE operation_id=?1",
@@ -2116,6 +2402,21 @@ fn validate_resource_usage_partitions(conn: &Connection) -> Result<()> {
         )?;
         let usage: ResourceUsageObservation = serde_json::from_str(&usage_json)?;
         let charge: ResourceRatedCharge = serde_json::from_str(&charge_json)?;
+        if serde_json::from_str::<serde_json::Value>(&encoded)?["version"] == 2 {
+            verify_paged_resource_partition(
+                conn,
+                &encoded,
+                &usage,
+                &charge,
+                budget_charge.map(u64::try_from).transpose()?.unwrap_or(0),
+            )?;
+            continue;
+        }
+        let mut attributed = conn.prepare("SELECT attribution_json FROM resource_request_attribution WHERE operation_id=?1 ORDER BY attribution_id LIMIT 1025")?;
+        let attributions = attributed
+            .query_map([&operation_id], |row| row.get::<_, String>(0))?
+            .map(|row| Ok(serde_json::from_str::<ResourceRequestAttribution>(&row?)?))
+            .collect::<Result<Vec<_>>>()?;
         let expected = ResourceUsagePartition::derive(
             &usage,
             &charge,
@@ -2124,10 +2425,7 @@ fn validate_resource_usage_partitions(conn: &Connection) -> Result<()> {
                 .transpose()
                 .context("resource partition budget charge is negative")?
                 .unwrap_or(0),
-            by_operation
-                .get(&operation_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
+            &attributions,
         )
         .map_err(anyhow::Error::msg)?;
         let retained: ResourceUsagePartition = serde_json::from_str(&encoded)?;
@@ -2240,6 +2538,58 @@ fn immediate_transaction<T>(
             ))),
         },
     }
+}
+
+const RESOURCE_ATTRIBUTION_PREDECESSOR_SQL: &str = "SELECT start_tick_key, end_tick_key
+       FROM resource_request_attribution
+      WHERE operation_id=?1 AND start_tick_key<=?2
+      ORDER BY start_tick_key DESC, end_tick_key DESC, attribution_id DESC
+      LIMIT 1";
+const RESOURCE_ATTRIBUTION_SUCCESSOR_SQL: &str = "SELECT start_tick_key, end_tick_key
+       FROM resource_request_attribution
+      WHERE operation_id=?1 AND start_tick_key>?2
+      ORDER BY start_tick_key, end_tick_key, attribution_id
+      LIMIT 1";
+
+/// Existing attribution intervals are mutually non-overlapping, so only the
+/// immediate chronological predecessor and successor can intersect a new
+/// interval. Both probes are covering, bounded index seeks; admission never
+/// walks or deserializes the operation's retained attribution history.
+fn resource_attribution_interval_overlaps(
+    conn: &Connection,
+    operation_id: &str,
+    start_tick_ns: u64,
+    end_tick_ns: u64,
+) -> Result<bool> {
+    let start = format!("{start_tick_ns:020}");
+    let end = format!("{end_tick_ns:020}");
+    let predecessor = conn
+        .query_row(
+            RESOURCE_ATTRIBUTION_PREDECESSOR_SQL,
+            rusqlite::params![operation_id, start],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if predecessor
+        .as_ref()
+        .is_some_and(|(retained_start, retained_end)| {
+            start < *retained_end && *retained_start < end
+        })
+    {
+        return Ok(true);
+    }
+    let successor = conn
+        .query_row(
+            RESOURCE_ATTRIBUTION_SUCCESSOR_SQL,
+            rusqlite::params![operation_id, start],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(successor
+        .as_ref()
+        .is_some_and(|(retained_start, retained_end)| {
+            start < *retained_end && *retained_start < end
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2479,29 +2829,19 @@ impl AccountingDb {
                 }
                 return Ok(false);
             }
-            let mut statement = conn.prepare(
-                "SELECT attribution_json FROM resource_request_attribution
-                  WHERE operation_id=?1 ORDER BY attribution_id",
-            )?;
-            let existing = statement
-                .query_map(
-                    rusqlite::params![attribution.operation_id.as_str()],
-                    |row| row.get::<_, String>(0),
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            for existing in existing {
-                let existing: ResourceRequestAttribution = serde_json::from_str(&existing)?;
-                if attribution.interval.start_tick_ns < existing.interval.end_tick_ns
-                    && existing.interval.start_tick_ns < attribution.interval.end_tick_ns
-                {
-                    bail!("resource request attributions overlap");
-                }
+            if resource_attribution_interval_overlaps(
+                &conn,
+                attribution.operation_id.as_str(),
+                attribution.interval.start_tick_ns,
+                attribution.interval.end_tick_ns,
+            )? {
+                bail!("resource request attributions overlap");
             }
             conn.execute(
                 "INSERT INTO resource_request_attribution (
                     attribution_id, operation_id, thread_id, request_digest,
-                    attribution_json, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    attribution_json, created_at_ms, start_tick_key, end_tick_key
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     attribution.attribution_id.as_str(),
                     attribution.operation_id.as_str(),
@@ -2509,6 +2849,8 @@ impl AccountingDb {
                     attribution.request_digest.as_str(),
                     encoded,
                     now_ms,
+                    format!("{:020}", attribution.interval.start_tick_ns),
+                    format!("{:020}", attribution.interval.end_tick_ns),
                 ],
             )?;
             Ok(true)
@@ -2576,36 +2918,34 @@ impl AccountingDb {
                 ) {
                     bail!("resource request attribution requires an issued live operation");
                 }
-                let mut intervals = Vec::new();
-                let mut statement = conn.prepare(
-                    "SELECT attribution_json FROM resource_request_attribution
-                      WHERE operation_id=?1 ORDER BY attribution_id",
-                )?;
-                for encoded in statement
-                    .query_map(rusqlite::params![operation_id], |row| {
-                        row.get::<_, String>(0)
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?
-                {
-                    intervals.push(
-                        serde_json::from_str::<ResourceRequestAttribution>(&encoded)?.interval,
-                    );
-                }
-                intervals.extend(pending.iter().map(|item| item.interval.clone()));
-                intervals.sort_by_key(|interval| interval.start_tick_ns);
+                let mut intervals = pending
+                    .iter()
+                    .map(|item| item.interval.clone())
+                    .collect::<Vec<_>>();
+                intervals.sort_by_key(|interval| (interval.start_tick_ns, interval.end_tick_ns));
                 if intervals
                     .windows(2)
                     .any(|pair| pair[1].start_tick_ns < pair[0].end_tick_ns)
                 {
                     bail!("resource request attributions overlap");
                 }
+                for incoming in &intervals {
+                    if resource_attribution_interval_overlaps(
+                        &conn,
+                        operation_id,
+                        incoming.start_tick_ns,
+                        incoming.end_tick_ns,
+                    )? {
+                        bail!("resource request attributions overlap");
+                    }
+                }
             }
             for (attribution, encoded) in new {
                 conn.execute(
                     "INSERT INTO resource_request_attribution (
                         attribution_id, operation_id, thread_id, request_digest,
-                        attribution_json, created_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        attribution_json, created_at_ms, start_tick_key, end_tick_key
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     rusqlite::params![
                         attribution.attribution_id.as_str(),
                         attribution.operation_id.as_str(),
@@ -2613,6 +2953,8 @@ impl AccountingDb {
                         attribution.request_digest.as_str(),
                         encoded,
                         now_ms,
+                        format!("{:020}", attribution.interval.start_tick_ns),
+                        format!("{:020}", attribution.interval.end_tick_ns),
                     ],
                 )?;
             }
@@ -2634,11 +2976,87 @@ impl AccountingDb {
             )
             .optional()?;
         encoded
-            .map(|encoded| serde_json::from_str(&encoded).map_err(anyhow::Error::from))
+            .map(|encoded| {
+                if serde_json::from_str::<serde_json::Value>(&encoded)?["version"] != 1 {
+                    bail!("paged resource partition requires the header/page reader");
+                }
+                serde_json::from_str(&encoded).map_err(anyhow::Error::from)
+            })
+            .transpose()
+    }
+
+    /// Bounded v2 readers; the legacy v1 getter never silently materializes a
+    /// resident lifetime into one unbounded allocation.
+    pub fn resource_usage_partition_header(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<PagedResourceUsagePartition>> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let encoded: Option<String> = conn
+            .query_row(
+                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        encoded
+            .map(|encoded| verify_paged_partition_read(&conn, operation_id, &encoded))
+            .transpose()
+    }
+
+    pub fn resource_usage_partition_page(
+        &self,
+        operation_id: &str,
+        page_index: u64,
+    ) -> Result<Option<Vec<ryeos_accounting::ResourceAttributedShare>>> {
+        HexDigest::new(operation_id.to_owned()).map_err(anyhow::Error::msg)?;
+        let conn = self.lock_conn()?;
+        let header: Option<String> = conn
+            .query_row(
+                "SELECT partition_json FROM resource_usage_partition WHERE operation_id=?1",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(header) = header else {
+            return Ok(None);
+        };
+        let verified = verify_paged_partition_read(&conn, operation_id, &header)?;
+        if page_index >= verified.page_count {
+            return Ok(None);
+        }
+        let encoded: Option<String> = conn.query_row(
+            "SELECT page_json FROM resource_usage_partition_page WHERE operation_id=?1 AND page_index=?2",
+            rusqlite::params![operation_id, page_index], |row| row.get(0),
+        ).optional()?;
+        encoded
+            .map(|encoded| {
+                if encoded.len() > RESOURCE_PARTITION_PAGE_BYTES {
+                    bail!("resource partition page exceeds byte bound");
+                }
+                let shares: Vec<ryeos_accounting::ResourceAttributedShare> =
+                    serde_json::from_str(&encoded)?;
+                if shares.len() > RESOURCE_PARTITION_PAGE_ROWS {
+                    bail!("resource partition page exceeds row bound");
+                }
+                Ok(shares)
+            })
             .transpose()
     }
 
     pub fn thread_resource_cost_sample(&self, thread_id: &str) -> Result<ThreadResourceCostSample> {
+        self.thread_resource_cost_sample_page(thread_id, None)
+    }
+
+    /// Exact whole-thread totals plus at most two aggregated components per
+    /// operation in a bounded page. Request-level detail remains available
+    /// through the verified partition page API; no financial evidence is lost.
+    pub fn thread_resource_cost_sample_page(
+        &self,
+        thread_id: &str,
+        after_operation_id: Option<&str>,
+    ) -> Result<ThreadResourceCostSample> {
         let conn = self.lock_conn()?;
         let mut statement = conn.prepare(
             "SELECT operation.operation_id, operation.thread_id, operation.state,
@@ -2655,38 +3073,48 @@ impl AccountingDb {
                        AND attribution.thread_id=?1)
               ORDER BY operation.operation_id",
         )?;
-        let rows = statement
-            .query_map([thread_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = statement.query_map([thread_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })?;
         let mut sample = ThreadResourceCostSample::default();
-        for (
-            operation_id,
-            owner_thread_id,
-            state,
-            budget_charge,
-            partition,
-            owner_gate_id,
-            authority_digest,
-            stable_resource_id,
-            authority_json,
-            usage_json,
-            rated_charge_json,
-        ) in rows
-        {
+        let mut retained_operations = 0;
+        let mut last_retained = None;
+        for row in rows {
+            let (
+                operation_id,
+                owner_thread_id,
+                state,
+                budget_charge,
+                partition,
+                owner_gate_id,
+                authority_digest,
+                stable_resource_id,
+                authority_json,
+                usage_json,
+                rated_charge_json,
+            ) = row?;
+            let after_cursor =
+                after_operation_id.is_none_or(|cursor| operation_id.as_str() > cursor);
+            let retain_components =
+                after_cursor && retained_operations < RESOURCE_COST_COMPONENT_PAGE_OPERATIONS;
+            if retain_components {
+                retained_operations += 1;
+                last_retained = Some(operation_id.clone());
+            } else if after_cursor && sample.components_next_operation_id.is_none() {
+                sample.components_next_operation_id = last_retained.clone();
+            }
             sample.operation_count = sample
                 .operation_count
                 .checked_add(1)
@@ -2723,25 +3151,29 @@ impl AccountingDb {
                     .pending_operation_count
                     .checked_add(1)
                     .context("pending resource operation count overflow")?;
-                sample.components.push(ThreadResourceCostComponent {
-                    operation_id,
-                    owner_gate_id,
-                    authority_digest,
-                    stable_resource_id,
-                    charge_class: authority.tariff.charge_class,
-                    state,
-                    coverage,
-                    rated_spend,
-                    committed_spend,
-                    allocation: if owner_thread_id == thread_id {
-                        ResourceCostAllocation::OwnerOverhead
-                    } else {
-                        ResourceCostAllocation::RequestAttribution
+                push_resource_cost_component(
+                    &mut sample,
+                    retain_components,
+                    ThreadResourceCostComponent {
+                        operation_id,
+                        owner_gate_id,
+                        authority_digest,
+                        stable_resource_id,
+                        charge_class: authority.tariff.charge_class,
+                        state,
+                        coverage,
+                        rated_spend,
+                        committed_spend,
+                        allocation: if owner_thread_id == thread_id {
+                            ResourceCostAllocation::OwnerOverhead
+                        } else {
+                            ResourceCostAllocation::RequestAttribution
+                        },
+                        allocated_spend: "0".to_owned(),
+                        partition_digest: None,
+                        provenance: "daemon_accounting_ledger",
                     },
-                    allocated_spend: "0".to_owned(),
-                    partition_digest: None,
-                    provenance: "daemon_accounting_ledger",
-                });
+                );
                 continue;
             }
             let coverage = usage_json
@@ -2759,46 +3191,88 @@ impl AccountingDb {
                 .transpose()?
                 .map(|charge| charge.to_canonical_string());
             if let Some(partition) = partition {
-                let partition: ResourceUsagePartition = serde_json::from_str(&partition)
-                    .with_context(|| format!("decode resource partition {operation_id}"))?;
-                let partition_digest =
-                    HexDigest::of_canonical_json(&serde_json::to_value(&partition)?)
-                        .map_err(anyhow::Error::msg)?;
-                for share in partition
-                    .attributed
-                    .iter()
-                    .filter(|share| share.thread_id == thread_id)
-                {
-                    sample.attributed_usd_nanos = sample
-                        .attributed_usd_nanos
-                        .checked_add(share.allocated_usd_nanos)
-                        .context("attributed resource cost overflow")?;
-                    sample.components.push(ThreadResourceCostComponent {
-                        operation_id: operation_id.clone(),
-                        owner_gate_id: owner_gate_id.clone(),
-                        authority_digest: authority_digest.clone(),
-                        stable_resource_id: stable_resource_id.clone(),
-                        charge_class: authority.tariff.charge_class,
-                        state,
-                        coverage,
-                        rated_spend: rated_spend.clone(),
-                        committed_spend: committed_spend.clone(),
-                        allocation: ResourceCostAllocation::RequestAttribution,
-                        allocated_spend: UsdNanos::from_nanos(i64::try_from(
-                            share.allocated_usd_nanos,
-                        )?)?
-                        .to_canonical_string(),
-                        partition_digest: Some(partition_digest.as_str().to_owned()),
-                        provenance: "daemon_accounting_ledger",
-                    });
+                let partition_digest = HexDigest::of_canonical_json(&serde_json::from_str::<
+                    serde_json::Value,
+                >(&partition)?)
+                .map_err(anyhow::Error::msg)?;
+                let mut attributed = 0_u64;
+                let mut has_attribution = false;
+                let partition =
+                    visit_resource_partition_shares(&conn, &operation_id, &partition, |share| {
+                        if share.thread_id != thread_id {
+                            return Ok(());
+                        }
+                        sample.attributed_usd_nanos = sample
+                            .attributed_usd_nanos
+                            .checked_add(share.allocated_usd_nanos)
+                            .context("attributed resource cost overflow")?;
+                        attributed = attributed
+                            .checked_add(share.allocated_usd_nanos)
+                            .context("operation attribution overflow")?;
+                        has_attribution = true;
+                        Ok(())
+                    })?;
+                if has_attribution {
+                    push_resource_cost_component(
+                        &mut sample,
+                        retain_components,
+                        ThreadResourceCostComponent {
+                            operation_id: operation_id.clone(),
+                            owner_gate_id: owner_gate_id.clone(),
+                            authority_digest: authority_digest.clone(),
+                            stable_resource_id: stable_resource_id.clone(),
+                            charge_class: authority.tariff.charge_class,
+                            state,
+                            coverage,
+                            rated_spend: rated_spend.clone(),
+                            committed_spend: committed_spend.clone(),
+                            allocation: ResourceCostAllocation::RequestAttribution,
+                            allocated_spend: UsdNanos::from_nanos(i64::try_from(attributed)?)?
+                                .to_canonical_string(),
+                            partition_digest: Some(partition_digest.as_str().to_owned()),
+                            provenance: "daemon_accounting_ledger",
+                        },
+                    );
                 }
                 if owner_thread_id == thread_id {
                     sample.owned_overhead_usd_nanos = sample
                         .owned_overhead_usd_nanos
                         .checked_add(partition.overhead_usd_nanos)
                         .context("resource overhead cost overflow")?;
-                    sample.components.push(ThreadResourceCostComponent {
-                        operation_id: operation_id.clone(),
+                    push_resource_cost_component(
+                        &mut sample,
+                        retain_components,
+                        ThreadResourceCostComponent {
+                            operation_id: operation_id.clone(),
+                            owner_gate_id,
+                            authority_digest,
+                            stable_resource_id,
+                            charge_class: authority.tariff.charge_class,
+                            state,
+                            coverage,
+                            rated_spend,
+                            committed_spend,
+                            allocation: ResourceCostAllocation::OwnerOverhead,
+                            allocated_spend: UsdNanos::from_nanos(i64::try_from(
+                                partition.overhead_usd_nanos,
+                            )?)?
+                            .to_canonical_string(),
+                            partition_digest: Some(partition_digest.as_str().to_owned()),
+                            provenance: "daemon_accounting_ledger",
+                        },
+                    );
+                }
+            } else if owner_thread_id == thread_id {
+                let charge = budget_charge.unwrap_or(0);
+                sample.owned_overhead_usd_nanos = sample
+                    .owned_overhead_usd_nanos
+                    .checked_add(u64::try_from(charge).context("resource charge is negative")?)
+                    .context("resource overhead cost overflow")?;
+                push_resource_cost_component(
+                    &mut sample,
+                    retain_components,
+                    ThreadResourceCostComponent {
+                        operation_id,
                         owner_gate_id,
                         authority_digest,
                         stable_resource_id,
@@ -2808,35 +3282,11 @@ impl AccountingDb {
                         rated_spend,
                         committed_spend,
                         allocation: ResourceCostAllocation::OwnerOverhead,
-                        allocated_spend: UsdNanos::from_nanos(i64::try_from(
-                            partition.overhead_usd_nanos,
-                        )?)?
-                        .to_canonical_string(),
-                        partition_digest: Some(partition_digest.as_str().to_owned()),
+                        allocated_spend: UsdNanos::from_nanos(charge)?.to_canonical_string(),
+                        partition_digest: None,
                         provenance: "daemon_accounting_ledger",
-                    });
-                }
-            } else if owner_thread_id == thread_id {
-                let charge = budget_charge.unwrap_or(0);
-                sample.owned_overhead_usd_nanos = sample
-                    .owned_overhead_usd_nanos
-                    .checked_add(u64::try_from(charge).context("resource charge is negative")?)
-                    .context("resource overhead cost overflow")?;
-                sample.components.push(ThreadResourceCostComponent {
-                    operation_id,
-                    owner_gate_id,
-                    authority_digest,
-                    stable_resource_id,
-                    charge_class: authority.tariff.charge_class,
-                    state,
-                    coverage,
-                    rated_spend,
-                    committed_spend,
-                    allocation: ResourceCostAllocation::OwnerOverhead,
-                    allocated_spend: UsdNanos::from_nanos(charge)?.to_canonical_string(),
-                    partition_digest: None,
-                    provenance: "daemon_accounting_ledger",
-                });
+                    },
+                );
             }
         }
         Ok(sample)
@@ -10671,7 +11121,7 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("read accounting schema version before migration")?;
-    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5) {
+    if application_id != ACCOUNTING_APP_ID || !matches!(version, 1 | 2 | 3 | 4 | 5 | 6) {
         return Ok(());
     }
     let predecessor_sql = match version {
@@ -10681,6 +11131,9 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
         4 => format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}"),
         5 => format!(
             "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}"
+        ),
+        6 => format!(
+            "{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}"
         ),
         _ => unreachable!("version domain checked above"),
     };
@@ -10720,10 +11173,31 @@ fn migrate_accounting_schema(conn: &Connection, path: &Path) -> Result<()> {
             conn.execute_batch(SCHEMA_V5_SQL)
                 .context("apply accounting v5 resource-attribution schema")?;
         }
-        conn.execute_batch(SCHEMA_V6_SQL)
-            .context("apply accounting v6 resource-owner gate schema")?;
-        backfill_resource_owner_accounting_gates(conn)?;
-        backfill_accounting_outbox_event_types(conn)?;
+        if version < 6 {
+            conn.execute_batch(SCHEMA_V6_SQL)
+                .context("apply accounting v6 resource-owner gate schema")?;
+            backfill_resource_owner_accounting_gates(conn)?;
+            backfill_accounting_outbox_event_types(conn)?;
+        }
+        conn.execute_batch(SCHEMA_V7_SQL)
+            .context("apply accounting v7 paged partitions")?;
+        let mut statement = conn.prepare("SELECT attribution_id, attribution_json FROM resource_request_attribution ORDER BY attribution_id")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let attribution: ResourceRequestAttribution =
+                serde_json::from_str(&row.get::<_, String>(1)?)?;
+            attribution.validate().map_err(anyhow::Error::msg)?;
+            if attribution.attribution_id.as_str() != id {
+                bail!("migration attribution identity mismatch");
+            }
+            conn.execute(
+                "UPDATE resource_request_attribution SET start_tick_key=?2, end_tick_key=?3 WHERE attribution_id=?1",
+                rusqlite::params![id, format!("{:020}", attribution.interval.start_tick_ns), format!("{:020}", attribution.interval.end_tick_ns)],
+            )?;
+        }
+        drop(rows);
+        drop(statement);
         backfill_resource_usage_partitions(conn)?;
         assert_current(conn, path).context("validate migrated accounting schema before commit")?;
         Ok(())
@@ -10920,7 +11394,7 @@ fn backfill_resource_usage_partitions(conn: &Connection) -> Result<()> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -10928,6 +11402,16 @@ fn backfill_resource_usage_partitions(conn: &Connection) -> Result<()> {
     for (_operation_id, usage, charge, settled_at_ms) in rows {
         let usage: ResourceUsageObservation = serde_json::from_str(&usage)?;
         let charge: ResourceRatedCharge = serde_json::from_str(&charge)?;
+        // Partial observations intentionally have no usage partition. An
+        // advisory observation remains unsettled with no timestamp; a bounded
+        // observation may already have fenced and settled at its reserved
+        // maximum. Preserve either predecessor meaning without inventing a v7
+        // partition publication coordinate.
+        if usage.coverage == ResourceUsageCoverage::Partial {
+            continue;
+        }
+        let settled_at_ms =
+            settled_at_ms.context("complete resource evidence lacks its settlement timestamp")?;
         let budget_charge: Option<i64> = conn.query_row(
             "SELECT budget_charge_usd_nanos FROM resource_financial_operation WHERE operation_id=?1",
             rusqlite::params![usage.operation_id],
@@ -11391,6 +11875,631 @@ mod tests {
             .as_str()
             .to_owned();
         (owner, gate)
+    }
+
+    #[test]
+    fn f08_cost_components_are_bounded_without_truncating_totals() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = resource_authority(ResourceSpendAuthority::Advisory);
+        let mut expected_ids = BTreeSet::new();
+        for index in 0..130 {
+            let operation_id = digest_of(&format!("paged-cost-{index}"))
+                .as_str()
+                .to_owned();
+            let request_digest = digest_of(&format!("paged-request-{index}"))
+                .as_str()
+                .to_owned();
+            let (owner, gate) = open_resource_owner_gate_for_pid(&db, 1000 + index);
+            db.reserve_resource_operation(ReserveResourceOperationArgs {
+                owner_gate_id: &gate,
+                operation_id: &operation_id,
+                request_digest: &request_digest,
+                execution_budget_id: EXEC,
+                directive_budget_id: None,
+                root_chain_id: "root-chain",
+                audit_chain_root_id: "audit-chain",
+                thread_id: THREAD,
+                launch_generation: GENERATION,
+                owner_incarnation: &owner,
+                authority: &authority,
+                now_ms: NOW,
+            })
+            .unwrap();
+            db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+                .unwrap();
+            let usage = resource_usage(
+                &operation_id,
+                &owner,
+                &authority,
+                ResourceUsageCoverage::Complete,
+            );
+            db.settle_resource_operation(&operation_id, &usage, NOW + 2)
+                .unwrap();
+            db.mark_resource_owner_cleanup_proved(&gate, &owner, true, NOW + 3)
+                .unwrap();
+            db.fence_resource_owner_accounting_gate(&gate, "owner_cleaned", NOW + 3)
+                .unwrap();
+            expected_ids.insert(operation_id);
+        }
+        let first = db.thread_resource_cost_sample(THREAD).unwrap();
+        assert_eq!(first.operation_count, 130);
+        assert_eq!(
+            first.components.len(),
+            RESOURCE_COST_COMPONENT_PAGE_OPERATIONS
+        );
+        let second = db
+            .thread_resource_cost_sample_page(THREAD, first.components_next_operation_id.as_deref())
+            .unwrap();
+        assert_eq!(second.operation_count, first.operation_count);
+        assert_eq!(second.attributed_usd_nanos, first.attributed_usd_nanos);
+        assert_eq!(
+            second.owned_overhead_usd_nanos,
+            first.owned_overhead_usd_nanos
+        );
+        assert_eq!(second.components.len(), 2);
+        assert!(second.components_next_operation_id.is_none());
+        let actual_ids = first
+            .components
+            .iter()
+            .chain(&second.components)
+            .map(|item| item.operation_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_ids, expected_ids);
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn f08_attribution_admission_uses_bounded_index_neighbors_at_high_cardinality() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = resource_authority(ResourceSpendAuthority::Advisory);
+        let operation_id = digest_of("bounded-attribution-admission")
+            .as_str()
+            .to_owned();
+        let request_digest = digest_of("bounded-attribution-request").as_str().to_owned();
+        let (owner, gate) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &gate,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+
+        let attribution = |start_tick_ns: u64, end_tick_ns: u64, tag: &str| {
+            ResourceRequestAttribution {
+                version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+                attribution_id: digest_of("placeholder"),
+                operation_id: HexDigest::new(operation_id.clone()).unwrap(),
+                thread_id: "T-attributed".to_owned(),
+                request_digest: digest_of(tag),
+                interval: ryeos_accounting::ResourceUsageInterval {
+                    start_tick_ns,
+                    end_tick_ns,
+                },
+            }
+            .sealed()
+            .unwrap()
+        };
+
+        const RETAINED: u64 = 8_192;
+        let retained = (0..RETAINED)
+            .rev()
+            .map(|index| attribution(index * 4, index * 4 + 2, &format!("retained-{index}")))
+            .collect::<Vec<_>>();
+        db.record_resource_request_attributions(&retained, NOW + 2)
+            .unwrap();
+
+        // Both overlap probes are LIMIT-1 covering-index seeks. This guards
+        // the admission work bound independently of the retained cardinality.
+        let conn = db.lock_conn().unwrap();
+        for sql in [
+            RESOURCE_ATTRIBUTION_PREDECESSOR_SQL,
+            RESOURCE_ATTRIBUTION_SUCCESSOR_SQL,
+        ] {
+            let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let details = plan
+                .query_map(
+                    rusqlite::params![operation_id, format!("{:020}", RETAINED * 2)],
+                    |row| row.get::<_, String>(3),
+                )
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(details.iter().any(|detail| {
+                detail.contains("USING COVERING INDEX idx_resource_attribution_chronology")
+            }));
+        }
+        drop(conn);
+
+        let middle = RETAINED / 2;
+        let exact_gap = attribution(middle * 4 + 2, middle * 4 + 4, "exact-gap");
+        assert!(
+            db.record_resource_request_attribution(&exact_gap, NOW + 3)
+                .unwrap()
+        );
+        assert!(
+            !db.record_resource_request_attribution(&exact_gap, NOW + 3)
+                .unwrap()
+        );
+
+        let overlap = attribution(middle * 4 + 1, middle * 4 + 3, "middle-overlap");
+        assert!(
+            db.record_resource_request_attribution(&overlap, NOW + 4)
+                .unwrap_err()
+                .to_string()
+                .contains("overlap")
+        );
+
+        // One retained conflict refuses the complete batch, including an
+        // otherwise valid tail row; that row remains independently insertable.
+        let tail = attribution(RETAINED * 4 + 2, RETAINED * 4 + 4, "tail");
+        assert!(
+            db.record_resource_request_attributions(&[overlap, tail.clone()], NOW + 5)
+                .unwrap_err()
+                .to_string()
+                .contains("overlap")
+        );
+        assert!(
+            db.record_resource_request_attribution(&tail, NOW + 6)
+                .unwrap()
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn f08_paged_resource_settlement_conserves_and_reopens() {
+        for advisory in [false, true] {
+            for count in [0_u64, 1, 1024, 1025, 4097] {
+                let (dir, db) = setup();
+                birth(&db, EXEC, None, if advisory { None } else { Some("1") });
+                open_gate(&db, THREAD, GENERATION, EXEC);
+                let authority = if advisory {
+                    resource_authority(ResourceSpendAuthority::Advisory)
+                } else {
+                    bounded_resource_authority()
+                };
+                let operation_id = digest_of("f08-operation").as_str().to_owned();
+                let request_digest = digest_of("f08-request").as_str().to_owned();
+                let (owner, gate) = open_resource_owner_gate(&db);
+                db.reserve_resource_operation(ReserveResourceOperationArgs {
+                    owner_gate_id: &gate,
+                    operation_id: &operation_id,
+                    request_digest: &request_digest,
+                    execution_budget_id: EXEC,
+                    directive_budget_id: None,
+                    root_chain_id: "root-chain",
+                    audit_chain_root_id: "audit-chain",
+                    thread_id: THREAD,
+                    launch_generation: GENERATION,
+                    owner_incarnation: &owner,
+                    authority: &authority,
+                    now_ms: NOW,
+                })
+                .unwrap();
+                db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+                    .unwrap();
+                let mut attributions = (0..count)
+                    .rev()
+                    .map(|index| {
+                        ResourceRequestAttribution {
+                            version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+                            attribution_id: digest_of("placeholder"),
+                            operation_id: HexDigest::new(operation_id.clone()).unwrap(),
+                            thread_id: "T-attributed".to_owned(),
+                            request_digest: digest_of("repeated-input"),
+                            interval: ryeos_accounting::ResourceUsageInterval {
+                                start_tick_ns: 10 + index * 100_003,
+                                end_tick_ns: 10 + index * 100_003 + 97_001,
+                            },
+                        }
+                        .sealed()
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                if count > 1 {
+                    // Equal starts must be ordered by end BEFORE digest.
+                    // Force the positive interval's digest to sort first so
+                    // the previous start/id ordering fails deterministically.
+                    let positive_id = attributions.last().unwrap().attribution_id.clone();
+                    let zero = &mut attributions[count as usize - 2];
+                    zero.interval.start_tick_ns = 10;
+                    zero.interval.end_tick_ns = 10;
+                    for salt in 0..10_000 {
+                        zero.request_digest = digest_of(&format!("zero-{salt}"));
+                        *zero = zero.clone().sealed().unwrap();
+                        if zero.attribution_id.as_str() > positive_id.as_str() {
+                            break;
+                        }
+                    }
+                    assert!(zero.attribution_id.as_str() > positive_id.as_str());
+                }
+                db.record_resource_request_attributions(&attributions, NOW + 2)
+                    .unwrap();
+                let usage = resource_usage(
+                    &operation_id,
+                    &owner,
+                    &authority,
+                    ResourceUsageCoverage::Complete,
+                );
+                if count > 1024 {
+                    // F08: fail after the first page was staged, then prove
+                    // partition publication and monetary settlement rolled
+                    // back together. The exact retained rows remain retryable.
+                    let mut truncated = usage.clone();
+                    truncated.intervals[0].end_tick_ns = 10 + 300 * 100_003;
+                    let before = db.account_snapshot(EXEC).unwrap()[0].held;
+                    assert!(
+                        db.settle_resource_operation(&operation_id, &truncated, NOW + 3)
+                            .is_err()
+                    );
+                    assert_eq!(db.account_snapshot(EXEC).unwrap()[0].held, before);
+                    let conn = db.lock_conn().unwrap();
+                    let pages: u64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM resource_usage_partition_page",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(pages, 0);
+                }
+                let settled = db
+                    .settle_resource_operation(&operation_id, &usage, NOW + 3)
+                    .unwrap();
+                assert!(
+                    db.settle_resource_operation(&operation_id, &usage, NOW + 4)
+                        .unwrap()
+                        .replayed
+                );
+                let (summary, shares) = if count <= 1024 {
+                    let partition = db.resource_usage_partition(&operation_id).unwrap().unwrap();
+                    (partition.clone(), partition.attributed)
+                } else {
+                    assert!(db.resource_usage_partition(&operation_id).is_err());
+                    let header = db
+                        .resource_usage_partition_header(&operation_id)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(header.attribution_count, count);
+                    let mut shares = Vec::new();
+                    for page in 0..header.page_count {
+                        let items = db
+                            .resource_usage_partition_page(&operation_id, page)
+                            .unwrap()
+                            .unwrap();
+                        assert!(items.len() <= RESOURCE_PARTITION_PAGE_ROWS);
+                        shares.extend(items);
+                    }
+                    (header.summary, shares)
+                };
+                assert_eq!(shares.len() as u64, count);
+                assert_eq!(
+                    shares
+                        .iter()
+                        .map(|share| share.observed_nanoseconds)
+                        .sum::<u64>()
+                        + summary.overhead_nanoseconds,
+                    1_500_000_000
+                );
+                assert_eq!(
+                    shares
+                        .iter()
+                        .map(|share| share.allocated_usd_nanos)
+                        .sum::<u64>()
+                        + summary.overhead_usd_nanos,
+                    settled
+                        .budget_charge
+                        .map(|v| v.as_nanos() as u64)
+                        .unwrap_or(0)
+                );
+                assert_eq!(db.account_snapshot(EXEC).unwrap()[0].held, UsdNanos::ZERO);
+                let sample = db.thread_resource_cost_sample("T-attributed").unwrap();
+                assert_eq!(sample.components.len(), usize::from(count > 0));
+                assert_eq!(
+                    sample.attributed_usd_nanos,
+                    shares
+                        .iter()
+                        .map(|share| share.allocated_usd_nanos)
+                        .sum::<u64>()
+                );
+                assert_healthy_verify(&db);
+                drop(db);
+                let reopened = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+                assert_healthy_verify(&reopened);
+                assert!(
+                    reopened
+                        .settle_resource_operation(&operation_id, &usage, NOW + 5)
+                        .unwrap()
+                        .replayed
+                );
+                if count > 1024 {
+                    let conn = reopened.lock_conn().unwrap();
+                    conn.execute("UPDATE resource_usage_partition_page SET page_json='[]' WHERE page_index=1", []).unwrap();
+                    assert!(validate_resource_usage_partitions(&conn).is_err());
+                    drop(conn);
+                    assert!(
+                        reopened
+                            .resource_usage_partition_header(&operation_id)
+                            .is_err()
+                    );
+                    assert!(
+                        reopened
+                            .resource_usage_partition_page(&operation_id, 0)
+                            .is_err()
+                    );
+                    assert!(
+                        reopened
+                            .thread_resource_cost_sample("T-attributed")
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn f08_exact_v6_migration_preserves_unsettled_lifetime_evidence() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, None);
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = bounded_resource_authority();
+        let operation_id = digest_of("legacy").as_str().to_owned();
+        let request_digest = digest_of("legacy-request").as_str().to_owned();
+        let (owner, gate) = open_resource_owner_gate(&db);
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &gate,
+            operation_id: &operation_id,
+            request_digest: &request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&operation_id, &request_digest, NOW + 1)
+            .unwrap();
+        let advisory_authority = resource_authority(ResourceSpendAuthority::Advisory);
+        let advisory_operation_id = digest_of("legacy-partial-advisory").as_str().to_owned();
+        let advisory_request_digest = digest_of("legacy-partial-advisory-request")
+            .as_str()
+            .to_owned();
+        db.reserve_resource_operation(ReserveResourceOperationArgs {
+            owner_gate_id: &gate,
+            operation_id: &advisory_operation_id,
+            request_digest: &advisory_request_digest,
+            execution_budget_id: EXEC,
+            directive_budget_id: None,
+            root_chain_id: "root-chain",
+            audit_chain_root_id: "audit-chain",
+            thread_id: THREAD,
+            launch_generation: GENERATION,
+            owner_incarnation: &owner,
+            authority: &advisory_authority,
+            now_ms: NOW,
+        })
+        .unwrap();
+        db.issue_resource_operation(&advisory_operation_id, &advisory_request_digest, NOW + 1)
+            .unwrap();
+        let mut advisory_partial = resource_usage(
+            &advisory_operation_id,
+            &owner,
+            &advisory_authority,
+            ResourceUsageCoverage::Partial,
+        );
+        advisory_partial.intervals.clear();
+        let partial_settlement = db
+            .settle_resource_operation(&advisory_operation_id, &advisory_partial, NOW + 2)
+            .unwrap();
+        assert_eq!(
+            partial_settlement.state,
+            ResourceBudgetState::AdvisoryIssued
+        );
+        let legacy = Connection::open_in_memory().unwrap();
+        legacy.execute_batch(&format!("{SCHEMA_V1_SQL}\n{SCHEMA_V2_SQL}\n{SCHEMA_V3_SQL}\n{SCHEMA_V4_SQL}\n{SCHEMA_V5_SQL}\n{SCHEMA_V6_SQL}")).unwrap();
+        legacy
+            .pragma_update(None, "application_id", ACCOUNTING_APP_ID)
+            .unwrap();
+        // A v6 predecessor may contain outstanding owners. Unlike the v5
+        // owner-gate migration, v7 must not require them to settle first.
+        let attribution = ResourceRequestAttribution {
+            version: ryeos_accounting::RESOURCE_REQUEST_ATTRIBUTION_VERSION,
+            attribution_id: digest_of("placeholder"),
+            operation_id: digest_of("legacy"),
+            thread_id: "thread".to_owned(),
+            request_digest: digest_of("request"),
+            interval: ryeos_accounting::ResourceUsageInterval {
+                start_tick_ns: u64::MAX - 2,
+                end_tick_ns: u64::MAX - 1,
+            },
+        }
+        .sealed()
+        .unwrap();
+        let attributions = (0..1025_u64)
+            .map(|index| {
+                let mut item = attribution.clone();
+                item.interval.start_tick_ns -= 2 * index;
+                item.interval.end_tick_ns -= 2 * index;
+                item.sealed().unwrap()
+            })
+            .collect::<Vec<_>>();
+        db.record_resource_request_attributions(&attributions, NOW + 2)
+            .unwrap();
+        // Project genuine ledger testimony into the exact predecessor schema,
+        // excluding only the new v7 column/table. No malformed financial row
+        // or invented authority is needed to exercise migration.
+        legacy.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        let source = db.lock_conn().unwrap();
+        let mut tables = legacy
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap();
+        let names = tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(tables);
+        for name in names {
+            let mut info = legacy
+                .prepare(&format!("PRAGMA table_info({name})"))
+                .unwrap();
+            let columns = info
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            drop(info);
+            let list = columns.join(",");
+            let slots = vec!["?"; columns.len()].join(",");
+            let mut select = source
+                .prepare(&format!("SELECT {list} FROM {name}"))
+                .unwrap();
+            let mut rows = select.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                let values = (0..columns.len())
+                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                legacy
+                    .execute(
+                        &format!("INSERT INTO {name}({list}) VALUES({slots})"),
+                        rusqlite::params_from_iter(values),
+                    )
+                    .unwrap();
+            }
+        }
+        drop(source);
+        legacy.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate_accounting_schema(&legacy, Path::new("v6-test")).unwrap();
+        assert_current(&legacy, Path::new("v7-test")).unwrap();
+        let key: String = legacy
+            .query_row(
+                "SELECT start_tick_key FROM resource_request_attribution ORDER BY start_tick_key DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(key, format!("{:020}", u64::MAX - 2));
+        let state: String = legacy
+            .query_row(
+                "SELECT state FROM resource_financial_operation WHERE operation_id=?1",
+                [&operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "issued");
+        let (advisory_state, advisory_settled_at_ms): (String, Option<i64>) = legacy
+            .query_row(
+                "SELECT state, settled_at_ms FROM resource_financial_operation WHERE operation_id=?1",
+                [&advisory_operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(advisory_state, "advisory_issued");
+        assert_eq!(advisory_settled_at_ms, None);
+        let advisory_partitions: u64 = legacy
+            .query_row(
+                "SELECT COUNT(*) FROM resource_usage_partition WHERE operation_id=?1",
+                [&advisory_operation_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(advisory_partitions, 0);
+        validate_resource_financial_operations(&legacy).unwrap();
+        validate_resource_usage_partitions(&legacy).unwrap();
+        // Exercise actual stopped-ledger upgrade, settlement and reopen with
+        // the original independent financial anchor, not just SQL projection.
+        {
+            let source = db.lock_conn().unwrap();
+            source
+                .execute_batch(
+                    "DROP INDEX idx_resource_attribution_chronology;
+                DROP TABLE resource_usage_partition_page;
+                ALTER TABLE resource_request_attribution DROP COLUMN start_tick_key;
+                ALTER TABLE resource_request_attribution DROP COLUMN end_tick_key;
+                PRAGMA user_version=6;",
+                )
+                .unwrap();
+        }
+        drop(db);
+        let upgraded = AccountingDb::open_at_runtime_state_dir(_dir.path()).unwrap();
+        assert_healthy_verify(&upgraded);
+        let mut usage = resource_usage(
+            &operation_id,
+            &owner,
+            &authority,
+            ResourceUsageCoverage::Complete,
+        );
+        usage.intervals = vec![ryeos_accounting::ResourceUsageInterval {
+            start_tick_ns: u64::MAX - 2050,
+            end_tick_ns: u64::MAX - 1,
+        }];
+        upgraded
+            .settle_resource_operation(&operation_id, &usage, NOW + 3)
+            .unwrap();
+        let advisory_complete = resource_usage(
+            &advisory_operation_id,
+            &owner,
+            &advisory_authority,
+            ResourceUsageCoverage::Complete,
+        );
+        let advisory_corrected = upgraded
+            .settle_resource_operation(&advisory_operation_id, &advisory_complete, NOW + 3)
+            .unwrap();
+        assert_eq!(
+            advisory_corrected.state,
+            ResourceBudgetState::AdvisoryReconciled
+        );
+        assert!(!advisory_corrected.replayed);
+        assert!(
+            upgraded
+                .resource_usage_partition(&advisory_operation_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            upgraded
+                .resource_usage_partition_header(&operation_id)
+                .unwrap()
+                .unwrap()
+                .attribution_count,
+            1025
+        );
+        drop(upgraded);
+        let reopened = AccountingDb::open_at_runtime_state_dir(_dir.path()).unwrap();
+        assert_healthy_verify(&reopened);
+        assert!(
+            reopened
+                .settle_resource_operation(&operation_id, &usage, NOW + 4)
+                .unwrap()
+                .replayed
+        );
+        assert!(
+            reopened
+                .settle_resource_operation(&advisory_operation_id, &advisory_complete, NOW + 4,)
+                .unwrap()
+                .replayed
+        );
     }
 
     #[test]

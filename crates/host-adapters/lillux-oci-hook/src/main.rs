@@ -295,16 +295,17 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
     if read_setup_transaction(&host_state)?.is_some_and(|transaction| transaction.open) {
         bail!("an interrupted contained OCI setup requires recovery");
     }
-    let init_pid = state.init_pid().map_err(anyhow::Error::msg)?;
     let intent = lillux::OciLifecycleIntent::observe(&state).map_err(anyhow::Error::msg)?;
     intent.require_live().map_err(anyhow::Error::msg)?;
-    let observed_app_path = PathBuf::from(format!("/proc/{init_pid}/root{APP_ROOT}"));
-    let app_root = lillux::PinnedDirectory::open(&observed_app_path)?
-        .context("contained OCI app root is absent through the init root")?;
-    let binding_directory = lillux::PinnedDirectory::open(Path::new(&format!(
-        "/proc/{init_pid}/root{BINDING_DIRECTORY}"
-    )))?
-    .context("contained OCI binding directory is absent through the init root")?;
+    let process_root = intent.open_process_root().map_err(anyhow::Error::msg)?;
+    let app_root = process_root
+        .open_directory(Path::new(APP_ROOT.trim_start_matches('/')))
+        .map_err(anyhow::Error::msg)
+        .context("contained OCI app root is absent through the exact init root")?;
+    let binding_directory = process_root
+        .open_directory(Path::new(BINDING_DIRECTORY.trim_start_matches('/')))
+        .map_err(anyhow::Error::msg)
+        .context("contained OCI binding directory is absent through the exact init root")?;
     binding_directory.require_owner(0)?;
     intent.require_live().map_err(anyhow::Error::msg)?;
     lillux::ControllerAccount::unix(CONTROLLER_UID, CONTROLLER_GID)
@@ -352,14 +353,25 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
     setup.open = false;
     write_setup_transaction(&host_state, &setup)?;
     let account = lillux::ControllerAccount::unix(CONTROLLER_UID, CONTROLLER_GID);
-    let (process_scopes, lifecycle) =
-        lillux::ProcessScopeConfiguration::prepare_oci_hook(&state, &account, &record.intent)
-            .map_err(anyhow::Error::msg)?;
+    let (process_scopes, lifecycle) = lillux::ProcessScopeConfiguration::prepare_oci_hook(
+        &state,
+        &account,
+        &record.intent,
+        &process_root,
+    )
+    .map_err(anyhow::Error::msg)?;
     record.phase = LifecyclePhase::Prepared;
     record.lifecycle = Some(lifecycle.clone());
     write_record(&host_state, &lease_name, &record)?;
     write_record(&host_state, &container_name, &record)?;
-    lillux::ProcessScopeConfiguration::enter_oci_mount_namespace(&state, &record.intent)
+    lillux::ProcessScopeConfiguration::enter_oci_mount_namespace(
+        &state,
+        &record.intent,
+        &process_root,
+    )
+    .map_err(anyhow::Error::msg)?;
+    process_root
+        .require_retained_lifetime()
         .map_err(anyhow::Error::msg)?;
     let binding = ryeos_node::host_runtime::HostRuntimeBinding::capture_oci_observed(
         &app_root,
@@ -380,6 +392,9 @@ fn prestart(state: lillux::OciHookState) -> Result<()> {
         &bytes,
         0o600,
     )?;
+    process_root
+        .require_retained_lifetime()
+        .map_err(anyhow::Error::msg)?;
     record.phase = LifecyclePhase::Active;
     record.binding_digest = Some(digest);
     write_record(&host_state, &lease_name, &record)?;

@@ -10,6 +10,8 @@ interface ScrollSnapshot {
   readonly atTail: boolean;
 }
 
+const modalReturnFocus = new WeakMap<Element, FocusSnapshot>();
+
 export interface BrowserPresentationSnapshot {
   readonly focus: FocusSnapshot | null;
   readonly scroll: ReadonlyMap<string, ScrollSnapshot>;
@@ -44,13 +46,26 @@ export function restoreBrowserPresentation(root: Element, snapshot: BrowserPrese
     node.scrollTop = state.atTail ? node.scrollHeight : state.top;
     node.scrollLeft = state.left;
   }
-  if (!snapshot.focus) return;
-  const target = root.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(snapshot.focus.key)}"]`);
+  if (root.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"]')) {
+    if (snapshot.focus && !snapshot.focus.key.startsWith("overlay:")) {
+      modalReturnFocus.set(root, snapshot.focus);
+    }
+    return;
+  }
+  let focus = snapshot.focus ?? modalReturnFocus.get(root) ?? null;
+  if (!focus) return;
+  let target = root.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(focus.key)}"]`);
+  if (!target) {
+    focus = modalReturnFocus.get(root) ?? null;
+    if (!focus) return;
+    target = root.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(focus.key)}"]`);
+  }
   target?.focus({ preventScroll: true });
   if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-    const start = snapshot.focus.selectionStart;
-    if (start !== null) target.setSelectionRange(start, snapshot.focus.selectionEnd ?? start);
+    const start = focus.selectionStart;
+    if (start !== null) target.setSelectionRange(start, focus.selectionEnd ?? start);
   }
+  if (target) modalReturnFocus.delete(root);
 }
 
 function selection(element: Element | null, field: "selectionStart" | "selectionEnd"): number | null {

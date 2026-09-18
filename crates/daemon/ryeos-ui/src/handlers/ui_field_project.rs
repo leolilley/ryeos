@@ -54,15 +54,23 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     // Unlike the existing operator topology endpoint, field/project has no
     // project-path parameter. Its authority comes only from the admitted UI
     // session. Project-authored view data can never select a host path.
-    let project_root = caller
-        .project_path()?
-        .map(|path| path.to_string_lossy().into_owned());
+    let project_access = caller.project_access()?;
+    let project_root = project_access
+        .as_ref()
+        .map(|access| access.path().to_string_lossy().into_owned());
+    let project_query_identity = caller.project_query_identity()?;
     let root_surface = match &caller {
         crate::seat_auth::SeatCaller::Session(session) => Some(session.surface_ref.clone()),
         crate::seat_auth::SeatCaller::Operator { .. } => None,
     };
-    let topology =
-        super::ui_graph_topology::build_topology(&state, project_root.clone(), root_surface);
+    let topology = super::ui_graph_topology::build_topology(
+        &state,
+        project_root.clone(),
+        project_query_identity
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
+        root_surface,
+    );
     let plan_context = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
@@ -114,9 +122,14 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             )),
         }
     }
-    let project_identity = project_root
+    let project_identity = project_query_identity
         .as_deref()
-        .map(|path| format!("project:{}", lillux::sha256_hex(path.as_bytes())))
+        .map(|path| {
+            format!(
+                "project:{}",
+                lillux::sha256_hex(path.to_string_lossy().as_bytes())
+            )
+        })
         .unwrap_or_else(|| "project:node".to_string());
     let admission = project_root.as_deref().map(|root| {
         ryeos_app::admission_events::read_admission_events(

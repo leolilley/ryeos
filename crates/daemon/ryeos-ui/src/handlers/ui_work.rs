@@ -68,7 +68,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_LIMIT);
     let project_root = match params.get("project").and_then(Value::as_str) {
-        Some("current") => caller.project_path()?,
+        Some("current") => caller.project_query_identity()?,
         _ => None,
     };
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
@@ -207,7 +207,7 @@ pub async fn handle_attention(
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_LIMIT);
     let project_root = match params.get("project").and_then(Value::as_str) {
-        Some("current") => caller.project_path()?,
+        Some("current") => caller.project_query_identity()?,
         _ => None,
     };
     let allowed_placements = if project_root.is_some() {
@@ -308,7 +308,7 @@ pub async fn handle_approval_history(
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_LIMIT);
     let project_root = match params.get("project").and_then(Value::as_str) {
-        Some("current") => caller.project_path()?,
+        Some("current") => caller.project_query_identity()?,
         _ => None,
     };
     let allowed_placements = if project_root.is_some() {

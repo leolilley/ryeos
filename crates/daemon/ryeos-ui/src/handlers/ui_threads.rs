@@ -110,7 +110,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
         exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
-        project_root: project_filter(&params, caller.project_path()?.as_deref())?,
+        project_root: project_filter(&params, caller.project_query_identity()?.as_deref())?,
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
@@ -433,6 +433,29 @@ pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_project_filter_uses_retained_canonical_identity() {
+        let retained = Path::new("/canonical/project");
+        let filter = project_filter(
+            &serde_json::json!({
+                "project": "current",
+                "project_path": "/untrusted/alternate"
+            }),
+            Some(retained),
+        )
+        .expect("current project filter");
+        assert_eq!(filter.as_deref(), Some(retained));
+    }
+
+    #[test]
+    fn projectless_current_filter_does_not_infer_a_project() {
+        assert_eq!(
+            project_filter(&serde_json::json!({"project": "current"}), None)
+                .expect("projectless filter"),
+            None
+        );
+    }
 
     #[test]
     fn execution_meta_from_full_audit_record() {

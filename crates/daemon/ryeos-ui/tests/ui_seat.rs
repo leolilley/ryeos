@@ -3,6 +3,7 @@ use test_state::{build_test_state_with_live_bundles, launch_context};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::state::get_ui_state;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 // Exercise the same verifier + canonical service invoker used by the signed
@@ -82,6 +83,36 @@ fn handler_context(session_id: &str) -> HandlerContext {
         vec!["ui.read".into()],
         false,
     )
+}
+
+fn append_request(
+    opened: &Value,
+    operation_id: &str,
+    first_engine_seq: u64,
+    payloads: &[Value],
+) -> Value {
+    let events = payloads
+        .iter()
+        .enumerate()
+        .map(|(offset, payload)| {
+            json!({
+                "engine_seq": first_engine_seq + offset as u64,
+                "event_type": "seat.facet",
+                "payload": payload,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload_digest = ryeos_ui::handlers::ui_seat::seat_payload_digest(&json!(events)).unwrap();
+    json!({
+        "thread_id": opened["thread_id"],
+        "producer_incarnation": opened["producer_incarnation"],
+        "operation_id": operation_id,
+        "first_engine_seq": first_engine_seq,
+        "last_engine_seq": first_engine_seq + payloads.len() as u64 - 1,
+        "event_count": payloads.len(),
+        "payload_digest": payload_digest,
+        "events": events,
+    })
 }
 
 #[tokio::test]
@@ -226,13 +257,12 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 
     let appended = invoke_seat_route(
         &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
-        serde_json::json!({
-            "thread_id": thread_id,
-            "events": [{
-                "event_type": "seat.facet",
-                "payload": { "seq": 0, "payload": { "key": "selection", "value": { "item": "T-1" } } }
-            }]
-        }),
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000001",
+            0,
+            &[json!({ "key": "selection", "value": { "item": "T-1" } })],
+        ),
         ctx.clone(),
         state.clone(),
     )
@@ -264,4 +294,246 @@ async fn ui_seat_append_replay_and_close_round_trip() {
     .await
     .expect("close seat");
     assert_eq!(closed["status"], "completed");
+}
+
+#[tokio::test]
+async fn ui_seat_append_is_exactly_idempotent_and_rejects_contradictions_and_gaps() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let (session_id, token) = get_ui_state(&state)
+        .unwrap()
+        .browser_sessions
+        .mint_token(session_context(None));
+    assert_eq!(
+        get_ui_state(&state)
+            .unwrap()
+            .browser_sessions
+            .consume_launch_token(&token),
+        Some(session_id.clone())
+    );
+    let ctx = handler_context(&session_id);
+    let state = Arc::new(state);
+    let opened = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        json!({}),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("open seat");
+    assert_eq!(opened["next_engine_seq"], "0");
+
+    let operation_id = "00000000-0000-4000-8000-000000000002";
+    let request = append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]);
+    // Cross-language vector for the browser/server typed digest protocol.
+    assert_eq!(
+        request["payload_digest"],
+        "40442791210ae66e4e67d762a8102f444250935db90a1976d743cb9952eed572"
+    );
+    let first = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        request.clone(),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("first append");
+    let replayed_ack = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        request,
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("lost-response-equivalent exact replay");
+    assert_eq!(replayed_ack, first);
+
+    let replay = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::REPLAY_DESCRIPTOR,
+        json!({ "chain_root_id": opened["thread_id"] }),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("replay seat");
+    assert_eq!(replay["events"].as_array().unwrap().len(), 1);
+
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            operation_id,
+            0,
+            &[json!({ "key": "selection", "value": "different" })],
+        ),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect_err("operation identity must bind the exact request");
+
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000003",
+            2,
+            &[json!({ "key": "selection", "value": "gap" })],
+        ),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect_err("sequence gaps must be refused");
+
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000007",
+            0,
+            &[json!({ "key": "selection", "value": "overlap" })],
+        ),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect_err("sequence overlaps must be refused");
+
+    let mut malformed = append_request(
+        &opened,
+        "00000000-0000-4000-8000-000000000004",
+        1,
+        &[json!({ "key": "selection", "value": "bad digest" })],
+    );
+    malformed["payload_digest"] = json!("not-a-digest");
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        malformed,
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect_err("malformed digest must be refused");
+
+    let float_append = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &opened,
+            "00000000-0000-4000-8000-000000000006",
+            1,
+            &[json!({ "key": "fraction", "value": 0.000001 })],
+        ),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("typed digest accepts a float across JS/serde exponent spelling thresholds");
+    assert_eq!(float_append["appended"], 1);
+
+    let rotated = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        json!({}),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("rotate the producer after the accepted operation");
+    assert_ne!(
+        rotated["producer_incarnation"],
+        opened["producer_incarnation"]
+    );
+    let rotated_replay = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("an accepted operation remains exactly replayable after producer rotation");
+    assert_eq!(rotated_replay, first);
+
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::CLOSE_DESCRIPTOR,
+        json!({ "thread_id": opened["thread_id"] }),
+        ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("close seat after committed operation");
+    let settled_replay = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(&opened, operation_id, 0, &[json!({ "é": "😀", "a": "𐀀" })]),
+        ctx,
+        state,
+    )
+    .await
+    .expect("durable receipt remains replayable after seat settlement");
+    assert_eq!(settled_replay, first);
+}
+
+#[tokio::test]
+async fn ui_seat_new_open_invalidates_stale_and_foreign_producers() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let sessions = &get_ui_state(&state).unwrap().browser_sessions;
+    let (owner_id, owner_token) = sessions.mint_token(session_context(None));
+    let (foreign_id, foreign_token) = sessions.mint_token(session_context(None));
+    assert_eq!(
+        sessions.consume_launch_token(&owner_token),
+        Some(owner_id.clone())
+    );
+    assert_eq!(
+        sessions.consume_launch_token(&foreign_token),
+        Some(foreign_id.clone())
+    );
+    let state = Arc::new(state);
+    let owner_ctx = handler_context(&owner_id);
+    let first = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        json!({}),
+        owner_ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("open seat");
+    let second = invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR,
+        json!({}),
+        owner_ctx.clone(),
+        state.clone(),
+    )
+    .await
+    .expect("reattach seat");
+    assert_ne!(
+        first["producer_incarnation"],
+        second["producer_incarnation"]
+    );
+
+    let stale_request = append_request(
+        &first,
+        "00000000-0000-4000-8000-000000000005",
+        0,
+        &[json!({ "key": "selection", "value": "stale" })],
+    );
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        stale_request,
+        owner_ctx,
+        state.clone(),
+    )
+    .await
+    .expect_err("previous open's producer must be stale");
+
+    invoke_seat_route(
+        &ryeos_ui::handlers::ui_seat::APPEND_DESCRIPTOR,
+        append_request(
+            &second,
+            "00000000-0000-4000-8000-000000000006",
+            0,
+            &[json!({ "key": "selection", "value": "foreign" })],
+        ),
+        handler_context(&foreign_id),
+        state,
+    )
+    .await
+    .expect_err("foreign session must not append an owned seat");
 }

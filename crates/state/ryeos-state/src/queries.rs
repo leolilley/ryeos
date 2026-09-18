@@ -1797,6 +1797,80 @@ pub fn latest_thread_events(
     Ok(events)
 }
 
+/// Return the newest event of one exact type on a thread. The event chain is
+/// authoritative; this indexed projection is only the bounded lookup path.
+pub fn latest_thread_event_by_type(
+    db: &ProjectionDb,
+    thread_id: &str,
+    event_type: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE thread_id = ?1 AND event_type = ?2 \
+             ORDER BY thread_seq DESC LIMIT 1",
+            rusqlite::params![thread_id, event_type],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest thread event by type")
+}
+
+pub fn latest_thread_event_by_type_prefix(
+    db: &ProjectionDb,
+    thread_id: &str,
+    event_type_prefix: &str,
+) -> anyhow::Result<Option<EventRow>> {
+    db.connection()
+        .query_row(
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                    event_type, durability, ts, prev_chain_event_hash, \
+                    prev_thread_event_hash, payload \
+             FROM events \
+             WHERE thread_id = ?1 AND substr(event_type, 1, length(?2)) = ?2 \
+             ORDER BY thread_seq DESC LIMIT 1",
+            rusqlite::params![thread_id, event_type_prefix],
+            EventRow::from_row,
+        )
+        .optional()
+        .context("query latest thread event by type prefix")
+}
+
+/// Look up at most two operation-addressed control events. Returning two lets
+/// the authority owner refuse a contradictory historical duplicate instead
+/// of arbitrarily selecting one projection row.
+pub fn thread_events_by_type_operation_id(
+    db: &ProjectionDb,
+    thread_id: &str,
+    event_type: &str,
+    operation_id: &str,
+) -> anyhow::Result<Vec<EventRow>> {
+    let mut stmt = db
+        .connection()
+        .prepare(
+            "SELECT e.event_id, e.event_hash, e.chain_root_id, e.chain_seq, e.thread_id, \
+                    e.thread_seq, e.event_type, e.durability, e.ts, \
+                    e.prev_chain_event_hash, e.prev_thread_event_hash, e.payload \
+             FROM event_operation_index AS operation \
+             JOIN events AS e ON e.event_hash = operation.event_hash \
+             WHERE operation.thread_id = ?1 AND operation.event_type = ?2 \
+               AND operation.operation_id = ?3 \
+             ORDER BY operation.chain_seq LIMIT 2",
+        )
+        .context("prepare thread operation event lookup")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![thread_id, event_type, operation_id],
+            EventRow::from_row,
+        )
+        .context("query thread operation event lookup")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("decode thread operation event lookup")
+}
+
 /// Return the newest generic state-anchor milestone on one placement thread.
 ///
 /// This uses the ordinary durable event projection and its
@@ -3847,6 +3921,48 @@ mod tests {
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[0].chain_seq, 3);
         assert_eq!(latest[1].chain_seq, 4);
+    }
+
+    #[test]
+    fn seat_control_queries_keep_thread_type_prefix_and_operation_filters_exact() {
+        let db = test_db();
+        let conn = db.connection();
+        for (seq, thread_id, event_type, operation_id) in [
+            (1_i64, "T-1", "seat.facet", "op-one"),
+            (2, "T-1", "ui_seat.append_receipt.v1", "op-one"),
+            (3, "T-1", "ui_seat.append_receipt.v1", "op-one-suffix"),
+            (4, "T-2", "ui_seat.append_receipt.v1", "op-one"),
+        ] {
+            let event_hash = format!("{seq:064x}");
+            let payload = serde_json::to_vec(&json!({ "operation_id": operation_id })).unwrap();
+            conn.execute(
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-A', ?, ?, ?, ?, 'durable', '2026-01-01T00:00:00Z', ?)",
+                rusqlite::params![&event_hash, seq, thread_id, seq, event_type, payload],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO event_operation_index (
+                    event_hash, thread_id, event_type, operation_id, chain_seq
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![event_hash, thread_id, event_type, operation_id, seq],
+            )
+            .unwrap();
+        }
+
+        let latest = latest_thread_event_by_type(&db, "T-1", "ui_seat.append_receipt.v1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.chain_seq, 3);
+        let latest_seat = latest_thread_event_by_type_prefix(&db, "T-1", "seat.")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_seat.chain_seq, 1);
+        let exact =
+            thread_events_by_type_operation_id(&db, "T-1", "ui_seat.append_receipt.v1", "op-one")
+                .unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].chain_seq, 2);
     }
 
     #[test]

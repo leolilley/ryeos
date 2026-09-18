@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.93"
+version = "0.5.94"
 dependencies = [
  "anyhow",
  "base64",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.93"
+version = "0.5.94"
 dependencies = [
  "anyhow",
  "base64",
@@ -2595,6 +2595,7 @@ name = "ryeos-client-base"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "ryeos-engine",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2657,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.93"
+version = "0.5.94"
 dependencies = [
  "anyhow",
  "base64",
@@ -2971,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.93"
+version = "0.5.94"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3017,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-session-exec"
-version = "0.5.93"
+version = "0.5.94"
 
 [[package]]
 name = "ryeos-state"
@@ -3155,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.93"
+version = "0.5.94"
 dependencies = [
  "anyhow",
  "arc-swap",

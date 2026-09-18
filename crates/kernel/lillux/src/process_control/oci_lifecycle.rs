@@ -31,7 +31,10 @@ pub struct OciHookState {
 
 /// Durable pre-mutation witness. The host adapter records this before Lillux
 /// creates the controller child, so interrupted preparation can prove the
-/// exact old init dead and retire only the reserved child below the exact C.
+/// exact old init dead. It intentionally contains no identity for a child that
+/// did not yet exist: recovery may reconcile that child's absence, but must
+/// quarantine any present same-named incarnation rather than infer authority
+/// from its path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciLifecycleIntent {
@@ -108,7 +111,7 @@ impl OciLifecycleIntent {
             }
             Err(_) => {}
         }
-        super::cgroup::retire_interrupted_oci_controller(
+        super::cgroup::reconcile_interrupted_oci_controller_absence(
             &self.lifecycle_path,
             self.lifecycle_scope,
             &self.controller_path,
@@ -125,6 +128,15 @@ impl OciLifecycleIntent {
             return Err("OCI init process changed from the durable lifecycle intent".to_owned());
         }
         Ok(())
+    }
+
+    /// Acquire the one explicit procfs magic-link authority for this retained
+    /// init incarnation. Callers must retain it through all namespace-rooted
+    /// observations and mutations.
+    pub fn open_process_root(&self) -> Result<super::ExactProcessRoot, String> {
+        super::require_administrator().map_err(|error| error.to_string())?;
+        self.require_live()?;
+        super::ExactProcessRoot::open(&self.init_process)
     }
 
     pub fn require_container_id(&self, container_id: &str) -> Result<(), String> {

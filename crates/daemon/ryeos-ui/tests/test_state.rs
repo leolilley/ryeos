@@ -295,7 +295,7 @@ fn build_app_state(
     let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
-        routes: vec![],
+        routes: test_ui_routes(),
         commands: vec![],
     };
     let test_command_registry =
@@ -365,4 +365,50 @@ fn build_app_state(
     };
 
     (tmpdir, state)
+}
+
+fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
+    use std::collections::HashSet;
+
+    use ryeos_app::route_raw::{
+        RawLimits, RawRequest, RawRequestBody, RawResponseSpec, RawRouteSpec,
+    };
+
+    let route = |id: &str, path: &str, method: &str, source: &str, source_config| RawRouteSpec {
+        id: id.to_string(),
+        path: path.to_string(),
+        methods: HashSet::from([method.to_string()]),
+        auth: "none".to_string(),
+        auth_config: None,
+        limits: RawLimits::default(),
+        response: RawResponseSpec {
+            mode: "json".to_string(),
+            source: Some(source.to_string()),
+            source_config,
+            status: None,
+            content_type: None,
+            body_b64: None,
+        },
+        execute: None,
+        request: RawRequest {
+            body: RawRequestBody::Json,
+        },
+        source_file: "/test/route.yaml".into(),
+    };
+    vec![
+        route(
+            "ui/launch",
+            "/ui/launch/{token}",
+            "GET",
+            ryeos_ui::handlers::ui_launch::DESCRIPTOR.service_ref,
+            serde_json::json!({"token": "${path.token}"}),
+        ),
+        route(
+            "ui/invocations/dispatch",
+            "/ui/api/invocations/dispatch",
+            "POST",
+            ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.service_ref,
+            serde_json::json!({}),
+        ),
+    ]
 }

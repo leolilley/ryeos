@@ -3,11 +3,21 @@
 import type { RyeOsUiIntent } from "./RyeOsUiIntent";
 
 export interface RyeOsOverlayItemVm {
+  /**
+   * Stable semantic identity used by pointer events. It deliberately does
+   * not depend on the row's filtered position or transient fold state.
+   */
+  id: string;
   category: string;
   primary: string;
   secondary: string;
   meta: string;
   enabled: boolean;
+  /**
+   * Exact reason an otherwise visible item is disabled. Presentation
+   * adapters expose this independently of ordinary secondary copy.
+   */
+  disabled_reason?: string | null;
   intent: RyeOsUiIntent | null;
   secondary_intent: RyeOsUiIntent | null;
   /**

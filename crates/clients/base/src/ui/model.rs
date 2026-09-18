@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -2420,7 +2421,12 @@ impl RyeOsCore {
         match binding.widget.as_str() {
             "rows" => super::content::source_collection(binding, response)
                 .get(cursor)
-                .map(|record| (row_key(record, cursor), record.clone())),
+                .map(|record| {
+                    (
+                        projected_row_key(record, cursor, &binding.projections),
+                        record.clone(),
+                    )
+                }),
             "table" => {
                 let records = super::content::source_collection(binding, response);
                 let collapsed_tree_rows = match &tile.local {
@@ -2439,9 +2445,12 @@ impl RyeOsCore {
                                     .map(|record| (row.key.clone(), record.clone()))
                             })
                     }
-                    None => records
-                        .get(cursor)
-                        .map(|record| (row_key(record, cursor), record.clone())),
+                    None => records.get(cursor).map(|record| {
+                        (
+                            projected_row_key(record, cursor, &binding.projections),
+                            record.clone(),
+                        )
+                    }),
                 }
             }
             "timeline" => {
@@ -2528,7 +2537,10 @@ impl RyeOsCore {
                 let index = cursor - flat;
                 let record = (*records.get(index)?).clone();
                 return Some((
-                    format!("{section_index}:{}", row_key(&record, index)),
+                    format!(
+                        "{section_index}:{}",
+                        projected_row_key(&record, index, &section.projection)
+                    ),
                     record,
                     super::content::expand_fields_from_projection(&section.projection),
                 ));
@@ -2548,7 +2560,29 @@ pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
             return format!("{field}:{value}");
         }
     }
-    format!("index:{index}")
+    let encoded = serde_json::to_vec(record).unwrap_or_else(|_| index.to_string().into_bytes());
+    format!("value:{:x}", Sha256::digest(encoded))
+}
+
+/// Resolve a view-authored occurrence identity before using the generic record
+/// fallback. Collections such as event streams legitimately contain several
+/// records for one thread, so the renderer cannot infer their identity from a
+/// convenient shared field such as `thread_id`.
+pub(crate) fn projected_row_key(
+    record: &serde_json::Value,
+    index: usize,
+    projection: &serde_json::Value,
+) -> String {
+    if let Some(path) = projection
+        .get("identity")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        && let Some(value) =
+            super::content::field_text(record, path).filter(|value| !value.is_empty())
+    {
+        return format!("identity:{path}:{value}");
+    }
+    row_key(record, index)
 }
 
 /// Per-row `(signature, projected tone)` — the signature detects change,
@@ -2576,7 +2610,7 @@ fn projected_row_signatures(
                 })
                 .to_string();
                 (
-                    row_key(&record.raw, index),
+                    projected_row_key(&record.raw, index, &binding.projections),
                     (signature, record.tone.clone()),
                 )
             })
@@ -2596,7 +2630,7 @@ fn projected_row_signatures(
                     })
                     .to_string();
                     (
-                        row_key(&record.raw, index),
+                        projected_row_key(&record.raw, index, &binding.projections),
                         (signature, record.tone.clone()),
                     )
                 })
@@ -2766,6 +2800,22 @@ impl Default for RyeOsCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_projection_identity_distinguishes_occurrences_with_one_subject() {
+        let projection = serde_json::json!({ "identity": "event_hash" });
+        let first = serde_json::json!({ "thread_id": "T-one", "event_hash": "event-a" });
+        let second = serde_json::json!({ "thread_id": "T-one", "event_hash": "event-b" });
+
+        assert_eq!(
+            projected_row_key(&first, 0, &projection),
+            "identity:event_hash:event-a"
+        );
+        assert_eq!(
+            projected_row_key(&second, 1, &projection),
+            "identity:event_hash:event-b"
+        );
+    }
 
     #[test]
     fn binding_contract_mismatch_decodes_no_views_and_emits_no_effects() {

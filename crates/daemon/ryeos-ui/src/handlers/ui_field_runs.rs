@@ -35,6 +35,17 @@ const MAX_THREAD_FACET_VALUE_BYTES: usize = 512;
 /// anchor closure is truncated, and the truncation is declared.
 const MAX_RUN_DEFINITION_VERSIONS: usize = 32;
 
+fn project_subject_identity(project_root: Option<&std::path::Path>) -> String {
+    project_root
+        .map(|path| {
+            format!(
+                "project:{}",
+                lillux::sha256_hex(path.to_string_lossy().as_bytes())
+            )
+        })
+        .unwrap_or_else(|| "project:node".to_string())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunsRequest {
@@ -62,7 +73,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let limit = request.limit.clamp(1, MAX_LIMIT);
     let facets = normalize_facet_filters(request.facets)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    let project_root = caller.project_path()?;
+    let project_root = caller.project_query_identity()?;
     let filter = ThreadListFilter {
         principal: None,
         status: None,
@@ -82,15 +93,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .collect::<Vec<_>>();
     let graph_runs = state.state_store.graph_run_list_identities(&thread_ids)?;
 
-    let project_subject = project_root
-        .as_ref()
-        .map(|path| {
-            format!(
-                "project:{}",
-                lillux::sha256_hex(path.to_string_lossy().as_bytes())
-            )
-        })
-        .unwrap_or_else(|| "project:node".to_string());
+    let project_subject = project_subject_identity(project_root.as_deref());
     let subject = if let Some(definition_ref) = request
         .definition_ref
         .as_ref()
@@ -772,6 +775,17 @@ mod tests {
             bounded
                 .values()
                 .all(|value| value.len() <= MAX_THREAD_FACET_VALUE_BYTES)
+        );
+    }
+
+    #[test]
+    fn field_project_identity_is_stable_and_not_descriptor_numbered() {
+        let stable = std::path::Path::new("/canonical/project");
+        let expected = project_subject_identity(Some(stable));
+        assert_eq!(expected, project_subject_identity(Some(stable)));
+        assert_ne!(
+            expected,
+            project_subject_identity(Some(std::path::Path::new("/proc/self/fd/73")))
         );
     }
 }

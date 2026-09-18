@@ -2058,6 +2058,7 @@ mod tests {
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
             "result_project_snapshot_hash": null,
+            "result_workspace_output_capture_hash": null,
             "created_at": "2026-04-22T00:00:00Z",
             "updated_at": "2026-04-22T00:00:00Z",
             "started_at": if started { serde_json::json!("2026-04-22T00:00:00Z") } else { serde_json::Value::Null },

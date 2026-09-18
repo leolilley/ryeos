@@ -9,6 +9,7 @@ HOOK = ROOT / "crates/host-adapters/lillux-oci-hook/src/main.rs"
 CGROUP = ROOT / "crates/kernel/lillux/src/process_control/cgroup.rs"
 LIFECYCLE = ROOT / "crates/kernel/lillux/src/process_control/oci_lifecycle.rs"
 SCOPE = ROOT / "crates/kernel/lillux/src/process_control/scope.rs"
+PROCESS = ROOT / "crates/kernel/lillux/src/process_control.rs"
 
 
 class LeaseModel:
@@ -136,6 +137,7 @@ class OciHookContractTests(unittest.TestCase):
         cgroup = CGROUP.read_text()
         lifecycle = LIFECYCLE.read_text()
         scope = SCOPE.read_text()
+        process = PROCESS.read_text()
         self.assertIn('HOST_STATE_ROOT: &str = "/var/lib/ryeos/contained-oci"', hook)
         self.assertIn("volume_record_name", hook)
         self.assertIn("prove_ended_and_retire", hook)
@@ -154,14 +156,22 @@ class OciHookContractTests(unittest.TestCase):
         self.assertIn("libc::SYS_move_mount", cgroup)
         self.assertIn("MOVE_MOUNT_T_EMPTY_PATH", cgroup)
         self.assertIn("require_oci_membership", cgroup)
-        self.assertIn("root/sys/fs/cgroup", cgroup)
+        self.assertIn("process_root.open_directory", cgroup)
         self.assertIn("libc::fchown", cgroup)
         self.assertIn("host cgroup root", cgroup)
         self.assertIn("retire_ended_oci_controller", cgroup)
+        self.assertIn("retire_empty_oci_descendants", cgroup)
+        self.assertIn("adopt_prepared_oci_controller", cgroup)
         self.assertIn("OciLifecycleIntent", lifecycle)
+        self.assertIn("open_process_root", lifecycle)
         self.assertIn("cannot prove OCI init death", lifecycle)
         self.assertIn("require_intent", lifecycle)
         self.assertIn("namespace and proc-membership descriptors pin", scope)
+        self.assertIn("pub struct ExactProcessRoot", process)
+        self.assertIn('open_proc_magic_file(', process)
+        self.assertIn('c"root"', process)
+        self.assertNotIn('format!("/proc/{init_pid}/root', hook)
+        self.assertNotIn('format!("/proc/{init_pid}/root', cgroup)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,9 @@ impl HostRuntimeBinding {
         account.require_directory_owner(observed_app_root)?;
         process_scopes.validate().map_err(anyhow::Error::msg)?;
         oci_lifecycle.validate().map_err(anyhow::Error::msg)?;
+        process_scopes
+            .require_oci_generation_as_administrator(&account, &oci_lifecycle)
+            .map_err(anyhow::Error::msg)?;
         if !runtime_app_root.is_absolute() || runtime_app_root.parent().is_none() {
             bail!("OCI runtime app root must be an absolute non-root path");
         }
@@ -89,6 +92,30 @@ impl HostRuntimeBinding {
     /// Validate the complete protected binding and return the exact pinned app
     /// root. This never creates, repairs or reinterprets node state.
     pub fn validate(&self, expected_root: &Path) -> Result<PinnedDirectory> {
+        let app_root = self.validate_common(expected_root)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            self.process_scopes
+                .require_oci_generation_as_controller(&self.account, lifecycle)
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(app_root)
+    }
+
+    /// Privileged bootstrap validation. Root observes the selected controller
+    /// account and exact prepared delegation; it never enters the ordinary
+    /// controller-side provider opener under a false current-UID assumption.
+    pub fn validate_as_administrator(&self, expected_root: &Path) -> Result<PinnedDirectory> {
+        lillux::require_administrator()?;
+        let app_root = self.validate_common(expected_root)?;
+        if let Some(lifecycle) = &self.oci_lifecycle {
+            self.process_scopes
+                .require_oci_generation_as_administrator(&self.account, lifecycle)
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(app_root)
+    }
+
+    fn validate_common(&self, expected_root: &Path) -> Result<PinnedDirectory> {
         if self.schema_version != HOST_RUNTIME_BINDING_SCHEMA_VERSION
             || self.app_root != expected_root
             || !self.app_root.is_absolute()
@@ -98,11 +125,6 @@ impl HostRuntimeBinding {
         }
         self.account.validate().map_err(anyhow::Error::msg)?;
         self.process_scopes.validate().map_err(anyhow::Error::msg)?;
-        if let Some(lifecycle) = &self.oci_lifecycle {
-            self.process_scopes
-                .require_oci_generation(lifecycle)
-                .map_err(anyhow::Error::msg)?;
-        }
         if !lillux::valid_hash(&self.node_fingerprint) {
             bail!("host runtime has an invalid node public identity");
         }
@@ -136,7 +158,7 @@ impl HostRuntimeBinding {
     ) -> Result<Self> {
         let mut binding = Self::capture(app_root, node_fingerprint, account, process_scopes)?;
         binding.oci_lifecycle = Some(oci_lifecycle);
-        binding.validate(app_root.path())?;
+        binding.validate_as_administrator(app_root.path())?;
         Ok(binding)
     }
 
@@ -238,7 +260,7 @@ pub fn exec_external_controller(
     let binding: HostRuntimeBinding =
         serde_json::from_slice(&document.read_stable_bounded(MAX_HOST_RUNTIME_DOCUMENT_BYTES)?)
             .context("parse external host-runtime binding")?;
-    let app_root = binding.validate(&binding.app_root)?;
+    let app_root = binding.validate_as_administrator(&binding.app_root)?;
 
     let executable_parent = PinnedDirectory::open_owned_hierarchy(
         daemon_executable
@@ -261,18 +283,34 @@ pub fn exec_external_controller(
         .app_root
         .to_str()
         .context("external host-runtime app root is not UTF-8")?;
-    binding
-        .process_scopes
-        .exec_controller_with_inherited_document(
-            &binding.account,
-            &executable,
-            &["--app-root".to_owned(), root.to_owned()],
-            &app_root,
-            &[],
-            document,
-            HOST_RUNTIME_AUTHORITY_FD_ENV,
-        )
-        .map_err(anyhow::Error::msg)
+    let arguments = ["--app-root".to_owned(), root.to_owned()];
+    match &binding.oci_lifecycle {
+        Some(lifecycle) => binding
+            .process_scopes
+            .exec_prepared_oci_controller_with_inherited_document(
+                &binding.account,
+                lifecycle,
+                &executable,
+                &arguments,
+                &app_root,
+                &[],
+                document,
+                HOST_RUNTIME_AUTHORITY_FD_ENV,
+            )
+            .map_err(anyhow::Error::msg),
+        None => binding
+            .process_scopes
+            .exec_controller_with_inherited_document(
+                &binding.account,
+                &executable,
+                &arguments,
+                &app_root,
+                &[],
+                document,
+                HOST_RUNTIME_AUTHORITY_FD_ENV,
+            )
+            .map_err(anyhow::Error::msg),
+    }
 }
 
 #[cfg(test)]

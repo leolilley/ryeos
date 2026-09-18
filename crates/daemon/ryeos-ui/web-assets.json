@@ -18,7 +18,7 @@
       "filename": "ryeos_ui.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "6b6d17992044409a60174b324fba76276dd7317d8da838527068d7cf13488ecb",
+      "sha256": "5c1de5450db5ff345d0d4b4d42ba865fbe9d02b34aa8ed15b086cb8ff1796e85",
       "imports": [
         "/ui/assets/ryeos_three.js",
         "/ui/assets/ryeos_web.js",
@@ -30,7 +30,7 @@
       "filename": "ryeos_ui.css",
       "mime": "text/css; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "38efbbb99ad9308406a8d2ca37ed1666b73782a98df2d56748e6a1ba15d5b13c",
+      "sha256": "ccd33287cf41e6cfc83d429e2828bed67d42da797945d0333eb65d699a519528",
       "imports": []
     },
     {
@@ -38,7 +38,7 @@
       "filename": "ryeos_three.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "73e4de307f95a3625ffa953433a59f0a74f8716bf9c842662b433b3f09219e26",
+      "sha256": "71693b835003a2b5d56f5e3f194acb363bef459535e3402779207d42ff2f2cd3",
       "imports": []
     },
     {
@@ -46,7 +46,7 @@
       "filename": "ryeos_web.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "40983b73331fd2194f8d95a1b9a075d2b7f0064890eab2b4c91f762fea7050b0",
+      "sha256": "4fe175316400c649ea673834acb9ac85b26a1d3e96ba8799034c78e23ae2018b",
       "imports": [
         "/ui/assets/ryeos_web_bg.wasm"
       ]
@@ -56,7 +56,7 @@
       "filename": "ryeos_web_bg.wasm",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "db658c2039ed166d83913437ef7a0567f84a37a6b858f82a43087d433a20c24a",
+      "sha256": "a919d4f0261ced31daab25a7b70434d37c672974324a76c9f399e794f686fffc",
       "imports": []
     }
   ]

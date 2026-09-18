@@ -240,10 +240,15 @@ class RequestInbox:
         self._current_lock = threading.Lock()
         self._current: tuple[str, threading.Event] | None = None
 
-    def clear_current(self, request_id: str) -> None:
+    def complete(self, request_id: str, publish: Any) -> None:
+        # I01: a peer may send its next request as soon as it reads terminal
+        # bytes. Keep the reader behind the same lock until publication and
+        # the exact inbox transition have both completed. A failed write
+        # leaves the owner current and must terminate the channel.
         with self._current_lock:
             if self._current is None or self._current[0] != request_id:
                 raise RuntimeError("persistent worker current request changed")
+            publish()
             self._current = None
 
     def run(self) -> None:
@@ -603,17 +608,17 @@ def main() -> int:
             )
             if cancelled.is_set():
                 raise RuntimeError("local Qwen request was cancelled")
-            _write_frame(channel, write_lock, "final", request_id, result)
+            terminal_kind, terminal_body = "final", result
         except BaseException as error:
-            _write_frame(
-                channel,
-                write_lock,
-                "error",
-                request_id,
-                {"message": str(error)[:2048]},
-            )
-        finally:
-            inbox.clear_current(request_id)
+            terminal_kind, terminal_body = "error", {"message": str(error)[:2048]}
+        # Do not catch publication failures and attempt another terminal on a
+        # possibly partially written stream.
+        inbox.complete(
+            request_id,
+            lambda: _write_frame(
+                channel, write_lock, terminal_kind, request_id, terminal_body
+            ),
+        )
 
 
 if __name__ == "__main__":
