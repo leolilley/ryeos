@@ -59,11 +59,21 @@ operator must keep project signing, publication, submission, Kaggle, and
 deployment-control credentials out of that placement; candidate acceptance
 remains an independent RyeOS operation.
 
+Credential enrollment follows the same explicit split. The existing
+`worker_execution:codex/login` selects the hard-contained
+`worker:codex/hosted`. A node that deliberately enables trusted process-group
+sessions instead uses `worker_execution:codex/trusted-login`, backed by the
+minimal `worker:codex/trusted-hosted` profile. RyeOS never falls back between
+these items: distinct signed refs, grants, protocols, activation bindings and
+launch identities keep the weaker containment choice explicit.
+
 The exact Codex executable, same-version code-mode host, packaged command-
 sandbox companion, and the package's `zsh` and `rg` runtime resources are
 selected from OpenAI's pinned standalone package by two signed acquisition
-recipes. `config:codex/activation` supplies the worker's five file
-realizations. `config:codex/environment-activation`
+recipes. `config:codex/activation` supplies the hard worker's five file
+realizations; `config:codex/trusted-activation` supplies the same verified
+bytes under the trusted worker's distinct consumer binding.
+`config:codex/environment-activation`
 supplies the default environment's self-contained `bin/{zsh,rg}` developer-
 tool tree from the same verified archive. The generic `external-content
 activate` service downloads or reuses the exact archive, verifies its archive
@@ -77,9 +87,11 @@ Persistent subprocesses and managed acquisition are deliberately disabled
 when their node-owned policies are absent. Before starting the daemon, apply
 an external-content policy with no named roots and an explicit managed
 activation host/resource ceiling, plus the exact persistent-session limits.
-Then, while the configured operator is still local to that node, run both
-`ryeos external-content activate config:codex/activation online` and `ryeos
-external-content activate config:codex/environment-activation online`. The
+Then, while the configured operator is still local to that node, run
+`ryeos external-content activate config:codex/activation online` for the hard
+worker or `ryeos external-content activate config:codex/trusted-activation
+online` for trusted enrollment, plus `ryeos external-content activate
+config:codex/environment-activation online`. The
 complete typed YAML and ceremony live in `knowledge:codex/hosted-activation`.
 A bundle never silently enables network acquisition, storage, or node-wide
 worker capacity.
@@ -119,6 +131,11 @@ RYEOS_APP_ROOT=/path/to/hosted-app-root ryeos authorize-client \
   --origin-site-id "site:<source>" \
   --scopes "$HOSTED_SCOPES"
 ```
+
+That default grant authorizes only hard-contained enrollment. For a target
+that deliberately uses trusted process-group enrollment, replace the exact
+`ryeos.execute.worker_execution.codex/login` member with
+`ryeos.execute.worker_execution.codex/trusted-login`; do not grant both.
 
 `worker_execution:codex/bounded-turn-recovery` is the explicit recovery-
 qualification variant. After the exact turn completion fence it waits for the
@@ -202,7 +219,10 @@ JSON
 ```
 
 Open the projectless login worker through the same seam, this time retaining a
-launch coordinate and using `accepted` response semantics:
+launch coordinate and using `accepted` response semantics. The example selects
+the hard-contained item. On an explicitly trusted process-group node, select
+`worker_execution:codex/trusted-login` before launch instead; never retry a
+failed hard launch by changing the item behind the same coordinate:
 
 ```sh
 LOGIN_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
