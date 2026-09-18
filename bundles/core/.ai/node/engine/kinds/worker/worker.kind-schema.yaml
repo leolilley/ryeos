@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-17T01:29:59Z:3f91e886a3ca1a616a92aff43454cf5cdae169e00d4831b0cbb1624bbe438706:gC4bmpQTB7ODASSfgES1wq7uYqAro6LsyLLs+njx8R1t8Z0cGbdH87bbtrQCP/14rVbxYDl+Usz71VsA+7t0Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T23:00:46Z:82536cc5a4e86cb0f4fc37017e8962b14fa49e58f80926ecba9cab4af004b5f2:IKukAabNgkCimV/Dmrp3C+gGyLUulTjTXOm/mi6axhPhTZsmiC81f+i6xUbLukxW5f8HDaZiPTeNrXKjgPz/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.1.0"
+version: "1.2.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -31,6 +31,7 @@ execution:
       allowed:
         - protocol:ryeos/core/persistent_session
         - protocol:ryeos/core/structured_session
+        - protocol:ryeos/core/trusted_structured_session
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
   target:

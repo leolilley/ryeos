@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T02:55:59Z:f2c6bbdaadea7868dd059d368afd67cfdd674a9cb370f0271c1e59cba87c8fc1:qF1cgK/j8pDGOO3rQfo0DItN2u2VhjtB1KGiqLZTOkR+aCthbl+ZpFXyj67/eS3bWG++gYEojGM99yShg4SJBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T23:05:06Z:f1c5f146834e34f418605c02524ff33eea6934793b81fe3bd27bc83b94d89d1c:BObArjLrUX6b8AM67bSTGfuwiifn9+Rnp50NI2IzAqlE7odmWUdCYv9gwV+RH7PbRU8YrNSFBZ0GanCRXwvIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
 title: "Remote Development and Qualification Runbook"
 description: "Use an operator-controlled stronger host and an ordinary configured RyeOS remote without adding a deployment or scheduling substrate"
 entry_type: implementation_guide
-version: "1.6.0"
+version: "1.7.0"
 ```
 
 # Remote Development and Qualification Runbook
@@ -15,21 +15,30 @@ RyeOS and then qualify a workload through RyeOS's existing remote boundary. It
 deliberately separates host administration from authenticated RyeOS runtime
 operations.
 
-The source workstation owns the source commit, review, and final integration.
+The initiating workstation owns the source commit, review, and final integration.
 The stronger target owns its checkout, build cache, disposable qualification
 roots, and retained non-secret evidence. Each app root is one ordinary RyeOS
 node. A target is selected by the operator as one named configured remote; it
 is not discovered by a registry or scheduler.
 
+That ownership statement is the current qualified operating model. The future
+[`ryeos-native-development-platform`](../future/ryeos-native-development-platform.md)
+and
+[`native-bundle-publication-and-node-composition`](../future/native-bundle-publication-and-node-composition.md)
+directions move exact source, release execution, retained products, and bundle
+publication onto RyeOS-native Graphs and services. Until those paths are
+qualified, this runbook must not infer publisher, catalog, installation, or
+deployment authority for an ordinary remote build target.
+
 ## The boundary
 
 ```text
-source operator                       stronger target operator
+initiating operator                   stronger target operator
   chooses exact commit  ----------->    creates an ordinary checkout
   reviews returned commit/artifacts     builds and runs focused tests
                                          installs/starts a disposable node
 
-source RyeOS node                     target RyeOS node
+initiating RyeOS node                 target RyeOS node
   configured remote + pinned ID  --->   exact node/operator grants
   full-project push/execute/pull        target-local execution and caches
   source-local job transcript      <---   result; signed receipt when supplied
@@ -63,7 +72,7 @@ scheduler, migration layer, or workload-specific app root is needed.
 | Observe recovery | authorized source-local sync job list/inspect and exact remote thread/launch status surfaces |
 | Reuse expensive content | host-operator Cargo caches plus target RyeOS CAS, per-snapshot engine, bundle, and managed-realization caches; these are separate authorities |
 
-Ordinary `remote execute` authenticates as the source node and is the generic
+Ordinary `remote execute` authenticates as the initiating node and is the generic
 synchronous full-project push/execute/pull operation. Configured-operator
 continuity is a narrower, explicit mode for durable push/run workflows; it is
 not selected implicitly and should not be simulated by sharing keys or editing
@@ -447,7 +456,7 @@ probe, refuses to release an admission token, and fails the helper.
 
 For an ordinary node-principal workflow, the target operator mints a short
 lived one-time admission token with only the required scopes, or authorizes
-the source node key locally. A full-project remote execution generally needs:
+the initiating node key locally. A full-project remote execution generally needs:
 
 ```text
 ryeos.execute.service.objects/has
@@ -457,8 +466,8 @@ ryeos.execute.service.objects/get
 <the exact caps required by the executed item and its children>
 ```
 
-Never grant wildcards. If the target must fetch a bundle from a source node,
-authorize that target node on the publisher node for exactly:
+Never grant wildcards. If the target must use the current legacy bundle-export
+path, authorize it on that bundle-exporting node for exactly:
 
 ```text
 ryeos.execute.service.bundle/export
@@ -467,9 +476,9 @@ ryeos.execute.service.objects/get
 
 For configured-operator continuity, stop the target and use the documented
 offline semantic conversion. The target grant must bind the configured
-operator key to the source's canonical `site_id` and exact workflow scopes;
-the source node key separately receives only
-`ryeos.attest.request.forwarded-operator`. The source node then co-signs each
+operator key to the initiating node's canonical `site_id` and exact workflow
+scopes; the initiating node key separately receives only
+`ryeos.attest.request.forwarded-operator`. The initiating node then co-signs each
 exact operator request. Do not use this mode for `remote execute`, admission
 claim, or arbitrary delegated callers.
 
@@ -501,7 +510,7 @@ hard refusal, not a fallback. It performs no Git operation after the
 target-controlled pull-back. Its preflight Git probes explicitly disable the
 repository's `core.fsmonitor`, so a prior target-controlled pull cannot turn a
 later retry into source-host execution. Qualification also requires an explicit
-`RYEOS_APP_ROOT`: the helper canonicalizes and freezes that source node root,
+`RYEOS_APP_ROOT`: the helper canonicalizes and freezes that initiating node root,
 proves its node/operator configuration and signing key remain outside the
 synchronized project, and freezes the resolved source daemon URL before the
 first RyeOS request. A locally discovered daemon is re-proved through the exact

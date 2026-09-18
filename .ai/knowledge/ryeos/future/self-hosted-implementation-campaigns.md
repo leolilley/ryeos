@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-08-27T04:21:34Z:a7f87f95de7989f8cbdf1beada8de88b0ab36a91b2fe03d5ccf777b8799ae20f:KabWaG5J+x9tS0c2mVMtfXy1OJaBdcE1iKfmjJjoifo6g9zOv32yDf/YWPa2LU4j0aKW3PDabBRuyLLkjAvOBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-18T23:05:34Z:6999d6b17b07bbf6654d9f8d98798a063502b499c71b1b10d9b7d148e512e47d:SS1YW4sn/AOP3qdB/YSO31PyQb0lhbVRA4qcmb6qeHW8NVBXo1QMX0JnCYxcAnH/uyrVqkm2+q8vtRo7eAvVAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: self-hosted-implementation-campaigns
 title: Self-Hosted Implementation Campaigns
 description: Scheduled design for RyeOS-owned workers implementing the next RyeOS generation under a strict host/candidate trust boundary
 entry_type: design
-version: "0.2.0"
+version: "0.3.0"
 ```
 
 # Self-hosted implementation campaigns
@@ -44,11 +44,14 @@ engine.
 ## Relation to adjacent future work
 
 This document owns implementation-campaign execution. It deliberately does
-not absorb two adjacent directions:
+not absorb three adjacent directions:
 
 - `knowledge:ryeos/future/ryeos-native-development-platform` owns future
   project hosting, check records, review objects, artifacts, releases, and Git
   projection;
+- `knowledge:ryeos/future/native-bundle-publication-and-node-composition` owns
+  immutable bundle generations, bundle sets, catalog publication, source-node
+  serving, and consumer composition;
 - `knowledge:ryeos/future/reflexive-deployment` owns an admitted activation
   set that drains the old epoch, installs a promoted candidate, validates the
   new boot, and records deployment evidence.
@@ -62,12 +65,17 @@ implementation campaign
 development/review platform
   -> accepted change and release candidate
 
+native bundle publication
+  -> publisher-authorized generation and exact bundle set
+
 reflexive deployment
   -> explicitly authorized activation
 ```
 
-An implementation campaign never becomes deployment authority merely because
-its checks passed.
+An implementation campaign never becomes publication or deployment authority
+merely because its checks passed. A development node may execute release Tools
+without possessing the publisher key; a bundle-source node may serve the
+published closure without possessing either authority.
 
 ## Foundational trust cut
 
@@ -379,8 +387,8 @@ private conversation sideways.
 9. Add a bounded multi-turn controller only after one-turn evidence establishes
    the need and supplies mechanical continuation predicates.
 10. Integrate accepted candidates with the future RyeOS-native development
-    platform while keeping activation under the separately reviewed reflexive-
-    deployment contract.
+    platform and native bundle-publication path while keeping publisher
+    authorization and activation under their separately reviewed contracts.
 
 ## Acceptance properties
 
