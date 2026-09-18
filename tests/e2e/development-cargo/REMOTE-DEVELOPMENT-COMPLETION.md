@@ -22,8 +22,8 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: retire only the two exact orphan runit services, build and install
-one exact current source generation, then create one fresh source/target pair with
+Current gate: build and install one exact current source generation, then create
+one fresh source/target pair with
 the supported installer and `development` node profile. Reconstruct the remote
 descriptor, exact grant, immutable source project, target snapshot, credential
 status, and product witnesses from their owning APIs. Do not attempt to recover
@@ -40,10 +40,11 @@ is mixed and stale: CLI v0.5.93 (`abd6676b…`) and daemon `d18fd85f…`. Rebuil
 install one exact current generation before admitting the replacement pair.
 
 Host-context checkpoint at 2026-09-19: former source service
-`ryeos-0b1d0411…` and target service `ryeos-721ce0a7…` report PIDs 16335 and
-26242 as `normally down`, but neither 7423 nor 7445 accepts a connection. Their
-named app roots were recreated at 10:00 NZST with only bundle lock files; the
-source project is absent. Stop these exact services before provisioning replacements.
+`ryeos-0b1d0411…` and target service `ryeos-721ce0a7…` are durably down after
+terminating only stale PIDs 16335 and 26242 and sending both supervisors an exact
+down control signal. Neither 7423 nor 7445 accepts a connection. Their named app
+roots were recreated at 10:00 NZST with only bundle lock files; the source project
+is absent. Do not reactivate these services or paths.
 
 ## Scope and finish line
 
@@ -396,6 +397,7 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 18 05:55 NZST | G0/G1 product continuity | exact `compose-product` for native verifier under snapshot `21867eea…` | first retained-current-HEAD wrapper launch `L-bc114deb…` failed before thread birth (`T-1ccd15aa…`, `launch_admission_failed`) because a unary service was incorrectly wrapped as an accepted root; no product handler contact. Correct projectless configured-operator composition then reached target and returned `retained product witness is absent` | not a substrate defect and do not reuse the failed launch. Historical product payload bytes confer no witness authority; reproduce the authored product chain under the frozen current generation |
 | Sept 18 05:58 NZST | G1 prepared-input reproduction / generic blocker | configured-operator launch `L-1c370bec6676a8ebce347df12da51c21`; source remote thread `svc-1789711065965-d99c57b0`; target root `T-99ffc235-c781-eda2-7be3-b22aded526cf` | launch bound to exact snapshot `21867eea…`, project authority `f27736e…`, then failed before start with `execution realization properties must be scalar or null`; PID/PGID null, no successor, no capsule, zero receipts/effects, no producer Tool/provider contact. Source digest-only error `6028cea0…`. Code inspection finds `execution_properties()` stores `selected_resources` as a JSON array while `AdmittedExecutionRealization::validate()` rejects every array/object property | stop without retry. Correct the generic representation/validation contract and cover empty plus nonempty resource selections; install on both retained nodes, then use a new launch coordinate and continue G1 |
 | Sept 19 10:15 NZST | G0 retained-state invalidation | filesystem, service, binary-hash, and endpoint reconciliation after `/tmp` cleanup | former source project is absent; both former app-root names were recreated at 10:00 NZST with only `.ai/.bundles.lock`. Exact runit services still report PIDs 16335 / 26242 as normally down, while 7423 / 7445 are unreachable. Installed CLI is v0.5.93 and installed daemon hash differs from both its former generation and staged v0.5.95. All former pair authority and every dependent G0/G1 product coordinate are invalidated | stop only the two exact orphan services. Rebuild/install exact current HEAD, create one fresh development-profile pair, and reconstruct authority once through supported APIs; never mine or reuse the deleted generation |
+| Sept 19 10:25 NZST | G0 orphan retirement | exact TERM of stale PIDs 16335 / 26242 followed by exact `sv down` for services `ryeos-0b1d0411…` / `ryeos-721ce0a7…` | both supervisors report durably down with no daemon PID; no other RyeOS service was touched | wait for the existing v0.5.96 worktree cut to land, then build/install one exact committed generation and create the replacement pair |
 
 Evidence correction (subsequent code review): the 05:55 entry overstates two
 conclusions. The unary launch's detailed admission cause was not recovered;
