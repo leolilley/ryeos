@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:27:55Z:8c91cb5ada3f45f8c49e76ed7a581fef983da201691392085a6b591ed4ef4607:MpGlwmN5W9aqmSdyywF1Y1hHbKFWfGRl92G2iAyIEjGYuH0H8EYXODRcOtqi05MIXfYrwgKHqfc9KgXodnRPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T23:55:30Z:936ee3ef7f21bdd1c65676a807a592e5ca782d723a4b895f540f9ca93d9e16ca:MCg8gN+qlb97W4Od7zD4KqWThEp6DhpiBmP0EG2GCsNmLcpXe96t37OQ6gobqSjMOGD20nn8C/TgyVJjeAfWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
 title: Native Bundle Publication and Node Composition
 description: Scheduled direction for independently publishing exact RyeOS bundle generations and composing nodes without rebuilding the substrate image
 entry_type: design
-version: "0.2.0"
+version: "0.3.0"
 status: scheduled_design
 ```
 
@@ -151,12 +151,11 @@ One immutable generation identifies:
 - target triple or an explicit portable target;
 - build profile;
 - required substrate and daemon protocol generations;
-- for native lineage, the existing accepted product result and exact selected
-  product identity/witness;
-- for native lineage, a typed publisher-materialization result binding that
-  unsigned candidate and signer to the exact final signed-tree manifest;
-- for native lineage, an exact source-snapshot edge only when release-retention
-  policy requires it;
+- the existing accepted product result and exact selected product
+  identity/witness;
+- a typed publisher-materialization result binding that unsigned candidate and
+  signer to the exact final signed-tree manifest;
+- an exact source-snapshot edge only when release-retention policy requires it;
 - qualification, provenance, notice, and SBOM evidence where required; and
 - publisher attestation over the exact subject.
 
@@ -166,8 +165,9 @@ not the generation identity. The CAS root and publisher evidence are.
 The existing external-content manifest contract should be reused for canonical
 paths, normalized executable modes, internal links, byte counts, and blob
 edges unless implementation proves it cannot faithfully represent a bundle.
-The current live-directory `bundle/export` response is a migration mechanism,
-not the durable generation format.
+The current live-directory `bundle/export` response is outside this protocol.
+Native publication never converts or admits it as a generation, and no
+compatibility adapter is part of this design.
 
 Bundle contracts have three layers. The wire decoder validates only local
 syntax, ordering, vocabularies, and bounds. A meaning-blind closure contract
@@ -191,12 +191,10 @@ provenance gap. V1 requires the in-tree signer and release-attestation signer
 to be the same exact publisher fingerprint. Separate signers require a later
 explicit two-key policy contract.
 
-Generation lineage is a closed tagged union. `native` requires the accepted
-product, selected witness, and publisher-materialization result above.
-`legacy_release_import` instead records exact archive/tree identity, available
-checksum/signature evidence, the import execution, and explicit absent-evidence
-declarations. Mixed variants are invalid, and policy restricts legacy lineage
-to bootstrap/import rather than fabricating native provenance.
+Every generation requires the accepted product, selected witness, and
+publisher-materialization result above. There is no alternate archive/import
+lineage, compatibility schema, or evidence-light publication path. Unknown or
+older generation schemas fail closed.
 
 V1 release attestations are non-expiring and remain subject to current local
 publisher policy and revocation. Their signed `issued_at` is an issuer claim,
@@ -497,11 +495,11 @@ Bootstrap recovery must preserve:
 - an operator path for restoring the bundle-source head without granting the
   bundle-source node publisher authority.
 
-Initial import of the current archive is classified as `legacy_release_import`.
-It records the exact archive/tag/commit/checksum/signature and import execution
-that actually exist, while naming absent native producer or qualification
-evidence. Publisher approval may authorize those imported bytes for bootstrap;
-it cannot create historical provenance retroactively.
+The native catalog starts from a freshly authorized genesis publication created
+through this protocol. Existing release archives are not imported or converted
+into native generations. During rollout they remain external recovery artifacts
+under the current release process, outside the native catalog's authority and
+lineage.
 
 ## Delivery stages
 
@@ -519,7 +517,8 @@ it cannot create historical provenance retroactively.
 - Reuse bounded per-generation closure transfer and generic signed-head
   retention.
 - Add durable bundle-source bootstrap, restart, diagnostics, and repair tests.
-- Import the current release bundle archive as an initial snapshot.
+- Create a fresh catalog genesis and first native data-bundle publication
+  through the same production contracts used for every successor.
 - Prove fetch-only verification with one data bundle.
 
 ### Stage 3 — constrained publisher service
