@@ -9469,6 +9469,7 @@ function RyeOs($$anchor, $$props) {
 //#region browser/renderer.ts
 /** Mount one presentation adapter over complete Rust-owned envelopes. */
 function mountRyeOsRenderer(target, initialEnvelope, dispatchUi) {
+	target.replaceChildren();
 	const component = mount(RyeOs, {
 		target,
 		props: {
