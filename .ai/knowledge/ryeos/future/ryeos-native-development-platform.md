@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:05:52Z:1afc74b04c0a3afd2ebbf5ac076e861f63c1c88489a35a5031851fa59554e565:FByoa3cFRSIABkil2T9RX2lZaVB/kVNFYhCNI7Tah/oD7aKDMGNssQDngQvuMlcg4rxCN2K/3FRZZaBlTLmwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T23:27:55Z:f17f67a3f132779d8f6dc24cc8b9c596158f79b24e2b9702f853d2e653689bff:YTdx2qimkspIpIe6/eBtdeqBycIzjXLDCVnji/HmSjtlSqOurP66ycOpDsxTyTIW3A+aXI6lM7JJu+tqPXasAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: ryeos-native-development-platform
 title: RyeOS-Native Development Platform
 description: Long-term owner for RyeOS-native project hosting, checks, review, release execution, and GitHub projection
 entry_type: design
-version: "1.1.0"
+version: "1.2.0"
 status: deferred_end_state
 ```
 
@@ -78,12 +78,12 @@ authority roles:
 - a development/build node executes admitted operations;
 - qualification records what was actually checked;
 - a publisher authorizes an exact product or release coordinate;
-- a source node stores and serves immutable published closures;
+- a bundle-source node stores and serves immutable published closures;
 - a consumer applies its own trust and admission policy; and
 - deployment authority selects and activates an exact admitted release.
 
 Build success is not publication. Publication is not installation. Installation
-is not activation. A candidate, worker, development node, or source node does
+is not activation. A candidate, worker, development node, or bundle-source node does
 not acquire the next authority merely because it completed the prior stage.
 
 ## Build and release composition
@@ -95,7 +95,8 @@ Release production should reuse the existing RyeOS substrate:
 - exact source closures and environment bindings identify the inputs;
 - retained products and content manifests identify outputs;
 - attestations state scoped claims about those outputs;
-- publisher policy determines which qualified product may become a release;
+- a typed bundle-publication section of operator-signed node policy determines
+  which publisher and qualified product may become a release;
 - signed heads and CAS closures retain and distribute published generations;
   and
 - consumer admission and node policy remain local to the consuming node.
@@ -139,7 +140,7 @@ publication.
 
 [Native bundle publication and node composition](native-bundle-publication-and-node-composition.md)
 owns the first concrete release/distribution slice: independent bundle
-generations, exact bundle sets, source-node serving, and consumer composition.
+generations, exact bundle sets, bundle-source serving, and consumer composition.
 
 [Reflexive deployment](reflexive-deployment.md) owns the later activation Graph
 that changes a running node or epoch. It consumes an already-published exact
@@ -151,13 +152,15 @@ authority.
 The first useful slice is not a general GitHub replacement. It is native bundle
 publication:
 
-1. Package an exact bundle generation from a retained or locally admitted
-   result.
-2. Qualify and attest that generation.
-3. Publish it through a separate publisher capability to a bundle-source node.
-4. Construct an exact bundle set.
-5. Let another node fetch, verify, stage, prospectively admit, and explicitly
-   activate that set.
+1. Build an exact clean candidate from a retained or locally admitted result.
+2. Use a constrained publisher transaction to sign the final in-tree bundle
+   manifest/items, then capture and qualify that exact signed tree.
+3. Finalize and release-attest the bundle generation through the separate
+   publisher boundary.
+4. Publish it to a bundle-source node and construct an exact curated bundle set.
+5. Let another node fetch, verify, stage, and prospectively admit that set;
+   deployment authority then authorizes an exact node-bundle selection for
+   activation through the operator-signed whole-init fence.
 6. Invoke the same operations from GitHub only as a temporary adapter.
 
 This slice provides immediate release-cost reduction while exercising the same
@@ -189,7 +192,7 @@ The end state is credible when:
   semantics;
 - GitHub projection can be restored without becoming the authoritative record;
 - a build node cannot publish or deploy merely because its checks passed;
-- a source node cannot forge publisher-authorized releases;
+- a bundle-source node cannot forge publisher-authorized releases;
 - consumers select exact releases and apply independent local admission;
 - interrupted build, publication, and deployment stages recover without
   inferring success; and

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T23:05:34Z:6999d6b17b07bbf6654d9f8d98798a063502b499c71b1b10d9b7d148e512e47d:SS1YW4sn/AOP3qdB/YSO31PyQb0lhbVRA4qcmb6qeHW8NVBXo1QMX0JnCYxcAnH/uyrVqkm2+q8vtRo7eAvVAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-18T23:27:55Z:48248db95e9d54a3b7a1640b5379e62bd31e85dbdd4bebb52a0669443e1fe0e2:dnZYX8XNpTMqxbCPzAjDFkNHJGD+/XnLlmWW1mKjlq49RwkeQq/R8OzPu8+J/g+dyfAnrIFSwfpWzS7mgcmGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: self-hosted-implementation-campaigns
 title: Self-Hosted Implementation Campaigns
 description: Scheduled design for RyeOS-owned workers implementing the next RyeOS generation under a strict host/candidate trust boundary
 entry_type: design
-version: "0.3.0"
+version: "0.4.0"
 ```
 
 # Self-hosted implementation campaigns
@@ -50,7 +50,7 @@ not absorb three adjacent directions:
   project hosting, check records, review objects, artifacts, releases, and Git
   projection;
 - `knowledge:ryeos/future/native-bundle-publication-and-node-composition` owns
-  immutable bundle generations, bundle sets, catalog publication, source-node
+  immutable bundle generations, bundle sets, catalog publication, bundle-source
   serving, and consumer composition;
 - `knowledge:ryeos/future/reflexive-deployment` owns an admitted activation
   set that drains the old epoch, installs a promoted candidate, validates the
@@ -66,10 +66,10 @@ development/review platform
   -> accepted change and release candidate
 
 native bundle publication
-  -> publisher-authorized generation and exact bundle set
+  -> publisher-authorized generations and optional curated-set evidence
 
 reflexive deployment
-  -> explicitly authorized activation
+  -> deployment-owned node-bundle selection and explicitly authorized activation
 ```
 
 An implementation campaign never becomes publication or deployment authority
