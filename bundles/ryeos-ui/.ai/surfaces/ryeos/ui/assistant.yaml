@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T22:44:50Z:f6d59b6766b013e2eef33b121e590bcdb3b08a6d3e17a139cddf38619d08374c:K+/bQgBadXUZ74Ap5XFbQwbgVFuLC2RfiOqjGFwFpiUcrT0KdkzY89HX/jGaWASL1y5DTNyXAgCojRNwrgMyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T23:48:30Z:ea0495bb8dcbb36b8f239c27a18853c959fa7c7062794cb6aa586b71948bcf56:F7pAG5o34My1NqP65795XLWB7pRfaJahyyJ4T5JbkSNa9DGuVqKk1BEf0dtrvTU9l+S8x/QwAuTP5u5KmWhXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "2.0.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
@@ -82,6 +82,7 @@ library:
   - group: Project
     views:
       - view:ryeos/project/files
+      - view:ryeos/project/document
       - view:ryeos/project/items
       - view:ryeos/project/schedules
   - group: Node

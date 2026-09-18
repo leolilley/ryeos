@@ -23,6 +23,11 @@
     <div class="text-view" aria-label={model.title}>
       {#each model.lines as line}<div data-tone={line.tone}>{line.text}</div>{/each}
     </div>
+  {:else if model.type === "document"}
+    <article class="document-view" aria-label={model.title}>
+      <header><span>{model.path}</span>{#if model.truncated}<small>bounded preview</small>{/if}</header>
+      <pre>{model.content}</pre>
+    </article>
   {:else if model.type === "rows"}
     <div class="rows-view" role="list" aria-label={model.title}>
       {#each model.rows as row, index (row.id)}

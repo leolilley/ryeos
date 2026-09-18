@@ -13,6 +13,8 @@ import type { RyeOsTimelineEntryVm } from "./RyeOsTimelineEntryVm";
 export type RyeOsViewVm =
   | { type: "field"; field: RyeOsFieldVm }
   | { type: "text"; title: string; lines: RyeOsTextLineVm[]; position: RyeOsTextPositionVm }
+  /** Bounded textual document content projected from an admitted source. */
+  | { type: "document"; title: string; path: string; content: string; truncated: boolean; provenance: string }
   /**
    * The generic content widget surface: every bound view renders
    * through rows (typed widget variants arrive with the render pass).

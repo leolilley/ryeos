@@ -304,10 +304,26 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         draw_text_view(surface, rect, lines, *position);
         return;
     }
+    if let RyeOsViewVm::Document {
+        path,
+        content,
+        truncated,
+        ..
+    } = view
+    {
+        let mut lines = vec![path.clone()];
+        if *truncated {
+            lines.push("[bounded preview]".to_string());
+        }
+        lines.extend(content.lines().map(str::to_owned));
+        draw_lines(surface, rect, &lines);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
         RyeOsViewVm::Field { .. } => unreachable!("field views return above"),
         RyeOsViewVm::Text { .. } => unreachable!("text views return above"),
+        RyeOsViewVm::Document { .. } => unreachable!("document views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
         RyeOsViewVm::Map { .. } | RyeOsViewVm::Atlas { .. } => {

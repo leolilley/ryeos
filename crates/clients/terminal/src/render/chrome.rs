@@ -384,6 +384,7 @@ fn view_chrome(view: &RyeOsViewVm) -> Option<(&str, &[String])> {
         } => provenance
             .as_deref()
             .map(|provenance| (provenance, affordance_hints.as_slice())),
+        RyeOsViewVm::Document { provenance, .. } => Some((provenance.as_str(), &[])),
         _ => None,
     }
 }

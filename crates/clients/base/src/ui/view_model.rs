@@ -421,6 +421,16 @@ pub enum RyeOsViewVm {
         lines: Vec<RyeOsTextLineVm>,
         position: RyeOsTextPositionVm,
     },
+    /// Bounded textual document content projected from an admitted source.
+    /// The view definition names the response fields; this primitive does not
+    /// know about files, knowledge items or any other product-specific owner.
+    Document {
+        title: String,
+        path: String,
+        content: String,
+        truncated: bool,
+        provenance: String,
+    },
     /// The generic content widget surface: every bound view renders
     /// through rows (typed widget variants arrive with the render pass).
     Rows {
@@ -1949,6 +1959,36 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
+            }
+        }
+        ("document", Some(response)) => {
+            let projection = |name: &str| {
+                binding
+                    .projections
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|path| super::content::field_path(response, path))
+            };
+            let Some(path) = projection("path").and_then(serde_json::Value::as_str) else {
+                return RyeOsViewVm::Placeholder {
+                    title,
+                    message: "document view has no projected path".to_string(),
+                };
+            };
+            let Some(content) = projection("content").and_then(serde_json::Value::as_str) else {
+                return RyeOsViewVm::Placeholder {
+                    title,
+                    message: "document view has no projected content".to_string(),
+                };
+            };
+            RyeOsViewVm::Document {
+                title,
+                path: path.to_string(),
+                content: content.to_string(),
+                truncated: projection("truncated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                provenance: view_ref.to_string(),
             }
         }
         (other, Some(_)) => RyeOsViewVm::Placeholder {
@@ -3916,6 +3956,43 @@ mod tests {
             ..Default::default()
         };
         RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn document_widget_projects_bounded_source_fields() {
+        let view_ref = "view:test/document";
+        let mut core = session_with_views(
+            json!({
+                (view_ref): {
+                    "widget": "document",
+                    "sources": { "default": { "ref": "service:test/read" } },
+                    "projections": {
+                        "path": "result.path",
+                        "content": "result.body",
+                        "truncated": "result.bounded"
+                    }
+                }
+            }),
+            json!([view_ref]),
+        );
+        let tile_id = core.view_sets[0].tile_ids()[0];
+        core.data.sources.insert(
+            tile_default_source_key(&core, tile_id),
+            json!({ "result": { "path": "src/main.rs", "body": "fn main() {}", "bounded": true } }),
+        );
+
+        let RyeOsViewVm::Document {
+            path,
+            content,
+            truncated,
+            ..
+        } = bound_view_vm(&core, tile_id, view_ref)
+        else {
+            panic!("document source should project as a document primitive")
+        };
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(content, "fn main() {}");
+        assert!(truncated);
     }
 
     #[test]
