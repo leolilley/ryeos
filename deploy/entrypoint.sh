@@ -127,6 +127,27 @@ build_ryeos_init_args() {
   esac
 }
 
+build_execution_history_schema_cut_args() {
+  local app_root="$1"
+  local cut="${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT:-}"
+
+  EXECUTION_HISTORY_SCHEMA_CUT_ARGS=()
+  if [[ -z "$cut" ]]; then
+    return 0
+  fi
+  if [[ ! "$cut" =~ ^([0-9]+):([0-9]+)$ ]] || [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]]; then
+    echo "[entrypoint] invalid RYEOS_EXECUTION_HISTORY_SCHEMA_CUT value; use exact distinct epochs FROM:TO" >&2
+    return 1
+  fi
+  EXECUTION_HISTORY_SCHEMA_CUT_ARGS=(
+    node reset execution-history
+    --app-root "$app_root"
+    --confirm
+    --schema-cut-from "${BASH_REMATCH[1]}"
+    --schema-cut-to "${BASH_REMATCH[2]}"
+  )
+}
+
 main() {
   local effective_bind
   effective_bind="$(container_bind)"
@@ -144,6 +165,12 @@ main() {
   build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
 
   ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
+
+  build_execution_history_schema_cut_args /data/app
+  if [[ ${#EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]} -gt 0 ]]; then
+    echo "[entrypoint] applying exact idempotent execution-history schema cut ${RYEOS_EXECUTION_HISTORY_SCHEMA_CUT}"
+    ryeos "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]}"
+  fi
 
   echo "[entrypoint] init complete, starting daemon"
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce

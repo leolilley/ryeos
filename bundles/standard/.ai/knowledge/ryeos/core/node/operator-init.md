@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-04T08:45:07Z:0101369f86e3d60f0b08664dcf47a13eb375d997921524c6fc8df8663553357a:rew37x0t31xv08356jDsTomdDp7H6sN7y/WCX3UubTbtfDEPWgBsZ3dOKWl1crce3xuds23j12qC9DvNI3NvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T20:48:06Z:d65406aeea853630ea62f7f8910d2641a5b427d706d03a5154c9250ff2ab76fd:BkOQyqCQlsU9HA2ehSL3xIp7RDMPWZO73CN2/QxYIZYA4TIpN9UrdYXmLPJ8PqnaEiAZt3An0Wor4rvuui28Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -111,6 +111,15 @@ entrypoint asks one locked init to replace that generation from the trusted
 baked profile, align the prospective exact bundle inventory, and publish its
 completion fence before starting the daemon. All other node state is
 preserved; remove the variable after the successful cut.
+
+An execution-history schema cut is separate. A persisted container may set
+`RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=FROM:TO`, using the exact runtime epochs
+reported by the startup refusal. Before daemon startup, the entrypoint runs the
+offline reset only when the retained database is exactly `FROM` and the
+installed binary owns exactly `TO`. Repeated boots at `TO` are non-destructive;
+every other pairing refuses. Project HEADs, node identity, trust, vault and
+stable credential profiles remain preserved. Remove the variable after success
+so a later release still requires a new explicit epoch authorization.
 
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source

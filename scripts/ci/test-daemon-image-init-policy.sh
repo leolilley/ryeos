@@ -272,6 +272,7 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     # Image metadata is mandatory even when a persisted generation exists.
     unset RYEOS_INIT_NODE_PROFILE
     unset RYEOS_RESET_NODE_POLICY_GENERATION
+    unset RYEOS_EXECUTION_HISTORY_SCHEMA_CUT
     mkdir -p "$policy_test_root/.ai/node/policies"
     if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an absent node init profile" >&2
@@ -305,6 +306,25 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     : > "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
     [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+
+    # Execution-history schema cuts carry their exact predecessor/current
+    # epochs. Repeated boots are handled by the CLI's idempotent cut contract.
+    build_execution_history_schema_cut_args "$policy_test_root"
+    [[ ${#EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]} -eq 0 ]]
+    RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=35:39
+    build_execution_history_schema_cut_args "$policy_test_root"
+    [[ "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[*]}" == "node reset execution-history --app-root $policy_test_root --confirm --schema-cut-from 35 --schema-cut-to 39" ]]
+    RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=39:39
+    if build_execution_history_schema_cut_args "$policy_test_root" >/dev/null 2>&1; then
+        echo "entrypoint accepted a non-cut execution-history epoch pair" >&2
+        exit 1
+    fi
+    RYEOS_EXECUTION_HISTORY_SCHEMA_CUT=invalid
+    if build_execution_history_schema_cut_args "$policy_test_root" >/dev/null 2>&1; then
+        echo "entrypoint accepted an invalid execution-history schema cut" >&2
+        exit 1
+    fi
+    unset RYEOS_EXECUTION_HISTORY_SCHEMA_CUT
 
     # The daemon consumes the create-once endpoint from config.yaml; ordinary
     # container startup must not present a competing runtime override.

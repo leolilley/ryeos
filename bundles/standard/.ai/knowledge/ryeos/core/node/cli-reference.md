@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-13T09:38:49Z:5c47818dfc08f22f4748f6c502a21681343cf2ace9ac8c701d754f077ed7d52b:2b7b4DRvaEmjsTAwlgX/mG0dhv+IHv5g747sR0VANSQzUoDmVIyYrA+LjAgXNjvK82+e5PnXLzZeUj8w4u/qAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T20:48:06Z:14dd9054e2ea188e12dd17a2d313acfe9614c2b11ada4acff42e852312727293:g2uoZxxZnoCTflSKbsrokMFcKQFesVUa9zPbVAbZ59AdTMAz2DKaMeoIIpLBQpBcJbB2LizJUEdugyCm96glBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -173,7 +173,7 @@ Policy edits require a daemon restart; see
 ### `ryeos node reset execution-history`
 
 ```bash
-ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--json] [--app-root <dir>]
+ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <epoch> --schema-cut-to <epoch>] [--json] [--app-root <dir>]
 ```
 
 Runs the explicit offline execution-history epoch retirement while the daemon
@@ -184,6 +184,13 @@ typed reset phases and exact retired-head counts; `--json` and redirected calls
 emit no terminal control sequences. Restart the daemon and use ordinary
 `ryeos maintenance gc` later to reclaim newly unreachable storage. See
 [Maintenance GC](../services/maintenance-gc.md).
+
+Persisted container upgrades may bind destructive authorization to one exact
+predecessor/current epoch pair with `--schema-cut-from` and `--schema-cut-to`.
+The command refuses a different predecessor or a future runtime. Repeating it
+after the named cut returns `already_current` without retiring new work. This
+allows platform restarts to redrive one authorized cut without turning later
+schema changes into implicit authorization.
 
 The other clean-cut reset scopes share the same namespace and require the
 daemon to be stopped:

@@ -939,7 +939,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         "node reset execution-history" => (
             "ryeos node reset execution-history",
             "Retire the local execution-history epoch",
-            "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--json] [--app-root <DIR>]",
+            "ryeos node reset execution-history [--dry-run | --confirm] [--include-project-heads --confirm-project-heads] [--schema-cut-from <EPOCH> --schema-cut-to <EPOCH>] [--json] [--app-root <DIR>]",
         ),
         "node reset authorization" => (
             "ryeos node reset authorization",

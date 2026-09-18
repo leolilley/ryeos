@@ -763,6 +763,14 @@ struct ExecutionHistoryResetArgs {
     /// Emit structured JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
+
+    /// Exact predecessor runtime schema epoch for an idempotent hosted cut.
+    #[arg(long = "schema-cut-from", requires = "schema_cut_to")]
+    schema_cut_from: Option<u32>,
+
+    /// Exact current runtime schema epoch for an idempotent hosted cut.
+    #[arg(long = "schema-cut-to", requires = "schema_cut_from")]
+    schema_cut_to: Option<u32>,
 }
 
 impl ExecutionHistoryResetArgs {
@@ -774,6 +782,10 @@ impl ExecutionHistoryResetArgs {
             anyhow::bail!(
                 "resetting principal and deployed project HEADs requires --confirm-project-heads"
             );
+        }
+        if matches!((self.schema_cut_from, self.schema_cut_to), (Some(from), Some(to)) if from == to)
+        {
+            anyhow::bail!("execution-history schema cut must name distinct epochs");
         }
         Ok(())
     }
@@ -792,6 +804,15 @@ fn run_execution_history_reset_command(
         app_root: args.app_root,
         dry_run: args.dry_run,
         discard_project_heads: args.include_project_heads,
+        schema_cut: args
+            .schema_cut_from
+            .zip(args.schema_cut_to)
+            .map(
+                |(from, to)| ryeos_app::execution_history_reset::ExecutionHistorySchemaCut {
+                    from,
+                    to,
+                },
+            ),
     };
     let mut progress =
         crate::tty::ExecutionHistoryResetProgress::new(!args.json, console.capabilities());
@@ -821,6 +842,8 @@ fn run_execution_history_reset_command(
         crate::tty::Tone::Success,
         if report.dry_run {
             "EXECUTION HISTORY SCAN COMPLETE"
+        } else if !report.performed {
+            "EXECUTION HISTORY SCHEMA ALREADY CURRENT"
         } else {
             "EXECUTION HISTORY RESET COMPLETE"
         },
@@ -864,7 +887,7 @@ fn run_execution_history_reset_command(
             report.projection.superseded_instances_deleted.to_string(),
         ),
     ];
-    if !report.dry_run {
+    if report.performed {
         status.rows.push(crate::tty::Row::key_value(
             "storage reclamation",
             "run `ryeos maintenance gc` after restart",
