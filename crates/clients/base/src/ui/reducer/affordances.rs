@@ -559,8 +559,7 @@ mod tests {
             },
         });
 
-        let fold = core.seat.fold();
-        assert_eq!(fold.get("selection").unwrap()["item"], "tool:demo/run");
+        assert_eq!(active_selection(&core)["item"], "tool:demo/run");
         assert!(matches!(
             effects.first().and_then(source_request),
             Some((fetched_tile, "view:test/inspector", "default", params))
@@ -1208,10 +1207,7 @@ mod tests {
             },
         });
 
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["work"]["thread"],
-            "T-inspected"
-        );
+        assert_eq!(active_selection(&core)["work"]["thread"], "T-inspected");
         assert_eq!(core.view_sets[core.active_view_set].lens_label, None);
     }
 

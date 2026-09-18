@@ -2108,8 +2108,8 @@ mod tests {
 
         // The selection facet is set …
         assert_eq!(
-            core.seat.fold().get(crate::ui::seat::KEY_SELECTION),
-            Some(&serde_json::json!({ "item": "tool:ryeos/x" })),
+            active_selection(&core),
+            serde_json::json!({ "item": "tool:ryeos/x" }),
         );
         // … and nothing was opened or swapped: same single tile, same lens.
         assert_eq!(core.view_sets[core.active_view_set].tile_ids().len(), 1);
@@ -2502,11 +2502,7 @@ mod tests {
         });
 
         // The facet carries the summary …
-        let fold = core.seat.fold();
-        assert_eq!(
-            fold.get("selection").unwrap()["summary"]["title"],
-            "failed — boom"
-        );
+        assert_eq!(active_selection(&core)["summary"]["title"], "failed — boom");
 
         // … and the inspector actually RENDERS it.
         let vm = build_view_model(&core);

@@ -1348,7 +1348,7 @@ mod tests {
                 entity_id: Some("run:two".to_string()),
             },
         });
-        let selection = core.seat.fold().get("selection").cloned().unwrap();
+        let selection = active_selection(&core);
         assert_eq!(selection["thread_id"], "T-two");
         assert_eq!(selection["entity_id"], "run:two");
         assert!(
@@ -1429,10 +1429,7 @@ mod tests {
                 delta: -1,
             },
         });
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["thread_id"],
-            "T-one"
-        );
+        assert_eq!(active_selection(&core)["thread_id"], "T-one");
         assert!(effects.iter().any(|effect| {
             source_request(effect).is_some_and(|(_, _, _, params)| {
                 params["thread_id"] == "T-one" && params["cursor"]["mode"] == "live"
@@ -1630,10 +1627,7 @@ mod tests {
             core.key_context(),
         );
         core.apply_key_command(down);
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["entity_id"],
-            "run:two"
-        );
+        assert_eq!(active_selection(&core)["entity_id"], "run:two");
 
         let enter = ryeos_key_command(
             RyeOsKeyEvent {
@@ -1643,10 +1637,7 @@ mod tests {
             core.key_context(),
         );
         core.apply_key_command(enter);
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["thread_id"],
-            "T-two"
-        );
+        assert_eq!(active_selection(&core)["thread_id"], "T-two");
     }
 
     #[test]

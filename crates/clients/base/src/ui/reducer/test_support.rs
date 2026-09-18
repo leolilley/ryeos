@@ -97,6 +97,15 @@ pub(crate) fn focused_input_text(core: &RyeOsCore) -> String {
         .unwrap_or_default()
 }
 
+pub(crate) fn active_selection(core: &RyeOsCore) -> serde_json::Value {
+    let key = crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
+    core.seat
+        .fold()
+        .get(&key)
+        .cloned()
+        .expect("active view set has selection")
+}
+
 /// Seed the `view:ryeos/input` completion source (the slash grammar) into
 /// the generic keyed source store, as `initial_effects`' FetchSource would.
 pub(crate) fn seed_commands(core: &mut RyeOsCore, commands: serde_json::Value) {
