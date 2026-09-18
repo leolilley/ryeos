@@ -1,15 +1,13 @@
 # RyeOS remote development completion plan and live ledger
 
-Updated: 2026-09-18, Pacific/Auckland. Owner: this execution thread.
-Status: BLOCKED AT GENERIC RYEOS BOUNDARY — merged-worktree remediation is installed on the primary,
-source, and target nodes at v0.5.93 revision `545c716e2a25`. The retained pair
-was upgraded in place, then its incompatible epoch-35 execution history and
-target project HEAD were explicitly retired with operator approval. Both nodes
-are healthy on epoch 39 with current projections; their identities, vault,
-remote descriptor, grant, and project binding remain exact. The first fresh G1
-product launch fails while constructing its execution realization because a
-structured selected-resource property contradicts the realization's scalar-only
-property contract. No E2E pass claimed; do not relaunch before the generic fix.
+Updated: 2026-09-19, Pacific/Auckland. Owner: this execution thread.
+Status: RECONSTRUCTING THE QUALIFICATION PAIR — the former retained source and
+target state was deleted during `/tmp` cleanup. Paths with those names were later
+recreated, but contain only `.ai/.bundles.lock`; their identities, policy, grants,
+project authority, product witnesses, execution history, and target HEAD are gone.
+The old runit services still report their former PIDs while both endpoints are
+unreachable and therefore confer no live authority. Treat every former source /
+target coordinate below as historical and invalidated. No E2E pass is claimed.
 
 This tracked-path document is the sole canonical continuation plan. Keep its
 checkpoint and append-only journal current and commit material checkpoint updates
@@ -24,34 +22,28 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: G0 lifecycle and route checks pass after the clean epoch cut. Configured-operator
-push re-established exact target snapshot `21867eea…` with unchanged content tree
-`7e09b35c…`; composition reported an absent witness, without establishing which
-of the two supplied witnesses was absent. Verify each independently before rebuilding.
-G1 is blocked at root `T-99ffc235-c781-eda2-7be3-b22aded526cf` by
-`execution realization properties must be scalar or null`. Fix and install the
-generic execution-realization property representation, then inspect that terminal
-root and issue one new prepared-input launch; never reuse its failed launch ID.
-Historical launch IDs, chain heads, replay
-indexes, and the former target project HEAD were deliberately retired and must not
-be reconstructed or reused. Do not create another node, use a custom runner, copy
-a binary directly, or issue bare host-upgrade phases outside the audited installer.
+Current gate: retire only the two exact orphan runit services, build and install
+one exact current source generation, then create one fresh source/target pair with
+the supported installer and `development` node profile. Reconstruct the remote
+descriptor, exact grant, immutable source project, target snapshot, credential
+status, and product witnesses from their owning APIs. Do not attempt to recover
+authority from the recreated empty paths or reuse any former identity, launch,
+chain, witness, project HEAD, receipt, or replay coordinate.
 
-Current implementation checkpoint: `545c716e2 Implement merged worktree
-remediation`. It contains the reviewed remote-development and CLI reflow corrections
-and is the exact revision reported by all three healthy daemons. Repository HEAD
-has since advanced through unrelated UI projection work at `ce1569e80`; that work
-is not part of this installed qualification generation. Native verifier live
-success is NOT established.
+Current implementation checkpoint: repository HEAD `86beed305 Add explicit
+trusted Codex enrollment lane`, one commit ahead of `origin/next` at the time of
+this checkpoint. The generic resource-selection realization correction landed at
+`7be572725`; exact hosted execution schema-cut support and v0.5.95 landed at
+`aa57e36ce`. Existing `target/release` CLI/daemon artifacts report v0.5.95 with
+hashes `e8f5146a…` / `67e253a8…`, but predate current HEAD. Installed `/usr/bin`
+is mixed and stale: CLI v0.5.93 (`abd6676b…`) and daemon `d18fd85f…`. Rebuild and
+install one exact current generation before admitting the replacement pair.
 
-Host-context checkpoint at 2026-09-18T05:38Z: retained source 7423 (PID 24227)
-and target 7445 (PID 26242) are healthy on v0.5.93 revision `545c716e2a25`.
-Source reset retired 16 chain heads, 48 chain-reference artifacts, 3 scheduler
-artifacts, and replay epoch 10. Target reset retired 125 chain heads, one project
-HEAD, 375 chain-reference artifacts, 12 thread-runtime artifacts, 3 scheduler
-artifacts, and replay epoch 10. Both had zero pending transitions. Target project
-status is intentionally separate by principal; retained CAS payload bytes are not
-product authority. Source is supervised after the final supported reinstall.
+Host-context checkpoint at 2026-09-19: former source service
+`ryeos-0b1d0411…` and target service `ryeos-721ce0a7…` report PIDs 16335 and
+26242 as `normally down`, but neither 7423 nor 7445 accepts a connection. Their
+named app roots were recreated at 10:00 NZST with only bundle lock files; the
+source project is absent. Stop these exact services before provisioning replacements.
 
 ## Scope and finish line
 
@@ -94,26 +86,27 @@ onboarding remain separate roadmap phases, explicitly reported at handoff.
 
 ## Fixed topology ledger
 
-These are last-known coordinates; G0 must confirm them without mutation.
+These are historical last-known coordinates from the invalidated pair. They are
+retained only as negative evidence and must not be used as current authority.
 
 | Field | Retained value |
 |---|---|
-| Repo / branch | `/home/leo/projects/ryeos-next`, `next`; installed implementation checkpoint `545c716e2`; current unrelated UI follow-up `ce1569e80` |
-| Source app root | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-node` |
+| Repo / branch | `/home/leo/projects/ryeos-next`, `next`; current HEAD `86beed305`; `origin/next` `aa57e36ce` at checkpoint time |
+| Source app root | INVALIDATED `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-node`; recreated shell contains no node state |
 | Source HTTP | `http://127.0.0.1:7423` |
-| Source project | `/tmp/ryeos-remote-workflow-e2e-v091.b4i6IGEs/source-project`, detached `bc58d9b709194a8e13f26f641585e2266ba4ba7f`, tree `7a8ea1a83864345f5d7c2d6a8fffcb2a3b8b4e7c` |
+| Source project | INVALIDATED / absent; former detached Git `bc58d9b709194a8e13f26f641585e2266ba4ba7f`, tree `7a8ea1a83864345f5d7c2d6a8fffcb2a3b8b4e7c` |
 | Source node fingerprint | `e1430400ff3d2d919a362b56fc7e0e72dead08977da3ff83e2a4ec0831a9916e` |
 | Source operator | `e70c09cb19bfbbc804fc1da882dad65ccca2a2799471c2f6b4fb5402ce0f1756` |
 | Remote route | `qualification` — must resolve to target below |
-| Target app root | `/tmp/ryeos-remote-e2e-v091.UyjanrF8/target-node` |
+| Target app root | INVALIDATED `/tmp/ryeos-remote-e2e-v091.UyjanrF8/target-node`; recreated shell contains no node state |
 | Target HTTP / UDS | `127.0.0.1:7445` / `/tmp/ryeos-remote-e2e-v091.UyjanrF8/target.sock` |
 | Target node fingerprint | `2719d3c2cd8bd3e3dac1f2a91381961fb65afa5c743f86439a46e865391704fd` |
 | Target local operator | `56feba567a49ae05a1f09c02c91b32ab477b78a204456db458102431f1d7d796` |
 | Target vault identity | `0b29be10b26bea6ac4bb2034c71aee41a35fc34f287d5d482f3b922c7be501b8` |
 | Target project display path | `/tmp/ryeos-remote-development.GgHPTg/target-project-current-20260915` |
 | Frozen target snapshot / target HEAD | configured-operator snapshot `21867eeaf077ab9b0db162431516bbc2cff3090fb9775c9926cf886ed0bec05e`; tree `7e09b35c0110494cc3f8667e671f4f7706440741673575ca8835283b9a011d4b`; 3,010 entries; source Git `bc58d9b709194a8e13f26f641585e2266ba4ba7f`. Generic doctor remains `deployed: false` because it reports the distinct node-owned view; former configured-operator HEAD `19fd0c01…` is retired |
-| Primary installed CLI / daemon | `/usr/bin/ryeos` v0.5.93 revision `545c716e2a25`, sha256 `abd6676b5c5e8ab4749d3ce0a03aef2e882bd1f6e8721fce0e31acd33c2b2110`; `/usr/bin/ryeosd` v0.5.93 revision `545c716e2a25`, sha256 `0b0e893375e02a8276998e0b0a02a293e2867d6ac6a8a3eface653e80aa13488`; both exactly match `target/release` |
-| Retained source / target daemon generation | both v0.5.93 revision `545c716e2a25`; supervised source PID 16335 on 7423, target PID 26242 on 7445; healthy after explicit epoch-35 execution-history reset |
+| Primary installed CLI / daemon | mixed/stale: `/usr/bin/ryeos` v0.5.93 sha256 `abd6676b5c5e8ab4749d3ce0a03aef2e882bd1f6e8721fce0e31acd33c2b2110`; `/usr/bin/ryeosd` sha256 `d18fd85f5021a1e015d273dfafc2979adce46615ce04ccb176273a25edf8db59` |
+| Retained source / target daemon generation | INVALIDATED; orphan services report former PIDs 16335 / 26242, endpoints are unreachable, and backing node state is absent |
 | Qualification daemon | `/usr/lib/ryeos-qualification/ryeosd` remains v0.5.87 revision `3a43ed50ee3e`, sha256 `263b937620543e2a72ef7e8d4d19225c48a4e40921c8c6b9a1af56e5080aa28b`; it is not the canonical target service image |
 | Target daemon last known | retained canonical target healthy on 7445 at v0.5.93 revision `545c716e2a25`; source-to-target signed authorization and every pinned identity coordinate match |
 | Credential profile | `personal`; state/generation require status check, never log tokens |
@@ -178,7 +171,7 @@ Status values: pending / running / passed / failed / blocked / invalidated.
 Each passed gate requires a timestamp, source coordinate, node identity, exact
 operation/root IDs and evidence path. Historical claims alone cannot mark a pass.
 
-### G0 — reconcile and freeze prerequisites (running)
+### G0 — reconcile and freeze prerequisites (invalidated; rebuilding)
 
 G0a is step 1. Step 2 follows G3a. G0b is steps 3–4 and must wait for G3a source
 decisions. Static feasibility review precedes lifecycle mutation and source freeze.
@@ -402,6 +395,7 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 18 05:42 NZST | G0 target freeze | one `remote push` as configured operator from clean detached source Git `bc58d9b…` / tree `7a8ea1a8…` | snapshot `21867eeaf077ab9b0db162431516bbc2cff3090fb9775c9926cf886ed0bec05e`, project tree `7e09b35c0110494cc3f8667e671f4f7706440741673575ca8835283b9a011d4b`, 3,010 entries; 5,900 blobs reused and one uploaded. Content tree exactly matches the former authoritative generation | freeze this configured-operator HEAD; generic doctor correctly reports the separate node-owned view as undeployed. Resolve current products and do not push again unless the frozen source generation changes intentionally |
 | Sept 18 05:55 NZST | G0/G1 product continuity | exact `compose-product` for native verifier under snapshot `21867eea…` | first retained-current-HEAD wrapper launch `L-bc114deb…` failed before thread birth (`T-1ccd15aa…`, `launch_admission_failed`) because a unary service was incorrectly wrapped as an accepted root; no product handler contact. Correct projectless configured-operator composition then reached target and returned `retained product witness is absent` | not a substrate defect and do not reuse the failed launch. Historical product payload bytes confer no witness authority; reproduce the authored product chain under the frozen current generation |
 | Sept 18 05:58 NZST | G1 prepared-input reproduction / generic blocker | configured-operator launch `L-1c370bec6676a8ebce347df12da51c21`; source remote thread `svc-1789711065965-d99c57b0`; target root `T-99ffc235-c781-eda2-7be3-b22aded526cf` | launch bound to exact snapshot `21867eea…`, project authority `f27736e…`, then failed before start with `execution realization properties must be scalar or null`; PID/PGID null, no successor, no capsule, zero receipts/effects, no producer Tool/provider contact. Source digest-only error `6028cea0…`. Code inspection finds `execution_properties()` stores `selected_resources` as a JSON array while `AdmittedExecutionRealization::validate()` rejects every array/object property | stop without retry. Correct the generic representation/validation contract and cover empty plus nonempty resource selections; install on both retained nodes, then use a new launch coordinate and continue G1 |
+| Sept 19 10:15 NZST | G0 retained-state invalidation | filesystem, service, binary-hash, and endpoint reconciliation after `/tmp` cleanup | former source project is absent; both former app-root names were recreated at 10:00 NZST with only `.ai/.bundles.lock`. Exact runit services still report PIDs 16335 / 26242 as normally down, while 7423 / 7445 are unreachable. Installed CLI is v0.5.93 and installed daemon hash differs from both its former generation and staged v0.5.95. All former pair authority and every dependent G0/G1 product coordinate are invalidated | stop only the two exact orphan services. Rebuild/install exact current HEAD, create one fresh development-profile pair, and reconstruct authority once through supported APIs; never mine or reuse the deleted generation |
 
 Evidence correction (subsequent code review): the 05:55 entry overstates two
 conclusions. The unary launch's detailed admission cause was not recovered;
