@@ -12856,7 +12856,7 @@ function WebGLRenderer(parameters) {
 	const renderListStack = [];
 	const renderStateStack = [];
 	this.domElement = _canvas;
-	this.debug = { 
+	this.debug = {
 	/**
 	* Enables error checking and reporting when shader programs are being compiled
 	* @type {boolean}

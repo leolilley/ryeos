@@ -1448,8 +1448,14 @@ fn bound_view_vm_keyed(
                 } else {
                     rows.reserve(count);
                     for record in records {
-                        let row_key =
-                            format!("{index}:{}", super::model::row_key(&record.raw, rows.len()));
+                        let row_key = format!(
+                            "{index}:{}",
+                            super::model::projected_row_key(
+                                &record.raw,
+                                rows.len(),
+                                &section.projection,
+                            )
+                        );
                         let expanded =
                             expanded_rows.is_some_and(|expanded| expanded.contains(&row_key));
                         let selected = cursor == Some(flat);
@@ -1596,7 +1602,8 @@ fn bound_view_vm_keyed(
                 .map(|(offset, raw)| {
                     let index = start + offset;
                     let record = super::content::project_record_for_binding(binding, raw);
-                    let key = super::model::row_key(&record.raw, index);
+                    let key =
+                        super::model::projected_row_key(&record.raw, index, &binding.projections);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
                     let detail = if expanded {
                         detail_vm(&record.raw, &expand_fields)
@@ -1837,7 +1844,13 @@ fn bound_view_vm_keyed(
                     let key = hierarchy
                         .as_ref()
                         .map(|tree| tree.key.clone())
-                        .unwrap_or_else(|| super::model::row_key(&record.raw, *source_index));
+                        .unwrap_or_else(|| {
+                            super::model::projected_row_key(
+                                &record.raw,
+                                *source_index,
+                                &binding.projections,
+                            )
+                        });
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
                     let detail = if expanded {
                         detail_vm(&record.raw, &expand_fields)
