@@ -408,6 +408,79 @@ impl ViewSet {
         }
     }
 
+    /// Copy only reusable composition. Mounted identities, drafts, transient
+    /// observations, focus ephemera and the lens return stack are deliberately
+    /// not cloned: those belong to one open set instance.
+    pub fn duplicate_composition(&self) -> Self {
+        fn duplicate_tree(
+            tree: &LayoutTree,
+            source: &HashMap<TileId, TileState>,
+            destination: &mut HashMap<TileId, TileState>,
+        ) -> LayoutTree {
+            match tree {
+                LayoutTree::Group { active, tabs, .. } => {
+                    let mut next_tabs = Vec::with_capacity(tabs.len());
+                    let mut next_active = None;
+                    for tile_id in tabs {
+                        let source_tile = source
+                            .get(tile_id)
+                            .expect("validated layout tree references a mounted tile");
+                        let next_id = ViewSet::next_tile_id();
+                        if tile_id == active {
+                            next_active = Some(next_id);
+                        }
+                        destination.insert(
+                            next_id,
+                            TileState {
+                                instance_key: RyeOsViewInstanceKey::view_set_tile(next_id),
+                                local: source_tile.view.initial_local_state(),
+                                view: source_tile.view.clone(),
+                            },
+                        );
+                        next_tabs.push(next_id);
+                    }
+                    LayoutTree::Group {
+                        group_id: ViewGroupId::new(next_tabs[0].0),
+                        active: next_active.expect("layout group has an active mounted tile"),
+                        tabs: next_tabs,
+                    }
+                }
+                LayoutTree::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => LayoutTree::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    first: Box::new(duplicate_tree(first, source, destination)),
+                    second: Box::new(duplicate_tree(second, source, destination)),
+                },
+            }
+        }
+
+        let mut duplicate = ViewSet::from_tiling(self.tiling.clone(), Vec::new());
+        duplicate.title = self.title.clone();
+        duplicate.docks = self.docks.clone();
+        duplicate.root = self
+            .root
+            .as_ref()
+            .map(|root| duplicate_tree(root, &self.tiles, &mut duplicate.tiles));
+        duplicate.focused_tile = duplicate
+            .root
+            .as_ref()
+            .and_then(|root| root.active_tile_ids().first().copied())
+            .unwrap_or_else(|| TileId::new(0));
+        duplicate.focus_target =
+            duplicate
+                .root
+                .as_ref()
+                .map(|_| crate::ui::model::RyeOsFocusTarget::ViewSetTile {
+                    tile_id: duplicate.focused_tile.0.to_string(),
+                });
+        duplicate
+    }
+
     /// Push a return frame: the view a step-in is leaving, the facet context it
     /// read, and the human label of that level. Recorded before the drill's
     /// facet write + center swap so a pop can restore the pre-drill state.

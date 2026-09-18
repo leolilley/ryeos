@@ -72,6 +72,24 @@ impl RyeOsCore {
         }
     }
 
+    /// Duplicate presentation composition without duplicating mounted
+    /// identity, transient observations or drafts. The new set follows the
+    /// same authored views and arrangement, but every mounted view receives a
+    /// fresh instance coordinate and therefore an independent source, input
+    /// and local-state lifetime.
+    pub(crate) fn duplicate_view_set(&mut self, id: crate::ids::ViewSetId) -> Vec<RyeOsEffect> {
+        if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
+            return Vec::new();
+        }
+        let Some(source) = self.view_sets.iter().find(|view_set| view_set.id == id) else {
+            return Vec::new();
+        };
+        let mut duplicate = source.duplicate_composition();
+        duplicate.title = format!("{} copy", source.title);
+        self.view_sets.push(duplicate);
+        self.switch_view_set_tab(self.view_sets.len() - 1)
+    }
+
     /// Closing presentation never terminates an execution. Stable identity is
     /// essential here: a delayed close must not target a newly shifted index.
     pub(crate) fn close_view_set(&mut self, id: crate::ids::ViewSetId) -> Vec<RyeOsEffect> {
@@ -1454,6 +1472,75 @@ mod tests {
             assert_eq!(core.view_sets[0].title, "My work");
         }
         assert_eq!(core.view_sets[0].id, id);
+    }
+
+    #[test]
+    fn duplicate_view_set_preserves_composition_without_aliasing_runtime_state() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/services");
+        seed_view(&mut core, "view:test/files");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::OpenView {
+                    view: ViewSpec::bound("view:test/services"),
+                },
+            },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::OpenNewView {
+                    view: ViewSpec::bound("view:test/files"),
+                },
+            },
+        });
+        core.view_sets[0].title = "Development".into();
+        core.view_sets[0].input_buffers.insert(
+            "draft".into(),
+            super::super::model::RyeOsInputState {
+                text: "private draft".into(),
+                ..Default::default()
+            },
+        );
+        let source_id = core.view_sets[0].id;
+        let source_instances: std::collections::BTreeSet<_> = core.view_sets[0]
+            .tiles
+            .values()
+            .map(|tile| tile.instance_key.clone())
+            .collect();
+        let source_views: std::collections::BTreeSet<_> = core.view_sets[0]
+            .tiles
+            .values()
+            .map(|tile| tile.view.view_ref.clone())
+            .collect();
+
+        core.duplicate_view_set(source_id);
+
+        let duplicate = &core.view_sets[core.active_view_set];
+        assert_ne!(duplicate.id, source_id);
+        assert_eq!(duplicate.title, "Development copy");
+        assert_eq!(
+            duplicate
+                .root
+                .as_ref()
+                .map(crate::layout::LayoutTree::tile_count),
+            Some(2)
+        );
+        assert!(duplicate.input_buffers.is_empty());
+        assert!(duplicate.lens_stack.is_empty());
+        let duplicate_instances: std::collections::BTreeSet<_> = duplicate
+            .tiles
+            .values()
+            .map(|tile| tile.instance_key.clone())
+            .collect();
+        assert!(source_instances.is_disjoint(&duplicate_instances));
+        assert_eq!(
+            duplicate
+                .tiles
+                .values()
+                .map(|tile| tile.view.view_ref.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            source_views
+        );
     }
 
     #[test]

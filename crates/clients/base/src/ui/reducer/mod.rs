@@ -952,6 +952,7 @@ impl RyeOsCore {
                 self.rename_view_set(view_set_id, &title);
                 Vec::new()
             }
+            RyeOsUiIntent::DuplicateViewSet { view_set_id } => self.duplicate_view_set(view_set_id),
             RyeOsUiIntent::CloseViewSet { view_set_id } => self.close_view_set(view_set_id),
             RyeOsUiIntent::MoveTileToViewSet {
                 layout_guard,

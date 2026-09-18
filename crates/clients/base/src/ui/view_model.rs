@@ -3035,6 +3035,15 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
         enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
     });
     let view_set = &core.view_sets[core.active_view_set];
+    items.push(RyeOsOverlayChoice {
+        label: "Duplicate view set".into(),
+        hint: "copy this composition with independent mounted views and drafts".into(),
+        intent: RyeOsUiIntent::DuplicateViewSet {
+            view_set_id: view_set.id,
+        },
+        secondary_intent: None,
+        enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
+    });
     if view_set.tiles.contains_key(&view_set.focused_tile) {
         for destination in &core.view_sets {
             if destination.id == view_set.id {

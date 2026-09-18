@@ -80,6 +80,9 @@ pub enum RyeOsUiIntent {
         view_set_id: crate::ids::ViewSetId,
         title: String,
     },
+    DuplicateViewSet {
+        view_set_id: crate::ids::ViewSetId,
+    },
     CloseViewSet {
         view_set_id: crate::ids::ViewSetId,
     },
