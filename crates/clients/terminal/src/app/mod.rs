@@ -202,7 +202,7 @@ pub async fn run(
         // Reconcile the SSE tail with the route facet. The timeline source is
         // scoped by `input.route.chain_root`, so tail the same braid live; keep
         // the moving route head separately as the live-buffer owner.
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         let desired_chain = route.chain_root.clone().or_else(|| route.thread.clone());
         let desired_thread = route.thread.clone().or_else(|| desired_chain.clone());
         if desired_chain != tail_chain {

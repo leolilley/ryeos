@@ -259,7 +259,6 @@ pub struct InputBufferKey {
 pub struct RyeOsInputAddress {
     pub session_id: String,
     pub binding_digest: String,
-    pub view_set_index: usize,
     pub view_set_id: crate::ids::ViewSetId,
     pub buffer: InputBufferKey,
 }
@@ -287,6 +286,10 @@ impl InputBufferKey {
             self.target_scope = Some(route_draft_scope(route));
         }
         self
+    }
+
+    pub fn route_facet_key(&self) -> String {
+        super::seat::input_route_facet_key(&self.view_instance_key)
     }
 
     /// Stable string key for the buffer map (JSON map keys must be
@@ -717,6 +720,10 @@ pub struct RyeOsCore {
     /// folds from here, never from renderer state.
     #[serde(default)]
     pub seat: super::seat::SeatLog,
+    /// Immutable initial route authored by the effective surface. Live subject
+    /// changes are stored only in the mounted input's scoped seat facet.
+    #[serde(default)]
+    pub initial_input_route: super::seat::InputRoute,
     /// Surface-declared chrome style (border treatment).
     #[serde(default)]
     pub style: SurfaceStyleSpec,
@@ -747,6 +754,114 @@ pub(crate) struct DeferredSourceFetch {
 }
 
 impl RyeOsCore {
+    pub(crate) fn input_key_for(
+        &self,
+        view_instance_key: RyeOsViewInstanceKey,
+        view_ref: impl Into<String>,
+        input: &super::content::InputBlock,
+    ) -> InputBufferKey {
+        let key = InputBufferKey::new(view_instance_key, view_ref, input.id.clone());
+        let route = self.input_route_for(&key);
+        key.scoped_for_input(input, &route)
+    }
+
+    pub(crate) fn input_route_for(&self, key: &InputBufferKey) -> super::seat::InputRoute {
+        self.route_for_instance(&key.view_instance_key)
+    }
+
+    pub(crate) fn route_for_instance(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+    ) -> super::seat::InputRoute {
+        self.seat
+            .fold()
+            .input_route(&super::seat::input_route_facet_key(instance))
+            .unwrap_or_else(|| self.initial_input_route.clone())
+    }
+
+    pub(crate) fn route_seq_for_instance(&self, instance: &RyeOsViewInstanceKey) -> Option<u64> {
+        self.seat
+            .fold()
+            .seq_of(&super::seat::input_route_facet_key(instance))
+    }
+
+    pub(crate) fn set_input_route(
+        &mut self,
+        key: &InputBufferKey,
+        route: &super::seat::InputRoute,
+    ) -> u64 {
+        self.seat.append_facet(
+            key.route_facet_key(),
+            serde_json::to_value(route).expect("InputRoute serializes"),
+        )
+    }
+
+    pub(crate) fn input_address_for(&self, key: InputBufferKey) -> RyeOsInputAddress {
+        let session = self.data.session.as_ref();
+        RyeOsInputAddress {
+            session_id: session
+                .map(|value| value.session_id.clone())
+                .unwrap_or_default(),
+            binding_digest: session
+                .map(|value| value.binding_digest.clone())
+                .unwrap_or_default(),
+            view_set_id: self.view_sets[self.active_view_set].id,
+            buffer: key,
+        }
+    }
+
+    pub(crate) fn input_address_is_live(&self, address: &RyeOsInputAddress) -> bool {
+        let Some(session) = self.data.session.as_ref() else {
+            return false;
+        };
+        if address.session_id != session.session_id
+            || address.binding_digest != session.binding_digest
+        {
+            return false;
+        }
+        let Some(view_set) = self
+            .view_sets
+            .iter()
+            .find(|view_set| view_set.id == address.view_set_id)
+        else {
+            return false;
+        };
+        let mounted = if let Some(tile_id) = address.buffer.view_instance_key.view_set_tile_id() {
+            view_set.tiles.get(&tile_id).is_some_and(|tile| {
+                tile.instance_key == address.buffer.view_instance_key
+                    && tile.view.view_ref == address.buffer.view_ref
+                    && view_set
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| root.active_tile_ids().contains(&tile_id))
+            })
+        } else {
+            view_set
+                .docks
+                .visible_slot_views()
+                .into_iter()
+                .any(|(edge, view_ref)| {
+                    dock_view_instance_key(view_set.id, edge) == address.buffer.view_instance_key
+                        && view_ref == address.buffer.view_ref
+                })
+        };
+        if !mounted {
+            return false;
+        }
+        let Some(input) = self
+            .views
+            .get(&address.buffer.view_ref)
+            .and_then(|view| view.input.as_ref())
+        else {
+            return false;
+        };
+        self.input_key_for(
+            address.buffer.view_instance_key.clone(),
+            address.buffer.view_ref.clone(),
+            input,
+        ) == address.buffer
+    }
+
     pub fn new(session: BrowserSession, viewport: BrowserViewport, now_ms: u64) -> Self {
         let local_preview = session.session_id.is_empty();
         let binding_contract_matches = local_preview
@@ -787,23 +902,20 @@ impl RyeOsCore {
                 .expect("minimal fail-closed surface is valid")
             }
         });
-        let input_route = super::seat::InputRoute::from_surface_input(surface.input.as_ref());
+        let input_route =
+            super::seat::InputRoute::from_surface_input(surface.input.as_ref()).unwrap_or_default();
         let mut core = Self {
             surface_sources: surface.sources.clone(),
             views: (surface_failure.is_none() && binding_contract_matches)
                 .then(|| super::content::views_from_surface(session.effective_surface.as_ref()))
                 .unwrap_or_default(),
+            initial_input_route: input_route,
             ..Self::default()
         };
         core.data.session = Some(session);
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
         core.runtime.last_tick_ms = now_ms;
-        if let Some(route) = input_route
-            && let Ok(value) = serde_json::to_value(&route)
-        {
-            core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
-        }
         core.style = surface.style;
         core.view_sets = surface
             .to_view_sets()
@@ -1081,7 +1193,10 @@ impl RyeOsCore {
             {
                 self.view_sets[self.active_view_set]
                     .dock_local
-                    .entry(dock_view_instance_key(edge))
+                    .entry(dock_view_instance_key(
+                        self.view_sets[self.active_view_set].id,
+                        edge,
+                    ))
                     .and_modify(|local| {
                         if !matches!(local, ViewLocalState::Field(_)) {
                             *local = ViewLocalState::Field(Default::default());
@@ -1364,8 +1479,15 @@ impl RyeOsCore {
                         && (!source.requires_project || self.has_project_bound()))
             })
             .map(|(channel, source)| {
-                let mut params =
-                    super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
+                let route = serde_json::to_value(self.route_for_instance(&instance_key))
+                    .expect("InputRoute serializes");
+                let mut params = super::content::resolve_params(&source.params, |key| {
+                    if key == super::seat::KEY_INPUT_ROUTE {
+                        Some(route.clone())
+                    } else {
+                        fold.get(key).cloned()
+                    }
+                });
                 if binding.widget == "field" {
                     params = resolve_field_params(
                         &params,
@@ -1680,7 +1802,12 @@ impl RyeOsCore {
             .docks
             .visible_slot_views()
             .into_iter()
-            .map(|(edge, view_ref)| (dock_view_instance_key(edge), view_ref))
+            .map(|(edge, view_ref)| {
+                (
+                    dock_view_instance_key(self.view_sets[self.active_view_set].id, edge),
+                    view_ref,
+                )
+            })
             .collect()
     }
 
@@ -1997,12 +2124,11 @@ impl RyeOsCore {
                 })?;
             if let Some(input) = self.views.get(&view_ref).and_then(|b| b.input.as_ref()) {
                 return Some((
-                    InputBufferKey::new(
-                        dock_view_instance_key(edge),
+                    self.input_key_for(
+                        dock_view_instance_key(self.view_sets[self.active_view_set].id, edge),
                         view_ref.clone(),
-                        input.id.clone(),
-                    )
-                    .scoped_for_input(input, &self.seat.fold().input_route()),
+                        input,
+                    ),
                     view_ref,
                 ));
             }
@@ -2017,20 +2143,44 @@ impl RyeOsCore {
             && let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref())
         {
             return Some((
-                InputBufferKey::new(
+                self.input_key_for(
                     self.view_sets[self.active_view_set]
                         .tiles
                         .get(&focused)?
                         .instance_key
                         .clone(),
                     view_ref.clone(),
-                    input.id.clone(),
-                )
-                .scoped_for_input(input, &self.seat.fold().input_route()),
+                    input,
+                ),
                 view_ref.clone(),
             ));
         }
         None
+    }
+
+    /// Subject of the currently focused input-owning view. This is a
+    /// presentation convenience only; delayed effects retain their exact
+    /// `RyeOsInputAddress` and never consult focus again.
+    pub fn focused_input_route(&self) -> super::seat::InputRoute {
+        self.focused_input_instance()
+            .map(|(key, _)| self.input_route_for(&key))
+            .unwrap_or_else(|| self.initial_input_route.clone())
+    }
+
+    pub(crate) fn focused_view_instance_key(&self) -> Option<RyeOsViewInstanceKey> {
+        match self.focus_target() {
+            RyeOsFocusTarget::Dock { edge } => Some(dock_view_instance_key(
+                self.view_sets[self.active_view_set].id,
+                edge,
+            )),
+            RyeOsFocusTarget::ViewSetTile { tile_id } => {
+                let tile_id = tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)?;
+                self.view_sets[self.active_view_set]
+                    .tiles
+                    .get(&tile_id)
+                    .map(|tile| tile.instance_key.clone())
+            }
+        }
     }
 
     /// Move focus to the default input edge, the one rule shared by
@@ -2197,9 +2347,9 @@ impl RyeOsCore {
                 .map(|t| t.cycle),
             // The head thread is mid-execution → esc interrupts it.
             head_thread_running: self
-                .seat
-                .fold()
-                .input_route()
+                .focused_input_instance()
+                .map(|(key, _)| self.input_route_for(&key))
+                .unwrap_or_default()
                 .thread
                 .as_deref()
                 .is_some_and(|head| self.head_thread_running(head)),
@@ -2750,13 +2900,19 @@ fn resolve_field_params(
 /// Stable identity for the view mounted in a surface slot. This is distinct
 /// from the source-effect key even while their current strings happen to
 /// match; Increment 2 gives source channels their own typed address.
-pub fn dock_view_instance_key(edge: RyeOsDockEdge) -> RyeOsViewInstanceKey {
-    RyeOsViewInstanceKey::surface_slot(match edge {
-        RyeOsDockEdge::Top => "top",
-        RyeOsDockEdge::Bottom => "bottom",
-        RyeOsDockEdge::Left => "left",
-        RyeOsDockEdge::Right => "right",
-    })
+pub fn dock_view_instance_key(
+    view_set_id: crate::ids::ViewSetId,
+    edge: RyeOsDockEdge,
+) -> RyeOsViewInstanceKey {
+    RyeOsViewInstanceKey::view_set_slot(
+        view_set_id,
+        match edge {
+            RyeOsDockEdge::Top => "top",
+            RyeOsDockEdge::Bottom => "bottom",
+            RyeOsDockEdge::Left => "left",
+            RyeOsDockEdge::Right => "right",
+        },
+    )
 }
 
 impl Default for RyeOsCore {
@@ -3036,7 +3192,10 @@ mod tests {
             fetches,
             vec![(
                 crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                    dock_view_instance_key(RyeOsDockEdge::Top),
+                    dock_view_instance_key(
+                        core.view_sets[core.active_view_set].id,
+                        RyeOsDockEdge::Top
+                    ),
                     "default",
                 )
                 .encode(),
@@ -3118,7 +3277,7 @@ mod tests {
         .unwrap();
         let base = || {
             InputBufferKey::new(
-                dock_view_instance_key(RyeOsDockEdge::Bottom),
+                dock_view_instance_key(crate::ids::ViewSetId::new(1), RyeOsDockEdge::Bottom),
                 "view:ryeos/input",
                 "line",
             )

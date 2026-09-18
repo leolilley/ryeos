@@ -102,7 +102,10 @@ pub(crate) fn focused_input_text(core: &RyeOsCore) -> String {
 pub(crate) fn seed_commands(core: &mut RyeOsCore, commands: serde_json::Value) {
     core.data.sources.insert(
         crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Bottom),
+            crate::ui::model::dock_view_instance_key(
+                core.view_sets[core.active_view_set].id,
+                crate::ui::model::RyeOsDockEdge::Bottom,
+            ),
             "line",
         )
         .encode(),
@@ -112,20 +115,39 @@ pub(crate) fn seed_commands(core: &mut RyeOsCore, commands: serde_json::Value) {
 
 pub(crate) fn seed_service_route(core: &mut RyeOsCore) {
     seed_input_view(core);
-    core.seat.append_facet(
-        crate::ui::seat::KEY_INPUT_ROUTE,
-        serde_json::json!({
-            "invoke": { "type": "service", "ref": "service:threads/input" },
-            "params": {
-                "target": {
-                    "kind": "fresh",
-                    "item_ref": "directive:demo/base",
-                    "project_path": "/tmp/project",
-                    "ref_bindings": { "model": "directive:demo/base" }
-                }
+    let (key, _) = core.focused_input_instance().expect("seeded input");
+    let route = serde_json::from_value(serde_json::json!({
+        "invoke": { "type": "service", "ref": "service:threads/input" },
+        "params": {
+            "target": {
+                "kind": "fresh",
+                "item_ref": "directive:demo/base",
+                "project_path": "/tmp/project",
+                "ref_bindings": { "model": "directive:demo/base" }
             }
-        }),
-    );
+        }
+    }))
+    .expect("valid route");
+    core.set_input_route(&key, &route);
+}
+
+pub(crate) fn set_focused_route_value(core: &mut RyeOsCore, value: serde_json::Value) {
+    let instance = core
+        .focused_view_instance_key()
+        .expect("a mounted view instance is focused");
+    core.seat
+        .append_facet(crate::ui::seat::input_route_facet_key(&instance), value);
+}
+
+pub(crate) fn focused_route_value(core: &RyeOsCore) -> serde_json::Value {
+    let instance = core
+        .focused_view_instance_key()
+        .expect("a mounted view instance is focused");
+    core.seat
+        .fold()
+        .get(&crate::ui::seat::input_route_facet_key(&instance))
+        .cloned()
+        .expect("focused view has a route")
 }
 
 /// Focus a center tile the way `FocusChanged` would: both the view_set

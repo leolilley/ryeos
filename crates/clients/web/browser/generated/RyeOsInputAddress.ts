@@ -9,7 +9,6 @@ import type { InputBufferKey } from "./InputBufferKey";
 export interface RyeOsInputAddress {
   session_id: string;
   binding_digest: string;
-  view_set_index: bigint;
   view_set_id: bigint;
   buffer: InputBufferKey;
 }

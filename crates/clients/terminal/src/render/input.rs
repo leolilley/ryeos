@@ -276,7 +276,6 @@ mod tests {
             address: ryeos_client_base::ui::model::RyeOsInputAddress {
                 session_id: "fixture".into(),
                 binding_digest: "fixture".into(),
-                view_set_index: 0,
                 view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
                 buffer: ryeos_client_base::ui::model::InputBufferKey::new(
                     ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(

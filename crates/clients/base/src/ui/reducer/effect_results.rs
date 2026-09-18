@@ -259,7 +259,13 @@ impl RyeOsCore {
             // new thread, so no ratchet and no "launched" copy. Clear
             // the buffer and keep the route where it is; the live tail
             // shows the folded turn.
-            self.clear_focused_input();
+            if let RyeOsEffectKind::InvokeBinding {
+                input_origin: Some(origin),
+                ..
+            } = expected
+            {
+                self.clear_addressed_input(origin);
+            }
             let notice = submitted_delivery_notice(
                 outcome.thread_id.as_deref(),
                 outcome.notice,
@@ -276,7 +282,13 @@ impl RyeOsCore {
             }
             return self.effects_for_hint("thread");
         }
-        self.clear_focused_input();
+        if let RyeOsEffectKind::InvokeBinding {
+            input_origin: Some(origin),
+            ..
+        } = expected
+        {
+            self.clear_addressed_input(origin);
+        }
         let Some(thread_id) = outcome.thread_id.clone() else {
             self.notice(effect_success_notice(expected, data), RyeOsTone::Good);
             self.bump_generation();
@@ -288,14 +300,18 @@ impl RyeOsCore {
         // since issue) may notice but never retargets.
         let route_metadata = match expected {
             RyeOsEffectKind::InvokeBinding {
+                input_origin,
                 route_seq,
                 ratchet_on_thread_id,
                 ..
-            } => Some((*route_seq, *ratchet_on_thread_id)),
+            } => input_origin
+                .as_ref()
+                .map(|origin| (origin.clone(), *route_seq, *ratchet_on_thread_id)),
             _ => None,
         };
-        if let Some((route_seq, ratchet_on_thread_id)) = route_metadata {
+        if let Some((origin, route_seq, ratchet_on_thread_id)) = route_metadata {
             self.try_ratchet_route(
+                &origin,
                 route_seq,
                 ratchet_on_thread_id,
                 &thread_id,
@@ -304,7 +320,13 @@ impl RyeOsCore {
         }
         self.notice(format!("Thread {thread_id} launched."), RyeOsTone::Good);
         let mut effects = Vec::new();
-        effects.extend(self.effects_for_facet(super::seat::KEY_INPUT_ROUTE));
+        if let RyeOsEffectKind::InvokeBinding {
+            input_origin: Some(origin),
+            ..
+        } = expected
+        {
+            effects.extend(self.effects_for_view_instance(&origin.buffer.view_instance_key));
+        }
         effects.extend(self.effects_for_hint("thread"));
         effects
     }
@@ -315,11 +337,19 @@ impl RyeOsCore {
     /// route moved since submit) notices and leaves the route untouched.
     fn try_ratchet_route(
         &mut self,
+        origin: &super::model::RyeOsInputAddress,
         route_seq: Option<u64>,
         ratchet_on_thread_id: bool,
         thread_id: &str,
         execution: Option<super::dto::ExecutionFacts>,
     ) -> bool {
+        if !self.input_address_is_live(origin) {
+            self.notice(
+                "Input context changed since submit; not retargeting.",
+                RyeOsTone::Warn,
+            );
+            return false;
+        }
         // Eligibility was decided at issue time (see submit_route)
         // — read it, don't recompute from current focus, which
         // may have moved while the launch was in flight. AND in
@@ -332,8 +362,9 @@ impl RyeOsCore {
         // machine but takes no operator input).
         let result_supports = execution.map(|e| e.supports_operator_followup);
         let targets = ratchet_on_thread_id && result_supports != Some(false);
+        let facet_key = origin.buffer.route_facet_key();
         let fold = self.seat.fold();
-        if fold.seq_of(super::seat::KEY_INPUT_ROUTE) != route_seq {
+        if fold.seq_of(&facet_key) != route_seq {
             self.notice(
                 "Route changed since submit; not retargeting.",
                 RyeOsTone::Warn,
@@ -348,7 +379,9 @@ impl RyeOsCore {
         if !targets {
             return false;
         }
-        let mut route = fold.input_route();
+        let mut route = fold
+            .input_route(&facet_key)
+            .unwrap_or_else(|| self.initial_input_route.clone());
         // First turn of a conversation: the launched
         // thread IS the chain root (root == head).
         // Continuations (route already had a head) keep
@@ -360,7 +393,7 @@ impl RyeOsCore {
         }
         route.thread = Some(thread_id.to_string());
         if let Ok(value) = serde_json::to_value(&route) {
-            self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+            self.seat.append_facet(facet_key, value);
         }
         true
     }
@@ -725,6 +758,7 @@ mod tests {
             },
             intent: crate::ui::effect::InvokeIntent::Service,
             success_notice: None,
+            input_origin: None,
             route_seq: None,
             ratchet_on_thread_id: false,
         });
@@ -1122,7 +1156,7 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None, "refused → no ratchet");
         assert_eq!(route.chain_root, None);
         assert!(
@@ -1156,7 +1190,7 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread.as_deref(), Some("T-1"));
         assert_eq!(route.chain_root.as_deref(), Some("T-1"));
 
@@ -1177,7 +1211,7 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         // Head advanced to the new turn; the next submit braids onto it.
         assert_eq!(route.thread.as_deref(), Some("T-2"));
         // Root unchanged — the feed keeps showing the whole conversation.
@@ -1197,8 +1231,8 @@ mod tests {
             .expect("submit effect");
 
         // Route changes after the submit was issued.
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
+        set_focused_route_value(
+            &mut core,
             serde_json::json!({
                 "invoke": { "type": "service", "ref": "service:threads/input" },
                 "thread": "T-other"
@@ -1218,7 +1252,7 @@ mod tests {
             },
         });
 
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread.as_deref(), Some("T-other"));
     }
 
@@ -1377,8 +1411,8 @@ mod tests {
             serde_json::json!({ "thread_id": "T-stale", "delivery": "launched" }),
             |core| {
                 // Route moves after the submit was issued → the result is stale.
-                core.seat.append_facet(
-                    crate::ui::seat::KEY_INPUT_ROUTE,
+                set_focused_route_value(
+                    core,
                     serde_json::json!({
                         "invoke": { "type": "service", "ref": "service:threads/input" },
                         "thread": "T-other"
@@ -1386,7 +1420,7 @@ mod tests {
                 );
             },
         );
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(
             route.thread.as_deref(),
             Some("T-other"),
@@ -1416,7 +1450,7 @@ mod tests {
             }),
             |_| {},
         );
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(
             route.thread, None,
             "no operator follow-up → route not retargeted"
@@ -1433,7 +1467,7 @@ mod tests {
             serde_json::json!({ "thread_id": "T-1", "delivery": "launched" }),
             |_| {},
         );
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         // First turn: the launched thread is both the chain root and the head.
         assert_eq!(route.chain_root.as_deref(), Some("T-1"));
         assert_eq!(route.thread.as_deref(), Some("T-1"));
@@ -1465,7 +1499,7 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(
             route.thread.as_deref(),
             Some("T-2"),
@@ -1496,7 +1530,7 @@ mod tests {
             "hold this",
             "refused delivery keeps the buffer"
         );
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None, "refused → no ratchet");
         assert_eq!(route.chain_root, None);
     }
@@ -1516,7 +1550,7 @@ mod tests {
         );
         // Live fold into a running thread: buffer clears, but no new thread and no ratchet.
         assert_eq!(focused_input_text(&core), "");
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None, "submitted → no ratchet");
         assert!(
             core.ui

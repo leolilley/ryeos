@@ -203,6 +203,7 @@ pub enum RyeOsMotionEventVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewSetVm {
+    pub view_set_id: crate::ids::ViewSetId,
     pub layout_guard: String,
     pub split_min_ratio: f32,
     pub split_max_ratio: f32,
@@ -680,7 +681,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
     };
-    let route = core.seat.fold().input_route();
+    let route = core.focused_input_route();
     let tail_url = route
         .chain_root
         .as_ref()
@@ -1104,6 +1105,7 @@ fn view_set_vm(core: &RyeOsCore) -> RyeOsViewSetVm {
     let center_is_empty = core.view_sets[core.active_view_set].center_is_empty();
     let backdrop_visible = center_is_empty || surface_uses_backdrop_underlay(core);
     RyeOsViewSetVm {
+        view_set_id: core.view_sets[core.active_view_set].id,
         layout_guard: core.layout_guard(),
         split_min_ratio: crate::layout::MIN_SPLIT_RATIO,
         split_max_ratio: crate::layout::MAX_SPLIT_RATIO,
@@ -1217,7 +1219,8 @@ fn dock_tile_vm(
         return None;
     }
     let RyeOsDockContent::View { view_ref } = &state.content;
-    let instance_key = super::model::dock_view_instance_key(edge);
+    let instance_key =
+        super::model::dock_view_instance_key(core.view_sets[core.active_view_set].id, edge);
     let focused = matches!(
         core.focus_target(),
         super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
@@ -1289,7 +1292,7 @@ fn instance_input_vm(
     let binding = core.views.get(view_ref)?;
     let input = binding.input.as_ref()?;
     let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone())
-        .scoped_for_input(input, &core.seat.fold().input_route());
+        .scoped_for_input(input, &core.route_for_instance(instance_key));
     Some(input_vm(core, &key, view_ref, input))
 }
 
@@ -1553,7 +1556,7 @@ fn bound_view_vm_keyed(
         // The feed follows `chain_root` (the whole braid), so key the empty
         // state off that, not the moving head. Show an honest
         // start-a-conversation state instead.
-        ("timeline", None) if core.seat.fold().input_route().chain_root.is_none() => {
+        ("timeline", None) if core.focused_input_route().chain_root.is_none() => {
             RyeOsViewVm::Placeholder {
                 title,
                 message: "No conversation yet — type below to start one.".to_string(),
@@ -2057,7 +2060,12 @@ pub(crate) fn field_vm_for_instance(
                 .docks
                 .visible_slot_views()
                 .into_iter()
-                .find(|(edge, _)| super::model::dock_view_instance_key(*edge) == *instance_key)
+                .find(|(edge, _)| {
+                    super::model::dock_view_instance_key(
+                        core.view_sets[core.active_view_set].id,
+                        *edge,
+                    ) == *instance_key
+                })
                 .map(|(_, view_ref)| view_ref)
         })?;
     let binding = core.views.get(&view_ref)?;
@@ -2325,7 +2333,7 @@ fn input_vm(
         .as_ref()
         .is_some_and(|(focused_key, _)| focused_key.storage_key() == key.storage_key());
 
-    let route = core.seat.fold().input_route();
+    let route = core.input_route_for(key);
     let route_label = input
         .target_label
         .clone()
@@ -2374,7 +2382,6 @@ fn input_vm(
                 .as_ref()
                 .map(|s| s.binding_digest.clone())
                 .unwrap_or_default(),
-            view_set_index: core.active_view_set,
             view_set_id: core.view_sets[core.active_view_set].id,
             buffer: key.clone(),
         },
@@ -2806,10 +2813,18 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
     refs.sort();
     refs.dedup();
     let fold = core.seat.fold();
+    let initial_route =
+        serde_json::to_value(&core.initial_input_route).expect("InputRoute serializes");
     refs.retain(|spec| {
         super::content::resolve_params(
             &serde_json::Value::String(format!("@facet:{spec}")),
-            |key| fold.get(key).cloned(),
+            |key| {
+                if key == super::seat::KEY_INPUT_ROUTE {
+                    Some(initial_route.clone())
+                } else {
+                    fold.get(key).cloned()
+                }
+            },
         )
         .is_null()
     });
@@ -2980,7 +2995,7 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
-    if let Some(head) = core.seat.fold().input_route().thread {
+    if let Some(head) = core.focused_input_route().thread {
         // "continue" is an operator follow-up — gate it on the substrate fact so
         // a machine-only thread (graph) doesn't offer an operator continue the
         // daemon refuses. "cancel" (terminate) applies to any active thread.
@@ -3519,9 +3534,9 @@ fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
             .iter()
             .find(|(id, _)| id.0.to_string() == tile_id)
             .map(|(_, tile)| tile.instance_key.clone()),
-        super::model::RyeOsFocusTarget::Dock { edge } => {
-            Some(super::model::dock_view_instance_key(edge))
-        }
+        super::model::RyeOsFocusTarget::Dock { edge } => Some(
+            super::model::dock_view_instance_key(core.view_sets[core.active_view_set].id, edge),
+        ),
     }
 }
 
@@ -3657,6 +3672,7 @@ fn tile_id_text(id: TileId) -> String {
 mod tests {
     use super::*;
     use crate::ui::content::{ProjectedRecord, TimelineRole};
+    use crate::ui::reducer::test_support::set_focused_route_value;
     use crate::ui::{RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
 
@@ -3687,9 +3703,12 @@ mod tests {
         .encode()
     }
 
-    fn dock_default_source_key(edge: RyeOsDockEdge) -> String {
+    fn dock_default_source_key(core: &RyeOsCore, edge: RyeOsDockEdge) -> String {
         super::super::source_key::RyeOsSourceInstanceKey::named(
-            super::super::model::dock_view_instance_key(edge),
+            super::super::model::dock_view_instance_key(
+                core.view_sets[core.active_view_set].id,
+                edge,
+            ),
             "default",
         )
         .encode()
@@ -3825,7 +3844,7 @@ mod tests {
         };
         let mut core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         core.data.sources.insert(
-            dock_default_source_key(RyeOsDockEdge::Top),
+            dock_default_source_key(&core, RyeOsDockEdge::Top),
             json!({ "version": "0.1.0" }),
         );
         core.notice(
@@ -4698,8 +4717,7 @@ mod tests {
     #[test]
     fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
             thread: "T-1".to_string(),
             text: "Hel".to_string(),
@@ -4719,8 +4737,7 @@ mod tests {
     #[test]
     fn append_live_delta_ignores_buffer_for_non_head_thread() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         // A buffer left over from a different head must not render.
         core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
             thread: "T-OTHER".to_string(),
@@ -4735,8 +4752,7 @@ mod tests {
     #[test]
     fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         // Head thread is running but has emitted no streaming text yet.
         core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
@@ -4757,8 +4773,7 @@ mod tests {
     #[test]
     fn append_live_delta_no_indicator_when_head_thread_settled() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
         });
@@ -4888,7 +4903,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -4926,7 +4944,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -4966,7 +4987,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::mention(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),

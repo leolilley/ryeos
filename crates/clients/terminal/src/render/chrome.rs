@@ -395,7 +395,10 @@ mod tests {
 
     fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
         RyeOsDockTileVm {
-            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(edge),
+            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(
+                ryeos_client_base::ids::ViewSetId::new(1),
+                edge,
+            ),
             edge,
             title: "t".into(),
             heading: None,
@@ -480,7 +483,6 @@ mod tests {
             address: ryeos_client_base::ui::model::RyeOsInputAddress {
                 session_id: "fixture".into(),
                 binding_digest: "fixture".into(),
-                view_set_index: 0,
                 view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
                 buffer: ryeos_client_base::ui::model::InputBufferKey::new(
                     ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(

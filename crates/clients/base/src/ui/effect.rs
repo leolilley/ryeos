@@ -29,6 +29,10 @@ pub enum RyeOsEffectKind {
         intent: InvokeIntent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success_notice: Option<String>,
+        /// Exact mounted input that issued this invocation. Delayed results
+        /// may mutate only this coordinate; current focus is never authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_origin: Option<super::model::RyeOsInputAddress>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_seq: Option<u64>,
         #[serde(default)]

@@ -359,7 +359,10 @@ impl RyeOsCore {
                 let view_ref = view_ref.clone();
                 self.view_sets[self.active_view_set].focus_target =
                     Some(super::model::RyeOsFocusTarget::Dock { edge });
-                let key = super::model::dock_view_instance_key(edge);
+                let key = super::model::dock_view_instance_key(
+                    self.view_sets[self.active_view_set].id,
+                    edge,
+                );
                 self.view_sets[self.active_view_set]
                     .dock_local
                     .entry(key.clone())
@@ -535,7 +538,7 @@ impl RyeOsCore {
                 // ryeos cancel path: `service:commands/submit { cancel }`, the
                 // same channel row affordances use. No-op if
                 // there's no running head.
-                let Some(head) = self.seat.fold().input_route().thread else {
+                let Some(head) = self.focused_input_route().thread else {
                     return Vec::new();
                 };
                 if !self.head_thread_running(&head) {
@@ -572,6 +575,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: None,
+                    input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
@@ -896,7 +900,7 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsUiIntent::CycleTab { direction } => self.cycle_workspace_tab(direction),
+            RyeOsUiIntent::CycleTab { direction } => self.cycle_view_set_tab(direction),
             RyeOsUiIntent::CycleViewTab { direction } => {
                 let forward = matches!(direction, RyeOsStackMoveDirection::Down);
                 if self.view_sets[self.active_view_set].cycle_view_tab(forward) {
@@ -1026,7 +1030,10 @@ impl RyeOsCore {
                 } else {
                     None
                 };
-                let key = super::model::dock_view_instance_key(edge);
+                let key = super::model::dock_view_instance_key(
+                    self.view_sets[self.active_view_set].id,
+                    edge,
+                );
                 self.normalize_field_local_states();
                 self.bump_generation();
                 shown_view
@@ -1163,7 +1170,7 @@ impl RyeOsCore {
             RyeOsUiIntent::SubmitThreadCommand { command } => {
                 if self.refuse_blocked_mutation() {
                     Vec::new()
-                } else if let Some(thread_id) = self.seat.fold().input_route().thread {
+                } else if let Some(thread_id) = self.focused_input_route().thread {
                     // Thread control is a surface-level signed affordance, not
                     // a privileged renderer endpoint. The selection is
                     // bounded data; the binding owns the executable target.
@@ -1197,6 +1204,7 @@ impl RyeOsCore {
                         request_bounds,
                         intent: super::effect::InvokeIntent::Service,
                         success_notice: None,
+                        input_origin: None,
                         route_seq: None,
                         ratchet_on_thread_id: false,
                     })]
@@ -1743,7 +1751,10 @@ mod tests {
 
         assert!(build_view_model(&core).view_set.docks.left.is_some());
         let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
-            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left),
+            crate::ui::model::dock_view_instance_key(
+                core.view_sets[core.active_view_set].id,
+                crate::ui::model::RyeOsDockEdge::Left,
+            ),
             "default",
         )
         .encode();
@@ -1939,7 +1950,10 @@ mod tests {
         // The refs land under the mention source key via the generic fetch.
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::mention(
-                crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    crate::ui::model::RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -1984,10 +1998,7 @@ mod tests {
     #[test]
     fn interrupt_head_is_noop_when_head_settled() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-done" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-done" }));
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![serde_json::json!({ "thread_id": "T-done", "status": "completed" })],
         });
@@ -2020,10 +2031,7 @@ mod tests {
                 }]
             }),
         );
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-run" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-run" }));
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
         });
@@ -2521,7 +2529,7 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(focused_input_text(&core), "", "unbound UI stages nothing");
         assert!(
-            core.seat.fold().input_route().thread.is_none(),
+            core.focused_input_route().thread.is_none(),
             "unbound UI does not retarget the route"
         );
         assert!(

@@ -53,8 +53,8 @@ impl RyeOsViewInstanceKey {
         Self(format!("tile:{}", tile_id.0))
     }
 
-    pub fn surface_slot(edge: &str) -> Self {
-        Self(format!("dock:{edge}"))
+    pub fn view_set_slot(view_set_id: ViewSetId, edge: &str) -> Self {
+        Self(format!("view-set:{}:slot:{edge}", view_set_id.0))
     }
 
     pub fn as_str(&self) -> &str {
@@ -75,10 +75,12 @@ impl RyeOsViewInstanceKey {
             let key = Self::view_set_tile(tile_id);
             return (key.as_str() == value).then_some(key);
         }
-        if let Some(edge) = value.strip_prefix("dock:")
+        if let Some(rest) = value.strip_prefix("view-set:")
+            && let Some((raw_id, edge)) = rest.split_once(":slot:")
+            && let Ok(view_set_id) = raw_id.parse::<u64>()
             && matches!(edge, "top" | "bottom" | "left" | "right")
         {
-            return Some(Self::surface_slot(edge));
+            return Some(Self::view_set_slot(ViewSetId::new(view_set_id), edge));
         }
         None
     }

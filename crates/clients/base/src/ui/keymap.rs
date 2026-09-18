@@ -823,7 +823,10 @@ impl super::model::RyeOsCore {
             super::model::RyeOsFocusTarget::Dock { edge } => {
                 dock_vm_for_edge(&vm.view_set.docks, edge)
                     .map(|dock| FocusedRowsTarget {
-                        instance_key: super::model::dock_view_instance_key(edge),
+                        instance_key: super::model::dock_view_instance_key(
+                            self.view_sets[self.active_view_set].id,
+                            edge,
+                        ),
                         count_and_feed: selectable_of(&dock.view),
                     })
                     .filter(|target| target.count_and_feed.0 > 0)
@@ -991,7 +994,10 @@ fn focused_field_instance(
             .tiles
             .get(&core.view_sets[core.active_view_set].focused_tile)
             .map(|tile| tile.instance_key.clone()),
-        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(edge)),
+        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(
+            core.view_sets[core.active_view_set].id,
+            edge,
+        )),
     }?;
     matches!(
         view_local_for_instance(core, &instance_key),

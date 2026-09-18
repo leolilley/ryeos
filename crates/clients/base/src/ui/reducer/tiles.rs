@@ -107,7 +107,7 @@ impl RyeOsCore {
         }
     }
 
-    pub(crate) fn cycle_workspace_tab(
+    pub(crate) fn cycle_view_set_tab(
         &mut self,
         direction: RyeOsStackMoveDirection,
     ) -> Vec<RyeOsEffect> {

@@ -97,6 +97,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
+                    input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
@@ -116,6 +117,7 @@ impl RyeOsCore {
         open_view: Option<String>,
         drill: bool,
     ) -> Vec<RyeOsEffect> {
+        let route_subject = facet == super::seat::KEY_INPUT_ROUTE;
         // Step-in: before the drill writes its facet (and possibly swaps the
         // center), record a return frame — the view being left plus the facet
         // context it was reading — so a later pop restores them. Only on
@@ -137,13 +139,41 @@ impl RyeOsCore {
             let label = self.view_sets[self.active_view_set].lens_label.clone();
             self.view_sets[self.active_view_set].push_lens_frame(view, facets, label);
         }
+        // A route carried by an affordance belongs to the view it opens. Mount
+        // that view first so its durable instance key—not current focus—is the
+        // subject coordinate. The initial fetch is fenced below and refreshed
+        // against the newly written route.
+        let mut effects = if route_subject {
+            open_view
+                .as_ref()
+                .map(|view_ref| self.open_view(ViewSpec::bound(view_ref.clone())))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let route_instance = route_subject
+            .then(|| self.focused_view_instance_key())
+            .flatten();
+        let storage_facet = route_instance
+            .as_ref()
+            .map(super::seat::input_route_facet_key)
+            .unwrap_or_else(|| facet.clone());
         let next = if let Some(merge) = merge {
-            let mut current = self
-                .seat
-                .fold()
-                .get(&facet)
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+            let mut current = if route_subject {
+                route_instance
+                    .as_ref()
+                    .map(|instance| {
+                        serde_json::to_value(self.route_for_instance(instance))
+                            .expect("InputRoute serializes")
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}))
+            } else {
+                self.seat
+                    .fold()
+                    .get(&storage_facet)
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}))
+            };
             if let (Some(target), Some(patch)) = (current.as_object_mut(), merge.as_object()) {
                 for (key, val) in patch {
                     target.insert(key.clone(), val.clone());
@@ -153,7 +183,7 @@ impl RyeOsCore {
         } else {
             value.unwrap_or(serde_json::Value::Null)
         };
-        self.seat.append_facet(facet.clone(), next);
+        self.seat.append_facet(storage_facet, next);
         // Only the input-route contract gives the shared client a typed thread
         // label. Other signed facets (including inspection selection) are
         // intentionally opaque: deriving their breadcrumb from input.route
@@ -162,16 +192,24 @@ impl RyeOsCore {
         if drill {
             self.view_sets[self.active_view_set].lens_label = (facet
                 == super::seat::KEY_INPUT_ROUTE)
-                .then(|| self.seat.fold().input_route().thread)
+                .then(|| self.focused_input_route().thread)
                 .flatten();
         }
         self.bump_generation();
-        let mut effects = self.effects_for_facet(&facet);
+        let refreshed = if let Some(instance) = route_instance.as_ref() {
+            self.effects_for_view_instance(instance)
+        } else {
+            self.effects_for_facet(&facet)
+        };
+        if route_subject {
+            self.floor_source_fetches(&refreshed, true);
+        }
+        effects.extend(refreshed);
         // Open the view AFTER the facet write, so the opened view's fetch
         // resolves its `@facet:` params against the value just written (e.g. a
         // row drill-in sets input.route.chain_root, then the braid lens fetches
         // that chain). Single-lens surfaces replace the center in place.
-        if let Some(view_ref) = open_view {
+        if !route_subject && let Some(view_ref) = open_view {
             effects.extend(self.open_view(ViewSpec::bound(view_ref)));
         }
         effects
@@ -249,6 +287,67 @@ impl RyeOsCore {
                         self.refresh_source_channel(instance_key.clone(), &view_ref, &channel)
                     })
                     .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Refresh route-dependent sources for one mounted view. `input.route`
+    /// is a logical name in signed view data, but its live value is owned by
+    /// the mounted view instance; route changes must never refetch or retarget
+    /// sibling views.
+    pub(crate) fn effects_for_view_instance(
+        &mut self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
+    ) -> Vec<RyeOsEffect> {
+        let target = self.view_sets.iter().find_map(|view_set| {
+            view_set
+                .tiles
+                .values()
+                .find_map(|tile| {
+                    (&tile.instance_key == instance)
+                        .then(|| (tile.instance_key.clone(), tile.view.view_ref.clone()))
+                })
+                .or_else(|| {
+                    view_set
+                        .docks
+                        .visible_slot_views()
+                        .into_iter()
+                        .find_map(|(edge, view_ref)| {
+                            (super::model::dock_view_instance_key(view_set.id, edge) == *instance)
+                                .then(|| (instance.clone(), view_ref))
+                        })
+                })
+        });
+        let Some((instance, view_ref)) = target else {
+            return Vec::new();
+        };
+        let Some(binding) = self.views.get(&view_ref) else {
+            return Vec::new();
+        };
+        let channels = binding
+            .sources
+            .iter()
+            .filter_map(|(channel, source)| {
+                let refresh = if source.refresh.is_null() {
+                    &binding.refresh
+                } else {
+                    &source.refresh
+                };
+                let references_route = serde_json::to_string(&source.params)
+                    .unwrap_or_default()
+                    .contains("@facet:input.route");
+                (references_route
+                    || refresh.get("on_facet").and_then(serde_json::Value::as_str)
+                        == Some(super::seat::KEY_INPUT_ROUTE))
+                .then(|| channel.clone())
+            })
+            .collect::<Vec<_>>();
+        self.reset_field_replay_for_subject(&instance);
+        channels
+            .into_iter()
+            .flat_map(|channel| {
+                self.clear_field_expansions_for_channel(&instance, &channel);
+                self.refresh_source_channel(instance.clone(), &view_ref, &channel)
             })
             .collect()
     }
@@ -593,11 +692,12 @@ mod tests {
                 } }
             }),
         );
-        // A pre-existing route field must survive the merge.
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "directive": "directive:ryeos/ops/base" }),
-        );
+        // The signed initial route is the template for a newly opened view;
+        // its fields must survive the instance-local subject merge.
+        core.initial_input_route = serde_json::from_value(serde_json::json!({
+            "params": { "directive": "directive:ryeos/ops/base" }
+        }))
+        .unwrap();
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -609,12 +709,11 @@ mod tests {
             },
         });
 
-        let fold = core.seat.fold();
-        let route = fold.get("input.route").expect("route facet");
+        let route = focused_route_value(&core);
         assert_eq!(route["thread"], "T-9");
         assert_eq!(route["chain_root"], "T-root");
         assert_eq!(
-            route["directive"], "directive:ryeos/ops/base",
+            route["params"]["directive"], "directive:ryeos/ops/base",
             "merge preserves existing route fields"
         );
         assert!(
@@ -787,10 +886,7 @@ mod tests {
             }),
         );
         // On the game braid (chain_root A).
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "chain_root": "A" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "chain_root": "A" }));
 
         // Step into the child braid (chain_root B) with drill = true.
         core.apply_ui_affordance(
@@ -804,8 +900,8 @@ mod tests {
         // A return frame captured the pre-drill braid; the fold now reads B.
         assert_eq!(core.view_sets[core.active_view_set].lens_depth(), 1);
         assert_eq!(
-            core.seat.fold().get(crate::ui::seat::KEY_INPUT_ROUTE),
-            Some(&serde_json::json!({ "chain_root": "B" }))
+            focused_route_value(&core),
+            serde_json::json!({ "chain_root": "B" })
         );
 
         // Return: PopLens restores chain_root A and refetches that braid.
@@ -814,8 +910,8 @@ mod tests {
         });
         assert_eq!(core.view_sets[core.active_view_set].lens_depth(), 0);
         assert_eq!(
-            core.seat.fold().get(crate::ui::seat::KEY_INPUT_ROUTE),
-            Some(&serde_json::json!({ "chain_root": "A" }))
+            focused_route_value(&core),
+            serde_json::json!({ "chain_root": "A" })
         );
         assert!(
             effects
@@ -865,10 +961,7 @@ mod tests {
             }),
         );
         // On the parent braid (chain_root P).
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "chain_root": "P" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "chain_root": "P" }));
 
         // Step into child C (a fresh root: both coords = C).
         let effects = core.dispatch(RyeOsEvent::Ui {
@@ -886,8 +979,7 @@ mod tests {
             core.view_sets[core.active_view_set].lens_label.as_deref(),
             Some("study")
         );
-        let route = core.seat.fold();
-        let route = route.get(crate::ui::seat::KEY_INPUT_ROUTE).unwrap();
+        let route = focused_route_value(&core);
         assert_eq!(route["thread"], "C");
         assert_eq!(route["chain_root"], "C");
         // The braid lens refetched onto the child chain via the route facet.
@@ -912,8 +1004,8 @@ mod tests {
             "pop restores the top-of-tree label"
         );
         assert_eq!(
-            core.seat.fold().get(crate::ui::seat::KEY_INPUT_ROUTE),
-            Some(&serde_json::json!({ "chain_root": "P" })),
+            focused_route_value(&core),
+            serde_json::json!({ "chain_root": "P" }),
             "pop restores the pre-drill route (parent braid, no child thread)"
         );
     }
@@ -968,11 +1060,11 @@ mod tests {
     #[test]
     fn invoke_affordance_ui_merge_folds_into_existing_facet() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
+        set_focused_route_value(
+            &mut core,
             serde_json::json!({
                 "invoke": { "type": "service", "ref": "service:threads/input" },
-                "directive": "directive:demo/base"
+                "params": { "directive": "directive:demo/base" }
             }),
         );
         seed_view_value(
@@ -1002,19 +1094,15 @@ mod tests {
             },
         });
 
-        let fold = core.seat.fold();
-        let route = fold.get(crate::ui::seat::KEY_INPUT_ROUTE).unwrap();
-        assert_eq!(route["directive"], "directive:demo/base");
+        let route = focused_route_value(&core);
+        assert_eq!(route["params"]["directive"], "directive:demo/base");
         assert_eq!(route["thread"], "T-route");
     }
 
     #[test]
     fn inspection_drill_does_not_borrow_the_composer_route_label() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-composer" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-composer" }));
         seed_view_value(
             &mut core,
             "view:test/work",
@@ -1070,7 +1158,10 @@ mod tests {
         );
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    crate::ui::model::RyeOsDockEdge::Left,
+                ),
                 "default",
             )
             .encode(),
@@ -1131,8 +1222,10 @@ mod tests {
             }),
         );
         // Each section's response lands under its own per-section key.
-        let instance_key =
-            crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left);
+        let instance_key = crate::ui::model::dock_view_instance_key(
+            core.view_sets[core.active_view_set].id,
+            crate::ui::model::RyeOsDockEdge::Left,
+        );
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
                 .encode(),

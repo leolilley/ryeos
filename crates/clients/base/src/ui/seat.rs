@@ -128,13 +128,12 @@ impl SeatFold {
         self.facets.get(key).map(|(seq, _)| *seq)
     }
 
-    /// Typed lens for the input route. Absent or unparseable values fold
-    /// to the no-target route rather than erroring — unknown shapes from
-    /// newer writers must not break older readers.
-    pub fn input_route(&self) -> InputRoute {
-        self.get(KEY_INPUT_ROUTE)
+    /// Typed lens for one mounted input's exact route facet. The caller owns
+    /// the mounted-instance coordinate; there is deliberately no seat-global
+    /// route fallback.
+    pub fn input_route(&self, facet_key: &str) -> Option<InputRoute> {
+        self.get(facet_key)
             .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default()
     }
 }
 
@@ -180,6 +179,14 @@ impl InputRoute {
     }
 }
 
+/// Seat-facet identity for one mounted input's subject route. View instance
+/// identity survives placement changes. Every source, control and composer in
+/// that view resolves the same subject; changing the view binding cannot create
+/// a parallel route authority.
+pub fn input_route_facet_key(view_instance: &crate::ids::RyeOsViewInstanceKey) -> String {
+    format!("{KEY_INPUT_ROUTE}\u{1f}{view_instance}")
+}
+
 /// The pinned invocation template. The client never interprets refs or
 /// kinds — it constructs invocations and the substrate decides.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,7 +220,10 @@ mod tests {
         let fold = log.fold();
         assert_eq!(fold.get(KEY_SELECTION), Some(&json!({"item": "b"})));
         assert_eq!(fold.seq_of(KEY_INPUT_ROUTE), Some(route_seq));
-        assert_eq!(fold.input_route().thread.as_deref(), Some("T-1"));
+        assert_eq!(
+            fold.input_route(KEY_INPUT_ROUTE).unwrap().thread.as_deref(),
+            Some("T-1")
+        );
     }
 
     #[test]
@@ -315,17 +325,25 @@ mod tests {
         log.append_facet("tile.t3.filter", json!("schedules"));
         let fold = log.fold();
         assert_eq!(fold.get("tile.t3.filter"), Some(&json!("schedules")));
-        assert!(!fold.input_route().has_target());
+        assert!(
+            !fold
+                .input_route(KEY_INPUT_ROUTE)
+                .unwrap_or_default()
+                .has_target()
+        );
     }
 
     #[test]
     fn route_lens_defaults_on_absent_or_invalid() {
         let fold = SeatLog::default().fold();
-        assert_eq!(fold.input_route(), InputRoute::default());
+        assert_eq!(
+            fold.input_route(KEY_INPUT_ROUTE).unwrap_or_default(),
+            InputRoute::default()
+        );
 
         let mut log = SeatLog::default();
         log.append_facet(KEY_INPUT_ROUTE, json!("not a route"));
-        assert_eq!(log.fold().input_route(), InputRoute::default());
+        assert_eq!(log.fold().input_route(KEY_INPUT_ROUTE), None);
     }
 
     #[test]

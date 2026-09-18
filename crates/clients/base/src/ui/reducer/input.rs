@@ -13,8 +13,7 @@ impl RyeOsCore {
         use super::event::{RyeOsInputAction, RyeOsUiEvent};
         use super::model::{InputBufferKey, RyeOsFocusTarget, dock_view_instance_key};
         let session = self.data.session.as_ref();
-        if address.view_set_index != self.active_view_set
-            || address.view_set_id != self.view_sets[self.active_view_set].id
+        if address.view_set_id != self.view_sets[self.active_view_set].id
             || address.session_id != session.map(|s| s.session_id.as_str()).unwrap_or_default()
             || address.binding_digest
                 != session
@@ -46,7 +45,8 @@ impl RyeOsCore {
                     .visible_slot_views()
                     .into_iter()
                     .find(|(edge, view_ref)| {
-                        dock_view_instance_key(*edge) == address.buffer.view_instance_key
+                        dock_view_instance_key(view_set.id, *edge)
+                            == address.buffer.view_instance_key
                             && view_ref == &address.buffer.view_ref
                     })
             else {
@@ -61,12 +61,11 @@ impl RyeOsCore {
         else {
             return Vec::new();
         };
-        let expected = InputBufferKey::new(
+        let expected = self.input_key_for(
             address.buffer.view_instance_key.clone(),
             &address.buffer.view_ref,
-            &input.id,
-        )
-        .scoped_for_input(input, &self.seat.fold().input_route());
+            input,
+        );
         if expected != address.buffer {
             return Vec::new();
         }
@@ -358,7 +357,10 @@ impl RyeOsCore {
             return Vec::new();
         };
 
-        let mut route = self.seat.fold().input_route();
+        let Some((input_key, _)) = self.focused_input_instance() else {
+            return Vec::new();
+        };
+        let mut route = self.input_route_for(&input_key);
         // The input declared route-chain targeting (the author's assertion
         // that this route continues conversations). The only thing the engine
         // can't paper over is a route with no invoke at all — there's nothing
@@ -401,10 +403,9 @@ impl RyeOsCore {
             }
         }
         // A non-serializable InputRoute is a bug, not a runtime branch.
-        let value = serde_json::to_value(&route).expect("InputRoute serializes");
-        self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+        self.set_input_route(&input_key, &route);
         self.bump_generation();
-        let mut effects = self.effects_for_facet(super::seat::KEY_INPUT_ROUTE);
+        let mut effects = self.effects_for_view_instance(&input_key.view_instance_key);
         effects.extend(self.effects_for_hint("thread"));
         effects
     }
@@ -443,6 +444,10 @@ impl RyeOsCore {
         if self.refuse_blocked_mutation() {
             return Vec::new();
         }
+        let Some((origin_key, _)) = self.focused_input_instance() else {
+            return Vec::new();
+        };
+        let input_origin = self.input_address_for(origin_key.clone());
         let line = match super::tokenize::classify_line(text) {
             Ok(line) => line,
             Err(error) => {
@@ -482,6 +487,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Launch,
                     success_notice: None,
+                    input_origin: Some(input_origin),
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
@@ -493,9 +499,8 @@ impl RyeOsCore {
                 // thread. Computed once here so a focus change while the async
                 // launch is in flight can't corrupt the ratchet decision.
                 let ratchet_on_thread_id = self.focused_input_target_cycle().is_some();
-                let fold = self.seat.fold();
-                let route = fold.input_route();
-                let route_seq = fold.seq_of(super::seat::KEY_INPUT_ROUTE);
+                let route = self.input_route_for(&origin_key);
+                let route_seq = self.route_seq_for_instance(&origin_key.view_instance_key);
                 let Some(invoke) = route.invoke.clone() else {
                     self.notice(
                         "Input has no target — the surface declares no route.",
@@ -526,6 +531,7 @@ impl RyeOsCore {
                             request_bounds,
                             intent: super::effect::InvokeIntent::Launch,
                             success_notice: None,
+                            input_origin: Some(input_origin),
                             route_seq,
                             ratchet_on_thread_id,
                         })]
@@ -598,6 +604,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
+                    input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
@@ -616,6 +623,30 @@ impl RyeOsCore {
         if let Some(buffer) = self.focused_input_buffer_mut() {
             buffer.clear();
         }
+    }
+
+    pub(crate) fn clear_addressed_input(
+        &mut self,
+        address: &super::model::RyeOsInputAddress,
+    ) -> bool {
+        if !self.input_address_is_live(address) {
+            return false;
+        }
+        let Some(view_set) = self
+            .view_sets
+            .iter_mut()
+            .find(|view_set| view_set.id == address.view_set_id)
+        else {
+            return false;
+        };
+        let Some(buffer) = view_set
+            .input_buffers
+            .get_mut(&address.buffer.storage_key())
+        else {
+            return false;
+        };
+        buffer.clear();
+        true
     }
 
     pub(crate) fn set_tile_filter(
@@ -900,7 +931,7 @@ mod tests {
         });
 
         // Starts on "new conversation" — no target thread, no chain root.
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None);
         assert_eq!(route.chain_root, None);
 
@@ -908,7 +939,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-b1"));
         assert_eq!(route.thread.as_deref(), Some("T-b1"));
 
@@ -916,7 +947,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
         assert_eq!(route.thread.as_deref(), Some("T-a2"));
 
@@ -924,7 +955,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None);
         assert_eq!(route.chain_root, None);
 
@@ -932,7 +963,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: false },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
         assert_eq!(route.thread.as_deref(), Some("T-a2"));
     }
@@ -1030,14 +1061,14 @@ mod tests {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
         assert_eq!(
-            core.seat.fold().input_route().chain_root.as_deref(),
+            core.focused_input_route().chain_root.as_deref(),
             Some("T-ok")
         );
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
         assert_eq!(
-            core.seat.fold().input_route().chain_root,
+            core.focused_input_route().chain_root,
             None,
             "wraps back to new conversation — the suspended parent was never a slot"
         );
@@ -1063,14 +1094,14 @@ mod tests {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
         assert_eq!(
-            core.seat.fold().input_route().chain_root.as_deref(),
+            core.focused_input_route().chain_root.as_deref(),
             Some("T-yes")
         );
         // Forward again → wraps straight back to "new conversation".
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        assert_eq!(core.seat.fold().input_route().chain_root, None);
+        assert_eq!(core.focused_input_route().chain_root, None);
     }
 
     #[test]
@@ -1081,7 +1112,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None);
         assert_eq!(route.chain_root, None);
     }
@@ -1105,7 +1136,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None, "no declaration → no mutation");
         assert_eq!(route.chain_root, None);
         assert!(
@@ -1119,10 +1150,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
         // Route facet with no invoke template at all.
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "thread": "T-x" }),
-        );
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-x" }));
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
         });
@@ -1143,8 +1171,8 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
         // Route already on chain A with a stale head (T-a1).
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
+        set_focused_route_value(
+            &mut core,
             serde_json::json!({
                 "invoke": { "type": "service", "ref": "service:threads/input" },
                 "thread": "T-a1", "chain_root": "T-a1"
@@ -1161,12 +1189,12 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        assert_eq!(core.seat.fold().input_route().chain_root, None);
+        assert_eq!(core.focused_input_route().chain_root, None);
         // Forward again → chain A using the FETCHED head, not the stale T-a1.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
         assert_eq!(
             route.thread.as_deref(),
@@ -1180,8 +1208,8 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
         // Route aimed at a freshly-launched chain not yet in the thread list.
-        core.seat.append_facet(
-            crate::ui::seat::KEY_INPUT_ROUTE,
+        set_focused_route_value(
+            &mut core,
             serde_json::json!({
                 "invoke": { "type": "service", "ref": "service:threads/input" },
                 "thread": "T-new", "chain_root": "T-new"
@@ -1193,7 +1221,7 @@ mod tests {
         // forward from the synthetic current reaches "new conversation".
         // (Returning to it relies on the refresh, which lands quickly.)
         assert_eq!(
-            core.seat.fold().input_route().chain_root.as_deref(),
+            core.focused_input_route().chain_root.as_deref(),
             Some("T-new"),
             "starts on the unfetched current chain"
         );
@@ -1201,7 +1229,7 @@ mod tests {
             event: RyeOsUiEvent::CycleInputTarget { forward: true },
         });
         assert_eq!(
-            core.seat.fold().input_route().chain_root,
+            core.focused_input_route().chain_root,
             None,
             "synthetic current did not trap the cycle — moved to new conversation"
         );
@@ -1325,7 +1353,7 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(route.thread, None, "non-targeting input is not retargeted");
         assert_eq!(route.chain_root, None);
     }
@@ -1369,13 +1397,90 @@ mod tests {
                 error: None,
             },
         });
-        let route = core.seat.fold().input_route();
+        let route = core.focused_input_route();
         assert_eq!(
             route.thread.as_deref(),
             Some("T-9"),
             "ratcheted on the issue-time decision, not the moved focus"
         );
         assert_eq!(route.chain_root.as_deref(), Some("T-9"));
+    }
+
+    #[test]
+    fn delayed_submit_result_mutates_only_its_originating_view_set() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "first draft");
+        let effect = core
+            .dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("first view-set submit");
+        let origin = match &effect.kind {
+            RyeOsEffectKind::InvokeBinding {
+                input_origin: Some(origin),
+                ..
+            } => origin.clone(),
+            other => panic!("route submit must retain its origin, got {other:?}"),
+        };
+
+        // A second view set mounts the same authored bottom view. Its dock has
+        // a distinct instance key because the set id is part of the address.
+        let mut second =
+            crate::view_set::ViewSet::from_tiling(core.view_sets[0].tiling.clone(), Vec::new());
+        second.docks = core.view_sets[0].docks.clone();
+        second.focus_target = Some(super::super::model::RyeOsFocusTarget::Dock {
+            edge: super::super::model::RyeOsDockEdge::Bottom,
+        });
+        core.view_sets.push(second);
+        core.active_view_set = 1;
+        seed_service_route(&mut core);
+        set_focused_route_value(
+            &mut core,
+            serde_json::json!({
+                "invoke": { "type": "service", "ref": "service:threads/input" },
+                "thread": "T-second", "chain_root": "T-second"
+            }),
+        );
+        set_focused_input(&mut core, "second draft");
+        let second_instance = core.focused_view_instance_key().unwrap();
+        assert_ne!(origin.buffer.view_instance_key, second_instance);
+
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::BindingInvoked,
+                data: Some(serde_json::json!({
+                    "thread_id": "T-first-result",
+                    "delivery": "launched"
+                })),
+                error: None,
+            },
+        });
+
+        assert_eq!(focused_input_text(&core), "second draft");
+        assert_eq!(
+            core.route_for_instance(&second_instance).thread.as_deref(),
+            Some("T-second")
+        );
+        assert_eq!(
+            core.route_for_instance(&origin.buffer.view_instance_key)
+                .thread
+                .as_deref(),
+            Some("T-first-result")
+        );
+        assert!(
+            core.view_sets
+                .iter()
+                .find(|view_set| view_set.id == origin.view_set_id)
+                .unwrap()
+                .input_buffers
+                .get(&origin.buffer.storage_key())
+                .is_some_and(|buffer| buffer.text.is_empty()),
+            "success clears the originating draft even after focus changes"
+        );
     }
 
     #[test]
@@ -1544,13 +1649,24 @@ mod tests {
 
         focus_tile(&mut core, first);
         set_focused_input(&mut core, "first-buffer");
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-first" }));
         focus_tile(&mut core, second);
         set_focused_input(&mut core, "second-buffer");
+        set_focused_route_value(&mut core, serde_json::json!({ "thread": "T-second" }));
 
-        // The same `view:` rendered twice keeps independent buffers.
+        // The same `view:` rendered twice keeps independent buffers and
+        // subjects. Its authored ref is content identity, not instance state.
         focus_tile(&mut core, first);
         assert_eq!(focused_input_text(&core), "first-buffer");
+        assert_eq!(
+            core.focused_input_route().thread.as_deref(),
+            Some("T-first")
+        );
         focus_tile(&mut core, second);
         assert_eq!(focused_input_text(&core), "second-buffer");
+        assert_eq!(
+            core.focused_input_route().thread.as_deref(),
+            Some("T-second")
+        );
     }
 }
