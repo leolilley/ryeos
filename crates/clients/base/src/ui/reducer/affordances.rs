@@ -44,10 +44,17 @@ impl RyeOsCore {
     /// tokens through the one daemon path.
     pub(crate) fn invoke_affordance(
         &mut self,
+        instance_key: &crate::ids::RyeOsViewInstanceKey,
         view_ref: &str,
         affordance_id: &str,
         record: &serde_json::Value,
     ) -> Vec<RyeOsEffect> {
+        // Browser events carry the mounted instance that projected the row.
+        // Revalidate it against retained composition so a delayed or forged
+        // event cannot apply a valid affordance to another view set.
+        if self.mounted_view_ref(instance_key) != Some(view_ref) {
+            return Vec::new();
+        }
         let Some(binding) = self.views.get(view_ref) else {
             return Vec::new();
         };
@@ -77,7 +84,14 @@ impl RyeOsCore {
                 merge,
                 open_view,
                 drill,
-            }) => self.apply_ui_affordance(facet, value, merge, open_view, drill),
+            }) => self.apply_ui_affordance_from(
+                Some(instance_key),
+                facet,
+                value,
+                merge,
+                open_view,
+                drill,
+            ),
             Some(super::content::AffordanceInvoke::Rye { notice, .. })
             | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
                 if self.refuse_blocked_mutation() {
@@ -117,7 +131,28 @@ impl RyeOsCore {
         open_view: Option<String>,
         drill: bool,
     ) -> Vec<RyeOsEffect> {
+        let origin = self.focused_view_instance_key();
+        self.apply_ui_affordance_from(origin.as_ref(), facet, value, merge, open_view, drill)
+    }
+
+    pub(crate) fn apply_ui_affordance_from(
+        &mut self,
+        origin: Option<&crate::ids::RyeOsViewInstanceKey>,
+        facet: String,
+        value: Option<serde_json::Value>,
+        merge: Option<serde_json::Value>,
+        open_view: Option<String>,
+        drill: bool,
+    ) -> Vec<RyeOsEffect> {
         let route_subject = facet == super::seat::KEY_INPUT_ROUTE;
+        let selection_subject =
+            facet == super::seat::KEY_SELECTION || facet.starts_with("selection.");
+        let selection_view_set = selection_subject
+            .then(|| origin.and_then(|instance| self.view_set_index_for_instance(instance)))
+            .flatten();
+        if selection_subject && selection_view_set.is_none() {
+            return Vec::new();
+        }
         // Step-in: before the drill writes its facet (and possibly swaps the
         // center), record a return frame — the view being left plus the facet
         // context it was reading — so a later pop restores them. Only on
@@ -154,10 +189,15 @@ impl RyeOsCore {
         let route_instance = route_subject
             .then(|| self.focused_view_instance_key())
             .flatten();
-        let storage_facet = route_instance
-            .as_ref()
-            .map(super::seat::input_route_facet_key)
-            .unwrap_or_else(|| facet.clone());
+        let storage_facet = if let Some(index) = selection_view_set {
+            super::seat::selection_storage_key(self.view_sets[index].id, &facet)
+                .expect("selection subject was classified above")
+        } else {
+            route_instance
+                .as_ref()
+                .map(super::seat::input_route_facet_key)
+                .unwrap_or_else(|| facet.clone())
+        };
         let next = if let Some(merge) = merge {
             let mut current = if route_subject {
                 route_instance
@@ -198,6 +238,8 @@ impl RyeOsCore {
         self.bump_generation();
         let refreshed = if let Some(instance) = route_instance.as_ref() {
             self.effects_for_view_instance(instance)
+        } else if let Some(index) = selection_view_set {
+            self.effects_for_facet_in_view_set(&facet, index)
         } else {
             self.effects_for_facet(&facet)
         };
@@ -219,6 +261,14 @@ impl RyeOsCore {
     /// declares `refresh.on_facet: <key>` or whose source params
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
+        self.effects_for_facet_in_view_set(facet, self.active_view_set)
+    }
+
+    pub(crate) fn effects_for_facet_in_view_set(
+        &mut self,
+        facet: &str,
+        view_set_index: usize,
+    ) -> Vec<RyeOsEffect> {
         let subscribed_channels = |binding: &super::content::ViewBinding| {
             let cursor_scope_depends_on_facet = binding.field_state.as_ref().is_some_and(|state| {
                 state.cursor_scope.subject.iter().any(|subject| {
@@ -250,11 +300,11 @@ impl RyeOsCore {
                 .collect::<Vec<_>>()
         };
         let mut targets: Vec<(crate::ids::RyeOsViewInstanceKey, String, Vec<String>)> = self
-            .view_sets[self.active_view_set]
+            .view_sets[view_set_index]
             .tile_ids()
             .into_iter()
             .filter_map(|tile_id| {
-                let tile = self.view_sets[self.active_view_set].tiles.get(&tile_id)?;
+                let tile = self.view_sets[view_set_index].tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
                 let channels = subscribed_channels(binding);
@@ -262,16 +312,33 @@ impl RyeOsCore {
                     .then(|| (tile.instance_key.clone(), view_ref.clone(), channels))
             })
             .collect();
-        targets.extend(self.visible_dock_views().into_iter().filter_map(
-            |(instance_key, view_ref)| {
-                let channels = self
-                    .views
-                    .get(&view_ref)
-                    .map(&subscribed_channels)
-                    .unwrap_or_default();
-                (!channels.is_empty()).then_some((instance_key, view_ref, channels))
-            },
-        ));
+        let view_set_id = self.view_sets[view_set_index].id;
+        let visible_docks = [
+            crate::ui::model::RyeOsDockEdge::Top,
+            crate::ui::model::RyeOsDockEdge::Bottom,
+            crate::ui::model::RyeOsDockEdge::Left,
+            crate::ui::model::RyeOsDockEdge::Right,
+        ]
+        .into_iter()
+        .filter_map(|edge| {
+            let slot = self.view_sets[view_set_index].docks.slot(edge)?;
+            if !slot.visible {
+                return None;
+            }
+            let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
+            Some((
+                super::model::dock_view_instance_key(view_set_id, edge),
+                view_ref.clone(),
+            ))
+        });
+        targets.extend(visible_docks.filter_map(|(instance_key, view_ref)| {
+            let channels = self
+                .views
+                .get(&view_ref)
+                .map(&subscribed_channels)
+                .unwrap_or_default();
+            (!channels.is_empty()).then_some((instance_key, view_ref, channels))
+        }));
         targets
             .into_iter()
             .flat_map(|(instance_key, view_ref, channels)| {
@@ -484,6 +551,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:test/list".to_string(),
                     affordance_id: "select-item".to_string(),
                     record: serde_json::json!({ "canonical_ref": "tool:demo/run" }),
@@ -538,6 +606,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -594,6 +663,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-7" }),
@@ -644,6 +714,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:test/projects".to_string(),
                     affordance_id: "open".to_string(),
                     record: serde_json::json!({ "local_id": "project-7" }),
@@ -702,6 +773,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -757,6 +829,7 @@ mod tests {
         let left_effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:ryeos/threads/history".to_string(),
                     affordance_id: "compare-left".to_string(),
                     record: serde_json::json!({ "thread_id": "T-left" }),
@@ -778,6 +851,7 @@ mod tests {
         let right_effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:ryeos/threads/history".to_string(),
                     affordance_id: "compare-right".to_string(),
                     record: serde_json::json!({ "thread_id": "T-right" }),
@@ -1034,6 +1108,7 @@ mod tests {
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-demo" }),
@@ -1087,6 +1162,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "aim-input".to_string(),
                     record: serde_json::json!({ "thread_id": "T-route" }),
@@ -1124,6 +1200,7 @@ mod tests {
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: core.focused_view_instance_key().unwrap(),
                     view_ref: "view:test/work".to_string(),
                     affordance_id: "inspect".to_string(),
                     record: serde_json::json!({ "thread_id": "T-inspected" }),
@@ -1185,6 +1262,60 @@ mod tests {
             }
             other => panic!("expected bound rows dock view, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn identical_views_in_two_sets_keep_selection_independent() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let first_view = core.view_sets[0]
+            .focused_view()
+            .expect("fixture has a center view")
+            .view_ref
+            .clone();
+        seed_view_value(
+            &mut core,
+            &first_view,
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {},
+                "affordances": [{
+                    "id": "select",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "selection",
+                        "value": { "item": "{record.item}" }
+                    }
+                }]
+            }),
+        );
+        core.view_sets
+            .push(core.view_sets[0].duplicate_composition());
+        let first_instance = core.view_sets[0].tiles[&core.view_sets[0].focused_tile]
+            .instance_key
+            .clone();
+        let second_instance = core.view_sets[1].tiles[&core.view_sets[1].focused_tile]
+            .instance_key
+            .clone();
+
+        core.invoke_affordance(
+            &first_instance,
+            &first_view,
+            "select",
+            &serde_json::json!({ "item": "first" }),
+        );
+        core.invoke_affordance(
+            &second_instance,
+            &first_view,
+            "select",
+            &serde_json::json!({ "item": "second" }),
+        );
+
+        let fold = core.seat.fold();
+        let first_key = super::super::seat::selection_facet_key(core.view_sets[0].id);
+        let second_key = super::super::seat::selection_facet_key(core.view_sets[1].id);
+        assert_eq!(fold.get(&first_key).unwrap()["item"], "first");
+        assert_eq!(fold.get(&second_key).unwrap()["item"], "second");
+        assert_ne!(first_key, second_key);
     }
 
     #[test]

@@ -1501,6 +1501,7 @@ fn bound_view_vm_keyed(
                                 super::content::affordance_eligibility(affordance, &record.raw)
                                     .enabled
                                     .then(|| RyeOsUiIntent::InvokeAffordance {
+                                        instance_key: instance_key.clone(),
                                         view_ref: view_ref.to_string(),
                                         affordance_id: affordance_id.clone(),
                                         record: record.raw.clone(),
@@ -1648,6 +1649,7 @@ fn bound_view_vm_keyed(
                             super::content::affordance_eligibility(affordance, &record.raw)
                                 .enabled
                                 .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    instance_key: instance_key.clone(),
                                     view_ref: view_ref.to_string(),
                                     affordance_id: affordance_id.clone(),
                                     record: record.raw.clone(),
@@ -1899,6 +1901,7 @@ fn bound_view_vm_keyed(
                             super::content::affordance_eligibility(affordance, &record.raw)
                                 .enabled
                                 .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    instance_key: instance_key.clone(),
                                     view_ref: view_ref.to_string(),
                                     affordance_id: affordance_id.clone(),
                                     record: record.raw.clone(),
@@ -2074,7 +2077,15 @@ fn project_field_vm(
         .filter(|entry| entry.fingerprint == fingerprint)
         .map(|entry| entry.base.clone());
     let base = cached.unwrap_or_else(|| {
-        let base = super::field::project_field(&field_id, title, view_ref, binding, &sources, None);
+        let base = super::field::project_field_for_instance(
+            &field_id,
+            title,
+            view_ref,
+            binding,
+            &sources,
+            None,
+            instance_key,
+        );
         core.data.field_projections.borrow_mut().insert(
             instance_key.clone(),
             super::field::FieldProjectionCacheEntry {
@@ -2941,6 +2952,9 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
         return Vec::new();
     };
     let view_ref = view.view_ref.clone();
+    let Some(instance_key) = core.focused_view_instance_key() else {
+        return Vec::new();
+    };
     let Some(binding) = core.views.get(&view_ref) else {
         return Vec::new();
     };
@@ -2977,6 +2991,7 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
                     .disabled_reason
                     .unwrap_or_else(|| "focused row".to_string()),
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: instance_key.clone(),
                     view_ref: view_ref.clone(),
                     affordance_id: id.to_string(),
                     record: row.raw.clone(),
@@ -4640,7 +4655,7 @@ mod tests {
             .expect("cancel overlay item");
         assert!(
             matches!(&cancel.intent,
-                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id, record }
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id, record, .. }
                     if view_ref == "view:ryeos/threads/list"
                         && affordance_id == "cancel"
                         && record["thread_id"] == "T-ab"),
@@ -4695,7 +4710,7 @@ mod tests {
                 .find(|item| item.label == label)
                 .unwrap_or_else(|| panic!("missing shared action {label}"));
             assert!(matches!(&item.intent,
-                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id: actual, record }
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id: actual, record, .. }
                     if view_ref == "view:ryeos/threads/history"
                         && actual == affordance_id
                         && record["thread_id"] == "T-ab"));

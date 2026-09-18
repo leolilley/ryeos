@@ -605,10 +605,12 @@ pub fn build_scene_model(
         ));
         // Selection is a seat facet — the scene highlights what the
         // seat braid says is selected.
+        let selection_key =
+            crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
         let selected_ref = core
             .seat
             .fold()
-            .get(crate::ui::seat::KEY_SELECTION)
+            .get(&selection_key)
             .and_then(|sel| sel.get("item"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
@@ -650,10 +652,12 @@ pub fn build_scene_model(
 
     if atlas.active_projection == AtlasProjectionVm::FileSpace {
         let file_space = file_space.or(core.data.file_space.as_ref());
+        let selection_key =
+            crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
         let selected_ref = core
             .seat
             .fold()
-            .get(crate::ui::seat::KEY_SELECTION)
+            .get(&selection_key)
             .and_then(|sel| sel.get("file"))
             .map(|file| {
                 format!(

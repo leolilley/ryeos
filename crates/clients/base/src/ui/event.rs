@@ -23,6 +23,7 @@ pub enum RyeOsUiIntent {
     /// affordance, substitutes row fields, and applies its plane (ui
     /// facet write or rye token dispatch). No product verbs in code.
     InvokeAffordance {
+        instance_key: RyeOsViewInstanceKey,
         view_ref: String,
         affordance_id: String,
         record: serde_json::Value,

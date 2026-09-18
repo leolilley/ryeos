@@ -22,6 +22,37 @@ pub const KEY_NAVIGATION_DESTINATION: &str = "navigation.destination";
 pub const KEY_SELECTION: &str = "selection";
 pub const KEY_WATCH: &str = "watch";
 
+/// Storage coordinate for the selection owned by one open view set.
+///
+/// `selection` remains the logical name used by signed view definitions. The
+/// client derives this key at the seat boundary so two open compositions can
+/// inspect independently without inventing product-specific facet names.
+pub fn selection_facet_key(view_set_id: crate::ids::ViewSetId) -> String {
+    format!("{KEY_SELECTION}\u{1f}view-set:{}", view_set_id.0)
+}
+
+pub fn selection_storage_key(
+    view_set_id: crate::ids::ViewSetId,
+    logical_facet: &str,
+) -> Option<String> {
+    let suffix = logical_facet.strip_prefix(KEY_SELECTION)?;
+    if !suffix.is_empty() && !suffix.starts_with('.') {
+        return None;
+    }
+    Some(format!("{}{suffix}", selection_facet_key(view_set_id)))
+}
+
+pub fn parse_selection_storage_key(key: &str) -> Option<(crate::ids::ViewSetId, String)> {
+    let rest = key.strip_prefix(&format!("{KEY_SELECTION}\u{1f}view-set:"))?;
+    let split = rest.find('.').unwrap_or(rest.len());
+    let id = rest[..split].parse::<u64>().ok()?;
+    let suffix = &rest[split..];
+    Some((
+        crate::ids::ViewSetId::new(id),
+        format!("{KEY_SELECTION}{suffix}"),
+    ))
+}
+
 /// One event on the seat braid. `seq` mirrors the braid's chain sequence:
 /// monotonic, assigned by whoever holds append authority (this log while
 /// engine-local; the daemon once the seat thread lands).

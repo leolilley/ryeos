@@ -1485,7 +1485,8 @@ impl RyeOsCore {
                     if key == super::seat::KEY_INPUT_ROUTE {
                         Some(route.clone())
                     } else {
-                        fold.get(key).cloned()
+                        self.facet_storage_key_for_instance(&instance_key, key)
+                            .and_then(|storage_key| fold.get(&storage_key).cloned())
                     }
                 });
                 if binding.widget == "field" {
@@ -1502,9 +1503,10 @@ impl RyeOsCore {
                     && let (Some(feeds), Some(input_id)) = (&feeds, &input_id)
                 {
                     let key = InputBufferKey::new(instance_key.clone(), view_ref, input_id.clone());
-                    let buffer = self.view_sets[self.active_view_set]
-                        .input_buffers
-                        .get(&key.storage_key());
+                    let buffer = self
+                        .view_set_index_for_instance(&instance_key)
+                        .and_then(|index| self.view_sets.get(index))
+                        .and_then(|view_set| view_set.input_buffers.get(&key.storage_key()));
                     let text = buffer.map(|buffer| buffer.text.clone()).unwrap_or_default();
                     let field = buffer.map(|buffer| buffer.filter_field).unwrap_or(0);
                     let param = feeds.active_param(field).to_string();
@@ -2183,6 +2185,81 @@ impl RyeOsCore {
         }
     }
 
+    /// Resolve a mounted view instance to its owning open view set. Tile ids
+    /// are allocated globally, while dock identities carry the set id; both
+    /// are still verified against the retained composition rather than parsed
+    /// into authority by the event sender.
+    pub(crate) fn view_set_index_for_instance(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+    ) -> Option<usize> {
+        self.view_sets.iter().position(|view_set| {
+            view_set
+                .tiles
+                .values()
+                .any(|tile| &tile.instance_key == instance)
+                || [
+                    RyeOsDockEdge::Top,
+                    RyeOsDockEdge::Bottom,
+                    RyeOsDockEdge::Left,
+                    RyeOsDockEdge::Right,
+                ]
+                .into_iter()
+                .any(|edge| {
+                    view_set.docks.slot(edge).is_some()
+                        && dock_view_instance_key(view_set.id, edge) == *instance
+                })
+        })
+    }
+
+    pub(crate) fn mounted_view_ref(&self, instance: &RyeOsViewInstanceKey) -> Option<&str> {
+        let view_set = &self.view_sets[self.view_set_index_for_instance(instance)?];
+        if let Some(tile) = view_set
+            .tiles
+            .values()
+            .find(|tile| &tile.instance_key == instance)
+        {
+            return Some(&tile.view.view_ref);
+        }
+        [
+            RyeOsDockEdge::Top,
+            RyeOsDockEdge::Bottom,
+            RyeOsDockEdge::Left,
+            RyeOsDockEdge::Right,
+        ]
+        .into_iter()
+        .find_map(|edge| {
+            (dock_view_instance_key(view_set.id, edge) == *instance)
+                .then(|| view_set.docks.slot(edge))
+                .flatten()
+                .map(|slot| match &slot.content {
+                    RyeOsDockContent::View { view_ref } => view_ref.as_str(),
+                })
+        })
+    }
+
+    pub(crate) fn facet_storage_key_for_instance(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+        logical_facet: &str,
+    ) -> Option<String> {
+        if logical_facet == super::seat::KEY_SELECTION || logical_facet.starts_with("selection.") {
+            let index = self.view_set_index_for_instance(instance)?;
+            super::seat::selection_storage_key(self.view_sets[index].id, logical_facet)
+        } else {
+            Some(logical_facet.to_string())
+        }
+    }
+
+    pub(crate) fn facet_for_instance(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+        logical_facet: &str,
+    ) -> Option<serde_json::Value> {
+        let key = self.facet_storage_key_for_instance(instance, logical_facet)?;
+        self.seat.fold().get(&key).cloned()
+    }
+
     /// Move focus to the default input edge, the one rule shared by
     /// session start and the explicit `FocusInput` event. `false` when
     /// no visible slot owns input.
@@ -2824,19 +2901,13 @@ fn field_local_state_for_instance<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> Option<&'a crate::view_set::FieldLocalState> {
+    let view_set = core
+        .view_set_index_for_instance(instance_key)
+        .and_then(|index| core.view_sets.get(index))?;
     let state = instance_key
         .view_set_tile_id()
-        .and_then(|tile_id| {
-            core.view_sets[core.active_view_set]
-                .tiles
-                .get(&tile_id)
-                .map(|tile| &tile.local)
-        })
-        .or_else(|| {
-            core.view_sets[core.active_view_set]
-                .dock_local
-                .get(instance_key)
-        });
+        .and_then(|tile_id| view_set.tiles.get(&tile_id).map(|tile| &tile.local))
+        .or_else(|| view_set.dock_local.get(instance_key));
     match state {
         Some(ViewLocalState::Field(state)) => Some(state),
         _ => None,

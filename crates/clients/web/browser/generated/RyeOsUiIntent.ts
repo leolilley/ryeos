@@ -3,6 +3,7 @@
 import type { FocusDirection } from "./FocusDirection";
 import type { RyeOsDockEdge } from "./RyeOsDockEdge";
 import type { RyeOsStackMoveDirection } from "./RyeOsStackMoveDirection";
+import type { RyeOsViewInstanceKey } from "./RyeOsViewInstanceKey";
 import type { SplitBranch } from "./SplitBranch";
 import type { ThreadControlCommand } from "./ThreadControlCommand";
 import type { ViewSpec } from "./ViewSpec";
@@ -15,7 +16,7 @@ export type RyeOsUiIntent =
    * affordance, substitutes row fields, and applies its plane (ui
    * facet write or rye token dispatch). No product verbs in code.
    */
-  | { type: "invoke_affordance"; view_ref: string; affordance_id: string; record: unknown }
+  | { type: "invoke_affordance"; instance_key: RyeOsViewInstanceKey; view_ref: string; affordance_id: string; record: unknown }
   | { type: "open_view"; view: ViewSpec }
   | { type: "open_new_view"; view: ViewSpec }
   | { type: "open_overlay"; overlay_id: string }

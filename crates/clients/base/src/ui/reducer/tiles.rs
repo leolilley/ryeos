@@ -520,7 +520,17 @@ impl RyeOsCore {
         // re-subscribes its tail; facet subscribers (docks/slots) refresh too.
         let mut effects = self.effects_for_view(&frame.view);
         for key in restored_facets {
-            effects.extend(self.effects_for_facet(&key));
+            if let Some((view_set_id, logical_facet)) =
+                super::seat::parse_selection_storage_key(&key)
+                && let Some(index) = self
+                    .view_sets
+                    .iter()
+                    .position(|view_set| view_set.id == view_set_id)
+            {
+                effects.extend(self.effects_for_facet_in_view_set(&logical_facet, index));
+            } else {
+                effects.extend(self.effects_for_facet(&key));
+            }
         }
         // Returning up the drill stack swaps the subject back: a straggler
         // from the drilled-into lens must not land under the restored one.

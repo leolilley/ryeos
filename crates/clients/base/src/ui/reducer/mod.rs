@@ -790,10 +790,11 @@ impl RyeOsCore {
         match intent {
             RyeOsUiIntent::Refresh => self.initial_effects(),
             RyeOsUiIntent::InvokeAffordance {
+                instance_key,
                 view_ref,
                 affordance_id,
                 record,
-            } => self.invoke_affordance(&view_ref, &affordance_id, &record),
+            } => self.invoke_affordance(&instance_key, &view_ref, &affordance_id, &record),
             RyeOsUiIntent::OpenOverlay { overlay_id } => self.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenOverlay { overlay_id },
             }),
@@ -1058,35 +1059,32 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsUiIntent::SelectDimension => {
-                self.seat.append_facet(
-                    super::seat::KEY_SELECTION,
-                    serde_json::json!({ "dimension": true }),
-                );
-                self.bump_generation();
-                self.effects_for_facet(super::seat::KEY_SELECTION)
-            }
+            RyeOsUiIntent::SelectDimension => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "dimension": true })),
+                None,
+                None,
+                false,
+            ),
             // Inspection IS selection: a facet write on the seat braid.
             // Inspection IS selection: a facet write, peer to `input.route`.
             // The engine never opens or names the inspector — it's a view that
             // reads `@facet:selection.*` and refreshes `on_facet: selection`,
             // shown as a slot or a lens like any other facet-bound view.
-            RyeOsUiIntent::InspectItem { canonical_ref } => {
-                self.seat.append_facet(
-                    super::seat::KEY_SELECTION,
-                    serde_json::json!({ "item": canonical_ref }),
-                );
-                self.bump_generation();
-                self.effects_for_facet(super::seat::KEY_SELECTION)
-            }
-            RyeOsUiIntent::InspectThread { thread_id } => {
-                self.seat.append_facet(
-                    super::seat::KEY_SELECTION,
-                    serde_json::json!({ "thread_id": thread_id }),
-                );
-                self.bump_generation();
-                self.effects_for_facet(super::seat::KEY_SELECTION)
-            }
+            RyeOsUiIntent::InspectItem { canonical_ref } => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "item": canonical_ref })),
+                None,
+                None,
+                false,
+            ),
+            RyeOsUiIntent::InspectThread { thread_id } => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "thread_id": thread_id })),
+                None,
+                None,
+                false,
+            ),
             RyeOsUiIntent::AimThread { thread_id } => self.apply_ui_affordance(
                 super::seat::KEY_INPUT_ROUTE.to_string(),
                 None,
@@ -1146,21 +1144,20 @@ impl RyeOsCore {
                 self.bump_generation();
                 effects
             }
-            RyeOsUiIntent::InspectSummary { title, detail } => {
-                self.seat.append_facet(
-                    super::seat::KEY_SELECTION,
-                    serde_json::json!({ "summary": { "title": title, "detail": detail } }),
-                );
-                self.bump_generation();
-                self.effects_for_facet(super::seat::KEY_SELECTION)
-            }
+            RyeOsUiIntent::InspectSummary { title, detail } => self.apply_ui_affordance(
+                super::seat::KEY_SELECTION.to_string(),
+                Some(serde_json::json!({ "summary": { "title": title, "detail": detail } })),
+                None,
+                None,
+                false,
+            ),
             RyeOsUiIntent::ReadFile { root, path } => {
                 if !self.has_project_bound() && file_root_requires_project(&root) {
                     self.notice("No project is bound to this session.", RyeOsTone::Warn);
                     return Vec::new();
                 }
                 self.seat.append_facet(
-                    super::seat::KEY_SELECTION,
+                    super::seat::selection_facet_key(self.view_sets[self.active_view_set].id),
                     serde_json::json!({ "file": { "root": root, "path": path } }),
                 );
                 self.bump_generation();
@@ -1262,7 +1259,17 @@ impl RyeOsCore {
         }
         for key in changed {
             if key != super::seat::KEY_NAVIGATION_DESTINATION {
-                effects.extend(self.effects_for_facet(&key));
+                if let Some((view_set_id, logical_facet)) =
+                    super::seat::parse_selection_storage_key(&key)
+                    && let Some(index) = self
+                        .view_sets
+                        .iter()
+                        .position(|view_set| view_set.id == view_set_id)
+                {
+                    effects.extend(self.effects_for_facet_in_view_set(&logical_facet, index));
+                } else {
+                    effects.extend(self.effects_for_facet(&key));
+                }
             }
         }
         effects
