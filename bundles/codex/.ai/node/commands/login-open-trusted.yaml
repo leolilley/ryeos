@@ -1,0 +1,21 @@
+# ryeos:signed:2026-09-18T22:05:27Z:79532da42c47d78ec2ec0a05bad2a27b9199374f764ebd4ac3c7d124992af6f9:ugeoIX9a2Asegi0qxmcVH7hle3+nnDSU3AhPkvTE2MRiD+VOEpUfGWktHtiFiYz1VqfEFUcusJuPcRWPHKwBCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [codex, login, open-trusted]
+description: "Open a projectless Codex device-login session on an explicitly trusted process-group node"
+help:
+  usage: "ryeos codex login open-trusted <credential-profile-id> --async"
+  examples:
+    - "ryeos codex login open-trusted personal --async"
+forms:
+  - slots:
+      - field: credential_profile_id
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+control_flags:
+  - flag: async
+    help: "Return after durable accepted launch"
+    binding: launch_mode_accepted
+dispatch:
+  kind: execute_ref
+  execute: worker_execution:codex/trusted-login
+  availability: daemon

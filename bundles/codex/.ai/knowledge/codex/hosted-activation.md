@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-17T04:06:11Z:9c8ffce90f0bb1a86d10dca1165b6af80c3c48bccf924e6fec75c32702cce5bb:ymegtqeU5P9vIIAVJPmIt7XqLfDhpXAXemefBVfcsJ5v68xRU4Crbj6W/Gy0nMSljcmD+983wPknSlsH7V+CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T22:05:27Z:15531252828e6fcedd5d6a46c620b1b189e2741a3b44fe0c8379444892c39bb7:PpSSun3j9JVQD70BnI0Hi6oV2X6YRdMXuNq6zChmoBGeTVqF3mtpcr9M+1QDkqrmwDDYA2GXOy5KG/iBYzBFDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -134,10 +134,15 @@ configured-operator forwarding route to inspect profiles on a remote node.
    hand-edit generation files or manufacture prerequisite policy documents for
    an ordinary fresh install.
 3. Start the node while the configured operator still has its ordinary local
-   grant, then activate the signed recipe:
+   grant, then activate the signed recipe. Hard-contained nodes use the
+   original worker activation; explicitly trusted process-group nodes use the
+   separate trusted enrollment activation. There is no admission fallback
+   between them:
 
    ```text
    ryeos external-content activate config:codex/activation online
+   # Or, on an explicitly trusted process-group node:
+   ryeos external-content activate config:codex/trusted-activation online
    ryeos external-content activate config:codex/environment-activation online
    ```
 
@@ -154,6 +159,15 @@ configured-operator forwarding route to inspect profiles on a remote node.
    every node that may become a placement target. `offline` is accepted only
    when the exact archive is already present in that node's private managed
    cache.
+
+   `config:codex/activation` binds only `worker:codex/hosted`;
+   `config:codex/trusted-activation` binds the same verified component bytes
+   only to `worker:codex/trusted-hosted`. The corresponding enrollment items
+   are `worker_execution:codex/login` and
+   `worker_execution:codex/trusted-login`. Each requires its own explicit
+   execute scope. A hard-isolation refusal is never permission to retry through
+   the trusted item; the trusted item must be selected before launch on a node
+   whose signed policy advertises trusted process-group readiness.
 
    `config:codex/environments/default` uses the closed
    `ryeos.worker_environment.v6` contract. Its `executable_search` contributes

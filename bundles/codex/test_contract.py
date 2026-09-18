@@ -19,7 +19,9 @@ BUNDLE = Path(__file__).resolve().parent
 SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 PROFILE_PATH = SOURCE / "structured-session.profile.json"
 WORKER_PATH = BUNDLE / ".ai/workers/codex/hosted.yaml"
+TRUSTED_WORKER_PATH = BUNDLE / ".ai/workers/codex/trusted-hosted.yaml"
 ACTIVATION_PATH = BUNDLE / ".ai/config/codex/activation.yaml"
+TRUSTED_ACTIVATION_PATH = BUNDLE / ".ai/config/codex/trusted-activation.yaml"
 ENVIRONMENT_ACTIVATION_PATH = (
     BUNDLE / ".ai/config/codex/environment-activation.yaml"
 )
@@ -30,6 +32,7 @@ HOSTED_WORKFLOW_PROFILE_PATH = (
 README_PATH = BUNDLE / "README.md"
 WORKER_EXECUTION_PATHS = (
     BUNDLE / ".ai/worker-executions/codex/login.yaml",
+    BUNDLE / ".ai/worker-executions/codex/trusted-login.yaml",
     BUNDLE / ".ai/worker-executions/codex/session.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn-recovery.yaml",
@@ -76,6 +79,7 @@ class CodexContractTests(unittest.TestCase):
         # mountpoints in a writable project overlay contaminates frozen source.
         for path in (
             WORKER_PATH,
+            TRUSTED_WORKER_PATH,
             WORKER_PATH.with_name("hosted-authoring.yaml"),
             WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
             ENVIRONMENT_PATH,
@@ -212,6 +216,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_managed_activation_closes_worker_files_and_environment_tree(self) -> None:
         activation = ACTIVATION_PATH.read_text(encoding="utf-8")
+        trusted_activation = TRUSTED_ACTIVATION_PATH.read_text(encoding="utf-8")
         environment_activation = ENVIRONMENT_ACTIVATION_PATH.read_text(
             encoding="utf-8"
         )
@@ -221,6 +226,13 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("    maximum_entries: 64", activation)
         self.assertEqual(activation.count("      kind: mapped"), 5)
         self.assertEqual(activation.count("        target: null"), 5)
+        self.assertEqual(
+            yaml.safe_load(trusted_activation),
+            {
+                **yaml.safe_load(activation),
+                "consumer_ref": "worker:codex/trusted-hosted",
+            },
+        )
         for line in (
             "      - path: codex-resources/bwrap",
             "        sha256: 77360cb751ccedc5971391444ac86a8a33c15b04d6b4a6fe45f5d25496e62c4c",
@@ -347,6 +359,43 @@ class CodexContractTests(unittest.TestCase):
             worker["session_resources"]["real_uid_process_limit"],
         )
 
+    def test_login_modes_are_explicit_and_select_distinct_cleanup_authority(self) -> None:
+        hard_worker = yaml.safe_load(WORKER_PATH.read_text(encoding="utf-8"))
+        trusted_worker = yaml.safe_load(
+            TRUSTED_WORKER_PATH.read_text(encoding="utf-8")
+        )
+        hard_login = yaml.safe_load(
+            (BUNDLE / ".ai/worker-executions/codex/login.yaml").read_text()
+        )
+        trusted_login = yaml.safe_load(
+            (BUNDLE / ".ai/worker-executions/codex/trusted-login.yaml").read_text()
+        )
+
+        self.assertEqual(hard_login["config"]["worker_ref"], "worker:codex/hosted")
+        self.assertEqual(
+            trusted_login["config"]["worker_ref"], "worker:codex/trusted-hosted"
+        )
+        self.assertEqual(
+            hard_worker["execution_protocol"], "protocol:ryeos/core/structured_session"
+        )
+        self.assertEqual(
+            trusted_worker["execution_protocol"],
+            "protocol:ryeos/core/trusted_structured_session",
+        )
+        for key in ("source", "external_content", "config", "session_resources"):
+            self.assertEqual(trusted_worker[key], hard_worker[key])
+        self.assertNotEqual(
+            hard_worker["execution_protocol"], trusted_worker["execution_protocol"]
+        )
+
+        command = yaml.safe_load(
+            (BUNDLE / ".ai/node/commands/login-open-trusted.yaml").read_text()
+        )
+        self.assertEqual(command["tokens"], ["codex", "login", "open-trusted"])
+        self.assertEqual(
+            command["dispatch"]["execute"], "worker_execution:codex/trusted-login"
+        )
+
     def test_runbook_operator_grant_covers_workers_but_excludes_peer_services(self) -> None:
         readme = README_PATH.read_text(encoding="utf-8")
         match = re.search(r"(?m)^HOSTED_SCOPES='([^']+)'$", readme)
@@ -354,6 +403,10 @@ class CodexContractTests(unittest.TestCase):
         hosted_scopes = set(match.group(1).split(","))
         self.assertIn("ryeos.execute.service.credential-profiles/list", hosted_scopes)
         self.assertIn("ryeos.execute.service.node/status", hosted_scopes)
+        self.assertIn("ryeos.execute.worker_execution.codex/login", hosted_scopes)
+        self.assertNotIn(
+            "ryeos.execute.worker_execution.codex/trusted-login", hosted_scopes
+        )
         declared_runtime_scopes = set()
         for path in WORKER_EXECUTION_PATHS:
             execution = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -410,7 +463,9 @@ class CodexContractTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     config["workload_client_delegation_caps"],
-                    [] if path.stem == "login" else ["ryeos.execute.tool.*"],
+                    []
+                    if path.stem in {"login", "trusted-login"}
+                    else ["ryeos.execute.tool.*"],
                 )
                 if bounded:
                     self.assertEqual(execution["limits"]["turns"], 1)
@@ -423,8 +478,14 @@ class CodexContractTests(unittest.TestCase):
                     )
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
-        activation = ACTIVATION_PATH.read_text(encoding="utf-8")
-        worker = WORKER_PATH.read_text(encoding="utf-8")
+        activations = [
+            ACTIVATION_PATH.read_text(encoding="utf-8"),
+            TRUSTED_ACTIVATION_PATH.read_text(encoding="utf-8"),
+        ]
+        workers = [
+            WORKER_PATH.read_text(encoding="utf-8"),
+            TRUSTED_WORKER_PATH.read_text(encoding="utf-8"),
+        ]
         files = {
             "codex": (
                 "bin/codex",
@@ -517,7 +578,8 @@ class CodexContractTests(unittest.TestCase):
                 f"        maximum_bytes: {maximum}\n"
                 "        executable: true"
             )
-            self.assertIn(member_block, activation, component_id)
+            for activation in activations:
+                self.assertIn(member_block, activation, component_id)
             component_block = (
                 f"  - id: {component_id}\n"
                 "    storage: large_content\n"
@@ -528,14 +590,16 @@ class CodexContractTests(unittest.TestCase):
                 f"          member: {member}\n"
                 "          target: null"
             )
-            self.assertIn(component_block, activation, component_id)
+            for activation in activations:
+                self.assertIn(component_block, activation, component_id)
             declaration = re.compile(
                 rf"(?m)^  - id: {re.escape(component_id)}\n"
                 rf"    kind: file\n"
                 rf"    mode: pinned\n"
                 rf"    digest: \"{expected}\"$"
             )
-            self.assertRegex(worker, declaration, component_id)
+            for worker in workers:
+                self.assertRegex(worker, declaration, component_id)
 
     def test_authority_overrides_are_forbidden_even_when_null(self) -> None:
         for route_id in ("session.start", "session.resume", "turn.start"):
@@ -655,6 +719,7 @@ class CodexContractTests(unittest.TestCase):
     def test_worker_source_digest_covers_the_complete_profile_closure(self) -> None:
         for path in (
             WORKER_PATH,
+            TRUSTED_WORKER_PATH,
             WORKER_PATH.with_name("hosted-authoring.yaml"),
             WORKER_PATH.with_name("trusted-hosted-authoring.yaml"),
         ):

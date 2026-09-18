@@ -41,6 +41,10 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in self.default["external_content"]], ["command-tools"])
         self.assertEqual(self.default["configuration"]["process_environment"], {})
         self.assertNotIn("authoring", json.dumps(load(".ai/worker-executions/codex/login.yaml")))
+        self.assertNotIn(
+            "authoring",
+            json.dumps(load(".ai/worker-executions/codex/trusted-login.yaml")),
+        )
         self.assertEqual(self.default["worker_ref"], "worker:codex/hosted")
 
     def test_explicit_worker_uses_existing_environment_contract(self):
