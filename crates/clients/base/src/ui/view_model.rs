@@ -11,7 +11,7 @@ use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
 use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
-use crate::workspace::{TileState, ViewLocalState, ViewSpec};
+use crate::view_set::{TileState, ViewLocalState, ViewSpec};
 
 mod dialogs;
 mod execution;
@@ -45,7 +45,7 @@ pub struct RyeOsViewModel {
     pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
-    pub workspace: RyeOsWorkspaceVm,
+    pub view_set: RyeOsViewSetVm,
     pub overlays: Vec<RyeOsOverlayVm>,
     pub notices: Vec<RyeOsNoticeVm>,
     pub transport: RyeOsTransportVm,
@@ -134,14 +134,14 @@ pub struct RyeOsPresentationChromeVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTopBarVm {
     pub visible: bool,
-    pub tabs: Vec<RyeOsWorkspaceTabVm>,
+    pub tabs: Vec<RyeOsViewSetTabVm>,
     pub focused_title: String,
     pub layout_symbol: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsWorkspaceTabVm {
-    pub workspace_id: crate::ids::WorkspaceId,
+pub struct RyeOsViewSetTabVm {
+    pub view_set_id: crate::ids::ViewSetId,
     pub number: usize,
     pub title: String,
     pub active: bool,
@@ -197,12 +197,12 @@ pub enum RyeOsMotionEventVm {
         tile_id: String,
     },
     TabChanged {
-        workspace_number: usize,
+        view_set_number: usize,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsWorkspaceVm {
+pub struct RyeOsViewSetVm {
     pub layout_guard: String,
     pub split_min_ratio: f32,
     pub split_max_ratio: f32,
@@ -673,7 +673,7 @@ pub enum RyeOsTone {
 pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
     let session = session_vm(core);
     let health = health_label(core);
-    let workspace = workspace_vm(core);
+    let view_set = view_set_vm(core);
     let chrome = RyeOsChromeVm {
         title: "RyeOS".to_string(),
         subtitle: subtitle(core),
@@ -692,11 +692,11 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_thread_id: route.thread,
         tail_chain_root_id: route.chain_root,
         tail_url,
-        presentation: presentation_vm(core, &session, &chrome, &workspace),
+        presentation: presentation_vm(core, &session, &chrome, &view_set),
         session,
         navigation: navigation_vm(core),
         chrome,
-        workspace,
+        view_set,
         overlays: overlays(core),
         notices: core.notices_vm(),
         transport: transport_vm(core),
@@ -711,9 +711,9 @@ fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
         .get(super::seat::KEY_NAVIGATION_DESTINATION)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let focused = core.workspaces[core.active_workspace]
+    let focused = core.view_sets[core.active_view_set]
         .tiles
-        .get(&core.workspaces[core.active_workspace].focused_tile)
+        .get(&core.view_sets[core.active_view_set].focused_tile)
         .map(|tile| tile.view.view_ref.as_str());
     let items = core
         .surface_navigation()
@@ -768,7 +768,7 @@ fn presentation_vm(
     core: &RyeOsCore,
     session: &RyeOsSessionVm,
     chrome: &RyeOsChromeVm,
-    workspace: &RyeOsWorkspaceVm,
+    view_set: &RyeOsViewSetVm,
 ) -> RyeOsPresentationVm {
     let version = ryeos_version(core);
     RyeOsPresentationVm {
@@ -782,9 +782,9 @@ fn presentation_vm(
             version_label: format!("RYE OS - {version}"),
             border: core.style.border.name().to_string(),
             top_bar: top_bar_vm(core),
-            status_bar: status_bar_vm(session, chrome, workspace, core, &version),
+            status_bar: status_bar_vm(session, chrome, view_set, core, &version),
         },
-        metrics: presentation_metrics_vm(core, workspace),
+        metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
             corners: RyeOsFrameCornersVm {
                 visible: true,
@@ -797,17 +797,17 @@ fn presentation_vm(
 
 fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
     RyeOsTopBarVm {
-        visible: core.style.workspace_tabs || core.ui.top_status_visible,
+        visible: core.style.view_set_tabs || core.ui.top_status_visible,
         tabs: core
-            .workspaces
+            .view_sets
             .iter()
             .enumerate()
-            .map(|(index, workspace)| RyeOsWorkspaceTabVm {
-                workspace_id: workspace.id,
+            .map(|(index, view_set)| RyeOsViewSetTabVm {
+                view_set_id: view_set.id,
                 number: index + 1,
-                title: workspace.title.clone(),
-                active: index == core.active_workspace,
-                tile_count: workspace.tile_ids().len(),
+                title: view_set.title.clone(),
+                active: index == core.active_view_set,
+                tile_count: view_set.tile_ids().len(),
             })
             .collect(),
         focused_title: focused_tile_title(core),
@@ -816,9 +816,9 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
 }
 
 fn focused_tile_title(core: &RyeOsCore) -> String {
-    core.workspaces[core.active_workspace]
+    core.view_sets[core.active_view_set]
         .tiles
-        .get(&core.workspaces[core.active_workspace].focused_tile)
+        .get(&core.view_sets[core.active_view_set].focused_tile)
         .map(|tile| tile_title(core, &tile.view))
         .unwrap_or_else(|| "home".to_string())
 }
@@ -838,13 +838,13 @@ fn view_title<'a>(core: &'a RyeOsCore, view_ref: &'a str) -> &'a str {
         .unwrap_or_else(|| view_ref.rsplit('/').next().unwrap_or(view_ref))
 }
 
-fn tile_title(core: &RyeOsCore, view: &crate::workspace::ViewSpec) -> String {
+fn tile_title(core: &RyeOsCore, view: &crate::view_set::ViewSpec) -> String {
     view_title(core, &view.view_ref).to_owned()
 }
 
 fn layout_symbol(core: &RyeOsCore) -> String {
-    let total = core.workspaces[core.active_workspace].tile_ids().len();
-    let master = core.workspaces[core.active_workspace]
+    let total = core.view_sets[core.active_view_set].tile_ids().len();
+    let master = core.view_sets[core.active_view_set]
         .tiling
         .master
         .count
@@ -855,7 +855,7 @@ fn layout_symbol(core: &RyeOsCore) -> String {
 
 fn presentation_metrics_vm(
     core: &RyeOsCore,
-    workspace: &RyeOsWorkspaceVm,
+    view_set: &RyeOsViewSetVm,
 ) -> RyeOsPresentationMetricsVm {
     let item_count = core
         .data
@@ -903,7 +903,7 @@ fn presentation_metrics_vm(
         .objects
         .len();
     let activity_level = presentation_activity_level(
-        workspace.tile_count,
+        view_set.tile_count,
         core.ui.motion.len(),
         core.ui.loading.len(),
         active_thread_count,
@@ -911,7 +911,7 @@ fn presentation_metrics_vm(
     );
 
     RyeOsPresentationMetricsVm {
-        tile_count: workspace.tile_count,
+        tile_count: view_set.tile_count,
         scene_object_count,
         item_count,
         thread_count,
@@ -976,7 +976,7 @@ fn compact_count(n: u64) -> String {
 fn status_bar_vm(
     session: &RyeOsSessionVm,
     chrome: &RyeOsChromeVm,
-    workspace: &RyeOsWorkspaceVm,
+    view_set: &RyeOsViewSetVm,
     core: &RyeOsCore,
     version: &str,
 ) -> RyeOsStatusBarVm {
@@ -993,7 +993,7 @@ fn status_bar_vm(
         .map(|threads| threads.threads.len())
         .unwrap_or_default();
     let (usage_in, usage_out) = conversation_usage(core);
-    let key_hint = if core.workspaces[core.active_workspace].lens_stack.is_empty() {
+    let key_hint = if core.view_sets[core.active_view_set].lens_stack.is_empty() {
         "ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
     } else {
         "⌫ back · alt+← back · ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
@@ -1037,7 +1037,7 @@ fn status_bar_vm(
             RyeOsStatusSegmentVm {
                 id: "tiles".to_string(),
                 label: Some("tiles".to_string()),
-                value: workspace.tile_count.to_string(),
+                value: view_set.tile_count.to_string(),
                 tone: RyeOsTone::Neutral,
                 grow: false,
             },
@@ -1100,24 +1100,24 @@ fn status_bar_vm(
     }
 }
 
-fn workspace_vm(core: &RyeOsCore) -> RyeOsWorkspaceVm {
-    let center_is_empty = core.workspaces[core.active_workspace].center_is_empty();
+fn view_set_vm(core: &RyeOsCore) -> RyeOsViewSetVm {
+    let center_is_empty = core.view_sets[core.active_view_set].center_is_empty();
     let backdrop_visible = center_is_empty || surface_uses_backdrop_underlay(core);
-    RyeOsWorkspaceVm {
+    RyeOsViewSetVm {
         layout_guard: core.layout_guard(),
         split_min_ratio: crate::layout::MIN_SPLIT_RATIO,
         split_max_ratio: crate::layout::MAX_SPLIT_RATIO,
-        root: core.workspaces[core.active_workspace]
+        root: core.view_sets[core.active_view_set]
             .layout()
             .map(|layout| layout_node_vm(&layout, core)),
-        focused_tile: tile_id_text(core.workspaces[core.active_workspace].focused_tile),
+        focused_tile: tile_id_text(core.view_sets[core.active_view_set].focused_tile),
         center_is_empty,
         // The backdrop scene resolves for empty centers, and for populated
         // centers that opt into a translucent ambient underlay.
         backdrop: backdrop_visible.then(|| backdrop_scene(core)).flatten(),
-        tile_count: core.workspaces[core.active_workspace].tile_ids().len(),
+        tile_count: core.view_sets[core.active_view_set].tile_ids().len(),
         docks: dock_plane_vm(core),
-        lens_trail: core.workspaces[core.active_workspace]
+        lens_trail: core.view_sets[core.active_view_set]
             .lens_stack
             .iter()
             .map(|frame| {
@@ -1127,7 +1127,7 @@ fn workspace_vm(core: &RyeOsCore) -> RyeOsWorkspaceVm {
                     .unwrap_or_else(|| tile_title(core, &frame.view))
             })
             .collect(),
-        lens_label: core.workspaces[core.active_workspace].lens_label.clone(),
+        lens_label: core.view_sets[core.active_view_set].lens_label.clone(),
     }
 }
 
@@ -1160,7 +1160,7 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
     // Keep project-local background activity from making the crystal race in
-    // busy workspaces. Active threads should lift the scene slightly; transient
+    // busy view sets. Active threads should lift the scene slightly; transient
     // activity pulses carry the stronger "something just happened" signal.
     let active_component = ((active_threads.max(0) as f32) * 0.06).clamp(0.0, 0.24);
     scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
@@ -1187,22 +1187,22 @@ fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
         top: dock_tile_vm(
             core,
             RyeOsDockEdge::Top,
-            core.workspaces[core.active_workspace].docks.top.as_ref(),
+            core.view_sets[core.active_view_set].docks.top.as_ref(),
         ),
         bottom: dock_tile_vm(
             core,
             RyeOsDockEdge::Bottom,
-            core.workspaces[core.active_workspace].docks.bottom.as_ref(),
+            core.view_sets[core.active_view_set].docks.bottom.as_ref(),
         ),
         left: dock_tile_vm(
             core,
             RyeOsDockEdge::Left,
-            core.workspaces[core.active_workspace].docks.left.as_ref(),
+            core.view_sets[core.active_view_set].docks.left.as_ref(),
         ),
         right: dock_tile_vm(
             core,
             RyeOsDockEdge::Right,
-            core.workspaces[core.active_workspace].docks.right.as_ref(),
+            core.view_sets[core.active_view_set].docks.right.as_ref(),
         ),
     }
 }
@@ -1250,18 +1250,18 @@ struct RowLocalState<'a> {
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
     collapsed_tree_rows: Option<&'a std::collections::BTreeSet<String>>,
-    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
 }
 
 fn dock_selected_state<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> RowLocalState<'a> {
-    match core.workspaces[core.active_workspace]
+    match core.view_sets[core.active_view_set]
         .dock_local
         .get(instance_key)
     {
-        Some(crate::workspace::ViewLocalState::GenericList {
+        Some(crate::view_set::ViewLocalState::GenericList {
             cursor,
             collapsed,
             expanded_rows,
@@ -1297,11 +1297,11 @@ fn instance_input_vm(
 /// Pure projection; unknown widgets and missing data degrade honestly.
 pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
     let (expanded_rows, collapsed_tree_rows, changed_rows) = selected_row_state(core, tile_id);
-    let instance_key = core.workspaces[core.active_workspace]
+    let instance_key = core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)
         .map(|tile| tile.instance_key.clone())
-        .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(tile_id));
+        .unwrap_or_else(|| RyeOsViewInstanceKey::view_set_tile(tile_id));
     let scoped_dataset_key = tile_id.0.to_string();
     bound_view_vm_keyed(
         core,
@@ -1370,14 +1370,14 @@ fn bound_view_vm_keyed(
                 scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
                 scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
             );
-            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
             return RyeOsViewVm::Atlas { scene };
         }
         "graph" => {
             // Graph renders shared topology; no per-tile content scope yet.
             let mut scene = build_scene_model(core, atlas, None, None);
-            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
             return RyeOsViewVm::Map { scene };
         }
@@ -1958,14 +1958,14 @@ fn bound_view_vm_keyed(
 fn field_local_state<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
-) -> Option<&'a crate::workspace::FieldLocalState> {
-    let local = core.workspaces[core.active_workspace]
+) -> Option<&'a crate::view_set::FieldLocalState> {
+    let local = core.view_sets[core.active_view_set]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| &tile.local)
         .or_else(|| {
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .dock_local
                 .get(instance_key)
         });
@@ -2047,13 +2047,13 @@ pub(crate) fn field_vm_for_instance(
     core: &RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> Option<(String, super::field::RyeOsFieldVm)> {
-    let view_ref = core.workspaces[core.active_workspace]
+    let view_ref = core.view_sets[core.active_view_set]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| tile.view.view_ref.clone())
         .or_else(|| {
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .docks
                 .visible_slot_views()
                 .into_iter()
@@ -2076,14 +2076,14 @@ pub(crate) fn view_vm_for_instance(
     core: &RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> Option<RyeOsViewVm> {
-    let workspace = &core.workspaces[core.active_workspace];
-    let active_tiles = workspace
+    let view_set = &core.view_sets[core.active_view_set];
+    let active_tiles = view_set
         .root
         .as_ref()
         .map(LayoutTree::active_tile_ids)
         .unwrap_or_default();
     if let Some((tile_id, view_ref)) = active_tiles.into_iter().find_map(|tile_id| {
-        workspace
+        view_set
             .tiles
             .get(&tile_id)
             .filter(|tile| &tile.instance_key == instance_key)
@@ -2315,7 +2315,7 @@ fn input_vm(
     view_ref: &str,
     input: &super::content::InputBlock,
 ) -> RyeOsInputVm {
-    let buffer = core.workspaces[core.active_workspace]
+    let buffer = core.view_sets[core.active_view_set]
         .input_buffers
         .get(&key.storage_key());
     let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
@@ -2374,8 +2374,8 @@ fn input_vm(
                 .as_ref()
                 .map(|s| s.binding_digest.clone())
                 .unwrap_or_default(),
-            workspace_index: core.active_workspace,
-            workspace_id: core.workspaces[core.active_workspace].id,
+            view_set_index: core.active_view_set,
+            view_set_id: core.view_sets[core.active_view_set].id,
             buffer: key.clone(),
         },
         focused,
@@ -2526,28 +2526,28 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
             tabs,
             active: tile_id,
         } => {
-            let view = core.workspaces[core.active_workspace]
+            let view = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .map(|tile| view_vm(core, *tile_id, tile))
                 .unwrap_or_else(|| RyeOsViewVm::Placeholder {
                     title: "Missing view".to_string(),
-                    message: format!("Tile {} is not present in the workspace.", tile_id.0),
+                    message: format!("Tile {} is not present in the view set.", tile_id.0),
                 });
-            let title = core.workspaces[core.active_workspace]
+            let title = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .map(|tile| tile_title(core, &tile.view))
                 .unwrap_or_else(|| "Missing".to_string());
-            let input = core.workspaces[core.active_workspace]
+            let input = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .and_then(|tile| instance_input_vm(core, &tile.instance_key, &tile.view.view_ref));
-            let chrome_hidden = core.workspaces[core.active_workspace]
+            let chrome_hidden = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .is_some_and(|tile| view_hides_tile_chrome(core, &tile.view.view_ref));
-            let background_transparent = core.workspaces[core.active_workspace]
+            let background_transparent = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .is_some_and(|tile| view_has_transparent_background(core, &tile.view.view_ref));
@@ -2557,7 +2557,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                     .iter()
                     .map(|id| RyeOsViewTabVm {
                         tile_id: tile_id_text(*id),
-                        title: core.workspaces[core.active_workspace]
+                        title: core.view_sets[core.active_view_set]
                             .tiles
                             .get(id)
                             .map(|tile| tile_title(core, &tile.view))
@@ -2565,19 +2565,19 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                         active: id == tile_id,
                     })
                     .collect(),
-                instance_key: core.workspaces[core.active_workspace]
+                instance_key: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
                     .map(|tile| tile.instance_key.clone())
-                    .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(*tile_id)),
+                    .unwrap_or_else(|| RyeOsViewInstanceKey::view_set_tile(*tile_id)),
                 tile_id: tile_id_text(*tile_id),
-                focused: *tile_id == core.workspaces[core.active_workspace].focused_tile,
+                focused: *tile_id == core.view_sets[core.active_view_set].focused_tile,
                 title,
-                heading: core.workspaces[core.active_workspace]
+                heading: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
                     .and_then(|tile| view_heading(core, &tile.view.view_ref)),
-                supplement: core.workspaces[core.active_workspace]
+                supplement: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
                     .and_then(|tile| view_supplement(core, &tile.view.view_ref)),
@@ -2846,22 +2846,22 @@ fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
         (
             RyeOsDockEdge::Bottom,
             "bottom",
-            core.workspaces[core.active_workspace].docks.bottom.as_ref(),
+            core.view_sets[core.active_view_set].docks.bottom.as_ref(),
         ),
         (
             RyeOsDockEdge::Left,
             "left",
-            core.workspaces[core.active_workspace].docks.left.as_ref(),
+            core.view_sets[core.active_view_set].docks.left.as_ref(),
         ),
         (
             RyeOsDockEdge::Right,
             "right",
-            core.workspaces[core.active_workspace].docks.right.as_ref(),
+            core.view_sets[core.active_view_set].docks.right.as_ref(),
         ),
         (
             RyeOsDockEdge::Top,
             "top",
-            core.workspaces[core.active_workspace].docks.top.as_ref(),
+            core.view_sets[core.active_view_set].docks.top.as_ref(),
         ),
     ]
     .into_iter()
@@ -2880,7 +2880,7 @@ fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
 /// Each is rebuilt as an `InvokeAffordance` from the row's raw record and
 /// the view's declared affordances.
 fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
-    let Some(view) = core.workspaces[core.active_workspace].focused_view() else {
+    let Some(view) = core.view_sets[core.active_view_set].focused_view() else {
         return Vec::new();
     };
     let view_ref = view.view_ref.clone();
@@ -3013,25 +3013,25 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
     // Presentation actions share the existing command overlay in both clients;
     // they are not executable Tool grants or session-local service routes.
     items.push(RyeOsOverlayChoice {
-        label: "New workspace".into(),
+        label: "New view set".into(),
         hint: "open an empty arrangement".into(),
-        intent: RyeOsUiIntent::NewWorkspace,
+        intent: RyeOsUiIntent::NewViewSet,
         secondary_intent: None,
-        enabled: core.workspaces.len() < crate::surface::workspaces::MAX_WORKSPACES,
+        enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
     });
-    let workspace = &core.workspaces[core.active_workspace];
-    if workspace.tiles.contains_key(&workspace.focused_tile) {
-        for destination in &core.workspaces {
-            if destination.id == workspace.id {
+    let view_set = &core.view_sets[core.active_view_set];
+    if view_set.tiles.contains_key(&view_set.focused_tile) {
+        for destination in &core.view_sets {
+            if destination.id == view_set.id {
                 continue;
             }
             items.push(RyeOsOverlayChoice {
                 label: format!("Move view to {}", destination.title),
-                hint: "move this mounted view and its drafts; follow it to that workspace".into(),
-                intent: RyeOsUiIntent::MoveTileToWorkspace {
+                hint: "move this mounted view and its drafts; follow it to that view set".into(),
+                intent: RyeOsUiIntent::MoveTileToViewSet {
                     layout_guard: core.layout_guard(),
-                    tile_id: workspace.focused_tile.0.to_string(),
-                    workspace_id: destination.id,
+                    tile_id: view_set.focused_tile.0.to_string(),
+                    view_set_id: destination.id,
                 },
                 secondary_intent: None,
                 enabled: true,
@@ -3039,15 +3039,15 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
         }
     }
     items.push(RyeOsOverlayChoice {
-        label: "Close workspace".into(),
+        label: "Close view set".into(),
         hint: "close this arrangement, not its running work; current input must be cleared first"
             .into(),
-        intent: RyeOsUiIntent::CloseWorkspace {
-            workspace_id: workspace.id,
+        intent: RyeOsUiIntent::CloseViewSet {
+            view_set_id: view_set.id,
         },
         secondary_intent: None,
-        enabled: core.workspaces.len() > 1
-            && workspace
+        enabled: core.view_sets.len() > 1
+            && view_set
                 .input_buffers
                 .values()
                 .all(|input| input.text.is_empty()),
@@ -3436,7 +3436,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         entry("Help", "Ctrl+H", "Open the help overlay"),
         entry("Shortcuts", "Ctrl+/", "Open the shortcuts overlay"),
         entry("Backdrop", "Ctrl+S", "Toggle backdrop break"),
-        entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+        entry("Lenses", "Ctrl+← / →", "Switch view-set tab"),
         entry(
             "Move",
             "Ctrl+U / Ctrl+D",
@@ -3513,8 +3513,8 @@ pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> 
 
 fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
     match core.focus_target() {
-        super::model::RyeOsFocusTarget::WorkspaceTile { tile_id } => core.workspaces
-            [core.active_workspace]
+        super::model::RyeOsFocusTarget::ViewSetTile { tile_id } => core.view_sets
+            [core.active_view_set]
             .tiles
             .iter()
             .find(|(id, _)| id.0.to_string() == tile_id)
@@ -3530,8 +3530,8 @@ fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
 /// row VM itself (the point may instead be on a collapsed header → no row).
 /// Scene widgets (graph/atlas) have no rows.
 fn focused_selected_row(core: &RyeOsCore) -> Option<RyeOsRowVm> {
-    let tile_id = core.workspaces[core.active_workspace].focused_tile;
-    let view = core.workspaces[core.active_workspace].focused_view()?;
+    let tile_id = core.view_sets[core.active_view_set].focused_tile;
+    let view = core.view_sets[core.active_view_set].focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
         RyeOsViewVm::Rows { rows, .. } => rows.into_iter().find(|row| row.selected),
         RyeOsViewVm::Sections { sections, .. } => sections
@@ -3546,8 +3546,8 @@ fn focused_selected_row(core: &RyeOsCore) -> Option<RyeOsRowVm> {
 /// VM (`RyeOsTableRowVm`, columnar cells) from the rows widget, so they need
 /// their own selection projection — same flat cursor, different shape.
 fn focused_selected_table_row(core: &RyeOsCore) -> Option<RyeOsTableRowVm> {
-    let tile_id = core.workspaces[core.active_workspace].focused_tile;
-    let view = core.workspaces[core.active_workspace].focused_view()?;
+    let tile_id = core.view_sets[core.active_view_set].focused_tile;
+    let view = core.view_sets[core.active_view_set].focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
         RyeOsViewVm::Table { rows, .. } => rows.into_iter().find(|row| row.selected),
         _ => None,
@@ -3555,7 +3555,7 @@ fn focused_selected_table_row(core: &RyeOsCore) -> Option<RyeOsTableRowVm> {
 }
 
 fn selected_cursor(core: &RyeOsCore, tile_id: TileId) -> Option<usize> {
-    let tile = core.workspaces[core.active_workspace].tiles.get(&tile_id)?;
+    let tile = core.view_sets[core.active_view_set].tiles.get(&tile_id)?;
     match &tile.local {
         ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
         ViewLocalState::None | ViewLocalState::Field(_) => None,
@@ -3566,7 +3566,7 @@ fn selected_collapsed(
     core: &RyeOsCore,
     tile_id: TileId,
 ) -> Option<&std::collections::BTreeSet<usize>> {
-    match &core.workspaces[core.active_workspace]
+    match &core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)?
         .local
@@ -3579,11 +3579,11 @@ fn selected_collapsed(
 type SelectedRowState<'a> = (
     Option<&'a std::collections::BTreeSet<String>>,
     Option<&'a std::collections::BTreeSet<String>>,
-    Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+    Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
 );
 
 fn selected_row_state(core: &RyeOsCore, tile_id: TileId) -> SelectedRowState<'_> {
-    match core.workspaces[core.active_workspace]
+    match core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)
         .map(|tile| &tile.local)
@@ -3646,7 +3646,7 @@ fn tone_for_health(value: &str) -> RyeOsTone {
 fn subtitle(core: &RyeOsCore) -> String {
     session_vm(core)
         .project_path
-        .unwrap_or_else(|| "Tiled RyeOS workspace".to_string())
+        .unwrap_or_else(|| "Tiled RyeOS view set".to_string())
 }
 
 fn tile_id_text(id: TileId) -> String {
@@ -3679,7 +3679,7 @@ mod tests {
 
     fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
         super::super::source_key::RyeOsSourceInstanceKey::named(
-            core.workspaces[core.active_workspace].tiles[&tile_id]
+            core.view_sets[core.active_view_set].tiles[&tile_id]
                 .instance_key
                 .clone(),
             "default",
@@ -3699,7 +3699,7 @@ mod tests {
     fn failed_source_renders_error_instead_of_loading_forever() {
         let mut core = RyeOsCore::default();
         let view_ref = "view:test/threads";
-        let instance_key = RyeOsViewInstanceKey::workspace_tile(TileId::new(1));
+        let instance_key = RyeOsViewInstanceKey::view_set_tile(TileId::new(1));
         let source_key = super::super::source_key::RyeOsSourceInstanceKey::named(
             instance_key.clone(),
             "default",
@@ -3787,9 +3787,9 @@ mod tests {
         let core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         let vm = build_view_model(&core);
 
-        assert!(vm.workspace.center_is_empty);
+        assert!(vm.view_set.center_is_empty);
         let backdrop = vm
-            .workspace
+            .view_set
             .backdrop
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
@@ -3835,7 +3835,7 @@ mod tests {
 
         let vm = build_view_model(&core);
         let dock = vm
-            .workspace
+            .view_set
             .docks
             .top
             .expect("authored top status slot should render");
@@ -3869,8 +3869,8 @@ mod tests {
         };
         let core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         let vm = build_view_model(&core);
-        assert!(vm.workspace.center_is_empty);
-        assert!(vm.workspace.backdrop.is_none());
+        assert!(vm.view_set.center_is_empty);
+        assert!(vm.view_set.backdrop.is_none());
     }
 
     fn session_with_views(views: serde_json::Value, tiles: serde_json::Value) -> RyeOsCore {
@@ -3897,7 +3897,7 @@ mod tests {
             }}),
             json!(["view:test/rows"]),
         );
-        let key = tile_default_source_key(&core, core.workspaces[0].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[0].focused_tile);
         core.data.sources.insert(
             key,
             json!({"rows":[
@@ -3905,7 +3905,7 @@ mod tests {
             ]}),
         );
         let vm = build_view_model(&core);
-        let RyeOsLayoutNodeVm::Tile { view, .. } = vm.workspace.root.unwrap() else {
+        let RyeOsLayoutNodeVm::Tile { view, .. } = vm.view_set.root.unwrap() else {
             panic!("tile");
         };
         let RyeOsViewVm::Rows { rows, .. } = *view else {
@@ -4432,8 +4432,7 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key.clone(),
             json!({ "threads": [
@@ -4452,7 +4451,7 @@ mod tests {
         }
         let selected_cells = |core: &RyeOsCore| -> Vec<Vec<String>> {
             let vm = build_view_model(core);
-            let root = vm.workspace.root.expect("layout root");
+            let root = vm.view_set.root.expect("layout root");
             match find_tile_view(&root).expect("tile view") {
                 RyeOsViewVm::Table { rows, .. } => rows
                     .iter()
@@ -4466,7 +4465,7 @@ mod tests {
         // Flat cursor 1 = the second row; activation carries that row's record.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
-                tile_id: core.workspaces[core.active_workspace]
+                tile_id: core.view_sets[core.active_view_set]
                     .focused_tile
                     .0
                     .to_string(),
@@ -4519,8 +4518,7 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key,
             json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
@@ -4567,8 +4565,7 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key,
             json!({ "threads": [{
@@ -4617,12 +4614,11 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile_key = core.workspaces[core.active_workspace]
+        let tile_key = core.view_sets[core.active_view_set]
             .focused_tile
             .0
             .to_string();
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data
             .sources
             .insert(key.clone(), json!({ "events": events }));
@@ -4846,19 +4842,19 @@ mod tests {
             "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let bottom = vm.workspace.docks.bottom.expect("bottom slot");
+        let bottom = vm.view_set.docks.bottom.expect("bottom slot");
         let input = bottom.input.expect("bottom instance declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
     }
 
     #[test]
-    fn workspace_vm_serializes_stable_view_instance_keys() {
+    fn view_set_vm_serializes_stable_view_instance_keys() {
         let mut core = RyeOsCore::default();
-        let tile_id = core.workspaces[core.active_workspace]
-            .add_tile(crate::workspace::ViewSpec::bound("view:test/missing"))
+        let tile_id = core.view_sets[core.active_view_set]
+            .add_tile(crate::view_set::ViewSpec::bound("view:test/missing"))
             .expect("fixture layout accepts view");
         let vm = build_view_model(&core);
-        let root = vm.workspace.root.expect("mounted center tile");
+        let root = vm.view_set.root.expect("mounted center tile");
         let RyeOsLayoutNodeVm::Tile { instance_key, .. } = root else {
             panic!("one tile renders as a leaf");
         };
@@ -4876,7 +4872,7 @@ mod tests {
             "input": { "id": "line", "target_label": "thread input", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert_eq!(input.route_label, "→ thread input");
     }
 
@@ -4911,7 +4907,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input
                 .completion
@@ -4946,7 +4942,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input.completion.is_empty(),
             "no completion source -> no suggestions"
@@ -4987,7 +4983,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input
                 .completion

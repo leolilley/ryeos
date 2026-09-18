@@ -7,7 +7,7 @@ use super::model::RyeOsCore;
 use crate::ids::RyeOsViewInstanceKey;
 use crate::ui::field::{self, FieldCursor, FieldEventRef};
 use crate::ui::source_key::{RyeOsSourceChannel, RyeOsSourceInstanceKey};
-use crate::workspace::{
+use crate::view_set::{
     FieldCursorScopeState, FieldCursorState, FieldEventRefState, FieldExpansionState,
     FieldLocalState, FieldPlaybackState, ViewLocalState,
 };
@@ -764,7 +764,7 @@ impl RyeOsCore {
     }
 
     fn visible_field_instances(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
-        let mut instances = self.workspaces[self.active_workspace]
+        let mut instances = self.view_sets[self.active_view_set]
             .tiles
             .values()
             .filter_map(|tile| {
@@ -787,7 +787,7 @@ impl RyeOsCore {
     }
 
     fn view_ref_for_instance(&self, instance_key: &RyeOsViewInstanceKey) -> Option<String> {
-        self.workspaces[self.active_workspace]
+        self.view_sets[self.active_view_set]
             .tiles
             .values()
             .find(|tile| &tile.instance_key == instance_key)
@@ -856,7 +856,7 @@ impl RyeOsCore {
             let removed_entity = after.is_none() && target.fact_kind == "entity";
             local.changes.insert(
                 key,
-                crate::workspace::FieldChangeState {
+                crate::view_set::FieldChangeState {
                     id: target.id.clone(),
                     kind: kind.to_string(),
                     at_ms: now_ms,
@@ -894,13 +894,10 @@ impl RyeOsCore {
                 .changes
                 .retain(|_, change| now_ms.saturating_sub(change.at_ms) <= 2_000);
         }
-        for tile in self.workspaces[self.active_workspace].tiles.values_mut() {
+        for tile in self.view_sets[self.active_view_set].tiles.values_mut() {
             expire(&mut tile.local, now_ms);
         }
-        for local in self.workspaces[self.active_workspace]
-            .dock_local
-            .values_mut()
-        {
+        for local in self.view_sets[self.active_view_set].dock_local.values_mut() {
             expire(local, now_ms);
         }
     }
@@ -909,13 +906,13 @@ impl RyeOsCore {
         &mut self,
         instance_key: &RyeOsViewInstanceKey,
     ) -> Option<&mut FieldLocalState> {
-        let local = if let Some(tile_id) = instance_key.workspace_tile_id() {
-            &mut self.workspaces[self.active_workspace]
+        let local = if let Some(tile_id) = instance_key.view_set_tile_id() {
+            &mut self.view_sets[self.active_view_set]
                 .tiles
                 .get_mut(&tile_id)?
                 .local
         } else {
-            self.workspaces[self.active_workspace]
+            self.view_sets[self.active_view_set]
                 .dock_local
                 .get_mut(instance_key)?
         };
@@ -1179,11 +1176,11 @@ mod tests {
             });
         }
 
-        let instances = core.workspaces[core.active_workspace]
+        let instances = core.view_sets[core.active_view_set]
             .tile_ids()
             .into_iter()
             .map(|tile_id| {
-                core.workspaces[core.active_workspace].tiles[&tile_id]
+                core.view_sets[core.active_view_set].tiles[&tile_id]
                     .instance_key
                     .clone()
             })
@@ -1326,7 +1323,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1488,7 +1485,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1614,17 +1611,16 @@ mod tests {
                 error: None,
             },
         });
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .tiles
             .keys()
             .next()
             .copied()
             .unwrap();
-        core.workspaces[core.active_workspace].focused_tile = tile_id;
-        core.workspaces[core.active_workspace].focus_target =
-            Some(RyeOsFocusTarget::WorkspaceTile {
-                tile_id: tile_id.0.to_string(),
-            });
+        core.view_sets[core.active_view_set].focused_tile = tile_id;
+        core.view_sets[core.active_view_set].focus_target = Some(RyeOsFocusTarget::ViewSetTile {
+            tile_id: tile_id.0.to_string(),
+        });
 
         let down = ryeos_key_command(
             RyeOsKeyEvent {
@@ -1672,7 +1668,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1727,7 +1723,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()

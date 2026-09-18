@@ -72,11 +72,11 @@ producers of the same intents, not a second command vocabulary.
 | [x] `MoveTileToGroup` | shared | shared | guarded layout edit |
 | [x] `CycleViewTab` | shared | shared | view-tab command |
 | [x] `SwitchTab` | shared | shared | exact tab selection |
-| [x] `NewWorkspace` | shared | shared | workspace edit |
-| [x] `SelectWorkspace` | shared | shared | workspace edit |
-| [x] `RenameWorkspace` | shared | shared | workspace edit |
-| [x] `CloseWorkspace` | shared | shared | workspace edit |
-| [x] `MoveTileToWorkspace` | shared | shared | guarded workspace edit |
+| [x] `NewViewSet` | shared | shared | view-set edit |
+| [x] `SelectViewSet` | shared | shared | view-set edit |
+| [x] `RenameViewSet` | shared | shared | view-set edit |
+| [x] `CloseViewSet` | shared | shared | view-set edit |
+| [x] `MoveTileToViewSet` | shared | shared | guarded view-set edit |
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
 | [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |

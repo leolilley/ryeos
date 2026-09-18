@@ -26,7 +26,7 @@ because fake DOM objects cannot qualify those browser contracts.
 
 ## Shared-model visual preview
 
-`ryeos-client-base/examples/workspace_visual_fixture.rs` emits production
+`ryeos-client-base/examples/view_set_visual_fixture.rs` emits production
 `RyeOsCore` envelopes for a synthetic surface. The browser runner can render
 these with the real DOM adapter and CSS, without a daemon, seat attachment or
 execution dispatcher. This is different from the standalone design study.
@@ -34,7 +34,7 @@ execution dispatcher. This is different from the standalone design study.
 From the repository root, generate the fixture with:
 
 ```sh
-cargo run -p ryeos-client-base --example workspace_visual_fixture --offline -j1 --quiet > /tmp/ryeos-ui-visual-fixture.json
+cargo run -p ryeos-client-base --example view_set_visual_fixture --offline -j1 --quiet > /tmp/ryeos-ui-visual-fixture.json
 ```
 
 Then run the browser checks with `RYEOS_UI_VISUAL_FIXTURE` set to that file.

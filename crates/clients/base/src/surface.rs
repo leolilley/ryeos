@@ -1,7 +1,7 @@
 //! SurfaceSpec — declarative UI contract for the RyeOS RyeOs.
 //!
 //! A surface is a non-executable Rye item describing the dynamic-tiling
-//! workspace (tiling algorithm + ordered initial tiles), edge slots,
+//! view set (tiling algorithm + ordered initial tiles), edge slots,
 //! chrome style, views, commands, and instruments. The TUI consumes
 //! **effective surfaces** — either:
 //! - `BuiltinDefault`: internal safe fallback (no explicit request)
@@ -13,12 +13,12 @@
 //! Those belong in ryeosd / item services.
 
 use crate::ui::content::SourceBinding;
-use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
+use crate::view_set::{ViewLocalState, ViewSet, ViewSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub mod workspaces;
+pub mod view_sets;
 
 // ---------------------------------------------------------------------------
 // SurfaceSpec — the declarative UI contract
@@ -46,10 +46,10 @@ pub struct SurfaceSpec {
     /// Fixed edge slots; an absent edge has no slot.
     #[serde(default)]
     pub slots: SlotsSpec,
-    /// Explicit named initial compositions. When populated, each workspace
+    /// Explicit named initial compositions. When populated, each view set
     /// owns its tree and slots; surface-level tiles/slots must be empty.
     #[serde(default)]
-    pub workspaces: Vec<workspaces::WorkspaceSeedSpec>,
+    pub view_sets: Vec<view_sets::ViewSetSeedSpec>,
     /// Chrome style (border treatment).
     #[serde(default)]
     pub style: SurfaceStyleSpec,
@@ -83,9 +83,9 @@ pub struct SurfaceSpec {
     /// they do not own a page enum or infer navigation from view names.
     #[serde(default)]
     pub navigation: Vec<SurfaceNavigationSpec>,
-    /// Transient overlays declared by the surface. Overlays are not workspace
+    /// Transient overlays declared by the surface. Overlays are not view-set
     /// views: they sit over the layout, own query/selection ephemera, and
-    /// dispatch actions into the workspace. Their content still comes from
+    /// dispatch actions into the view set. Their content still comes from
     /// generic widgets and runtime/source projections.
     #[serde(default)]
     pub overlays: BTreeMap<String, SurfaceOverlaySpec>,
@@ -163,7 +163,7 @@ pub struct SurfaceCapabilitySpec {
 // Tiling — the dynamic layout algorithm (mechanism words only)
 // ---------------------------------------------------------------------------
 
-/// Deterministic arrange recipe. Named workspaces may instead author a tree;
+/// Deterministic arrange recipe. Named view sets may instead author a tree;
 /// subsequent edits always operate on the resulting canonical tree.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -353,9 +353,9 @@ impl<'de> Deserialize<'de> for SlotContentSpec {
 pub struct SurfaceStyleSpec {
     #[serde(default)]
     pub border: BorderStyleSpec,
-    /// Workspace navigation remains visible independently of optional status.
+    /// ViewSet navigation remains visible independently of optional status.
     #[serde(default)]
-    pub workspace_tabs: bool,
+    pub view_set_tabs: bool,
 }
 
 /// Closed border vocabulary. Renderers map names to local glyph/pixel
@@ -683,7 +683,7 @@ impl LoadedSurface {
         }
 
         // Parse composed value as SurfaceSpec
-        workspaces::validate_effective_workspaces(&composed)
+        view_sets::validate_effective_view_sets(&composed)
             .map_err(|message| SurfaceDiagnostic::ValidationError { message })?;
         let spec = match serde_json::from_value::<SurfaceSpec>(composed) {
             Ok(s) => s,
@@ -807,7 +807,7 @@ fn empty_provenance(requested_ref: &str) -> serde_json::Value {
 // Built-in default surface
 // ---------------------------------------------------------------------------
 
-/// The built-in default RyeOs surface — dynamic-tiling workspace.
+/// The built-in default RyeOs surface — dynamic-tiling view set.
 ///
 /// Data-equivalent to `surface:ryeos/ui/base`: empty center (the
 /// backdrop scene shows on first-run), default master/stack tiling,
@@ -817,11 +817,11 @@ pub fn builtin_default() -> SurfaceSpec {
         name: "ryeos-ui-base".into(),
         version: "1.0.0".into(),
         extends: None,
-        description: Some("Default RyeOS RyeOs — dynamic tiling workspace".into()),
+        description: Some("Default RyeOS RyeOs — dynamic tiling view set".into()),
         tiling: TilingSpec::default(),
         tiles: Vec::new(),
         slots: SlotsSpec::default(),
-        workspaces: Vec::new(),
+        view_sets: Vec::new(),
         style: SurfaceStyleSpec::default(),
         input: None,
         sources: BTreeMap::new(),
@@ -935,7 +935,7 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 
     // Warn about unsupported fields
     let mut diagnostics = Vec::new();
-    if let Err(message) = spec.to_workspaces() {
+    if let Err(message) = spec.to_view_sets() {
         diagnostics.push(SurfaceDiagnostic::ValidationError { message });
         return LoadedSurface::LocalPreview {
             path: path.to_path_buf(),
@@ -966,14 +966,14 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 }
 
 // ---------------------------------------------------------------------------
-// SurfaceSpec → Workspace conversion
+// SurfaceSpec → ViewSet conversion
 // ---------------------------------------------------------------------------
 
 impl SurfaceSpec {
-    pub fn to_workspaces(&self) -> Result<Vec<Workspace>, String> {
-        workspaces::validate_seeds(&self.workspaces)?;
-        if self.workspaces.is_empty() {
-            return Ok(vec![self.to_workspace()]);
+    pub fn to_view_sets(&self) -> Result<Vec<ViewSet>, String> {
+        view_sets::validate_seeds(&self.view_sets)?;
+        if self.view_sets.is_empty() {
+            return Ok(vec![self.to_view_set()]);
         }
         if !self.tiles.is_empty()
             || self.slots.top.is_some()
@@ -981,26 +981,26 @@ impl SurfaceSpec {
             || self.slots.left.is_some()
             || self.slots.right.is_some()
         {
-            return Err("named workspaces cannot inherit surface-level tiles or slots".into());
+            return Err("named view sets cannot inherit surface-level tiles or slots".into());
         }
-        self.workspaces
+        self.view_sets
             .iter()
             .map(|seed| seed.instantiate(&self.tiling))
             .collect()
     }
 
-    /// Convert this surface spec into a Workspace for rendering.
+    /// Convert this surface spec into a ViewSet for rendering.
     ///
     /// Authored tiling seeds the canonical tree once. Subsequent edits change
     /// that tree, not a separately ordered tile list or the authored recipe.
-    pub fn to_workspace(&self) -> Workspace {
-        let mut workspace = Workspace::from_tiling(
+    pub fn to_view_set(&self) -> ViewSet {
+        let mut view_set = ViewSet::from_tiling(
             self.tiling.clone(),
             self.tiles.iter().map(ViewKindSpec::to_view_spec).collect(),
         );
-        workspace.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
-        workspace.title = self.name.clone();
-        workspace
+        view_set.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
+        view_set.title = self.name.clone();
+        view_set
     }
 }
 
@@ -1059,8 +1059,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_default_produces_empty_center_workspace() {
-        let ws = builtin_default().to_workspace();
+    fn builtin_default_produces_empty_center_view_set() {
+        let ws = builtin_default().to_view_set();
         assert!(ws.center_is_empty());
         assert!(ws.tile_ids().is_empty());
         assert!(ws.layout().is_none());
@@ -1225,12 +1225,12 @@ style:
     }
 
     #[test]
-    fn to_workspace_preserves_authored_focus_and_derives_geometric_order() {
+    fn to_view_set_preserves_authored_focus_and_derives_geometric_order() {
         let spec: SurfaceSpec = serde_yaml::from_str(
             "name: x\ntiles: [\"view:a/b\", \"view:ryeos/graph/topology\", \"view:ryeos/atlas\"]\n",
         )
         .unwrap();
-        let ws = spec.to_workspace();
+        let ws = spec.to_view_set();
         let ids = ws.tile_ids();
         assert_eq!(ids.len(), 3);
         assert_eq!(ws.tiles[&ws.focused_tile].view.view_ref, "view:a/b");
@@ -1397,7 +1397,7 @@ tiles = ["view:ryeos/threads/list"]
             Some(SlotContentSpec::View(view_ref)) if view_ref == "view:ryeos/input"
         ));
         assert_eq!(spec.style.border, BorderStyleSpec::Thin);
-        let ws = spec.to_workspace();
+        let ws = spec.to_view_set();
         assert!(ws.center_is_empty());
     }
 

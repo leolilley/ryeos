@@ -2,13 +2,13 @@
 //!
 //! `RyeOsCore::dispatch` is the one public entry; it fans out to the UI and
 //! intent routers here, then to the concern-cluster modules. State is genuinely
-//! shared across clusters (`open_view` touches workspace + seat + data), so the
+//! shared across clusters (`open_view` touches view_set + seat + data), so the
 //! dispatch is not sliced — the split is by concern, not by state ownership, and
 //! `RyeOsCore`'s public API is unchanged.
 //!
 //! Clusters:
 //! - `input` — input buffers, routing, targeting, submit.
-//! - `tiles` — workspace/tile motion and lens/tab switching.
+//! - `tiles` — view_set/tile motion and lens/tab switching.
 //! - `affordances` — content affordance resolution and facet/view fetch effects.
 //! - `effect_results` — platform effect-result application (launch/ratchet, parse/store).
 //!
@@ -30,7 +30,7 @@ use super::event::{RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiInt
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsMotionEventVm, RyeOsTone, intent_for_focused_row};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
-use crate::workspace::ViewSpec;
+use crate::view_set::ViewSpec;
 use serde::Deserialize;
 
 impl RyeOsCore {
@@ -328,14 +328,14 @@ impl RyeOsCore {
                 else {
                     return Vec::new();
                 };
-                if self.workspaces[self.active_workspace]
+                if self.view_sets[self.active_view_set]
                     .tiles
                     .contains_key(&tile_id)
                 {
-                    self.workspaces[self.active_workspace].focus_tile(tile_id);
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
-                            tile_id: self.workspaces[self.active_workspace]
+                    self.view_sets[self.active_view_set].focus_tile(tile_id);
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
+                            tile_id: self.view_sets[self.active_view_set]
                                 .focused_tile
                                 .0
                                 .to_string(),
@@ -348,7 +348,7 @@ impl RyeOsCore {
                 Vec::new()
             }
             RyeOsUiEvent::FocusDock { edge } => {
-                let Some(slot) = self.workspaces[self.active_workspace]
+                let Some(slot) = self.view_sets[self.active_view_set]
                     .docks
                     .slot(edge)
                     .filter(|slot| slot.visible)
@@ -357,10 +357,10 @@ impl RyeOsCore {
                 };
                 let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
                 let view_ref = view_ref.clone();
-                self.workspaces[self.active_workspace].focus_target =
+                self.view_sets[self.active_view_set].focus_target =
                     Some(super::model::RyeOsFocusTarget::Dock { edge });
                 let key = super::model::dock_view_instance_key(edge);
-                self.workspaces[self.active_workspace]
+                self.view_sets[self.active_view_set]
                     .dock_local
                     .entry(key.clone())
                     .or_insert_with(initial_list_local_state);
@@ -368,16 +368,16 @@ impl RyeOsCore {
                 self.emit_fetch_source_for_instance(key, &view_ref)
             }
             RyeOsUiEvent::FocusDirection { direction } => {
-                if self.workspaces[self.active_workspace].focus_in_direction(direction) {
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
-                            tile_id: self.workspaces[self.active_workspace]
+                if self.view_sets[self.active_view_set].focus_in_direction(direction) {
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
+                            tile_id: self.view_sets[self.active_view_set]
                                 .focused_tile
                                 .0
                                 .to_string(),
                         });
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
-                        tile_id: self.workspaces[self.active_workspace]
+                        tile_id: self.view_sets[self.active_view_set]
                             .focused_tile
                             .0
                             .to_string(),
@@ -423,12 +423,12 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::BlurInput => {
                 if matches!(
-                    self.workspaces[self.active_workspace].focus_target.as_ref(),
+                    self.view_sets[self.active_view_set].focus_target.as_ref(),
                     Some(super::model::RyeOsFocusTarget::Dock { .. })
                 ) {
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
-                            tile_id: self.workspaces[self.active_workspace]
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
+                            tile_id: self.view_sets[self.active_view_set]
                                 .focused_tile
                                 .0
                                 .to_string(),
@@ -467,7 +467,7 @@ impl RyeOsCore {
                 let Some((key, view_ref)) = self.focused_input_instance() else {
                     return Vec::new();
                 };
-                let buffer = self.workspaces[self.active_workspace]
+                let buffer = self.view_sets[self.active_view_set]
                     .input_buffers
                     .get(&key.storage_key())
                     .cloned()
@@ -822,7 +822,7 @@ impl RyeOsCore {
             RyeOsUiIntent::OpenNewView { view } => {
                 // Single-lens surfaces have no "another tile": a new-view
                 // request collapses to replacing the one center lens.
-                if self.workspaces[self.active_workspace].tiling.mode
+                if self.view_sets[self.active_view_set].tiling.mode
                     == crate::surface::TilingModeSpec::SingleLens
                 {
                     self.open_view(view)
@@ -833,7 +833,7 @@ impl RyeOsCore {
                 }
             }
             RyeOsUiIntent::CloseFocused => {
-                if self.close_tile_or_empty(self.workspaces[self.active_workspace].focused_tile) {
+                if self.close_tile_or_empty(self.view_sets[self.active_view_set].focused_tile) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -848,9 +848,9 @@ impl RyeOsCore {
                 Vec::new()
             }
             RyeOsUiIntent::ToggleFocusedMaster => {
-                if self.workspaces[self.active_workspace].zoom_focused() {
+                if self.view_sets[self.active_view_set].zoom_focused() {
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
-                        tile_id: self.workspaces[self.active_workspace]
+                        tile_id: self.view_sets[self.active_view_set]
                             .focused_tile
                             .0
                             .to_string(),
@@ -864,9 +864,9 @@ impl RyeOsCore {
                     RyeOsStackMoveDirection::Up => -1,
                     RyeOsStackMoveDirection::Down => 1,
                 };
-                if self.workspaces[self.active_workspace].move_focused_in_stack(delta) {
+                if self.view_sets[self.active_view_set].move_focused_in_stack(delta) {
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
-                        tile_id: self.workspaces[self.active_workspace]
+                        tile_id: self.view_sets[self.active_view_set]
                             .focused_tile
                             .0
                             .to_string(),
@@ -886,10 +886,10 @@ impl RyeOsCore {
                 }
                 if let (Some(tile), Some(target)) =
                     (parse_tile_id(&tile_id), parse_tile_id(&target_tile_id))
-                    && self.workspaces[self.active_workspace].move_tile_beside(tile, target, edge)
+                    && self.view_sets[self.active_view_set].move_tile_beside(tile, target, edge)
                 {
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
                             tile_id: tile.0.to_string(),
                         });
                     self.bump_generation();
@@ -899,10 +899,10 @@ impl RyeOsCore {
             RyeOsUiIntent::CycleTab { direction } => self.cycle_workspace_tab(direction),
             RyeOsUiIntent::CycleViewTab { direction } => {
                 let forward = matches!(direction, RyeOsStackMoveDirection::Down);
-                if self.workspaces[self.active_workspace].cycle_view_tab(forward) {
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
-                            tile_id: self.workspaces[self.active_workspace]
+                if self.view_sets[self.active_view_set].cycle_view_tab(forward) {
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
+                            tile_id: self.view_sets[self.active_view_set]
                                 .focused_tile
                                 .0
                                 .to_string(),
@@ -922,41 +922,37 @@ impl RyeOsCore {
                 }
                 if let (Some(tile), Some(target)) =
                     (parse_tile_id(&tile_id), parse_tile_id(&target_tile_id))
-                    && self.workspaces[self.active_workspace]
-                        .move_tile_to_group(tile, target, index)
+                    && self.view_sets[self.active_view_set].move_tile_to_group(tile, target, index)
                 {
-                    self.workspaces[self.active_workspace].focus_target =
-                        Some(super::model::RyeOsFocusTarget::WorkspaceTile {
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
                             tile_id: tile.0.to_string(),
                         });
                     self.bump_generation();
                 }
                 Vec::new()
             }
-            RyeOsUiIntent::SwitchTab { index } => self.switch_workspace_tab(index),
-            RyeOsUiIntent::NewWorkspace => self.new_workspace(),
-            RyeOsUiIntent::SelectWorkspace { workspace_id } => {
+            RyeOsUiIntent::SwitchTab { index } => self.switch_view_set_tab(index),
+            RyeOsUiIntent::NewViewSet => self.new_view_set(),
+            RyeOsUiIntent::SelectViewSet { view_set_id } => {
                 match self
-                    .workspaces
+                    .view_sets
                     .iter()
-                    .position(|workspace| workspace.id == workspace_id)
+                    .position(|view_set| view_set.id == view_set_id)
                 {
-                    Some(index) => self.switch_workspace_tab(index),
+                    Some(index) => self.switch_view_set_tab(index),
                     None => Vec::new(),
                 }
             }
-            RyeOsUiIntent::RenameWorkspace {
-                workspace_id,
-                title,
-            } => {
-                self.rename_workspace(workspace_id, &title);
+            RyeOsUiIntent::RenameViewSet { view_set_id, title } => {
+                self.rename_view_set(view_set_id, &title);
                 Vec::new()
             }
-            RyeOsUiIntent::CloseWorkspace { workspace_id } => self.close_workspace(workspace_id),
-            RyeOsUiIntent::MoveTileToWorkspace {
+            RyeOsUiIntent::CloseViewSet { view_set_id } => self.close_view_set(view_set_id),
+            RyeOsUiIntent::MoveTileToViewSet {
                 layout_guard,
                 tile_id,
-                workspace_id,
+                view_set_id,
             } => {
                 if layout_guard != self.layout_guard() {
                     return Vec::new();
@@ -965,25 +961,25 @@ impl RyeOsCore {
                     return Vec::new();
                 };
                 let Some(target) = self
-                    .workspaces
+                    .view_sets
                     .iter()
-                    .position(|workspace| workspace.id == workspace_id)
+                    .position(|view_set| view_set.id == view_set_id)
                 else {
                     return Vec::new();
                 };
-                let source = self.active_workspace;
+                let source = self.active_view_set;
                 if target == source {
                     return Vec::new();
                 }
                 let moved = if source < target {
-                    let (before, after) = self.workspaces.split_at_mut(target);
-                    before[source].move_tile_to_workspace(&mut after[0], tile)
+                    let (before, after) = self.view_sets.split_at_mut(target);
+                    before[source].move_tile_to_view_set(&mut after[0], tile)
                 } else {
-                    let (before, after) = self.workspaces.split_at_mut(source);
-                    after[0].move_tile_to_workspace(&mut before[target], tile)
+                    let (before, after) = self.view_sets.split_at_mut(source);
+                    after[0].move_tile_to_view_set(&mut before[target], tile)
                 };
                 if moved {
-                    self.switch_workspace_tab(target)
+                    self.switch_view_set_tab(target)
                 } else {
                     Vec::new()
                 }
@@ -994,7 +990,7 @@ impl RyeOsCore {
                 ratio,
             } => {
                 if layout_guard == self.layout_guard()
-                    && self.workspaces[self.active_workspace]
+                    && self.view_sets[self.active_view_set]
                         .root
                         .as_mut()
                         .is_some_and(|root| root.set_split_ratio(&path, ratio))
@@ -1020,7 +1016,7 @@ impl RyeOsCore {
             RyeOsUiIntent::ToggleDock { edge } => {
                 // Toggling flips a surface-declared slot open/closed; a
                 // closed slot frees its space. Absent edges have no slot.
-                let Some(slot) = self.workspaces[self.active_workspace].docks.slot_mut(edge) else {
+                let Some(slot) = self.view_sets[self.active_view_set].docks.slot_mut(edge) else {
                     return Vec::new();
                 };
                 slot.visible = !slot.visible;
@@ -1039,7 +1035,7 @@ impl RyeOsCore {
             }
             RyeOsUiIntent::ResizeFocused { direction } => {
                 if self.resize_focused_dock(direction)
-                    || self.workspaces[self.active_workspace].resize_focused_split(direction)
+                    || self.view_sets[self.active_view_set].resize_focused_split(direction)
                 {
                     self.bump_generation();
                 }
@@ -1100,7 +1096,7 @@ impl RyeOsCore {
                 // Prefer the node name (e.g. `study`) over the default child-id
                 // label the drill just set, so the breadcrumb reads the cognition.
                 if let Some(label) = label {
-                    self.workspaces[self.active_workspace].lens_label = Some(label);
+                    self.view_sets[self.active_view_set].lens_label = Some(label);
                 }
                 effects
             }
@@ -1356,11 +1352,11 @@ fn file_root_requires_project(root: &str) -> bool {
 }
 
 impl RyeOsCore {
-    fn resize_focused_dock(&mut self, direction: crate::workspace::FocusDirection) -> bool {
+    fn resize_focused_dock(&mut self, direction: crate::view_set::FocusDirection) -> bool {
         let super::model::RyeOsFocusTarget::Dock { edge } = self.focus_target() else {
             return false;
         };
-        let Some(slot) = self.workspaces[self.active_workspace]
+        let Some(slot) = self.view_sets[self.active_view_set]
             .docks
             .slot_mut(edge)
             .filter(|slot| slot.visible)
@@ -1368,14 +1364,14 @@ impl RyeOsCore {
             return false;
         };
         let delta: i16 = match (edge, direction) {
-            (super::model::RyeOsDockEdge::Top, crate::workspace::FocusDirection::Down)
-            | (super::model::RyeOsDockEdge::Bottom, crate::workspace::FocusDirection::Up)
-            | (super::model::RyeOsDockEdge::Left, crate::workspace::FocusDirection::Right)
-            | (super::model::RyeOsDockEdge::Right, crate::workspace::FocusDirection::Left) => 1,
-            (super::model::RyeOsDockEdge::Top, crate::workspace::FocusDirection::Up)
-            | (super::model::RyeOsDockEdge::Bottom, crate::workspace::FocusDirection::Down)
-            | (super::model::RyeOsDockEdge::Left, crate::workspace::FocusDirection::Left)
-            | (super::model::RyeOsDockEdge::Right, crate::workspace::FocusDirection::Right) => -1,
+            (super::model::RyeOsDockEdge::Top, crate::view_set::FocusDirection::Down)
+            | (super::model::RyeOsDockEdge::Bottom, crate::view_set::FocusDirection::Up)
+            | (super::model::RyeOsDockEdge::Left, crate::view_set::FocusDirection::Right)
+            | (super::model::RyeOsDockEdge::Right, crate::view_set::FocusDirection::Left) => 1,
+            (super::model::RyeOsDockEdge::Top, crate::view_set::FocusDirection::Up)
+            | (super::model::RyeOsDockEdge::Bottom, crate::view_set::FocusDirection::Down)
+            | (super::model::RyeOsDockEdge::Left, crate::view_set::FocusDirection::Left)
+            | (super::model::RyeOsDockEdge::Right, crate::view_set::FocusDirection::Right) => -1,
             _ => return false,
         };
         let next = (slot.size as i16 + delta).clamp(3, 18) as u16;
@@ -1387,8 +1383,8 @@ impl RyeOsCore {
     }
 }
 
-fn initial_list_local_state() -> crate::workspace::ViewLocalState {
-    crate::workspace::ViewLocalState::GenericList {
+fn initial_list_local_state() -> crate::view_set::ViewLocalState {
+    crate::view_set::ViewLocalState::GenericList {
         cursor: 0,
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),
@@ -1534,13 +1530,13 @@ mod tests {
     #[test]
     fn stale_layout_gesture_cannot_resize_a_replacement_tree() {
         let mut core = RyeOsCore::default();
-        let workspace = &mut core.workspaces[0];
-        workspace
+        let view_set = &mut core.view_sets[0];
+        view_set
             .add_tile(ViewSpec {
                 view_ref: "view:test/one".into(),
             })
             .unwrap();
-        workspace
+        view_set
             .add_tile(ViewSpec {
                 view_ref: "view:test/two".into(),
             })
@@ -1557,32 +1553,32 @@ mod tests {
         };
         assert!(core.dispatch(resize(guard.clone())).is_empty());
         assert_ne!(core.layout_guard(), guard);
-        let current = core.workspaces[0].root.clone();
+        let current = core.view_sets[0].root.clone();
         core.dispatch(resize(guard));
-        assert_eq!(core.workspaces[0].root, current);
+        assert_eq!(core.view_sets[0].root, current);
         let guard = core.layout_guard();
-        core.new_workspace();
+        core.new_view_set();
         core.dispatch(resize(guard));
-        assert!(core.workspaces[1].root.is_none());
-        assert_eq!(core.workspaces[0].root, current);
+        assert!(core.view_sets[1].root.is_none());
+        assert_eq!(core.view_sets[0].root, current);
     }
 
     #[test]
     fn layout_edits_keep_input_focus_on_the_selected_view() {
         use crate::ui::model::{RyeOsDockEdge, RyeOsFocusTarget};
         let mut core = RyeOsCore::default();
-        let workspace = &mut core.workspaces[core.active_workspace];
-        let first = workspace
+        let view_set = &mut core.view_sets[core.active_view_set];
+        let first = view_set
             .add_tile(ViewSpec {
                 view_ref: "view:test/first".into(),
             })
             .unwrap();
-        let second = workspace
+        let second = view_set
             .add_tile(ViewSpec {
                 view_ref: "view:test/second".into(),
             })
             .unwrap();
-        core.workspaces[core.active_workspace].focus_target = Some(RyeOsFocusTarget::Dock {
+        core.view_sets[core.active_view_set].focus_target = Some(RyeOsFocusTarget::Dock {
             edge: RyeOsDockEdge::Bottom,
         });
         let effects = core.dispatch(RyeOsEvent::Ui {
@@ -1600,8 +1596,8 @@ mod tests {
             "geometry changes must not invoke services"
         );
         assert_eq!(
-            core.workspaces[core.active_workspace].focus_target,
-            Some(RyeOsFocusTarget::WorkspaceTile {
+            core.view_sets[core.active_view_set].focus_target,
+            Some(RyeOsFocusTarget::ViewSetTile {
                 tile_id: second.0.to_string()
             })
         );
@@ -1612,10 +1608,10 @@ mod tests {
                 },
             },
         });
-        assert_eq!(core.workspaces[core.active_workspace].focused_tile, first);
+        assert_eq!(core.view_sets[core.active_view_set].focused_tile, first);
         assert_eq!(
-            core.workspaces[core.active_workspace].focus_target,
-            Some(RyeOsFocusTarget::WorkspaceTile {
+            core.view_sets[core.active_view_set].focus_target,
+            Some(RyeOsFocusTarget::ViewSetTile {
                 tile_id: first.0.to_string()
             })
         );
@@ -1725,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_dock_updates_workspace_dock_vm() {
+    fn toggle_dock_updates_view_set_dock_vm() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
@@ -1735,7 +1731,7 @@ mod tests {
                 "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" } }
             }),
         );
-        assert!(build_view_model(&core).workspace.docks.left.is_none());
+        assert!(build_view_model(&core).view_set.docks.left.is_none());
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1745,7 +1741,7 @@ mod tests {
             },
         });
 
-        assert!(build_view_model(&core).workspace.docks.left.is_some());
+        assert!(build_view_model(&core).view_set.docks.left.is_some());
         let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
             crate::ui::model::dock_view_instance_key(crate::ui::model::RyeOsDockEdge::Left),
             "default",
@@ -1762,7 +1758,7 @@ mod tests {
     fn toggling_open_slot_closes_it_and_frees_its_space() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         // The bottom input slot starts open.
-        assert!(build_view_model(&core).workspace.docks.bottom.is_some());
+        assert!(build_view_model(&core).view_set.docks.bottom.is_some());
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -1774,8 +1770,8 @@ mod tests {
 
         // Closed slots vanish from the dock plane: renderers reserve no
         // space for them. Content and size are retained for reopening.
-        assert!(build_view_model(&core).workspace.docks.bottom.is_none());
-        let bottom = core.workspaces[core.active_workspace]
+        assert!(build_view_model(&core).view_set.docks.bottom.is_none());
+        let bottom = core.view_sets[core.active_view_set]
             .docks
             .bottom
             .as_ref()
@@ -1784,7 +1780,7 @@ mod tests {
         assert_eq!(bottom.size, 7);
 
         // Toggling an absent edge is a no-op (no slot declared).
-        assert!(core.workspaces[core.active_workspace].docks.top.is_none());
+        assert!(core.view_sets[core.active_view_set].docks.top.is_none());
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ToggleDock {
@@ -1793,7 +1789,7 @@ mod tests {
             },
         });
         assert!(effects.is_empty());
-        assert!(core.workspaces[core.active_workspace].docks.top.is_none());
+        assert!(core.view_sets[core.active_view_set].docks.top.is_none());
     }
 
     #[test]
@@ -1836,7 +1832,7 @@ mod tests {
     }
 
     #[test]
-    fn route_change_focuses_workspace_view() {
+    fn route_change_focuses_view_set_view() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:ryeos/items/space");
         let effects = core.dispatch(RyeOsEvent::RouteChanged {
@@ -1844,7 +1840,7 @@ mod tests {
         });
 
         assert_eq!(
-            core.workspaces[core.active_workspace].focused_view(),
+            core.view_sets[core.active_view_set].focused_view(),
             Some(&ViewSpec {
                 view_ref: "view:ryeos/items/space".to_string()
             })
@@ -2061,7 +2057,7 @@ mod tests {
         // unchanged and no tile is added; the inspector is a facet-bound view
         // (slot or lens) reached by ordinary navigation, live via on_facet.
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        core.workspaces[core.active_workspace].tiling.mode =
+        core.view_sets[core.active_view_set].tiling.mode =
             crate::surface::TilingModeSpec::SingleLens;
         seed_view(&mut core, "view:ryeos/items/space");
 
@@ -2075,7 +2071,7 @@ mod tests {
                 },
             },
         });
-        assert_eq!(core.workspaces[core.active_workspace].tile_ids().len(), 1);
+        assert_eq!(core.view_sets[core.active_view_set].tile_ids().len(), 1);
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -2091,9 +2087,9 @@ mod tests {
             Some(&serde_json::json!({ "item": "tool:ryeos/x" })),
         );
         // … and nothing was opened or swapped: same single tile, same lens.
-        assert_eq!(core.workspaces[core.active_workspace].tile_ids().len(), 1);
+        assert_eq!(core.view_sets[core.active_view_set].tile_ids().len(), 1);
         assert!(
-            matches!(core.workspaces[core.active_workspace].focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"),
+            matches!(core.view_sets[core.active_view_set].focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"),
             "inspect does not open or swap to the inspector — it only writes the facet"
         );
     }
@@ -2129,7 +2125,7 @@ mod tests {
 
         assert!(core.ui.overlay.active.is_none());
         assert!(matches!(
-            core.workspaces[core.active_workspace].focused_view(),
+            core.view_sets[core.active_view_set].focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"
         ));
         assert!(matches!(
@@ -2198,7 +2194,7 @@ mod tests {
 
         assert!(core.ui.overlay.active.is_none());
         assert!(matches!(
-            core.workspaces[core.active_workspace].focused_view(),
+            core.view_sets[core.active_view_set].focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:test/alpha/two"
         ));
     }
@@ -2401,7 +2397,7 @@ mod tests {
     }
 
     #[test]
-    fn arrow_focus_uses_workspace_geometry() {
+    fn arrow_focus_uses_view_set_geometry() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -2412,8 +2408,8 @@ mod tests {
                 },
             },
         });
-        // The first tile fills the workspace.
-        let master = core.workspaces[core.active_workspace].focused_tile;
+        // The first tile fills the view_set.
+        let master = core.view_sets[core.active_view_set].focused_tile;
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::OpenNewView {
@@ -2424,7 +2420,7 @@ mod tests {
             },
         });
         // An ordinary open splits beside it, preserving existing geometry.
-        let stacked = core.workspaces[core.active_workspace].focused_tile;
+        let stacked = core.view_sets[core.active_view_set].focused_tile;
         assert_ne!(master, stacked);
 
         core.dispatch(RyeOsEvent::Ui {
@@ -2433,7 +2429,7 @@ mod tests {
             },
         });
 
-        assert_eq!(core.workspaces[core.active_workspace].focused_tile, master);
+        assert_eq!(core.view_sets[core.active_view_set].focused_tile, master);
     }
 
     #[test]
@@ -2458,7 +2454,7 @@ mod tests {
             }),
         );
         // Open the right slot so the inspector renders in the dock plane.
-        core.workspaces[core.active_workspace]
+        core.view_sets[core.active_view_set]
             .docks
             .right
             .as_mut()
@@ -2489,7 +2485,7 @@ mod tests {
 
         // … and the inspector actually RENDERS it.
         let vm = build_view_model(&core);
-        let dock = vm.workspace.docks.right.expect("right dock open");
+        let dock = vm.view_set.docks.right.expect("right dock open");
         let rows = match dock.view {
             crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows,
             other => panic!("expected the key_value inspector to render rows, got {other:?}"),
@@ -2563,8 +2559,8 @@ mod tests {
             }
         }));
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
-        let tile_id = core.workspaces[core.active_workspace].focused_tile;
-        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+        let tile_id = core.view_sets[core.active_view_set].focused_tile;
+        let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]
             .instance_key
             .clone();
         let source_key =
@@ -2595,8 +2591,8 @@ mod tests {
                 activate: true,
             },
         });
-        let crate::workspace::ViewLocalState::GenericList { cursor, .. } =
-            &core.workspaces[core.active_workspace].tiles[&tile_id].local
+        let crate::view_set::ViewLocalState::GenericList { cursor, .. } =
+            &core.view_sets[core.active_view_set].tiles[&tile_id].local
         else {
             panic!("rows view retains generic-list state");
         };
@@ -2641,21 +2637,21 @@ mod tests {
             }
         }));
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
-        let workspace = &core.workspaces[core.active_workspace];
-        let a = workspace
+        let view_set = &core.view_sets[core.active_view_set];
+        let a = view_set
             .tiles
             .iter()
             .find(|(_, tile)| tile.view.view_ref == "view:test/a")
             .map(|(id, _)| *id)
             .unwrap();
-        let b = workspace
+        let b = view_set
             .tiles
             .iter()
             .find(|(_, tile)| tile.view.view_ref == "view:test/b")
             .map(|(id, _)| *id)
             .unwrap();
-        assert!(core.workspaces[core.active_workspace].move_tile_to_group(b, a, 1));
-        let b_instance = core.workspaces[core.active_workspace].tiles[&b]
+        assert!(core.view_sets[core.active_view_set].move_tile_to_group(b, a, 1));
+        let b_instance = core.view_sets[core.active_view_set].tiles[&b]
             .instance_key
             .clone();
         let source_key =
@@ -2672,13 +2668,13 @@ mod tests {
         };
 
         assert!(
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .root
                 .as_mut()
                 .unwrap()
                 .select_tab(a)
         );
-        core.workspaces[core.active_workspace].focused_tile = a;
+        core.view_sets[core.active_view_set].focused_tile = a;
         let generation = core.generation;
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::ChooseViewItem {
@@ -2712,8 +2708,8 @@ mod tests {
             }
         }));
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
-        let tile_id = core.workspaces[core.active_workspace].focused_tile;
-        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+        let tile_id = core.view_sets[core.active_view_set].focused_tile;
+        let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]
             .instance_key
             .clone();
         let section_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
@@ -2734,8 +2730,8 @@ mod tests {
                 section_id,
             },
         });
-        let crate::workspace::ViewLocalState::GenericList { collapsed, .. } =
-            &core.workspaces[core.active_workspace].tiles[&tile_id].local
+        let crate::view_set::ViewLocalState::GenericList { collapsed, .. } =
+            &core.view_sets[core.active_view_set].tiles[&tile_id].local
         else {
             panic!("sections view retains generic-list state");
         };

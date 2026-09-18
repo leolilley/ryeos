@@ -153,7 +153,7 @@ impl SessionCompiledUiBinding {
         mut resolve_target: impl FnMut(&str) -> Result<CompiledUiTarget>,
     ) -> Result<Self> {
         validate_navigation(effective_surface)?;
-        ryeos_client_base::surface::workspaces::validate_effective_workspaces(effective_surface)
+        ryeos_client_base::surface::view_sets::validate_effective_view_sets(effective_surface)
             .map_err(anyhow::Error::msg)?;
         let views = effective_surface
             .get("views")

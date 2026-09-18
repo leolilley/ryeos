@@ -99,8 +99,8 @@ fn key_context(core: &RyeOsCore) -> RyeOsKeyContext {
 /// the focused lens is a feed positioned on one. Drives plain ←/→ folding.
 fn focused_fold_section(core: &mut RyeOsCore) -> Option<(String, usize)> {
     let vm = core.envelope(Vec::new()).view_model;
-    let focused = vm.workspace.focused_tile;
-    let root = vm.workspace.root.as_ref()?;
+    let focused = vm.view_set.focused_tile;
+    let root = vm.view_set.root.as_ref()?;
     find_fold_section(root, &focused).map(|section| (focused.clone(), section))
 }
 

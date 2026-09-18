@@ -638,7 +638,7 @@ mod tests {
     use crate::ui::reducer::test_support::*;
 
     fn test_instance() -> crate::ids::RyeOsViewInstanceKey {
-        crate::ids::RyeOsViewInstanceKey::workspace_tile(crate::ids::TileId::new(77))
+        crate::ids::RyeOsViewInstanceKey::view_set_tile(crate::ids::TileId::new(77))
     }
 
     fn test_source_key() -> String {
@@ -976,12 +976,12 @@ mod tests {
                 "sources": { "default": { "ref": "service:test/detail", "params": {}, "collection": "rows" } }
             }),
         );
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/detail".to_string(),
             })
             .expect("fixture layout accepts view");
-        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+        let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]
             .instance_key
             .clone();
         let key =
@@ -1069,12 +1069,12 @@ mod tests {
                 ]
             }),
         );
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/detail".to_string(),
             })
             .expect("fixture layout accepts view");
-        let instance_key = core.workspaces[core.active_workspace].tiles[&tile_id]
+        let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]
             .instance_key
             .clone();
         let k0 = crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "a")

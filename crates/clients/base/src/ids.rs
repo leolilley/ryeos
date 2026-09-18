@@ -27,7 +27,7 @@ macro_rules! id_type {
 
 id_type!(TileId);
 id_type!(ViewGroupId);
-id_type!(WorkspaceId);
+id_type!(ViewSetId);
 id_type!(ThreadId);
 id_type!(ThreadTurnId);
 id_type!(ThreadRowId);
@@ -49,7 +49,7 @@ id_type!(ItemId);
 pub struct RyeOsViewInstanceKey(String);
 
 impl RyeOsViewInstanceKey {
-    pub fn workspace_tile(tile_id: TileId) -> Self {
+    pub fn view_set_tile(tile_id: TileId) -> Self {
         Self(format!("tile:{}", tile_id.0))
     }
 
@@ -61,7 +61,7 @@ impl RyeOsViewInstanceKey {
         &self.0
     }
 
-    pub fn workspace_tile_id(&self) -> Option<TileId> {
+    pub fn view_set_tile_id(&self) -> Option<TileId> {
         self.0
             .strip_prefix("tile:")?
             .parse::<u64>()
@@ -72,7 +72,7 @@ impl RyeOsViewInstanceKey {
     pub(crate) fn from_canonical(value: &str) -> Option<Self> {
         if let Some(raw) = value.strip_prefix("tile:") {
             let tile_id = raw.parse::<u64>().ok().map(TileId::new)?;
-            let key = Self::workspace_tile(tile_id);
+            let key = Self::view_set_tile(tile_id);
             return (key.as_str() == value).then_some(key);
         }
         if let Some(edge) = value.strip_prefix("dock:")

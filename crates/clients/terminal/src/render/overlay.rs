@@ -1,5 +1,5 @@
 //! Generic overlay host. Overlays are transient surface layers over the
-//! workspace; their content is data-projected in the shared VM and rendered
+//! view set; their content is data-projected in the shared VM and rendered
 //! here by widget shape, not by product-specific overlay names.
 
 use ryeos_client_base::layout::Rect;

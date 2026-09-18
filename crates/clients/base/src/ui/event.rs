@@ -4,7 +4,7 @@ use super::effect::{RyeOsEffectResult, RyeOsUiError};
 use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::ids::RyeOsViewInstanceKey;
-use crate::workspace::{FieldCursorState, FocusDirection, ViewSpec};
+use crate::view_set::{FieldCursorState, FocusDirection, ViewSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,21 +72,21 @@ pub enum RyeOsUiIntent {
     SwitchTab {
         index: usize,
     },
-    NewWorkspace,
-    SelectWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    NewViewSet,
+    SelectViewSet {
+        view_set_id: crate::ids::ViewSetId,
     },
-    RenameWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    RenameViewSet {
+        view_set_id: crate::ids::ViewSetId,
         title: String,
     },
-    CloseWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    CloseViewSet {
+        view_set_id: crate::ids::ViewSetId,
     },
-    MoveTileToWorkspace {
+    MoveTileToViewSet {
         layout_guard: String,
         tile_id: String,
-        workspace_id: crate::ids::WorkspaceId,
+        view_set_id: crate::ids::ViewSetId,
     },
     ResizeSplit {
         layout_guard: String,

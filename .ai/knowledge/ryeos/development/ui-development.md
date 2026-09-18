@@ -1,16 +1,16 @@
-<!-- ryeos:signed:2026-09-17T01:49:07Z:227e81541e0bb086eaea5a5dd56ca6e8c5dfd55abe0686ee9a5de3b4f502257f:NX1oiPMDD/KR82RxfdP+HEV3PV0d/xg+qyiuQScVdrqIjsFeXqdZD0EdaXrNyu90QUTNxDznIo2WD6jRtG84BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T22:45:43Z:f883a583460503977ad169828ae4eefa8b289c37b789597edc3aba8c20a08033:VOxcIsWBJ9YiMiqopKqVlc93C0/ArQdxyZCLAhGW7lC7roonAbmMg3ldNg1z9BiIBrYaffcSTqqTkDwUdeqyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to develop and qualify the typed Svelte RyeOS browser renderer"
 entry_type: reference
-version: "2.0.0"
+version: "3.0.0"
 ```
 
 # Browser UI Development Workflow
 
-Read `ui-design-system.md` first. Preserve the Gruvbox palette, tiled workspace,
+Read `ui-design-system.md` first. Preserve the Gruvbox palette, tiled view sets,
 launcher, optional slots, authored ambient character and shared Rust-owned UI
 semantics. Do not turn RyeOS into a generic sidebar application.
 
@@ -89,8 +89,8 @@ view-name exception. Animation state does not become RyeOS semantic state.
 
 Map and Atlas are ordinary views placed by the shared Rust-owned layout tree.
 A compact execution map may occupy a supporting tile while the same view can be
-promoted into the central workspace; Atlas usually benefits from the larger
-workspace with selection or evidence in adjacent tiles. These are authored
+promoted into the central region; Atlas usually benefits from a larger region
+with selection or evidence in adjacent tiles. These are authored
 arrangements, not fixed browser positions.
 
 `SceneView.svelte` receives only the projected scene and owning tile identity.

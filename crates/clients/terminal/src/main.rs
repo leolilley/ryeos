@@ -1,6 +1,6 @@
 //! ryeos-tui — Native terminal TUI for Rye OS.
 //!
-//! A tiled workspace for AI agent operations: thread management,
+//! A tiled view set for AI agent operations: thread management,
 //! execution, state inspection, remotes, and trust.
 
 mod app;
@@ -100,7 +100,7 @@ mod view_reference_tests {
         let mut refs = Vec::new();
         super::collect_view_refs(
             &serde_json::json!({
-                "workspaces": [{"root": {
+                "view_sets": [{"root": {
                     "type": "group", "active": 0,
                     "views": ["view:test/active", "view:test/inactive"]
                 }}],
@@ -420,7 +420,7 @@ fn main() {
         let result = app::run(&project_path, loaded, diagnostics, daemon_client).await;
 
         if let Err(e) = result {
-            exit_with_error(&console, format!("terminal workspace failed: {e}"), None);
+            exit_with_error(&console, format!("terminal view set failed: {e}"), None);
         }
     });
 }

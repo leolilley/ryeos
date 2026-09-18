@@ -1,17 +1,17 @@
 <script lang="ts">
-  import type { RyeOsWorkspaceVm } from "../generated";
+  import type { RyeOsViewSetVm } from "../generated";
   import DockSlot from "./DockSlot.svelte";
   import LayoutNode from "./LayoutNode.svelte";
-  interface Props { model: RyeOsWorkspaceVm }
+  interface Props { model: RyeOsViewSetVm }
   let { model }: Props = $props();
 </script>
 
-<main class="workspace" class:empty={model.center_is_empty}>
+<main class="view-set" class:empty={model.center_is_empty}>
   {#if model.docks.top}<DockSlot model={model.docks.top} />{/if}
-  <div class="workspace-middle">
+  <div class="view-set-middle">
     {#if model.docks.left}<DockSlot model={model.docks.left} />{/if}
-    <section class="workspace-center">
-      {#if model.root}<LayoutNode model={model.root} />{:else}<div class="workspace-backdrop" aria-label="Empty workspace"></div>{/if}
+    <section class="view-set-center">
+      {#if model.root}<LayoutNode model={model.root} />{:else}<div class="view-set-backdrop" aria-label="Empty view set"></div>{/if}
     </section>
     {#if model.docks.right}<DockSlot model={model.docks.right} />{/if}
   </div>

@@ -37,11 +37,11 @@ export type RyeOsUiIntent =
   | { type: "move_tile_to_group"; layout_guard: string; tile_id: string; target_tile_id: string; index: bigint }
   | { type: "cycle_view_tab"; direction: RyeOsStackMoveDirection }
   | { type: "switch_tab"; index: bigint }
-  | { type: "new_workspace" }
-  | { type: "select_workspace"; workspace_id: bigint }
-  | { type: "rename_workspace"; workspace_id: bigint; title: string }
-  | { type: "close_workspace"; workspace_id: bigint }
-  | { type: "move_tile_to_workspace"; layout_guard: string; tile_id: string; workspace_id: bigint }
+  | { type: "new_view_set" }
+  | { type: "select_view_set"; view_set_id: bigint }
+  | { type: "rename_view_set"; view_set_id: bigint; title: string }
+  | { type: "close_view_set"; view_set_id: bigint }
+  | { type: "move_tile_to_view_set"; layout_guard: string; tile_id: string; view_set_id: bigint }
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }
   | { type: "toggle_top_status_bar" }
   | { type: "toggle_bottom_status_bar" }

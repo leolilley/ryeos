@@ -7,7 +7,7 @@ pub(crate) use crate::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
 pub(crate) use crate::ui::view_model::{
     build_view_model, command_overlay_items_for, view_overlay_items,
 };
-pub(crate) use crate::workspace::{FocusDirection, ViewSpec};
+pub(crate) use crate::view_set::{FocusDirection, ViewSpec};
 
 pub(crate) fn session() -> BrowserSession {
     BrowserSession {
@@ -128,13 +128,13 @@ pub(crate) fn seed_service_route(core: &mut RyeOsCore) {
     );
 }
 
-/// Focus a center tile the way `FocusChanged` would: both the workspace
+/// Focus a center tile the way `FocusChanged` would: both the view_set
 /// pointer and the explicit UI target move. Tests that poke
-/// `workspace.focused_tile` alone leave the initial dock focus standing.
+/// `view_set.focused_tile` alone leave the initial dock focus standing.
 pub(crate) fn focus_tile(core: &mut RyeOsCore, tile_id: crate::ids::TileId) {
-    core.workspaces[core.active_workspace].focused_tile = tile_id;
-    core.workspaces[core.active_workspace].focus_target =
-        Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
+    core.view_sets[core.active_view_set].focused_tile = tile_id;
+    core.view_sets[core.active_view_set].focus_target =
+        Some(crate::ui::model::RyeOsFocusTarget::ViewSetTile {
             tile_id: tile_id.0.to_string(),
         });
 }
@@ -151,7 +151,7 @@ pub(crate) fn seed_filter_tile(core: &mut RyeOsCore) -> String {
             "input": { "id": "q", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
         }),
     );
-    let tile_id = core.workspaces[core.active_workspace]
+    let tile_id = core.view_sets[core.active_view_set]
         .add_tile(ViewSpec {
             view_ref: "view:test/filter".to_string(),
         })

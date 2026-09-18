@@ -4,12 +4,12 @@
 
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockSlotState};
 use crate::layout::LayoutTree;
-use crate::surface::workspaces::{LayoutSeedSpec, WorkspaceSeedSpec, validate_seeds};
+use crate::surface::view_sets::{LayoutSeedSpec, ViewSetSeedSpec, validate_seeds};
 use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
-const SCHEMA: &str = "ryeos.ui.layout-preferences.v1";
+const SCHEMA: &str = "ryeos.ui.layout-preferences.v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,14 +24,14 @@ struct Scope {
 struct Preferences {
     schema: String,
     scope: Scope,
-    active_workspace: usize,
-    workspaces: Vec<SavedWorkspace>,
+    active_view_set: usize,
+    view_sets: Vec<SavedViewSet>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SavedWorkspace {
-    seed: WorkspaceSeedSpec,
+struct SavedViewSet {
+    seed: ViewSetSeedSpec,
     focused_view: Option<usize>,
 }
 
@@ -73,14 +73,14 @@ impl RyeOsCore {
     pub fn export_layout_preferences(&self) -> Result<String, String> {
         fn capture(
             tree: &LayoutTree,
-            workspace: &crate::workspace::Workspace,
+            view_set: &crate::view_set::ViewSet,
         ) -> Result<LayoutSeedSpec, String> {
             Ok(match tree {
                 LayoutTree::Group { tabs, active, .. } => LayoutSeedSpec::Group {
                     views: tabs
                         .iter()
                         .map(|id| {
-                            let tile = workspace
+                            let tile = view_set
                                 .tiles
                                 .get(id)
                                 .ok_or("layout references an unmounted view")?;
@@ -103,44 +103,44 @@ impl RyeOsCore {
                 } => LayoutSeedSpec::Split {
                     axis: *axis,
                     ratio: *ratio,
-                    first: Box::new(capture(first, workspace)?),
-                    second: Box::new(capture(second, workspace)?),
+                    first: Box::new(capture(first, view_set)?),
+                    second: Box::new(capture(second, view_set)?),
                 },
             })
         }
-        let workspaces = self
-            .workspaces
+        let view_sets = self
+            .view_sets
             .iter()
             .enumerate()
-            .map(|(index, workspace)| {
-                Ok(SavedWorkspace {
-                    seed: WorkspaceSeedSpec {
-                        id: format!("workspace-{index}"),
-                        title: workspace.title.clone(),
-                        root: workspace
+            .map(|(index, view_set)| {
+                Ok(SavedViewSet {
+                    seed: ViewSetSeedSpec {
+                        id: format!("view-set-{index}"),
+                        title: view_set.title.clone(),
+                        root: view_set
                             .root
                             .as_ref()
-                            .map(|root| capture(root, workspace))
+                            .map(|root| capture(root, view_set))
                             .transpose()?,
                         slots: SlotsSpec {
-                            top: slot(&workspace.docks.top),
-                            bottom: slot(&workspace.docks.bottom),
-                            left: slot(&workspace.docks.left),
-                            right: slot(&workspace.docks.right),
+                            top: slot(&view_set.docks.top),
+                            bottom: slot(&view_set.docks.bottom),
+                            left: slot(&view_set.docks.left),
+                            right: slot(&view_set.docks.right),
                         },
                     },
-                    focused_view: workspace
+                    focused_view: view_set
                         .tile_ids()
                         .iter()
-                        .position(|id| *id == workspace.focused_tile),
+                        .position(|id| *id == view_set.focused_tile),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let snapshot = Preferences {
             schema: SCHEMA.into(),
             scope: self.preference_scope()?,
-            active_workspace: self.active_workspace,
-            workspaces,
+            active_view_set: self.active_view_set,
+            view_sets,
         };
         let encoded = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
         if encoded.len() > MAX_LAYOUT_PREFERENCE_BYTES {
@@ -156,8 +156,8 @@ impl RyeOsCore {
         // This restores presentation only; it has no authority to discard live
         // input. In particular, a later browser/client caller must not turn the
         // startup restore API into an implicit "discard all drafts" action.
-        if self.workspaces.iter().any(|workspace| {
-            workspace
+        if self.view_sets.iter().any(|view_set| {
+            view_set
                 .input_buffers
                 .values()
                 .any(|input| !input.text.is_empty())
@@ -174,22 +174,21 @@ impl RyeOsCore {
         if snapshot.schema != SCHEMA || snapshot.scope != self.preference_scope()? {
             return Err("layout preferences have a different schema or session scope".into());
         }
-        if snapshot.workspaces.is_empty() || snapshot.active_workspace >= snapshot.workspaces.len()
-        {
-            return Err("layout preferences have no valid active workspace".into());
+        if snapshot.view_sets.is_empty() || snapshot.active_view_set >= snapshot.view_sets.len() {
+            return Err("layout preferences have no valid active view set".into());
         }
         validate_seeds(
             &snapshot
-                .workspaces
+                .view_sets
                 .iter()
                 .map(|saved| saved.seed.clone())
                 .collect::<Vec<_>>(),
         )?;
-        let tiling = self.workspaces[self.active_workspace].tiling.clone();
-        let mut restored = Vec::with_capacity(snapshot.workspaces.len());
-        for saved in snapshot.workspaces {
-            let mut workspace = saved.seed.instantiate(&tiling)?;
-            for tile in workspace.tiles.values() {
+        let tiling = self.view_sets[self.active_view_set].tiling.clone();
+        let mut restored = Vec::with_capacity(snapshot.view_sets.len());
+        for saved in snapshot.view_sets {
+            let mut view_set = saved.seed.instantiate(&tiling)?;
+            for tile in view_set.tiles.values() {
                 if !self.views.contains_key(&tile.view.view_ref) {
                     return Err(format!(
                         "saved view is not admitted: {}",
@@ -200,10 +199,10 @@ impl RyeOsCore {
             // Closed slots need the same check as visible slots: they may be
             // revealed later, so hiding cannot smuggle an unadmitted view in.
             for slot in [
-                &workspace.docks.top,
-                &workspace.docks.bottom,
-                &workspace.docks.left,
-                &workspace.docks.right,
+                &view_set.docks.top,
+                &view_set.docks.bottom,
+                &view_set.docks.left,
+                &view_set.docks.right,
             ]
             .into_iter()
             .flatten()
@@ -214,19 +213,19 @@ impl RyeOsCore {
                 }
             }
             if let Some(index) = saved.focused_view {
-                let id = *workspace
+                let id = *view_set
                     .tile_ids()
                     .get(index)
-                    .ok_or("saved focus is outside the workspace")?;
-                workspace.focus_tile(id);
+                    .ok_or("saved focus is outside the view set")?;
+                view_set.focus_tile(id);
             }
-            restored.push(workspace);
+            restored.push(view_set);
         }
         // Complete validation precedes replacement. This operation never replays
         // an input/command, mutates the seat route or imports saved privileges.
-        self.workspaces = restored;
-        self.active_workspace = snapshot.active_workspace;
-        Ok(self.refresh_workspace_sources())
+        self.view_sets = restored;
+        self.active_view_set = snapshot.active_view_set;
+        Ok(self.refresh_view_set_sources())
     }
 }
 
@@ -257,15 +256,15 @@ mod tests {
     #[test]
     fn arrangement_round_trip_allocates_fresh_ids_and_never_saves_drafts() {
         let mut source = core();
-        source.workspaces[0].input_buffers.insert(
+        source.view_sets[0].input_buffers.insert(
             "test".into(),
             RyeOsInputState {
                 text: "private-unsent-draft".into(),
                 ..Default::default()
             },
         );
-        let ids = source.workspaces[0].tile_ids();
-        source.workspaces[0].move_tile_to_group(ids[1], ids[0], 1);
+        let ids = source.view_sets[0].tile_ids();
+        source.view_sets[0].move_tile_to_group(ids[1], ids[0], 1);
         let encoded = source.export_layout_preferences().unwrap();
         assert!(!encoded.contains("private-unsent-draft"));
         assert!(!encoded.contains("binding_digest"));
@@ -278,7 +277,7 @@ mod tests {
         )));
         assert_eq!(target.seat.fold().snapshot(), seat_before);
         assert_eq!(
-            target.workspaces[0]
+            target.view_sets[0]
                 .root
                 .as_ref()
                 .unwrap()
@@ -286,9 +285,9 @@ mod tests {
                 .len(),
             1
         );
-        assert!(target.workspaces[0].input_buffers.is_empty());
+        assert!(target.view_sets[0].input_buffers.is_empty());
         assert!(
-            target.workspaces[0]
+            target.view_sets[0]
                 .tile_ids()
                 .iter()
                 .all(|id| !ids.contains(id))
@@ -298,7 +297,7 @@ mod tests {
     #[test]
     fn refused_preferences_leave_live_layout_unchanged() {
         let mut target = core();
-        let original = target.workspaces[0].root.clone();
+        let original = target.view_sets[0].root.clone();
         let mut saved: serde_json::Value =
             serde_json::from_str(&target.export_layout_preferences().unwrap()).unwrap();
         saved["scope"]["principal"] = json!("fp:someone-else");
@@ -307,17 +306,17 @@ mod tests {
                 .restore_layout_preferences(&saved.to_string())
                 .is_err()
         );
-        assert_eq!(target.workspaces[0].root, original);
+        assert_eq!(target.view_sets[0].root, original);
         let mut saved: serde_json::Value =
             serde_json::from_str(&target.export_layout_preferences().unwrap()).unwrap();
-        saved["workspaces"][0]["seed"]["slots"] =
+        saved["view_sets"][0]["seed"]["slots"] =
             json!({"left": {"content": "view:unadmitted", "open": false, "size": 20}});
         assert!(
             target
                 .restore_layout_preferences(&saved.to_string())
                 .is_err()
         );
-        assert_eq!(target.workspaces[0].root, original);
+        assert_eq!(target.view_sets[0].root, original);
         assert!(
             target
                 .restore_layout_preferences(&" ".repeat(MAX_LAYOUT_PREFERENCE_BYTES + 1))
@@ -326,31 +325,31 @@ mod tests {
     }
 
     #[test]
-    fn restore_does_not_discard_input_in_an_inactive_workspace() {
+    fn restore_does_not_discard_input_in_an_inactive_view_set() {
         let mut target = core();
         let saved = target.export_layout_preferences().unwrap();
-        target.workspaces[0].input_buffers.insert(
+        target.view_sets[0].input_buffers.insert(
             "draft".into(),
             RyeOsInputState {
                 text: "keep me".into(),
                 ..Default::default()
             },
         );
-        target.new_workspace();
+        target.new_view_set();
         let ids: Vec<_> = target
-            .workspaces
+            .view_sets
             .iter()
-            .map(|workspace| workspace.id)
+            .map(|view_set| view_set.id)
             .collect();
         assert!(target.restore_layout_preferences(&saved).is_err());
         assert_eq!(
             target
-                .workspaces
+                .view_sets
                 .iter()
-                .map(|workspace| workspace.id)
+                .map(|view_set| view_set.id)
                 .collect::<Vec<_>>(),
             ids
         );
-        assert_eq!(target.workspaces[0].input_buffers["draft"].text, "keep me");
+        assert_eq!(target.view_sets[0].input_buffers["draft"].text, "keep me");
     }
 }

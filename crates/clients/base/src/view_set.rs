@@ -1,4 +1,4 @@
-//! Workspace — canonical layout tree, view state and focus.
+//! ViewSet — canonical layout tree, view state and focus.
 //!
 //! The tree owns placement. The surface's tiling recipe seeds an arrangement;
 //! it must never flatten a nested layout on an ordinary open/close/move edit.
@@ -302,7 +302,7 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace
+// ViewSet
 // ---------------------------------------------------------------------------
 
 /// One frame on the lens stack: the view a step-in left behind, plus the
@@ -329,12 +329,12 @@ pub struct LensFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Workspace {
+pub struct ViewSet {
     /// Presentation identity, independent of tab order or authored label.
-    pub id: crate::ids::WorkspaceId,
+    pub id: crate::ids::ViewSetId,
     pub title: String,
-    /// Placement and editor ephemera belong to this workspace, not to the
-    /// shell. Switching workspaces must not retarget another workspace's draft.
+    /// Placement and editor ephemera belong to this view set, not to the
+    /// shell. Switching view sets must not retarget another view set's draft.
     pub docks: crate::ui::model::RyeOsDockState,
     pub dock_local: BTreeMap<RyeOsViewInstanceKey, ViewLocalState>,
     pub focus_target: Option<crate::ui::model::RyeOsFocusTarget>,
@@ -352,8 +352,8 @@ pub struct Workspace {
     pub focused_tile: TileId,
     /// Step-in return stack (single-lens surfaces). A drill pushes the view it
     /// left and the facet context it read; a pop restores them. Empty at the
-    /// top of the tree. `#[serde(default)]` keeps older serialized workspaces
-    /// (no stack field) loadable.
+    /// top of the tree. The default is part of the optional lens contract,
+    /// not a compatibility path for predecessor view-set schemas.
     #[serde(default)]
     pub lens_stack: Vec<LensFrame>,
     /// Human label for the CURRENT focused level (the cognition/thread stepped
@@ -364,20 +364,20 @@ pub struct Workspace {
     pub lens_label: Option<String>,
 }
 
-impl Workspace {
-    /// Build a workspace from a tiling spec and ordered initial views.
+impl ViewSet {
+    /// Build a view set from a tiling spec and ordered initial views.
     pub fn from_tiling(tiling: TilingSpec, views: Vec<ViewSpec>) -> Self {
         let mut center_tiles = Vec::with_capacity(views.len());
         let mut tiles = HashMap::new();
         for view in views {
             // Initial mounts and later opens share one identity allocator.
-            // Reusing 1..N per workspace aliases source and input coordinates.
+            // Reusing 1..N per view set aliases source and input coordinates.
             let id = Self::next_tile_id();
             center_tiles.push(id);
             tiles.insert(
                 id,
                 TileState {
-                    instance_key: RyeOsViewInstanceKey::workspace_tile(id),
+                    instance_key: RyeOsViewInstanceKey::view_set_tile(id),
                     local: view.initial_local_state(),
                     view,
                 },
@@ -391,7 +391,7 @@ impl Workspace {
         Self {
             id: {
                 static COUNTER: AtomicU64 = AtomicU64::new(1);
-                crate::ids::WorkspaceId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
+                crate::ids::ViewSetId::new(COUNTER.fetch_add(1, Ordering::Relaxed))
             },
             title: String::new(),
             docks: crate::ui::model::RyeOsDockState::default(),
@@ -495,7 +495,7 @@ impl Workspace {
 
     /// Transfer a mounted centre view, not a new copy of its definition. Stage
     /// both trees first so a full/deep target leaves the source untouched.
-    pub fn move_tile_to_workspace(&mut self, destination: &mut Self, tile: TileId) -> bool {
+    pub fn move_tile_to_view_set(&mut self, destination: &mut Self, tile: TileId) -> bool {
         if self.id == destination.id || destination.tiles.contains_key(&tile) {
             return false;
         }
@@ -573,7 +573,7 @@ impl Workspace {
             return false;
         }
         self.focused_tile = tile;
-        self.focus_target = Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
+        self.focus_target = Some(crate::ui::model::RyeOsFocusTarget::ViewSetTile {
             tile_id: tile.0.to_string(),
         });
         true
@@ -669,7 +669,7 @@ impl Workspace {
         self.tiles.insert(
             id,
             TileState {
-                instance_key: RyeOsViewInstanceKey::workspace_tile(id),
+                instance_key: RyeOsViewInstanceKey::view_set_tile(id),
                 local: view.initial_local_state(),
                 view,
             },
@@ -910,18 +910,18 @@ mod tests {
         }
     }
 
-    fn workspace_with(n: usize) -> Workspace {
-        Workspace::from_tiling(
+    fn view_set_with(n: usize) -> ViewSet {
+        ViewSet::from_tiling(
             TilingSpec::default(),
             (0..n).map(|i| bound(&format!("v{i}"))).collect(),
         )
     }
 
     #[test]
-    fn cross_workspace_move_retains_instance_local_state_and_all_subject_drafts() {
+    fn cross_view_set_move_retains_instance_local_state_and_all_subject_drafts() {
         use crate::ui::model::{InputBufferKey, RyeOsInputState};
-        let mut source = workspace_with(1);
-        let mut target = workspace_with(1);
+        let mut source = view_set_with(1);
+        let mut target = view_set_with(1);
         let tile = source.focused_tile;
         let instance = source.tiles[&tile].instance_key.clone();
         let key = InputBufferKey::new(instance.clone(), "view:test/v0", "message").storage_key();
@@ -933,7 +933,7 @@ mod tests {
             },
         );
         source.field_query_editing = Some(instance.clone());
-        assert!(source.move_tile_to_workspace(&mut target, tile));
+        assert!(source.move_tile_to_view_set(&mut target, tile));
         assert!(source.root.is_none());
         assert!(source.focus_target.is_none());
         assert!(source.input_buffers.is_empty());
@@ -945,13 +945,13 @@ mod tests {
     }
 
     #[test]
-    fn cross_workspace_move_into_full_layout_is_atomic() {
-        let mut source = workspace_with(1);
-        let mut target = workspace_with(crate::layout::MAX_LAYOUT_TILES);
+    fn cross_view_set_move_into_full_layout_is_atomic() {
+        let mut source = view_set_with(1);
+        let mut target = view_set_with(crate::layout::MAX_LAYOUT_TILES);
         let source_before = source.root.clone();
         let target_before = target.root.clone();
         let tile = source.focused_tile;
-        assert!(!source.move_tile_to_workspace(&mut target, tile));
+        assert!(!source.move_tile_to_view_set(&mut target, tile));
         assert_eq!(source.root, source_before);
         assert_eq!(target.root, target_before);
         assert!(source.tiles.contains_key(&tile));
@@ -959,9 +959,9 @@ mod tests {
     }
 
     #[test]
-    fn initial_workspaces_and_later_opens_have_disjoint_instance_identities() {
-        let mut first = workspace_with(128);
-        let second = workspace_with(128);
+    fn initial_view_sets_and_later_opens_have_disjoint_instance_identities() {
+        let mut first = view_set_with(128);
+        let second = view_set_with(128);
         let second_ids = second.tile_ids();
         assert!(first.tile_ids().iter().all(|id| !second_ids.contains(id)));
         let added = first.add_tile(bound("later")).unwrap();
@@ -1081,7 +1081,7 @@ mod tests {
 
     #[test]
     fn add_tile_appends_to_end_and_focuses() {
-        let mut ws = workspace_with(2);
+        let mut ws = view_set_with(2);
         let order_before = ws.tile_ids();
         let new_id = ws
             .add_tile(bound("new"))
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[test]
     fn duplicate_view_refs_have_distinct_stable_instance_keys() {
-        let mut ws = Workspace::from_tiling(
+        let mut ws = ViewSet::from_tiling(
             TilingSpec::default(),
             vec![bound("view:test/same"), bound("view:test/same")],
         );
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn first_added_tile_takes_the_full_center() {
-        let mut ws = Workspace::from_tiling(TilingSpec::default(), Vec::new());
+        let mut ws = ViewSet::from_tiling(TilingSpec::default(), Vec::new());
         assert!(ws.center_is_empty());
         assert!(ws.layout().is_none());
         let id = ws
@@ -1139,7 +1139,7 @@ mod tests {
 
     #[test]
     fn close_tile_keeps_order_and_refocuses_neighbor() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         let order = ws.tile_ids();
         ws.focused_tile = order[1];
         assert!(ws.close_tile(order[1]));
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn closing_last_tile_empties_center() {
-        let mut ws = workspace_with(1);
+        let mut ws = view_set_with(1);
         let only = ws.tile_ids()[0];
         assert!(ws.close_tile(only));
         assert!(ws.center_is_empty());
@@ -1162,14 +1162,14 @@ mod tests {
 
     #[test]
     fn close_tile_ignores_unknown_tile() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         assert!(!ws.close_tile(TileId::new(999)));
         assert_eq!(ws.tile_ids().len(), 3);
     }
 
     #[test]
     fn focus_next_cycles_center_order() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         let order = ws.tile_ids();
         ws.focused_tile = order[0];
         assert_eq!(ws.focused_tile, order[0]);
@@ -1185,7 +1185,7 @@ mod tests {
 
     #[test]
     fn move_tile_reorders_with_wrap() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         let order = ws.tile_ids();
         ws.focused_tile = order[0];
         assert!(ws.move_focused_in_stack(1));
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn zoom_promotes_to_master_and_swaps_at_front() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         let order = ws.tile_ids();
         assert!(ws.zoom_tile(order[2]));
         assert_eq!(ws.tile_ids(), vec![order[2], order[0], order[1]]);
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn resize_changes_geometry_not_the_authored_arrange_recipe() {
-        let mut ws = workspace_with(2);
+        let mut ws = view_set_with(2);
         let recipe = ws.tiling.clone();
         let before = ws.layout().unwrap();
         assert!(ws.resize_focused_split(FocusDirection::Left));
@@ -1224,7 +1224,7 @@ mod tests {
     #[test]
     fn focus_in_direction_uses_computed_geometry() {
         // Traversal is geometric: the left placement precedes the right.
-        let mut ws = workspace_with(2);
+        let mut ws = view_set_with(2);
         let order = ws.tile_ids();
         ws.focused_tile = order[0];
         assert!(ws.focus_in_direction(FocusDirection::Right));
@@ -1235,7 +1235,7 @@ mod tests {
 
     #[test]
     fn nested_move_retains_view_state_and_rejects_invalid_destination_atomically() {
-        let mut ws = workspace_with(3);
+        let mut ws = view_set_with(3);
         let ids = ws.tile_ids();
         let key = ws.tiles[&ids[0]].instance_key.clone();
         ws.tiles.get_mut(&ids[0]).unwrap().local = ViewLocalState::None;
@@ -1251,7 +1251,7 @@ mod tests {
 
     #[test]
     fn arranged_large_region_is_bounded_and_even() {
-        let ws = workspace_with(crate::layout::MAX_LAYOUT_TILES);
+        let ws = view_set_with(crate::layout::MAX_LAYOUT_TILES);
         ws.root.as_ref().unwrap().validate().unwrap();
     }
 }

@@ -1,4 +1,4 @@
-//! Signed initial workspace composition. This is presentation data inside a
+//! Signed initial view-set composition. This is presentation data inside a
 //! surface, not a second kind, view resolver or execution authority.
 
 use super::{SlotsSpec, TilingSpec, ViewKindSpec};
@@ -6,16 +6,16 @@ use crate::ids::ViewGroupId;
 use crate::layout::{
     LayoutTree, MAX_LAYOUT_DEPTH, MAX_LAYOUT_TILES, MAX_SPLIT_RATIO, MIN_SPLIT_RATIO, SplitAxis,
 };
-use crate::workspace::Workspace;
+use crate::view_set::ViewSet;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const MAX_WORKSPACES: usize = 16;
-pub const MAX_WORKSPACE_LABEL_BYTES: usize = 128;
+pub const MAX_VIEW_SETS: usize = 16;
+pub const MAX_VIEW_SET_LABEL_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceSeedSpec {
+pub struct ViewSetSeedSpec {
     pub id: String,
     pub title: String,
     #[serde(default)]
@@ -39,14 +39,14 @@ pub enum LayoutSeedSpec {
     },
 }
 
-pub fn validate_seeds(seeds: &[WorkspaceSeedSpec]) -> Result<(), String> {
-    if seeds.len() > MAX_WORKSPACES {
-        return Err(format!("workspaces exceeds {MAX_WORKSPACES} entries"));
+pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
+    if seeds.len() > MAX_VIEW_SETS {
+        return Err(format!("view_sets exceeds {MAX_VIEW_SETS} entries"));
     }
     let mut ids = BTreeSet::new();
     let mut total_views = 0;
     for (index, seed) in seeds.iter().enumerate() {
-        let location = format!("workspaces[{index}]");
+        let location = format!("view_sets[{index}]");
         if seed.id.is_empty()
             || seed.id.len() > 64
             || !seed
@@ -58,7 +58,7 @@ pub fn validate_seeds(seeds: &[WorkspaceSeedSpec]) -> Result<(), String> {
             return Err(format!("{location}.id must be a unique bounded identifier"));
         }
         if seed.title.trim().is_empty()
-            || seed.title.len() > MAX_WORKSPACE_LABEL_BYTES
+            || seed.title.len() > MAX_VIEW_SET_LABEL_BYTES
             || seed.title.chars().any(char::is_control)
         {
             return Err(format!("{location}.title must be a nonempty bounded label"));
@@ -104,10 +104,10 @@ pub fn validate_seeds(seeds: &[WorkspaceSeedSpec]) -> Result<(), String> {
     Ok(())
 }
 
-impl WorkspaceSeedSpec {
-    pub fn instantiate(&self, tiling: &TilingSpec) -> Result<Workspace, String> {
+impl ViewSetSeedSpec {
+    pub fn instantiate(&self, tiling: &TilingSpec) -> Result<ViewSet, String> {
         validate_seeds(std::slice::from_ref(self))?;
-        fn collect(node: &LayoutSeedSpec, views: &mut Vec<crate::workspace::ViewSpec>) {
+        fn collect(node: &LayoutSeedSpec, views: &mut Vec<crate::view_set::ViewSpec>) {
             match node {
                 LayoutSeedSpec::Group { views: group, .. } => {
                     views.extend(group.iter().map(ViewKindSpec::to_view_spec))
@@ -124,8 +124,8 @@ impl WorkspaceSeedSpec {
         }
         // Allocate mounted identities once. Authored tree membership references
         // those instances; it never creates a second mutable view collection.
-        let mut workspace = Workspace::from_tiling(tiling.clone(), views);
-        let mut ids: Vec<_> = workspace.tiles.keys().copied().collect();
+        let mut view_set = ViewSet::from_tiling(tiling.clone(), views);
+        let mut ids: Vec<_> = view_set.tiles.keys().copied().collect();
         ids.sort_by_key(|id| id.0);
         fn instantiate(
             node: &LayoutSeedSpec,
@@ -153,29 +153,29 @@ impl WorkspaceSeedSpec {
                 },
             }
         }
-        workspace.root = self
+        view_set.root = self
             .root
             .as_ref()
             .map(|root| instantiate(root, &mut ids.iter()));
-        workspace.title = self.title.clone();
-        workspace.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
-        if let Some(root) = &workspace.root {
+        view_set.title = self.title.clone();
+        view_set.docks = crate::ui::model::RyeOsDockState::from_slots(&self.slots);
+        if let Some(root) = &view_set.root {
             root.validate()?;
             let first = root.active_tile_ids()[0];
-            workspace.focus_tile(first);
+            view_set.focus_tile(first);
         }
-        Ok(workspace)
+        Ok(view_set)
     }
 }
 
 /// Shared daemon/client check. Nested references still resolve through the
 /// ordinary surface view collector, including inactive group tabs.
-pub fn validate_effective_workspaces(value: &serde_json::Value) -> Result<(), String> {
-    let Some(raw) = value.get("workspaces") else {
+pub fn validate_effective_view_sets(value: &serde_json::Value) -> Result<(), String> {
+    let Some(raw) = value.get("view_sets") else {
         return Ok(());
     };
-    let seeds: Vec<WorkspaceSeedSpec> =
-        serde_json::from_value(raw.clone()).map_err(|error| format!("workspaces: {error}"))?;
+    let seeds: Vec<ViewSetSeedSpec> =
+        serde_json::from_value(raw.clone()).map_err(|error| format!("view_sets: {error}"))?;
     validate_seeds(&seeds)?;
     if !seeds.is_empty()
         && (value
@@ -187,7 +187,7 @@ pub fn validate_effective_workspaces(value: &serde_json::Value) -> Result<(), St
                 .and_then(|v| v.as_object())
                 .is_some_and(|v| v.values().any(|slot| !slot.is_null())))
     {
-        return Err("workspaces cannot be combined with surface-level tiles or slots; author each workspace's composition explicitly".into());
+        return Err("view_sets cannot be combined with surface-level tiles or slots; author each view set's composition explicitly".into());
     }
     Ok(())
 }
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn authored_groups_preserve_selection_and_allocate_fresh_mounts() {
-        let spec: WorkspaceSeedSpec = serde_json::from_value(seed()).unwrap();
+        let spec: ViewSetSeedSpec = serde_json::from_value(seed()).unwrap();
         let first = spec.instantiate(&TilingSpec::default()).unwrap();
         let second = spec.instantiate(&TilingSpec::default()).unwrap();
         assert_eq!(first.title, "Work");
@@ -229,41 +229,41 @@ mod tests {
     fn malformed_compositions_fail_with_the_authored_location() {
         let mut bad = seed();
         bad["root"]["first"]["active"] = json!(9);
-        let error = validate_effective_workspaces(&json!({ "workspaces": [bad] })).unwrap_err();
-        assert!(error.contains("workspaces[0].root.first"));
+        let error = validate_effective_view_sets(&json!({ "view_sets": [bad] })).unwrap_err();
+        assert!(error.contains("view_sets[0].root.first"));
         let mut bad = seed();
         bad["root"]["ratio"] = json!(1.0);
         assert!(
-            validate_effective_workspaces(&json!({ "workspaces": [bad] }))
+            validate_effective_view_sets(&json!({ "view_sets": [bad] }))
                 .unwrap_err()
                 .contains("root.ratio")
         );
-        assert!(validate_effective_workspaces(&json!({ "workspaces": [seed(), seed()] })).is_err());
+        assert!(validate_effective_view_sets(&json!({ "view_sets": [seed(), seed()] })).is_err());
         assert!(
-            validate_effective_workspaces(
-                &json!({ "workspaces": [seed()], "tiles": ["view:test/other"] })
+            validate_effective_view_sets(
+                &json!({ "view_sets": [seed()], "tiles": ["view:test/other"] })
             )
             .is_err()
         );
-        assert!(validate_effective_workspaces(&json!({ "workspaces": [seed()], "slots": { "left": { "content": "view:test/other" } } })).is_err());
+        assert!(validate_effective_view_sets(&json!({ "view_sets": [seed()], "slots": { "left": { "content": "view:test/other" } } })).is_err());
     }
 
     #[test]
-    fn core_mounts_only_the_named_workspaces_and_their_slots() {
+    fn core_mounts_only_the_named_view_sets_and_their_slots() {
         let mut work = seed();
         work["slots"] =
             json!({ "left": { "content": "view:test/tree", "open": true, "size": 24 } });
         let session = crate::ui::model::BrowserSession {
             effective_surface: Some(
-                json!({ "name": "test", "workspaces": [work, { "id": "review", "title": "Review" }] }),
+                json!({ "name": "test", "view_sets": [work, { "id": "review", "title": "Review" }] }),
             ),
             ..Default::default()
         };
         let core = crate::ui::model::RyeOsCore::new(session, Default::default(), 0);
-        assert_eq!(core.workspaces.len(), 2);
-        assert!(core.workspaces[0].docks.left.is_some());
-        assert!(core.workspaces[1].docks.left.is_none());
-        assert_eq!(core.workspaces[1].title, "Review");
-        assert!(core.workspaces[1].center_is_empty());
+        assert_eq!(core.view_sets.len(), 2);
+        assert!(core.view_sets[0].docks.left.is_some());
+        assert!(core.view_sets[1].docks.left.is_none());
+        assert_eq!(core.view_sets[1].title, "Review");
+        assert!(core.view_sets[1].center_is_empty());
     }
 }

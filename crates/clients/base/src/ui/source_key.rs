@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn codec_round_trips_every_current_channel_without_collisions() {
-        let tile = RyeOsViewInstanceKey::workspace_tile(TileId::new(7));
+        let tile = RyeOsViewInstanceKey::view_set_tile(TileId::new(7));
         let dock = RyeOsViewInstanceKey::surface_slot("left");
         let keys = [
             RyeOsSourceInstanceKey::named(tile.clone(), "default"),

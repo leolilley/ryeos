@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::ui::content::{Payload, Producer, ViewBinding, resolve_affordance_invoke};
 use crate::ui::event::RyeOsUiIntent;
 use crate::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
-use crate::workspace::{FieldFingerprintState, FieldLocalState};
+use crate::view_set::{FieldFingerprintState, FieldLocalState};
 
 pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v2";
 pub const FIELD_PROJECTION_SCHEMA: &str = "ryeos.ui.field.projection.v1";

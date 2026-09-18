@@ -9,12 +9,12 @@
 .system-state { justify-self: end; text-transform: uppercase; }
 .presence { color: var(--green); font-size: 8px; }
 .separator { color: var(--faint); }
-.workspace-strip { display: flex; align-items: end; gap: 8px; padding: 0 18px; border-bottom: 1px solid var(--line); }
-.workspace-strip button { align-self: stretch; display: flex; align-items: center; gap: 17px; min-width: 140px; padding: 4px 18px 0; border-bottom: 2px solid transparent; color: var(--muted); }
-.workspace-strip button.active { border-color: var(--accent-bright); color: var(--text); }
-.workspace-strip .ordinal { color: var(--faint); font: 9px var(--font-data); }
-.workspace-strip button.active .ordinal { color: var(--yellow); }
-.workspace-strip .new-workspace { min-width: 44px; color: var(--muted); font-size: 20px; }
+.view-set-strip { display: flex; align-items: end; gap: 8px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.view-set-strip button { align-self: stretch; display: flex; align-items: center; gap: 17px; min-width: 140px; padding: 4px 18px 0; border-bottom: 2px solid transparent; color: var(--muted); }
+.view-set-strip button.active { border-color: var(--accent-bright); color: var(--text); }
+.view-set-strip .ordinal { color: var(--faint); font: 9px var(--font-data); }
+.view-set-strip button.active .ordinal { color: var(--yellow); }
+.view-set-strip .new-view-set { min-width: 44px; color: var(--muted); font-size: 20px; }
 .shell-body { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; padding: 14px 18px; gap: 12px; }
 .shell-body.with-navigation { grid-template-columns: var(--nav-width) minmax(0, 1fr); }
 .navigation { display: grid; grid-template-rows: 40px 1fr; min-height: 0; border: 1px solid var(--line); background: var(--plane); }

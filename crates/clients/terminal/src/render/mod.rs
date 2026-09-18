@@ -81,15 +81,15 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
     let center = chrome::draw_docks(&mut surface, body, vm);
-    let draw_backdrop_underlay = vm.workspace.root.is_some()
+    let draw_backdrop_underlay = vm.view_set.root.is_some()
         && vm.session.ambient.show_background
         && vm
             .session
             .ambient
             .opacity
             .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
-    if let Some(root) = &vm.workspace.root {
-        if draw_backdrop_underlay && let Some(backdrop) = &vm.workspace.backdrop {
+    if let Some(root) = &vm.view_set.root {
+        if draw_backdrop_underlay && let Some(backdrop) = &vm.view_set.backdrop {
             widgets::scene::draw_scene(&mut surface, center, backdrop);
         }
         let border = theme::border_for(&vm.presentation.chrome.border);
@@ -101,7 +101,7 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
             vm.now_ms,
             draw_backdrop_underlay,
         );
-    } else if let Some(backdrop) = &vm.workspace.backdrop {
+    } else if let Some(backdrop) = &vm.view_set.backdrop {
         // Empty center: the backdrop is content — the ONE generic scene
         // renderer draws it (particles twinkle by generation). No
         // per-art code, no background enum.
@@ -456,8 +456,8 @@ mod tests {
     fn empty_center_draws_backdrop_scene_and_bottom_input() {
         let vm = build_view_model(&empty_center_core());
         // The backdrop scene resolved on an empty center.
-        assert!(vm.workspace.center_is_empty);
-        assert!(vm.workspace.backdrop.is_some());
+        assert!(vm.view_set.center_is_empty);
+        assert!(vm.view_set.backdrop.is_some());
 
         let rendered = surface_text(&build_surface(&vm, 96, 28));
         // The backdrop scene draws its text objects + particles.
@@ -487,11 +487,7 @@ mod tests {
         // The bug's regression: on an empty center, the bottom slot is the
         // focused/active input instance carrying the prompt VM.
         let vm = build_view_model(&empty_center_core());
-        let bottom = vm
-            .workspace
-            .docks
-            .bottom
-            .expect("bottom input slot present");
+        let bottom = vm.view_set.docks.bottom.expect("bottom input slot present");
         let input = bottom.input.expect("bottom slot declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
     }

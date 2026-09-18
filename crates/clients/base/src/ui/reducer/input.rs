@@ -13,8 +13,8 @@ impl RyeOsCore {
         use super::event::{RyeOsInputAction, RyeOsUiEvent};
         use super::model::{InputBufferKey, RyeOsFocusTarget, dock_view_instance_key};
         let session = self.data.session.as_ref();
-        if address.workspace_index != self.active_workspace
-            || address.workspace_id != self.workspaces[self.active_workspace].id
+        if address.view_set_index != self.active_view_set
+            || address.view_set_id != self.view_sets[self.active_view_set].id
             || address.session_id != session.map(|s| s.session_id.as_str()).unwrap_or_default()
             || address.binding_digest
                 != session
@@ -23,25 +23,25 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
-        let workspace = &self.workspaces[self.active_workspace];
-        let target = if let Some(tile_id) = address.buffer.view_instance_key.workspace_tile_id() {
-            let Some(tile) = workspace.tiles.get(&tile_id) else {
+        let view_set = &self.view_sets[self.active_view_set];
+        let target = if let Some(tile_id) = address.buffer.view_instance_key.view_set_tile_id() {
+            let Some(tile) = view_set.tiles.get(&tile_id) else {
                 return Vec::new();
             };
             if tile.view.view_ref != address.buffer.view_ref
-                || !workspace
+                || !view_set
                     .root
                     .as_ref()
                     .is_some_and(|tree| tree.active_tile_ids().contains(&tile_id))
             {
                 return Vec::new();
             }
-            RyeOsFocusTarget::WorkspaceTile {
+            RyeOsFocusTarget::ViewSetTile {
                 tile_id: tile_id.0.to_string(),
             }
         } else {
             let Some((edge, _)) =
-                workspace
+                view_set
                     .docks
                     .visible_slot_views()
                     .into_iter()
@@ -72,11 +72,11 @@ impl RyeOsCore {
         }
         // Resolve and compare before changing any focus or buffer state. A stale
         // callback must not retarget a replacement view or a changed seat route.
-        if let RyeOsFocusTarget::WorkspaceTile { tile_id } = &target {
-            self.workspaces[self.active_workspace]
+        if let RyeOsFocusTarget::ViewSetTile { tile_id } = &target {
+            self.view_sets[self.active_view_set]
                 .focus_tile(parse_tile_id(tile_id).expect("validated tile"));
         }
-        self.workspaces[self.active_workspace].focus_target = Some(target);
+        self.view_sets[self.active_view_set].focus_target = Some(target);
         let event = match action {
             RyeOsInputAction::Focus => {
                 self.bump_generation();
@@ -151,7 +151,7 @@ impl RyeOsCore {
         if input.submit.is_none() {
             return Vec::new();
         }
-        let text = self.workspaces[self.active_workspace]
+        let text = self.view_sets[self.active_view_set]
             .input_buffers
             .get(&key.storage_key())
             .map(|buffer| buffer.text.trim().to_string())
@@ -328,7 +328,7 @@ impl RyeOsCore {
         if count < 2 {
             return Vec::new();
         }
-        let buffer = self.workspaces[self.active_workspace]
+        let buffer = self.view_sets[self.active_view_set]
             .input_buffers
             .entry(key.storage_key())
             .or_default();
@@ -627,10 +627,7 @@ impl RyeOsCore {
         let Some(tile_id) = parse_tile_id(&tile_id) else {
             return Vec::new();
         };
-        let Some(tile) = self.workspaces[self.active_workspace]
-            .tiles
-            .get_mut(&tile_id)
-        else {
+        let Some(tile) = self.view_sets[self.active_view_set].tiles.get_mut(&tile_id) else {
             return Vec::new();
         };
         // Item/file tiles are content-bound now; only the services
@@ -673,7 +670,7 @@ mod tests {
         use crate::ui::event::RyeOsInputAction;
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let address = build_view_model(&core)
-            .workspace
+            .view_set
             .docks
             .bottom
             .unwrap()
@@ -682,7 +679,7 @@ mod tests {
             .address;
         // Browser focus may still be on a different region; address, not that
         // focus, decides which admitted input receives the edit.
-        core.workspaces[0].focus_target = None;
+        core.view_sets[0].focus_target = None;
         let edit = RyeOsInputAction::SetText {
             text: "exact draft".into(),
             cursor: 11,
@@ -715,11 +712,11 @@ mod tests {
             },
         );
         assert_eq!(core.focused_input_buffer().unwrap().text, "exact draft");
-        core.new_workspace();
+        core.new_view_set();
         core.dispatch_addressed_input(address, edit);
-        assert!(core.workspaces[1].input_buffers.is_empty());
+        assert!(core.view_sets[1].input_buffers.is_empty());
         assert_eq!(
-            core.workspaces[0]
+            core.view_sets[0]
                 .input_buffers
                 .values()
                 .next()
@@ -804,7 +801,7 @@ mod tests {
     #[test]
     fn editing_a_live_filter_resets_the_table_cursor_to_the_top() {
         use crate::ui::view_model::intent_for_focused_row;
-        use crate::workspace::ViewLocalState;
+        use crate::view_set::ViewLocalState;
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
@@ -827,10 +824,10 @@ mod tests {
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile = core.workspaces[core.active_workspace].focused_tile;
+        let tile = core.view_sets[core.active_view_set].focused_tile;
         let tile_key = tile.0.to_string();
         let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
-            core.workspaces[core.active_workspace].tiles[&tile]
+            core.view_sets[core.active_view_set].tiles[&tile]
                 .instance_key
                 .clone(),
             "default",
@@ -851,7 +848,7 @@ mod tests {
                 index: 50,
             },
         });
-        let cursor = |core: &RyeOsCore| match &core.workspaces[core.active_workspace]
+        let cursor = |core: &RyeOsCore| match &core.view_sets[core.active_view_set]
             .tiles
             .get(&tile)
             .unwrap()
@@ -1402,7 +1399,7 @@ mod tests {
         assert_eq!(
             fetched,
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                crate::ids::RyeOsViewInstanceKey::workspace_tile(crate::ids::TileId::new(
+                crate::ids::RyeOsViewInstanceKey::view_set_tile(crate::ids::TileId::new(
                     tile_id.parse().unwrap()
                 )),
                 "default",
@@ -1459,7 +1456,7 @@ mod tests {
                 }]
             }),
         );
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/palette".to_string(),
             })
@@ -1502,12 +1499,12 @@ mod tests {
                 }]
             }),
         );
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/palette".to_string(),
             })
             .expect("fixture layout accepts view");
-        core.workspaces[core.active_workspace].focused_tile = tile_id;
+        core.view_sets[core.active_view_set].focused_tile = tile_id;
         set_focused_input(&mut core, "blocked");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SubmitInput,
@@ -1533,12 +1530,12 @@ mod tests {
                 "input": { "id": "q", "feeds": { "param": "query" } }
             }),
         );
-        let first = core.workspaces[core.active_workspace]
+        let first = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/filter".to_string(),
             })
             .expect("fixture layout accepts view");
-        let second = core.workspaces[core.active_workspace]
+        let second = core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {
                 view_ref: "view:test/filter".to_string(),
             })

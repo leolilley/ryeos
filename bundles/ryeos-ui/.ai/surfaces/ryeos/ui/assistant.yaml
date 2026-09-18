@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-17T00:05:36Z:bd23e4510ce6f3f42e19bee49ff0210d952a3c8919670fffcec44e2122118fe2:FFXKbPiSr0kJQErKKIweBiG+ntFk5uYEJXEPx80ePkhVxfpz+QoyKcEv0pWk9yCOf0eSAMhAQ7FUMyqEDLr3AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T22:44:50Z:f6d59b6766b013e2eef33b121e590bcdb3b08a6d3e17a139cddf38619d08374c:K+/bQgBadXUZ74Ap5XFbQwbgVFuLC2RfiOqjGFwFpiUcrT0KdkzY89HX/jGaWASL1y5DTNyXAgCojRNwrgMyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "2.0.0"
-description: Named tiled RyeOS workspaces with contextual views and optional supporting slots
+description: Named tiled RyeOS view sets with contextual views and optional supporting slots
 
 extends: surface:ryeos/ui/lens
 
@@ -9,16 +9,16 @@ tiling:
   mode: master_stack
 
 tiles: []
-# Explicitly remove the inherited single-lens slots. Workspace seeds below
+# Explicitly remove the inherited single-lens slots. View-set seeds below
 # own their placements; the overview has no global command/input strip.
 slots: { top: null, bottom: null, left: null, right: null }
 
 navigation: []
 style:
   border: thin
-  workspace_tabs: true
+  view_set_tabs: true
 
-workspaces:
+view_sets:
   - id: overview
     title: Overview
     root:

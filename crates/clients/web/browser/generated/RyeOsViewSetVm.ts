@@ -4,7 +4,7 @@ import type { RyeOsDockPlaneVm } from "./RyeOsDockPlaneVm";
 import type { RyeOsLayoutNodeVm } from "./RyeOsLayoutNodeVm";
 import type { RyeOsSceneModel } from "./RyeOsSceneModel";
 
-export interface RyeOsWorkspaceVm {
+export interface RyeOsViewSetVm {
   layout_guard: string;
   split_min_ratio: number;
   split_max_ratio: number;
