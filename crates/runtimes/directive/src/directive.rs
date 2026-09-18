@@ -129,16 +129,17 @@ pub struct ExecutionConfig {
     /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
+    /// Historical compatibility field. A timeout after submission has an
+    /// uncertain provider outcome. Current validation requires this to remain
+    /// false until the admitted provider route supplies deduplication or
+    /// outcome lookup.
     #[serde(default)]
     pub retry_on_timeout: bool,
-    /// Retry a stream that dies MID-READ (chunk timeout, reset, dropped
-    /// connection) under the same `retries` budget. The request is idempotent
-    /// (same message array); deltas persisted before the cut stay in the braid
-    /// as the record of the abandoned partial, delimited by the
-    /// `provider_retry` event. On by default — a dropped stream is the same
-    /// transient transport class as a pre-stream connect failure, and without
-    /// this every long generation is one hiccup away from a dead thread. Set
-    /// `false` to fail a directive on the first mid-stream cut.
+    /// Historical compatibility field. A stream that dies after provider
+    /// contact has an uncertain external outcome and cannot be retried merely
+    /// because the request bytes are identical. Current validation requires
+    /// this to remain false until an admitted provider route supplies a real
+    /// deduplication or outcome-query contract.
     #[serde(default = "default_retry_mid_stream")]
     pub retry_mid_stream: bool,
     /// Execution-owned provider-attempt accounting policy. Wire parsing stays
@@ -219,7 +220,7 @@ fn default_max_provider_stream_frame_bytes() -> u64 {
 }
 
 fn default_retry_mid_stream() -> bool {
-    true
+    false
 }
 
 impl Default for ExecutionConfig {
@@ -249,6 +250,11 @@ impl ExecutionConfig {
             anyhow::bail!(
                 "execution.tool_concurrency must be between 1 and 16, got {}",
                 self.tool_concurrency
+            );
+        }
+        if self.retry_on_timeout || self.retry_mid_stream {
+            anyhow::bail!(
+                "execution cannot retry an outcome-uncertain provider request without an admitted provider deduplication or outcome-query contract"
             );
         }
         // `budget_mode: hard` is structurally valid configuration; whether the
@@ -505,8 +511,8 @@ mod tests {
             "omitted backoff defaults to 1s, not a 0ms hot loop"
         );
         assert!(
-            cfg.retry_mid_stream,
-            "omitted retry_mid_stream defaults ON — a dropped stream is transient"
+            !cfg.retry_mid_stream,
+            "omitted retry_mid_stream fails closed because a dropped stream has an uncertain provider outcome"
         );
         assert_eq!(
             cfg.max_provider_output_tokens_per_turn,
@@ -566,6 +572,18 @@ mod tests {
         let error = serde_yaml::from_str::<ExecutionConfig>("max_output_tokens_per_turn: 10\n")
             .expect_err("removed key must not deserialize");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn outcome_uncertain_retry_knobs_fail_closed() {
+        for field in ["retry_on_timeout", "retry_mid_stream"] {
+            let config: ExecutionConfig =
+                serde_yaml::from_str(&format!("{field}: true\n")).unwrap();
+            let error = config
+                .validate()
+                .expect_err("outcome-uncertain provider retries require a provider contract");
+            assert!(error.to_string().contains("deduplication or outcome-query"));
+        }
     }
 }
 

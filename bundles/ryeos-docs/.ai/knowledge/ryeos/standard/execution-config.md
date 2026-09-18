@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:17:38Z:0133c20a26a4760ae4b3a0bf110e8b7441ec162dffd9923820526b1e9251290a:hg0Zmm6/r/ejlfDP0rTZ97gxE/+aH2DXOWEyibAuCR0M+u2lg7oCSLdnPr1IrdRyoRYr8nHbGW7D1iMuBXJMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:59:40Z:90094458c6c415f28dc39a6bd09f679203b038578a01edb3393c1a4e98d01f2d:lmIkMabgAf4xEJYMg3gecFDuLNzOiOAaa2/n/r9h+slCLNHvbzFb/q1I8XRdt4Fx/ym6/WKE6w953HeT3T8dCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -30,7 +30,8 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
 | `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
-| `retry_on_timeout`   | true     | Whether timeouts trigger retries      |
+| `retry_on_timeout`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
+| `retry_mid_stream`   | false    | Must remain false without admitted provider deduplication/outcome lookup |
 
 ## Retry Behavior
 
@@ -41,7 +42,12 @@ When an API call fails with a retryable status code (429, 500, 502, 503):
 
 Auth errors (401, 403) and not-found (404) are never retried.
 
-Timeouts are retried by default (`retry_on_timeout: true`).
+Connection-establishment failures and explicitly configured retryable HTTP
+statuses may be retried. A timeout, non-connect send failure, or mid-stream cut
+may have reached the provider and is not retried. Reusing the same prompt bytes
+does not make a provider call idempotent. Configuration that enables
+`retry_on_timeout` or `retry_mid_stream` is refused until the selected provider
+route supplies an admitted deduplication or outcome-query contract.
 
 The provider-native token ceiling and RyeOS-local byte backstop are independent.
 RyeOS sends the token ceiling only at the signed provider schema's declared

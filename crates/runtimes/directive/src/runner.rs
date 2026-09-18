@@ -560,8 +560,11 @@ struct CostBreakdown {
 ///
 /// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
 /// is retryable — the adapter classifies exactly the transient transport/
-/// provider classes (pre-stream send/status/timeout, and a stream that dies
-/// mid-read). Everything else — invalid model, auth, context overflow, a
+/// provider classes with an outcome-safe retry contract (an explicit retryable
+/// status or a failure that never established a connection). Everything else —
+/// including timeout, non-connect send failure, and a stream that dies mid-read —
+/// has a potentially accepted external effect and stays fail-fast. Invalid
+/// model, auth, context overflow, and a
 /// live callback publication failure — stays fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
@@ -586,24 +589,30 @@ fn retry_classification(
         Some(ProviderStreamError::Status { code, .. }) => {
             ProviderRetryReason::Status { code: *code }
         }
-        Some(ProviderStreamError::Timeout { .. }) => ProviderRetryReason::Timeout,
-        // A pre-stream `.send()` transport failure (DNS/connect/TLS/reset) is
-        // always retry-safe — no cognition_out was emitted. Retry it under the
-        // shared `execution.retries` budget so a burst-fanout connect blip backs
-        // off and re-attempts instead of surfacing as a fatal generic error.
-        Some(ProviderStreamError::Send { connect, .. }) => ProviderRetryReason::Send {
-            connect_phase: *connect,
+        Some(ProviderStreamError::Timeout { .. }) => return None,
+        // A reqwest connect-phase failure did not establish the provider
+        // connection. Other `.send()` failures can occur after request bytes
+        // crossed the boundary and therefore have an uncertain outcome.
+        Some(ProviderStreamError::Send { connect: true, .. }) => ProviderRetryReason::Send {
+            connect_phase: true,
         },
-        // The stream died mid-read (chunk timeout/reset). The request is
-        // idempotent; the durable `provider_retry` event records the count of
-        // live/ephemeral deltas emitted before the cut.
-        Some(ProviderStreamError::MidStream(mid_stream)) => ProviderRetryReason::MidStream {
-            live_output_events_emitted: u64::try_from(mid_stream.live_output_events_emitted)
-                .ok()?,
-        },
+        Some(ProviderStreamError::Send { connect: false, .. }) => return None,
+        // Once a stream opened, the provider accepted the request. Identical
+        // message bytes are not a provider deduplication key and retrying may
+        // duplicate spend or consequences.
+        Some(ProviderStreamError::MidStream(_)) => return None,
         None => return None,
     };
     retry_delay_for_reason(&reason, attempt.checked_add(1)?, execution).map(|delay| (delay, reason))
+}
+
+fn provider_outcome_is_uncertain(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<crate::provider_adapter::ProviderStreamError>(),
+        Some(crate::provider_adapter::ProviderStreamError::Timeout { .. })
+            | Some(crate::provider_adapter::ProviderStreamError::Send { connect: false, .. })
+            | Some(crate::provider_adapter::ProviderStreamError::MidStream(_))
+    )
 }
 
 fn retry_delay_for_reason(
@@ -620,9 +629,15 @@ fn retry_delay_for_reason(
             !execution.never_retry.contains(&code.to_string())
                 && execution.retry_status_codes.contains(code)
         }
-        ProviderRetryReason::Timeout => execution.retry_on_timeout,
-        ProviderRetryReason::Send { .. } => true,
-        ProviderRetryReason::MidStream { .. } => execution.retry_mid_stream,
+        // Current production classification never creates these reasons. Keep
+        // their decoder behavior closed for retained historical testimony.
+        ProviderRetryReason::Timeout | ProviderRetryReason::MidStream { .. } => false,
+        ProviderRetryReason::Send {
+            connect_phase: true,
+        } => true,
+        ProviderRetryReason::Send {
+            connect_phase: false,
+        } => false,
     };
     if !admitted {
         return None;
@@ -1329,14 +1344,13 @@ impl Runner {
                         self.directive_outputs.as_deref(),
                         self.harness.tool_calls_available(),
                     );
-                    // §1 retry loop. A retryable provider failure — a configured
-                    // HTTP status, a send timeout/transport error, or a stream
-                    // that died mid-read — is re-attempted with exponential
-                    // backoff. The request is idempotent (same message array).
-                    // Pre-stream classes cannot duplicate an indexed completed
-                    // cognition_out. Mid-stream deltas are live/ephemeral; the
-                    // durable `provider_retry` event below records the abandoned
-                    // attempt before re-issue. Anything not
+                    // §1 retry loop. A provider failure with an outcome-safe
+                    // classification — a configured status response or a
+                    // connection-establishment failure — is re-attempted with
+                    // exponential backoff. Timeout, post-connect send failure,
+                    // and mid-stream cut remain explicit uncertain outcomes;
+                    // identical message bytes are not an idempotency key.
+                    // Anything not
                     // classified as a `ProviderStreamError` (invalid bytes, a
                     // live callback publication failure) routes to
                     // `State::Errored` unchanged.
@@ -1792,6 +1806,11 @@ impl Runner {
                         match call {
                             Err(e) => {
                                 let Some(decision) = prepared_retry else {
+                                    if provider_outcome_is_uncertain(&e) {
+                                        break Err(anyhow::anyhow!(
+                                            "provider_outcome_uncertain: the provider may have accepted the issued request; automatic retry is forbidden without admitted deduplication or outcome lookup; original error: {e:#}"
+                                        ));
+                                    }
                                     break Err(e);
                                 };
                                 let Some(advance) = durable_retry_advance else {
@@ -5768,7 +5787,7 @@ mod tests {
             retry_status_codes: vec![429, 500, 502, 503],
             never_retry: vec!["401".into(), "403".into(), "404".into()],
             backoff_base_ms: 1000,
-            retry_on_timeout: true,
+            retry_on_timeout: false,
             ..ExecutionConfig::default()
         }
     }
@@ -5823,11 +5842,10 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_retries_pre_stream_send_failure() {
+    fn retry_backoff_retries_only_connect_phase_send_failure() {
         use std::time::Duration;
-        // A `.send()` transport failure (DNS/connect/TLS/reset) is pre-stream and
-        // always retry-safe — retried under the shared budget, not gated by a
-        // status allowlist or the timeout flag. This is the burst-fanout fix.
+        // A connect-phase failure did not establish a connection. A later send
+        // failure has an uncertain provider outcome and must not be retried.
         let send_err = |connect: bool| {
             anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Send {
                 connect,
@@ -5839,27 +5857,20 @@ mod tests {
             retry_backoff(&send_err(true), 0, &cfg),
             Some(Duration::from_millis(1000))
         );
-        assert_eq!(
-            retry_backoff(&send_err(false), 1, &cfg),
-            Some(Duration::from_millis(2000))
-        );
+        assert_eq!(retry_backoff(&send_err(false), 1, &cfg), None);
         // Still bounded by the retry budget.
         assert_eq!(retry_backoff(&send_err(true), 2, &cfg), None);
     }
 
     #[test]
-    fn retry_backoff_timeout_gated_by_retry_on_timeout() {
-        use std::time::Duration;
+    fn retry_backoff_never_retries_outcome_uncertain_timeout() {
         let timeout = || {
             anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
                 detail: "timed out".into(),
             })
         };
         let mut cfg = retry_cfg();
-        assert_eq!(
-            retry_backoff(&timeout(), 0, &cfg),
-            Some(Duration::from_millis(1000))
-        );
+        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
         cfg.retry_on_timeout = false;
         assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
     }
@@ -5876,10 +5887,9 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_mid_stream_gated_by_retry_mid_stream() {
-        use std::time::Duration;
-        // A stream cut mid-read (chunk timeout/reset) is transient: retried by
-        // default under the shared budget, and disabled by the knob.
+    fn retry_backoff_never_retries_outcome_uncertain_mid_stream() {
+        // A stream cut mid-read proves provider contact. Identical request bytes
+        // do not make a second provider effect safe.
         let mid_stream = || {
             anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
                 Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
@@ -5895,18 +5905,44 @@ mod tests {
             ))
         };
         let mut cfg = retry_cfg();
-        assert_eq!(
-            retry_backoff(&mid_stream(), 0, &cfg),
-            Some(Duration::from_millis(1000))
-        );
-        assert_eq!(
-            retry_backoff(&mid_stream(), 1, &cfg),
-            Some(Duration::from_millis(2000))
-        );
-        // Still bounded by the retry budget.
-        assert_eq!(retry_backoff(&mid_stream(), 2, &cfg), None);
+        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
+        assert_eq!(retry_backoff(&mid_stream(), 1, &cfg), None);
         cfg.retry_mid_stream = false;
         assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
+    }
+
+    #[test]
+    fn provider_outcome_uncertainty_starts_only_after_possible_contact() {
+        use crate::provider_adapter::ProviderStreamError;
+
+        let connect = anyhow::Error::new(ProviderStreamError::Send {
+            connect: true,
+            detail: "connect failed".into(),
+        });
+        let send = anyhow::Error::new(ProviderStreamError::Send {
+            connect: false,
+            detail: "send failed after connection".into(),
+        });
+        let timeout = anyhow::Error::new(ProviderStreamError::Timeout {
+            detail: "response timed out".into(),
+        });
+        let mid_stream = anyhow::Error::new(ProviderStreamError::MidStream(Box::new(
+            crate::provider_adapter::streaming::ProviderMidStreamError {
+                live_output_events_emitted: 0,
+                accepted_bytes: 0,
+                accepted_output_events: 0,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: None,
+                detail: "stream cut".into(),
+            },
+        )));
+
+        assert!(!provider_outcome_is_uncertain(&connect));
+        assert!(provider_outcome_is_uncertain(&send));
+        assert!(provider_outcome_is_uncertain(&timeout));
+        assert!(provider_outcome_is_uncertain(&mid_stream));
     }
 
     #[test]
