@@ -1,10 +1,11 @@
+<!-- ryeos:signed:2026-09-18T04:59:34Z:465e09cbd3e408aa17956004a076f5dbaa501e4f5fde28746c6e1a4c9555302e:LQOmF473QZUFe5K5oikikmsI6Ct0g9zcLtjoCY31sP/YOr5D9FpPZRiXollYVl1K6aS2F/wAgU1F1pTvEVZcBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for scheduled and deferred RyeOS design work
 entry_type: reference
-version: "1.4.0"
+version: "1.5.0"
 ```
 
 # Future RyeOS Design Notes
@@ -23,7 +24,6 @@ version: "1.4.0"
   from execution evidence; not an implemented memory service.
 
 These are working discussion designs, not scheduled implementation promises.
-The edited index and new notes are unsigned pending normal project signing.
 
 ## Scheduled and deferred work
 
@@ -100,8 +100,11 @@ from the former top-level `docs/future` tree include:
 - [`resolution-pipeline-advanced.md`](resolution-pipeline-advanced.md) —
   criteria for adding new resolution stages; and
 - [`ryeos-native-development-platform.md`](ryeos-native-development-platform.md)
-  — RyeOS-native project hosting, checks, review, and release; and
+  — RyeOS-native project hosting, checks, review, and release;
 - [`environment-build-system.md`](environment-build-system.md) — production,
   independent verification, publication, and simple reuse of portable
   execution environments through existing Tool, Graph, content, and retained-
-  result authority.
+  result authority; and
+- [`yaml-parser-migration.md`](yaml-parser-migration.md) — the deliberately
+  deferred replacement of `serde_yaml`, including activation triggers,
+  compatibility obligations, artifact-safety review, and the acceptance gate.
