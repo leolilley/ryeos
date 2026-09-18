@@ -24,9 +24,10 @@ Read this document first after interruption/compaction. Read the current gate an
 its referenced contracts before acting. Historical transcripts and launch fixtures
 are evidence, not current authority. Do not restart the investigation from scratch.
 
-Current gate: G0 is reconciled after the clean epoch cut. Configured-operator
+Current gate: G0 lifecycle and route checks pass after the clean epoch cut. Configured-operator
 push re-established exact target snapshot `21867eea…` with unchanged content tree
-`7e09b35c…`; exact composition proved the historical product witnesses absent.
+`7e09b35c…`; composition reported an absent witness, without establishing which
+of the two supplied witnesses was absent. Verify each independently before rebuilding.
 G1 is blocked at root `T-99ffc235-c781-eda2-7be3-b22aded526cf` by
 `execution realization properties must be scalar or null`. Fix and install the
 generic execution-realization property representation, then inspect that terminal
@@ -128,10 +129,10 @@ Current-target captures, not a claim of currently valid consumer bindings:
 
 | Product | Witness | State |
 |---|---|---|
-| Prepared inputs | `f5d78d646fe68e6af36f3f0e36e6d4f569f445f2e9f03b333a61bd7f041a61cf` | historical witness proved absent; reproduce under `21867eea…` |
+| Prepared inputs | `f5d78d646fe68e6af36f3f0e36e6d4f569f445f2e9f03b333a61bd7f041a61cf` | historical capture; individual availability unverified after reset |
 | Build support | `60b25f1695600bd9e16b980af6e6f6a6d0fff476cd6f1ad223a89312144ce191` | historical capture; current binding must be resolved after the new target HEAD |
 | Built utilities | `e5e28c1487cc3abcd4759706075308c98741e970850eca936a5cae3f9f97b6ba` | historical capture; current binding must be resolved after the new target HEAD |
-| Authoring runtime | `9304f0eaca0f4a013a8288957cf844857f5bcf8575bf76a86fac99a87ac78957` | historical witness proved absent; reproduce and qualify under `21867eea…` |
+| Authoring runtime | `9304f0eaca0f4a013a8288957cf844857f5bcf8575bf76a86fac99a87ac78957` | historical capture; individual availability unverified after reset |
 | Current-target platform | unresolved | query or produce via supported graph |
 | Current-target registry/vendor | unresolved | query or produce via supported graphs |
 | Evaluator Python binding | unresolved | verify for frozen base/consumer |
@@ -401,6 +402,26 @@ where necessary; deleting published assets requires its own concrete authorizati
 | Sept 18 05:42 NZST | G0 target freeze | one `remote push` as configured operator from clean detached source Git `bc58d9b…` / tree `7a8ea1a8…` | snapshot `21867eeaf077ab9b0db162431516bbc2cff3090fb9775c9926cf886ed0bec05e`, project tree `7e09b35c0110494cc3f8667e671f4f7706440741673575ca8835283b9a011d4b`, 3,010 entries; 5,900 blobs reused and one uploaded. Content tree exactly matches the former authoritative generation | freeze this configured-operator HEAD; generic doctor correctly reports the separate node-owned view as undeployed. Resolve current products and do not push again unless the frozen source generation changes intentionally |
 | Sept 18 05:55 NZST | G0/G1 product continuity | exact `compose-product` for native verifier under snapshot `21867eea…` | first retained-current-HEAD wrapper launch `L-bc114deb…` failed before thread birth (`T-1ccd15aa…`, `launch_admission_failed`) because a unary service was incorrectly wrapped as an accepted root; no product handler contact. Correct projectless configured-operator composition then reached target and returned `retained product witness is absent` | not a substrate defect and do not reuse the failed launch. Historical product payload bytes confer no witness authority; reproduce the authored product chain under the frozen current generation |
 | Sept 18 05:58 NZST | G1 prepared-input reproduction / generic blocker | configured-operator launch `L-1c370bec6676a8ebce347df12da51c21`; source remote thread `svc-1789711065965-d99c57b0`; target root `T-99ffc235-c781-eda2-7be3-b22aded526cf` | launch bound to exact snapshot `21867eea…`, project authority `f27736e…`, then failed before start with `execution realization properties must be scalar or null`; PID/PGID null, no successor, no capsule, zero receipts/effects, no producer Tool/provider contact. Source digest-only error `6028cea0…`. Code inspection finds `execution_properties()` stores `selected_resources` as a JSON array while `AdmittedExecutionRealization::validate()` rejects every array/object property | stop without retry. Correct the generic representation/validation contract and cover empty plus nonempty resource selections; install on both retained nodes, then use a new launch coordinate and continue G1 |
+
+Evidence correction (subsequent code review): the 05:55 entry overstates two
+conclusions. The unary launch's detailed admission cause was not recovered;
+its use of accepted authority alone does not establish the cause. The batch
+composition refusal proves at least one supplied witness was unavailable, not
+that both were absent or that the reset caused their absence. Inspect individual
+witnesses before deciding which producers require reproduction. G0 credential,
+product, and evaluator-base checks remain outstanding despite healthy lifecycle
+and route checks. Times marked 05:xx in the Sept 18 entries above are UTC, not NZST.
+
+Implementation correction: resource selections now validate through their owning
+contract and encode as canonical JSON text, matching target-requirement encoding.
+The generic scalar-only realization envelope remains unchanged. The focused
+executor realization suite passed all three tests, including production property
+construction through state validation, round-trip decoding, identity changes,
+and rejection of raw arrays/objects. Formatting and diff checks passed. This is
+not a live recovery or remote-launch pass. Installed qualification remains
+blocked until rebuilt binaries pass the fresh remote launch boundary. The test
+build left roughly 1 GiB free on the host filesystem; release rebuilding and
+installation were not attempted. Existing qualification nodes are untouched.
 
 Before every stop/compaction/turn handoff: update this top checkpoint, gate states,
 in-flight process/tool session IDs, retained launch coordinates, exact next operation,

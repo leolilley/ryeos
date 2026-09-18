@@ -515,10 +515,30 @@ fn execution_properties(
     selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
     let inspection = state.isolation.inspection();
+    execution_properties_from_inspection(
+        inspection,
+        state.isolation.is_enforced(),
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        target_requirement,
+        resource_authority_ceiling,
+        selected_resources,
+    )
+}
+
+fn execution_properties_from_inspection(
+    inspection: &ryeos_engine::isolation::IsolationInspection,
+    isolation_enforced: bool,
+    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: IsolationNetworkAuthorityCeiling,
+    target_requirement: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
+) -> Result<BTreeMap<String, serde_json::Value>> {
     let mut properties = BTreeMap::new();
     properties.insert(
         "isolation_enforced".to_owned(),
-        serde_json::Value::Bool(state.isolation.is_enforced()),
+        serde_json::Value::Bool(isolation_enforced),
     );
     properties.insert(
         ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
@@ -552,9 +572,23 @@ fn execution_properties(
     );
     properties.insert(
         ryeos_engine::contracts::ExecutionResourceSelection::REALIZATION_PROPERTY.to_owned(),
-        serde_json::to_value(selected_resources)?,
+        resource_selection_property(selected_resources)?,
     );
     Ok(properties)
+}
+
+// Keep structured evidence in the owning execution contract, using the same
+// canonical scalar encoding as the target requirement. Preserve list order:
+// admission and recovery must compare the exact selected resource generation.
+fn resource_selection_property(
+    selections: &[ryeos_engine::contracts::ExecutionResourceSelection],
+) -> Result<serde_json::Value> {
+    for selection in selections {
+        selection.validate()?;
+    }
+    Ok(serde_json::Value::String(lillux::canonical_json(
+        &serde_json::to_value(selections)?,
+    )?))
 }
 
 fn authority_ceiling_properties(
@@ -773,6 +807,80 @@ mod tests {
     use ryeos_isolation_protocol::{
         InspectedArtifact, IsolationArtifactRole, IsolationBackendSelection,
     };
+
+    fn realization_with_resources(
+        selections: &[ryeos_engine::contracts::ExecutionResourceSelection],
+    ) -> AdmittedExecutionRealization {
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let properties = execution_properties_from_inspection(
+            isolation.inspection(),
+            isolation.is_enforced(),
+            IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            IsolationNetworkAuthorityCeiling::Isolated,
+            None,
+            ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
+            selections,
+        )
+        .unwrap();
+        AdmittedExecutionRealization {
+            schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
+            substrate_identity_hash: "a".repeat(64),
+            substrate_attestation_hash: "b".repeat(64),
+            launch_authority_digest: "c".repeat(64),
+            effective_definition_digest: "d".repeat(64),
+            artifact_identity_digest: "e".repeat(64),
+            execution_closure_digest: "f".repeat(64),
+            contract_ref: "execution:test/fixture".to_owned(),
+            contract_digest: "1".repeat(64),
+            components: vec![],
+            properties,
+        }
+    }
+
+    #[test]
+    fn resource_evidence_validates_round_trips_and_changes_realization_identity() {
+        use ryeos_engine::contracts::ExecutionResourceSelection;
+        let key = ExecutionResourceSelection::REALIZATION_PROPERTY;
+        let empty = realization_with_resources(&[]);
+        empty.validate().unwrap();
+        assert_eq!(empty.properties[key], serde_json::json!("[]"));
+        let mut selection: ExecutionResourceSelection = serde_json::from_value(serde_json::json!({
+            "stable_id": "gpu-0", "class": "gpu", "matched_facts": {"memory": 1024, "vendor": "fixture"},
+            "observation_contract_digest": "2".repeat(64),
+            "device_binding_digest": "3".repeat(64),
+            "access": "execution_restricted", "enforcement": "character_device_grant",
+            "character_devices": [{"role": "compute", "destination": "/dev/test-gpu",
+                "access": "read_write", "major": 195, "minor": 0}]
+        }))
+        .unwrap();
+        let admitted = realization_with_resources(&[selection.clone()]);
+        let encoded = admitted.to_value().unwrap();
+        assert_eq!(
+            AdmittedExecutionRealization::from_current_value(&encoded).unwrap(),
+            admitted
+        );
+        let decoded: Vec<ExecutionResourceSelection> =
+            serde_json::from_str(admitted.properties[key].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, vec![selection.clone()]);
+        assert_ne!(
+            empty.content_hash().unwrap(),
+            admitted.content_hash().unwrap()
+        );
+        assert_eq!(admitted, realization_with_resources(&[selection.clone()]));
+        selection.device_binding_digest = "4".repeat(64);
+        let changed = realization_with_resources(&[selection]);
+        assert_ne!(admitted.properties, changed.properties);
+        assert_ne!(
+            admitted.content_hash().unwrap(),
+            changed.content_hash().unwrap()
+        );
+        for invalid in [serde_json::json!([]), serde_json::json!({})] {
+            let mut malformed = admitted.clone();
+            malformed.properties.insert(key.to_owned(), invalid);
+            assert!(malformed.validate().is_err());
+        }
+    }
 
     fn backend_with_launcher(digest: &str) -> IsolationBackendInspection {
         IsolationBackendInspection {
