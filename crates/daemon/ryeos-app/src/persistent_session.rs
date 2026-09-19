@@ -3275,9 +3275,6 @@ fn begin_resource_request_evidence(
         (Some(_), None) if require_attribution => {
             bail!("resource-bearing exclusive request lacks attribution identity")
         }
-        (None, Some(_)) if require_attribution => {
-            bail!("exclusive request attribution identity has no admitted resource sink")
-        }
         _ => None,
     };
     Ok((lease, start))
@@ -4233,6 +4230,46 @@ while True:
         pool.retire_exclusive(&session_id).unwrap();
         pool.reserve_exclusive(&session_id, &lifecycle, &wire)
             .unwrap();
+    }
+
+    #[test]
+    fn zero_resource_exclusive_request_accepts_command_identity_without_attribution() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "z".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let identity = PersistentSessionRequestIdentity {
+            thread_id: "T-zero-resource".to_owned(),
+            request_digest: ryeos_accounting::HexDigest::new("a".repeat(64)).unwrap(),
+        };
+
+        let result = pool
+            .execute_exclusive_attributed_with_deadline(
+                &session_id,
+                Some(&identity),
+                serde_json::json!({"message":"zero-resource"}),
+                || false,
+                |_| Ok(None),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result["echo"]["message"], "zero-resource");
+        assert!(
+            pool.take_exclusive_failure_cleanup_state(&session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
     }
 
     #[test]
