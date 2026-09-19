@@ -393,3 +393,38 @@ historical delivery acknowledgement is not new dispatch or cleanup proof.
 Architecture and security reviews accepted this distinction. All 14 rebuilt
 application journal tests and 21 independent SQLite regressions pass. Keep this
 node ownership check outside the future shared guest transcript implementation.
+
+The subsequent executor persistent-session test build was explicitly interrupted
+(exit 130) before exhausting the filesystem, at approximately 164 MiB free.
+That test group has not run; prior successful `cargo check --tests` does not
+replace it. No Cargo process from this attempt remains active. Only the feature
+target has been populated (approximately 1.6 GiB); relocating that generated
+directory to `/tmp` while retaining the worktree-local target path awaits the
+operator's choice. No other worktree or installation was modified.
+
+### Reviewed shared journal extraction contract
+
+The next complete slice is a transaction-borrowing adapter in
+`ryeos_state::external_execution::journal`, retaining the existing transcript
+reducers. It owns common channel/frame/revocation tables, immutable transitions,
+binding lookup, signatures, sequence/budget projection, sticky cancellation,
+claim/finish and reopen validation. It never commits the caller's transaction.
+
+Owner hooks are mandatory and have no defaults: exact owner validation,
+authorization of new application, and exact export-retention qualification.
+They cannot disable shared signature, sequence, deadline or revocation checks.
+Node hooks retain session/profile/workspace, allocation/quarantine and imported
+CAS-root ownership in `ryeos-app`; allocation-dependent delete/reset guards stay
+there too. The guest owns a fresh, protected single-binding bootstrap journal,
+not node session/allocation tables. Its export gate requires its own durable
+native-export retention record, never a fabricated node import row or a skip
+flag. Reopen validates exact retained authority but cannot recreate/release a
+launcher; without the original process-local owner it remains recovery-only.
+
+Cancellation must still commit before a potentially failing contiguous append.
+Claim/owner validation and finish/export retention remain atomic. Actual writes
+must share the supervisor's serialized revocation gate; a database claim is not
+continuing execution authority. Preserve the 14 node regressions through this
+extraction, then add guest fresh/reopen, uncertain-claim, cancellation-gap and
+export-retention cases. This is reviewed implementation direction, not an
+implemented guest journal or network supervisor.
