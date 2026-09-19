@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-18T23:48:30Z:ea0495bb8dcbb36b8f239c27a18853c959fa7c7062794cb6aa586b71948bcf56:F7pAG5o34My1NqP65795XLWB7pRfaJahyyJ4T5JbkSNa9DGuVqKk1BEf0dtrvTU9l+S8x/QwAuTP5u5KmWhXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T00:03:21Z:72bb162818f4715867f078fde3d6ac060e881a4c17b2f300efff3a61b035fd88:nYbAhRQXfCG5u9Wl+PmAcee2ZNtxlJjCrcCYUbBaQ9afu47CBMf40AHvY3ZwAhqhD4xzPByOZLgV9aRIc06HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
-version: "2.0.0"
+version: "3.0.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
 
 extends: surface:ryeos/ui/lens
@@ -49,6 +49,30 @@ view_sets:
           type: group
           views: ["view:ryeos/work/children", "view:ryeos/work/overview"]
           active: 0
+  - id: development
+    title: Development
+    slots:
+      left: { content: "view:ryeos/project/files", open: true, size: 24 }
+    root:
+      type: split
+      axis: horizontal
+      ratio: 0.7
+      first:
+        type: group
+        views: ["view:ryeos/thread/conversation", "view:ryeos/project/document", "view:ryeos/work/evidence"]
+        active: 0
+      second:
+        type: split
+        axis: vertical
+        ratio: 0.54
+        first:
+          type: group
+          views: ["view:ryeos/work/overview", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+          active: 0
+        second:
+          type: group
+          views: ["view:ryeos/work/children", "view:ryeos/thread/tree", "view:ryeos/graph/topology"]
+          active: 0
   - id: review
     title: Review
     root:
@@ -85,6 +109,16 @@ library:
       - view:ryeos/project/document
       - view:ryeos/project/items
       - view:ryeos/project/schedules
+  - group: Execution
+    views:
+      - view:ryeos/graph/topology
+      - view:ryeos/thread/tree
+      - view:ryeos/thread/transcript
+      - view:ryeos/work/overview
+      - view:ryeos/work/children
+      - view:ryeos/work/evidence
+      - view:ryeos/work/candidate
+      - view:ryeos/work/approvals
   - group: Node
     views:
       - view:ryeos/projects/list
