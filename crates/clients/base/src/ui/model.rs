@@ -2249,15 +2249,6 @@ impl RyeOsCore {
         }
     }
 
-    pub(crate) fn facet_for_instance(
-        &self,
-        instance: &RyeOsViewInstanceKey,
-        logical_facet: &str,
-    ) -> Option<serde_json::Value> {
-        let key = self.facet_storage_key_for_instance(instance, logical_facet)?;
-        self.seat.fold().get(&key).cloned()
-    }
-
     /// Move focus to the default input edge, the one rule shared by
     /// session start and the explicit `FocusInput` event. `false` when
     /// no visible slot owns input.
