@@ -51,7 +51,7 @@ impl RyeOsCore {
             // expired fence does not leave an actionable stale row rendered.
             // Which sources refresh remains signed view data (`on_hint`), not
             // a product/action branch in this reducer.
-            let effects = matches!(
+            let mut effects = matches!(
                 expected,
                 RyeOsEffectKind::InvokeBinding {
                     intent: super::effect::InvokeIntent::Service,
@@ -60,6 +60,7 @@ impl RyeOsCore {
             )
             .then(|| self.effects_for_hint("thread"))
             .unwrap_or_default();
+            effects.extend(self.refresh_after_invocation(&expected));
             return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
@@ -69,7 +70,8 @@ impl RyeOsCore {
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let effects = self.apply_invocation_result(&expected, result.kind, data);
+            let mut effects = self.apply_invocation_result(&expected, result.kind, data);
+            effects.extend(self.refresh_after_invocation(&expected));
             return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
@@ -109,8 +111,53 @@ impl RyeOsCore {
             return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         };
 
-        let effects = self.apply_source_result(&expected, result.kind, result.id, data);
+        let mut effects = self.apply_source_result(&expected, result.kind, result.id, data);
+        effects.extend(self.refresh_after_invocation(&expected));
         self.finish_source_effect(completed_source_key.as_deref(), effects)
+    }
+
+    /// Refresh only the invoking signed view's mounted sources. This is an
+    /// observation after settlement/refusal, never a mutation retry.
+    fn refresh_after_invocation(&mut self, expected: &RyeOsEffectKind) -> Vec<RyeOsEffect> {
+        let RyeOsEffectKind::InvokeBinding { request, .. } = expected else {
+            return Vec::new();
+        };
+        let crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, .. } =
+            &request.coordinate
+        else {
+            return Vec::new();
+        };
+        if !self
+            .data
+            .session
+            .as_ref()
+            .is_some_and(|session| session.binding_digest == request.binding_digest)
+            || !self.views.get(view_ref).is_some_and(|binding| {
+                binding
+                    .refresh
+                    .get("after_invoke")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            })
+        {
+            return Vec::new();
+        }
+        let mut instances = self.view_sets[self.active_view_set]
+            .tiles
+            .values()
+            .filter(|tile| tile.view.view_ref == *view_ref)
+            .map(|tile| tile.instance_key.clone())
+            .collect::<Vec<_>>();
+        instances.extend(
+            self.visible_dock_views()
+                .into_iter()
+                .filter(|(_, mounted_ref)| mounted_ref == view_ref)
+                .map(|(instance, _)| instance),
+        );
+        instances
+            .into_iter()
+            .flat_map(|instance| self.emit_fetch_source_for_instance(instance, view_ref))
+            .collect()
     }
 
     fn finish_source_effect(

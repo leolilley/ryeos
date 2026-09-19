@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T22:45:43Z:f883a583460503977ad169828ae4eefa8b289c37b789597edc3aba8c20a08033:VOxcIsWBJ9YiMiqopKqVlc93C0/ArQdxyZCLAhGW7lC7roonAbmMg3ldNg1z9BiIBrYaffcSTqqTkDwUdeqyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T05:01:29Z:149916a3e7799cd7a1929f13a2878f0c71e4d4a482e26f824505b22e271126c9:RgFrZ76V+lwQpaH6V1+G056Zb2mu60lycBlxeMmT3gTSSLmZbr7bubMG3KEoludZX1SPY7BWzpJiF3noBew9AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -15,6 +15,34 @@ launcher, optional slots, authored ambient character and shared Rust-owned UI
 semantics. Do not turn RyeOS into a generic sidebar application.
 
 ## Ownership
+
+### Saved view-set library
+
+The signed `view:ryeos/view-sets/library` uses the existing principal config
+get/update services. It is not a browser storage feature or a second personal
+state service. Shared Rust captures and validates the active composition;
+`save_active_view_set` invokes its declared signed companion through the normal
+compiled binding path. The daemon still validates and revision-fences the write.
+Authored companion presence never establishes admission.
+
+Saving uses the active set's name. A duplicate name is refused, not overwritten:
+rename the open set to save another composition. Concurrent library changes
+produce a conflict; refresh re-observes current data without retrying the write.
+Updating/deleting a named saved composition is not implemented by this flow.
+
+`open_saved_view_set` is a local composition operation. It creates fresh mounted
+identities and revalidates against the current admitted surface. It does not
+restore credentials, grants, execution state or input drafts. A saved template
+and a resumed UI session are different contracts.
+
+The library remains useful in observation-only sessions, but persistence can
+refuse when its companion coordinate is not admitted. Never broaden grants to
+make a visible control work, and never infer per-coordinate admission from
+authored definitions. Availability presentation is not an authority check.
+
+View-level `refresh.after_invoke` is an explicit boolean. It re-observes mounted
+view sources after invocation settlement, including refusal. It is not a
+source-level trigger and must not retry mutations or recreate closed views.
 
 The browser is a renderer, not a second application model:
 

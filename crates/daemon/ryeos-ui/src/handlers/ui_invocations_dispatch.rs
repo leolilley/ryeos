@@ -507,7 +507,9 @@ fn resolve_binding_request(
                 ryeos_client_base::ui::content::AffordanceInvoke::Rye { tokens, args, .. } => {
                     json!({"project_path": project_root, "tokens": tokens, "arguments": args})
                 }
-                ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. } => {
+                ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::OpenSavedViewSet { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveViewSet { .. } => {
                     return Err(HandlerError::BadRequest(
                         "UI-local affordance crossed execution dispatch".into(),
                     )

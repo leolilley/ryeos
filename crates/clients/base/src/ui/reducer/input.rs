@@ -573,6 +573,14 @@ impl RyeOsCore {
             super::content::Producer::Input,
             &payload,
         ) {
+            Some(super::content::AffordanceInvoke::OpenSavedViewSet { .. })
+            | Some(super::content::AffordanceInvoke::SaveActiveViewSet { .. }) => {
+                self.notice(
+                    "View-set library actions require a selected library record.",
+                    RyeOsTone::Warn,
+                );
+                Vec::new()
+            }
             Some(super::content::AffordanceInvoke::Ui {
                 facet,
                 value,

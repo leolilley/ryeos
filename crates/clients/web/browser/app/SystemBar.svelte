@@ -26,7 +26,7 @@
   <div class="system-state">
     <span>{chrome.health_label}</span>
     <span class="transport" data-freshness={transport.freshness}>{transport.freshness}</span>
-    <button class="system-launch" onclick={() => dispatch({ type: "open_overlay", overlay_id: "views" })}>Launch</button>
-    <button class="system-commands" aria-label="Open context commands" title="Context commands" onclick={() => dispatch({ type: "open_overlay", overlay_id: "commands" })}>⌘</button>
+    <button class="system-launch" data-focus-key="shell:launch" onclick={() => dispatch({ type: "open_overlay", overlay_id: "views" })}>Launch</button>
+    <button class="system-commands" data-focus-key="shell:commands" aria-label="Open context commands" title="Context commands" onclick={() => dispatch({ type: "open_overlay", overlay_id: "commands" })}>⌘</button>
   </div>
 </header>

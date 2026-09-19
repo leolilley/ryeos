@@ -437,7 +437,18 @@ pub async fn handle_config_get(
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_ui_config()?;
-    Ok(json!(config))
+    let mut response = json!(config);
+    // Response-only row for the ordinary sections renderer. The durable file
+    // remains the bounded config contract, with no duplicated library state.
+    response["view_set_save_context"] = json!([{
+        "label": "Save current view set",
+        "description": "Uses the current set name; rename it to save another composition",
+        "context": {
+            "expected_revision": config.view_set_library_revision,
+            "saved_view_sets": config.saved_view_sets
+        }
+    }]);
+    Ok(response)
 }
 
 pub async fn handle_config_update(

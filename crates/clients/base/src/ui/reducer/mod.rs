@@ -21,6 +21,7 @@ mod affordances;
 mod effect_results;
 mod field_interaction;
 mod input;
+mod saved_view_sets;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod tiles;

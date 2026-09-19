@@ -39,5 +39,5 @@
       }
     }}
   ></textarea>
-  <div class="composer-actions"><span>{model.hint}</span>{#if !model.live_filter}<button disabled={!model.submit_enabled} onclick={() => dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: false } })}>↑</button>{/if}</div>
+  <div class="composer-actions"><span>{model.hint}</span>{#if !model.live_filter}<button aria-label={`Send to ${model.route_label}`} disabled={!model.submit_enabled} onclick={() => dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: false } })}>↑</button>{/if}</div>
 </section>

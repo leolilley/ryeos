@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:03:23Z:9a9e0f4ad64129ca7c1906f2ade0533aa53ea279dc391599d06565b52f027b44:0t5UvgmgH3xtAYAjL/Uk5jmg48x9FDHScLhEWn1f3Yvw9jzNxj7f9Y3FUrNzSG3UGDcxTNwbkScCTIKbr97PAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:54:27Z:193c803545f0cd7c1bced3b48a8ced6110fe07c5d3d268f57dda93764acc8430:x4lucQbk/wunLfFN/3c1EZK86IkyQCJ5T8gAVeW7kbtKyHmef0eLUvM6bfK6Ye+V+KxvPZzyG/ndzsWQzkAgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "3.1.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
@@ -88,6 +88,9 @@ view_sets:
       active: 0
 
 library:
+  - group: View sets
+    views:
+      - view:ryeos/view-sets/library
   - group: Assistant
     views:
       - view:ryeos/home/overview

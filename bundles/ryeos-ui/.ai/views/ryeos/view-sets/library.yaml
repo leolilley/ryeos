@@ -1,0 +1,54 @@
+# ryeos:signed:2026-09-19T04:54:27Z:566194f252dfddebdb8e50a65fcb1e98c1c7e693df592ddc37a1f0aae3e1c5a6:w2Vc281Ki/wBulfHvdvMQtspotp2bP1/agGTye20zSNQ4Mh81xC1NdFV4BGQsFnxAqBcBdnKMUnfeeLIwQ/GBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: view-set-library
+title: Saved view sets
+version: "1.0.0"
+description: Save a named composition or open a fresh copy under current admission; no work or credentials are restored
+widget: sections
+sources:
+  library:
+    ref: service:ui/ryeos-ui/config/get
+affordances:
+  - id: open
+    label: Open saved composition
+    invoke:
+      plane: ui
+      operation: open_saved_view_set
+      value:
+        id: "{record.id}"
+        name: "{record.name}"
+        composition: "{record.composition}"
+  - id: save
+    label: Save current view set
+    invoke:
+      plane: ui
+      operation: save_active_view_set
+      persist_affordance: persist
+      value: "{record.context}"
+  - id: persist
+    label: Persist captured composition
+    producer: selection
+    visible_when: { field: captured, equals: true }
+    invoke:
+      plane: rye
+      ref: service:ui/ryeos-ui/config/update
+      args:
+        view_set_library:
+          expected_revision: "{record.expected_revision}"
+          saved_view_sets: "{record.saved_view_sets}"
+      notice: Saved view set.
+sections:
+  - title: Save composition
+    source_channel: library
+    collection: view_set_save_context
+    projection:
+      primary: label
+      secondary: description
+    activate: save
+  - title: Saved compositions
+    source_channel: library
+    collection: saved_view_sets
+    projection:
+      primary: name
+    activate: open
+refresh:
+  after_invoke: true

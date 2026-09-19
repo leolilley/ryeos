@@ -27,7 +27,7 @@
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       dispatch({ type: "move_overlay_selection", delta: event.key === "ArrowDown" ? 1 : -1 });
-    } else if (event.key === "Enter") {
+    } else if (event.key === "Enter" && event.target === queryInput) {
       event.preventDefault();
       dispatch({ type: "choose_overlay", secondary: event.shiftKey || event.altKey });
     } else if (event.key === "Tab" && panel) {

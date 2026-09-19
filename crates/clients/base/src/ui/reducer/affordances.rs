@@ -83,6 +83,13 @@ impl RyeOsCore {
             super::content::Producer::Selection,
             &payload,
         ) {
+            Some(super::content::AffordanceInvoke::OpenSavedViewSet { template }) => {
+                self.open_view_set_record(template)
+            }
+            Some(super::content::AffordanceInvoke::SaveActiveViewSet {
+                context,
+                persist_affordance,
+            }) => self.save_view_set_record(instance_key, view_ref, &persist_affordance, context),
             Some(super::content::AffordanceInvoke::Ui {
                 facet,
                 value,

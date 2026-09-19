@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { RyeOsTopBarVm } from "../generated";
   import { dispatchUi } from "../runtime/context";
 
@@ -9,6 +10,13 @@
   // goes through the shared reducer and its existing persistence owner.
   let editingId = $state<bigint | null>(null);
   let draft = $state("");
+  let renameInput = $state<HTMLInputElement>();
+  async function beginRename(id: bigint, title: string) {
+    draft = title;
+    editingId = id;
+    await tick();
+    if (editingId === id) { renameInput?.focus(); renameInput?.select(); }
+  }
   function finishRename() {
     const title = draft.trim();
     if (editingId !== null && title) {
@@ -27,13 +35,14 @@
       <div class="view-set-tab" class:active={tab.active}>
         {#if editingId === tab.view_set_id}
           <form class="view-set-rename" onsubmit={(event) => { event.preventDefault(); finishRename(); }}>
-            <input aria-label="View set name" bind:value={draft} onkeydown={(event) => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); editingId = null; } }} />
+            <input bind:this={renameInput} data-focus-key={`view-set:${tab.view_set_id}:rename`} aria-label="View set name" bind:value={draft} onkeydown={(event) => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); editingId = null; } }} />
             <button type="submit" aria-label="Save view set name">✓</button>
             <button type="button" aria-label="Cancel rename" onclick={() => editingId = null}>×</button>
           </form>
         {:else}
         <button
           class="view-set-select"
+          data-focus-key={`view-set:${tab.view_set_id}:select`}
           aria-current={tab.active ? "page" : undefined}
           onclick={() => dispatch({ type: "activate", intent: { type: "select_view_set", view_set_id: tab.view_set_id } })}
         >
@@ -43,7 +52,7 @@
         {/if}
         {#if tab.active}
           <span class="view-set-actions" role="group" aria-label={`${tab.title} view-set actions`}>
-            <button aria-label={`Rename ${tab.title}`} title="Rename view set" onclick={() => { draft = tab.title; editingId = tab.view_set_id; }}>✎</button>
+            <button aria-label={`Rename ${tab.title}`} title="Rename view set" onclick={() => beginRename(tab.view_set_id, tab.title)}>✎</button>
             <button
               aria-label={`Duplicate ${tab.title}`}
               title="Duplicate view set"
