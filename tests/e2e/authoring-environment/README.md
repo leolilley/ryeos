@@ -11,6 +11,10 @@ worker, Render deployment, authenticated channel or Lillux qualification.
 ```sh
 python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
   --package /absolute/path/to/extracted/authored-codex-package
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package --selected-skills
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package --managed-mcp
 python3 -B -m unittest discover -s tests/e2e/authoring-environment \
   -p test_external_execution_probe.py
 ```
@@ -31,6 +35,13 @@ stdout and protocol input have finite bounds and protocol waits have deadlines.
 - A synthetic secret in the controller's profile did not reach tool output.
 - Read-only configuration overlays refused direct write and unlink attempts;
   the exact environment inventory overrode a conflicting ambient execution URL.
+- Every scripted request retained the same namespace-qualified tool inventory
+  and complete definition digest; later schema/namespace changes are refused.
+- Actual authored immutable feature/notification arguments overrode a hostile
+  fixture profile. Candidate-local configuration did not add controller tools.
+- The optional selected-skills diagnostic discovered and read an exact executor
+  package, then refused an existing, independently readable file outside it.
+  This diagnostic is not permission to enable selected roots in RyeOS.
 - Explicit `environment_id: local` was refused when local was not configured.
 - Killing the executor produced an explicit failure without local execution.
   The pinned client first attempted recovery for 25 seconds. The fixture's
@@ -50,6 +61,42 @@ activate the current authoring profile by simply adding an execution URL. A
 mutable `environments.toml` can override that URL; the production binding and
 effective configuration must be owned and protected by the runtime.
 
+### Pinned controller-extension audit
+
+The 0.147.0 source review found independently enabled controller paths:
+`plugins` defaults on despite `remote_plugin=false`; notification commands are
+independent of the hooks feature; skill MCP dependency installation defaults on.
+Both authored profiles now explicitly close those paths in baseline and immutable
+argv, disable orchestrator skills/MCP, and refuse caller-supplied
+`selectedCapabilityRoots`. Selected executor roots can add MCP independently
+of the plugins feature. The separately admitted RyeOS dynamic-tool injector is
+unchanged; caller-supplied dynamic tools remain forbidden in the authoring route.
+
+The baseline routing diagnostic advertises six tools; the optional skills
+diagnostic adds `skills.list` and `skills.read`. The latter uses exact observed
+package/resource identities, not reconstructed paths. Startup host discovery,
+enterprise-managed inputs and all other authority surfaces still need qualification.
+
+**Ordinary `mcp_servers={}` is not a deny-all policy.** Pinned configuration
+merges tables, preserving lower-layer server entries. `--managed-mcp` supplies
+a diagnostic read-only `/etc/codex/requirements.toml` containing an empty managed
+MCP allowlist. A configured controller subprocess canary remains in the merged
+ordinary configuration but is not launched during the completed turn. No host
+system file is changed. This proves that pinned mechanism only in the fixture's
+empty enterprise/cloud-policy context—not an unconditional production denial.
+
+Production still requires an admitted runtime-configuration mount and control
+of higher-priority managed policy before MCP startup. A profile-home
+`requirements.toml` would not be read as system requirements. Do not repurpose
+node networking files or enable the external profile to bypass this gate.
+
+Fixture HTTP handling is serialized, request retention is bounded before append,
+and accepted sockets have a timeout before header parsing. A live incomplete-header
+probe waits for exact acceptance and verifies bounded teardown. These fixture
+properties are not RyeOS transport/recovery evidence. Independent reviews found
+and corrected the previous missing-file escape assertion, namespace-hash omission,
+post-retention request limit, and pre-handler header timeout gap.
+
 ### Production configuration work in progress
 
 The implementation branch adds required `auxiliary_configs` to structured
@@ -67,13 +114,14 @@ potential portable-session overlap is rejected. Empty inventories remain
 explicit in every current bundle profile; no external authoring profile is
 activated by these changes.
 
-Rust regression tests are authored but **not compiled or run** under the
-operator's no-Cargo instruction. Syntax parsing and Python source-contract
-tests do not establish Rust type correctness, bundle binary coherence or
-installed admission. A focused operator build and bundle refresh are required
-before merging/qualification. The subordinate allocation journal and native
-terminal writer-exclusion primitive now have source implementations; neither
-has Rust/native qualification yet. See
+Cargo is now authorized. Initial state framing/export (5), capsule (9), and
+allocation/channel (12) tests passed. Three focused native terminal-export tests
+also passed, including descendant writer exclusion. Subsequent state/app
+integrity corrections and shared transcript extraction still await rebuilt
+checks: the affected rerun was explicitly interrupted for disk space. No Cargo
+process from that run remains active. Python/source checks do not establish
+Rust type correctness, bundle binary coherence or installed admission. Affected
+builds and the full bundle refresh remain required before qualification. See
 [external execution qualification](../external-execution/README.md) for the
 exact checkpoint, operator tests and missing lifecycle/channel/export work.
 

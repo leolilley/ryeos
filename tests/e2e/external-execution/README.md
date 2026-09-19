@@ -305,3 +305,29 @@ security source reviews found no semantic regression in the extraction. The
 21 SQLite regressions and Rust formatting checks pass; the three new Rust
 projection/frontier tests await the affected Cargo rerun after space is available.
 This is not yet the shared transaction-level guest journal or supervisor loop.
+
+### Controller runtime-configuration gate
+
+Pinned Codex source review and credential-free binary diagnostics now distinguish
+ordinary configuration from managed requirements. Empty ordinary MCP tables
+merge with existing entries, so immutable argv alone cannot express deny-all.
+The actual managed system file suppresses a configured subprocess canary in the
+isolated fixture. See the authoring-environment ledger for the exact scope and
+the corrected six-tool and optional selected-skill routing evidence.
+
+The next configuration implementation is generic, not a Codex path in executor:
+an admitted, bounded source-file inventory with canonical absolute **namespace**
+file destinations; exact capsule identities; pinned descriptors; enforced
+read-only isolation; bridge verification before workload start; and collision
+refusal against workspace, profile/state, executable/source/runtime mounts,
+network inputs, writable views, `/proc`, `/dev` and protected control paths.
+Existing flat profile-home auxiliary files keep their semantics. The new scope
+must not authorize executable lookup or writes to the host's `/etc`. Node-policy
+network runtime files are not the owner of signed provider configuration.
+
+Higher-priority cloud-managed requirements can still change the effective MCP
+allowlist. Qualification must resolve/control those inputs before any relevant
+startup contact; a later status check is insufficient. Provider contact needed
+to discover policy cannot be described as zero provider contact. No such
+effective-policy admission or production runtime-config mount is implemented
+by the diagnostic, and no external worker profile is enabled.

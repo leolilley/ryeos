@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:02:12Z:f34708ab657a25e27bca36f0087b0f4a57e4c5a2eb02b1e0755a1a3364d15c62:IouLUTvzZ7D4HpXBPJXK57G1ZZUIwaY5gYqbV2xqTuwF1wGtrIPFsHnuJapQpBcCJ9qA0Bwj3z74FM+ALK1zBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T06:52:09Z:1472822a635873532cc8fc8cdf17d95091a91386d268c409dd616c73e54780ed:Uis8wp5+VO/WcivmHLuXFnyt1JxVMe3rV4KMW2exWqmUeJEijCeUTyqlPfnowsI7DcRBLU6K48/8/CyQuLiIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -74,6 +74,30 @@ def source_manifest_digest() -> str:
 
 
 class CodexContractTests(unittest.TestCase):
+    def test_controller_side_extensions_are_closed_in_config_and_immutable_argv(self) -> None:
+        for name in ("structured-session.profile.json", "authoring.profile.json"):
+            profile = json.loads((SOURCE / name).read_text())
+            baseline = tomllib.loads((SOURCE / profile["baseline_config"]).read_text())
+            overrides = {}
+            arguments = profile["workload_args"]
+            for offset, argument in enumerate(arguments):
+                if argument == "-c":
+                    parsed = tomllib.loads(arguments[offset + 1])
+                    self.assertFalse(set(parsed) & set(overrides), "ambiguous repeated override")
+                    overrides.update(parsed)
+            for config in (baseline, overrides):
+                self.assertEqual(config["notify"], [])
+                self.assertEqual(config["mcp_servers"], {})
+                self.assertEqual(config["orchestrator"], {
+                    "skills": {"enabled": False}, "mcp": {"enabled": False}})
+                for feature in ("plugins", "remote_plugin", "hooks", "skill_mcp_dependency_install"):
+                    self.assertIs(config["features"][feature], False, (name, feature))
+            start = next(route for route in profile["routes"] if route["id"] == "session.start")
+            self.assertIn("selectedCapabilityRoots", start["forbidden_fields"])
+            # Selected executor roots can contribute MCP independently of the
+            # plugin feature. Presence must be refused, including null/empty.
+            self.assertNotIn("selectedCapabilityRoots", start["fixed_params"])
+
     def test_runtime_realizations_never_write_project_mountpoints(self) -> None:
         # These are process dependencies, not project data. Creating their
         # mountpoints in a writable project overlay contaminates frozen source.

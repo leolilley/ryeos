@@ -27,6 +27,11 @@ class ExternalExecutionProbeTests(unittest.TestCase):
         self.assertEqual(provider["base_url"], "http://127.0.0.1:12345")
         self.assertEqual(config["mcp_servers"], {})
         self.assertFalse(config["features"]["hooks"])
+        self.assertFalse(config["features"]["plugins"])
+        self.assertFalse(config["features"]["skill_mcp_dependency_install"])
+        self.assertEqual(config["notify"], [])
+        self.assertFalse(config["orchestrator"]["skills"]["enabled"])
+        self.assertFalse(config["orchestrator"]["mcp"]["enabled"])
         self.assertFalse(config["features"]["multi_agent"])
         self.assertFalse(config["features"]["code_mode"]["enabled"])
 
@@ -40,13 +45,121 @@ class ExternalExecutionProbeTests(unittest.TestCase):
         self.assertIn("/package/bin/codex", argv)
         self.assertEqual(argv[-2:], ["/runtime/bin/codex", "exec-server"])
 
+    def test_managed_requirements_fixture_uses_exact_system_path_read_only(self):
+        argv = probe.isolated_command(Path("/p/bwrap"), Path("/package"),
+            Path("/candidate"), Path("/profile"), ["app-server"],
+            managed_requirements=Path("/fixture/requirements.toml"))
+        offset = argv.index("/fixture/requirements.toml")
+        self.assertEqual(argv[offset - 1:offset + 2],
+            ["--ro-bind", "/fixture/requirements.toml", "/etc/codex/requirements.toml"])
+        self.assertNotIn("/profile/requirements.toml", argv)
+
+    def test_effective_closure_checks_actual_authored_immutable_overrides(self):
+        arguments = probe.controller_arguments()
+        config = {}
+        for offset, argument in enumerate(arguments):
+            if argument == "-c":
+                config.update(tomllib.loads(arguments[offset + 1]))
+        probe.verify_effective_closure(config)
+        self.assertNotIn("model_provider", config)
+        self.assertNotIn("forced_login_method", config)
+        for field in ("notify", "mcp_servers", "features", "orchestrator"):
+            changed = dict(config)
+            del changed[field]
+            with self.subTest(field=field), self.assertRaises(probe.ProbeRefused):
+                probe.verify_effective_closure(changed)
+        changed = dict(config, notify=["/bin/sh"])
+        with self.assertRaises(probe.ProbeRefused):
+            probe.verify_effective_closure(changed)
+
     def test_advertised_inventory_preserves_nested_tools(self):
-        self.assertEqual(probe.tool_names([
+        self.assertEqual(set(probe.tool_inventory([
             {"type": "namespace", "name": "functions", "tools": [
                 {"type": "function", "name": "exec_command"},
                 {"type": "custom", "name": "apply_patch"}]},
-            {"type": "function", "name": "view_image"}]),
-            {"exec_command", "apply_patch", "view_image"})
+            {"type": "function", "name": "view_image"}])),
+            {"functions.exec_command", "functions.apply_patch", "view_image"})
+
+    def test_inventory_rejects_aliases_unknown_types_and_namespace_collisions(self):
+        for tools in (
+            [{"type": "web_search"}],
+            [{"type": "function", "name": "skills.read"}],
+            [{"type": "namespace", "name": "skills", "tools": []}],
+            [{"type": "namespace", "name": "skills", "tools": None}],
+            [{"type": "function", "name": "read"}] * 2,
+            [{"type": "function", "name": "skills"},
+             {"type": "namespace", "name": "skills", "tools": [
+                 {"type": "function", "name": "read"}]}],
+        ):
+            with self.subTest(tools=tools), self.assertRaises(probe.ProbeRefused):
+                probe.tool_inventory(tools)
+
+    def test_inventory_validates_definitions_not_just_leaf_names(self):
+        tools = [{"type": kind, "name": name} for name, kind in probe.EXPECTED_TOOL_TYPES.items()
+                 if not name.startswith("skills.")]
+        tools.append({"type": "namespace", "name": "skills", "tools": [
+            {"type": "function", "name": "list"}, {"type": "function", "name": "read"}]})
+        digest = probe.validate_inventory(tools, selected_skills=True)
+        self.assertEqual(digest, probe.validate_inventory(list(reversed(tools)), selected_skills=True))
+        tools[-1]["description"] = "namespace metadata must also be exact"
+        self.assertNotEqual(digest, probe.validate_inventory(tools, selected_skills=True))
+        digest = probe.validate_inventory(tools, selected_skills=True)
+        tools[0]["parameters"] = {"properties": {"new_authority": {"type": "string"}}}
+        self.assertNotEqual(digest, probe.validate_inventory(tools, selected_skills=True))
+        with self.assertRaises(probe.ProbeRefused):
+            probe.validate_inventory(tools)
+        tools[-1]["name"] = "unreviewed"
+        with self.assertRaises(probe.ProbeRefused):
+            probe.validate_inventory(tools, selected_skills=True)
+
+    def test_namespaced_call_keeps_explicit_namespace(self):
+        call = probe.tool_call("read", {}, "skill-read", namespace="skills")
+        self.assertEqual(call["namespace"], "skills")
+        self.assertEqual(call["name"], "read")
+
+    def test_provider_rejects_extra_requests_before_retention(self):
+        provider = object.__new__(probe.ScriptedProvider)
+        provider.calls, provider.requests = [], []
+        provider.inventory_digest, provider.selected_skills = None, False
+        request = {"tools": [{"name": name, "type": kind}
+                              for name, kind in probe.EXPECTED_TOOL_TYPES.items()]}
+        self.assertEqual(provider.retain_request(request), 0)
+        for _ in range(10):
+            with self.assertRaisesRegex(probe.ProbeRefused, "count exceeded"):
+                provider.retain_request(request)
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_provider_checks_definitions_on_later_requests(self):
+        provider = object.__new__(probe.ScriptedProvider)
+        provider.calls, provider.requests = [None, None], []
+        provider.inventory_digest, provider.selected_skills = None, False
+        request = {"tools": [{"name": name, "type": kind}
+                              for name, kind in probe.EXPECTED_TOOL_TYPES.items()]}
+        provider.retain_request(request)
+        changed = probe.json.loads(probe.json.dumps(request))
+        changed["tools"][0]["description"] = "changed after first request"
+        with self.assertRaisesRegex(probe.ProbeRefused, "definitions changed"):
+            provider.retain_request(changed)
+        self.assertEqual(len(provider.requests), 1)
+
+    def test_skill_read_uses_exact_observed_package_and_authority(self):
+        catalog = {"skills": [{"name": "routing-fixture",
+            "authority": {"kind": "executor", "id": "candidate-fixture"},
+            "package": "observed-package", "main_resource": "observed-resource"}]}
+        request = {"input": [{"type": "function_call_output", "call_id": "skill-list",
+                              "output": probe.json.dumps(catalog)}]}
+        item = {"call_id": "skill-read"}
+        probe.prepare_call(item, request, Mock())
+        arguments = probe.json.loads(item["arguments"])
+        self.assertEqual(arguments["package"], "observed-package")
+        self.assertEqual(arguments["resource"], "observed-resource")
+        escaped = {"call_id": "skill-escape"}
+        probe.prepare_call(escaped, request, Mock())
+        self.assertEqual(probe.json.loads(escaped["arguments"])["resource"], "/workspace/outside-skill")
+        catalog["skills"][0]["authority"]["id"] = "wrong-environment"
+        request["input"][0]["output"] = probe.json.dumps(catalog)
+        with self.assertRaisesRegex(probe.ProbeRefused, "wrong authority"):
+            probe.prepare_call(item, request, Mock())
 
     def test_configuration_overlay_is_exact_and_flat(self):
         argv = probe.isolated_command(Path("/p/bwrap"), Path("/package"),

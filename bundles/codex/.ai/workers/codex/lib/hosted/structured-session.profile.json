@@ -16,6 +16,10 @@
     "-c",
     "mcp_servers={}",
     "-c",
+    "notify=[]",
+    "-c",
+    "orchestrator={ skills={ enabled=false }, mcp={ enabled=false } }",
+    "-c",
     "check_for_update_on_startup=false",
     "-c",
     "approval_policy=\"on-request\"",
@@ -34,7 +38,7 @@
     "-c",
     "agents={ enabled=false }",
     "-c",
-    "features={ apps=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=false, code_mode={ enabled=false } }",
+    "features={ apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=false, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
@@ -419,7 +423,8 @@
       ],
       "forbidden_fields": [
         "approvalPolicy",
-        "ephemeral"
+        "ephemeral",
+        "selectedCapabilityRoots"
       ],
       "observations": [
         {
