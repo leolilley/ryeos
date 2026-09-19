@@ -65,6 +65,7 @@ producers of the same intents, not a second command vocabulary.
 | [x] `ToggleOverlayGroup` | shared | shared | presentation state |
 | [x] `CloseFocused` | shared | shared | shared close command |
 | [x] `CloseTile` | shared | shared | exact tile close |
+| [x] `ToggleTileMaximized` | shared | shared | render-only focused tile projection |
 | [x] `ToggleFocusedMaster` | shared | shared | layout edit |
 | [x] `MoveFocusedTile` | shared | shared | layout edit |
 | [x] `MoveTileBeside` | shared | shared | guarded layout edit |
@@ -75,6 +76,7 @@ producers of the same intents, not a second command vocabulary.
 | [x] `NewViewSet` | shared | shared | view-set edit |
 | [x] `SelectViewSet` | shared | shared | view-set edit |
 | [x] `RenameViewSet` | shared | shared | view-set edit |
+| [x] `DuplicateViewSet` | shared | shared | composition-only view-set duplication |
 | [x] `CloseViewSet` | shared | shared | view-set edit |
 | [x] `MoveTileToViewSet` | shared | shared | guarded view-set edit |
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
@@ -185,6 +187,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | --- | --- | --- | --- |
 | [x] `Field` | presentation | presentation | Same field model. |
 | [x] `Text` | presentation | presentation | Same lines, tones and position. |
+| [x] `Document` | presentation | presentation | Same bounded text, path and provenance. |
 | [x] `Rows` | presentation | presentation | Same rows and affordances. |
 | [x] `Timeline` | presentation | presentation | Same entries, folds and details. |
 | [x] `Map` | presentation | presentation | Same scene model. |
