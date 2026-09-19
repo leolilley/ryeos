@@ -621,7 +621,9 @@ mod tests {
             }),
         );
         let origin = mount_affordance_view(&mut core, "view:test/list");
+        let origin_view_set_id = core.view_sets[core.active_view_set].id;
         core.new_view_set();
+        let active_view_set_id = core.view_sets[core.active_view_set].id;
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -635,13 +637,15 @@ mod tests {
         });
 
         assert!(effects.is_empty());
-        assert!(
-            core.seat
-                .fold()
-                .get(super::super::seat::KEY_SELECTION)
-                .is_none()
-        );
-        assert!(active_selection(&core).is_null());
+        let facets = core.seat.fold();
+        for view_set_id in [origin_view_set_id, active_view_set_id] {
+            assert!(
+                facets
+                    .get(&super::super::seat::selection_facet_key(view_set_id))
+                    .is_none(),
+                "delayed affordance must not write selection in either view set"
+            );
+        }
     }
 
     #[test]
