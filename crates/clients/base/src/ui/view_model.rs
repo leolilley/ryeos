@@ -3106,6 +3106,17 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
         enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
     });
     if view_set.tiles.contains_key(&view_set.focused_tile) {
+        items.extend(
+            placement_intents(core, view_set.focused_tile)
+                .into_iter()
+                .map(|action| RyeOsOverlayChoice {
+                    label: action.label,
+                    hint: action.title,
+                    intent: action.intent,
+                    secondary_intent: None,
+                    enabled: true,
+                }),
+        );
         for destination in &core.view_sets {
             if destination.id == view_set.id {
                 continue;
@@ -3186,7 +3197,7 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
         topic(
             "Start",
             "Input",
-            "The foot input stays open while views move",
+            "Each view keeps its own input and destination while it moves",
         ),
         view(
             "Work",
@@ -3541,15 +3552,64 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
 }
 
 fn tile_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
-    // Dynamic tiling: the algorithm owns the tree; tiles offer no
-    // manual splits. Closing the last tile returns home.
-    let _ = core;
+    let mut actions = placement_intents(core, tile_id);
     let tile_id = tile_id_text(tile_id);
-    vec![RyeOsTileIntentVm {
-        label: "×".to_string(),
-        title: "Close tile".to_string(),
+    actions.push(RyeOsTileIntentVm {
+        label: "Close view".to_string(),
+        title: "Close this view; its running work is unaffected".to_string(),
         intent: RyeOsUiIntent::CloseTile { tile_id },
-    }]
+    });
+    actions
+}
+
+/// Both renderers receive exact mounted coordinates from this projection.
+/// Do not reconstruct placement authority from browser labels or DOM order.
+fn placement_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
+    use crate::view_set::FocusDirection;
+
+    let view_set = &core.view_sets[core.active_view_set];
+    if !view_set.tiles.contains_key(&tile_id) {
+        return Vec::new();
+    }
+    let guard = core.layout_guard();
+    let mut actions = Vec::new();
+    for target_id in view_set.tile_ids() {
+        if target_id == tile_id {
+            continue;
+        }
+        let Some(target) = view_set.tiles.get(&target_id) else {
+            continue;
+        };
+        let target_label = format!("{} · {}", tile_title(core, &target.view), target_id.0);
+        for (label, edge) in [
+            ("Left of", FocusDirection::Left),
+            ("Right of", FocusDirection::Right),
+            ("Above", FocusDirection::Up),
+            ("Below", FocusDirection::Down),
+        ] {
+            actions.push(RyeOsTileIntentVm {
+                label: format!("{label} {target_label}"),
+                title: "Move this mounted view, preserving its subject and draft".into(),
+                intent: RyeOsUiIntent::MoveTileBeside {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(target_id),
+                    edge,
+                },
+            });
+        }
+        actions.push(RyeOsTileIntentVm {
+            label: format!("Group with {target_label}"),
+            title: "Move this view into the destination tab group".into(),
+            intent: RyeOsUiIntent::MoveTileToGroup {
+                layout_guard: guard.clone(),
+                tile_id: tile_id_text(tile_id),
+                target_tile_id: tile_id_text(target_id),
+                index: 0,
+            },
+        });
+    }
+    actions
 }
 
 pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
@@ -3975,6 +4035,34 @@ mod tests {
             ..Default::default()
         };
         RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn projected_placement_action_cannot_cross_view_set_switch() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let source = core.view_sets[core.active_view_set].tile_ids()[0];
+        let action = placement_intents(&core, source)
+            .into_iter()
+            .find(|action| matches!(&action.intent, RyeOsUiIntent::MoveTileBeside { .. }))
+            .expect("placement action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::NewViewSet,
+            },
+        });
+        let before = core.export_layout_preferences().expect("layout snapshot");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        assert_eq!(core.export_layout_preferences().unwrap(), before);
     }
 
     #[test]

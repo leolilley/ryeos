@@ -7,7 +7,7 @@
   let { model, guard, minRatio, maxRatio, path = [] }: Props = $props();
   const dispatch = dispatchUi();
   let region = $state<HTMLDivElement>();
-  let drag: { pointer: number; guard: string; path: SplitBranch[]; start: number; extent: number; horizontal: boolean; min: number; max: number } | null = null;
+  let drag: { pointer: number; guard: string; path: SplitBranch[]; start: number; ratio: number; extent: number; horizontal: boolean; min: number; max: number } | null = null;
   function resize(ratio: number, layoutGuard = guard, splitPath = path) {
     dispatch({ type: "activate", intent: { type: "resize_split", layout_guard: layoutGuard, path: splitPath, ratio } });
   }
@@ -15,7 +15,11 @@
     if (event.button !== 0 || model.type !== "split" || !region) return;
     const rect = region.getBoundingClientRect();
     const horizontal = model.axis === "horizontal";
-    drag = { pointer: event.pointerId, guard, path: [...path], start: horizontal ? rect.left : rect.top, extent: horizontal ? rect.width : rect.height, horizontal, min: minRatio, max: maxRatio };
+    const styles = getComputedStyle(region);
+    const gap = parseFloat(horizontal ? styles.columnGap : styles.rowGap) || 0;
+    const divider = event.currentTarget as HTMLElement;
+    const dividerSize = horizontal ? divider.offsetWidth : divider.offsetHeight;
+    drag = { pointer: event.pointerId, guard, path: [...path], start: horizontal ? event.clientX : event.clientY, ratio: model.ratio, extent: (horizontal ? rect.width : rect.height) - 2 * gap - dividerSize, horizontal, min: minRatio, max: maxRatio };
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     event.preventDefault();
   }
@@ -25,7 +29,8 @@
     drag = null;
     if (retained.extent <= 0) return;
     const position = retained.horizontal ? event.clientX : event.clientY;
-    resize(Math.max(retained.min, Math.min(retained.max, (position - retained.start) / retained.extent)), retained.guard, retained.path);
+    if (position === retained.start) return;
+    resize(Math.max(retained.min, Math.min(retained.max, retained.ratio + (position - retained.start) / retained.extent)), retained.guard, retained.path);
   }
   function key(event: KeyboardEvent) {
     if (model.type !== "split") return;

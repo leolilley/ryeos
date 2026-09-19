@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RyeOsChromeVm, RyeOsSessionVm, RyeOsTransportVm } from "../generated";
+  import { dispatchUi } from "../runtime/context";
 
   interface Props {
     chrome: RyeOsChromeVm;
@@ -8,6 +9,7 @@
   }
 
   let { chrome, session, transport }: Props = $props();
+  const dispatch = dispatchUi();
 </script>
 
 <header class="system-bar">
@@ -24,5 +26,7 @@
   <div class="system-state">
     <span>{chrome.health_label}</span>
     <span class="transport" data-freshness={transport.freshness}>{transport.freshness}</span>
+    <button class="system-launch" onclick={() => dispatch({ type: "open_overlay", overlay_id: "views" })}>Launch</button>
+    <button class="system-commands" aria-label="Open context commands" title="Context commands" onclick={() => dispatch({ type: "open_overlay", overlay_id: "commands" })}>⌘</button>
   </div>
 </header>

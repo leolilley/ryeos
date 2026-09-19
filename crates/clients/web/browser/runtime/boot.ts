@@ -148,7 +148,7 @@ function attachBrowserEvents(wasm: RyeOsWasmApi, runtime: UiRuntime): () => void
     if (isTypingTarget(event.target)) return;
     const key = keyEvent(event);
     if (!key) return;
-    if (key.key === "enter" && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
+    if ((event.key === "Enter" || event.key === " ") && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
     let handled = false;
     runtime.commitMutation(() => {
       const outcome = wasm.ryeos_key(key);

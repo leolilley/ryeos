@@ -18,6 +18,11 @@
 .brand-mark { color: var(--accent-bright); font-size: 22px; }
 .system-context, .system-state { display: flex; align-items: center; gap: 10px; color: var(--muted); font: 10px var(--font-data); letter-spacing: .04em; }
 .system-state { justify-self: end; text-transform: uppercase; }
+.system-context { min-width: 0; }
+.system-context > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.system-launch { margin-left: 12px; padding: 5px 0 5px 20px; border-left: 1px solid var(--line); color: var(--text); font: 12px var(--font-ui); }
+.system-commands { padding: 4px 7px; border: 1px solid var(--line); color: var(--muted); }
+.system-launch:hover, .system-launch:focus-visible, .system-commands:hover, .system-commands:focus-visible { color: var(--yellow); }
 .presence { color: var(--green); font-size: 8px; }
 .separator { color: var(--faint); }
 .view-set-strip { display: flex; align-items: end; gap: 8px; padding: 0 18px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); }

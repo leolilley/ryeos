@@ -26,7 +26,7 @@
 .tile-action-menu { position: relative; letter-spacing: 0; text-transform: none; }
 .tile-action-menu summary { cursor: pointer; list-style: none; padding: 5px; font-size: 15px; }
 .tile-action-menu summary::-webkit-details-marker { display: none; }
-.tile-action-list { position: absolute; right: 0; top: 100%; z-index: 10; display: grid; min-width: 180px; padding: 4px; border: 1px solid var(--line-strong); background: var(--plane-raised); }
+.tile-action-list { position: absolute; right: 0; top: 100%; z-index: 10; display: grid; min-width: 180px; max-width: min(360px, 80vw); max-height: 50vh; overflow: auto; padding: 4px; border: 1px solid var(--line-strong); background: var(--plane-raised); }
 .tile-action-list button { padding: 9px 10px; text-align: left; color: var(--text); font: 12px var(--font-ui); }
 .tile-action-list button:hover, .tile-action-list button:focus-visible { background: var(--plane-selected); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
