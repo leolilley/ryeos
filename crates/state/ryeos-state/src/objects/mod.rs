@@ -138,7 +138,8 @@ pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
     AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
-    CredentialSubjectProjectionContract, ExecutableSearchPathEntry,
+    CredentialSubjectProjectionContract, ExecutableSearchPathEntry, SessionConfigurationFile,
+    MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
     MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
     MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES, PERSISTENT_SESSION_CAPSULE_KIND,
@@ -147,7 +148,7 @@ pub use persistent_session_capsule::{
     PortableSessionStateContract, PortableSessionStateSelector, PreparedSessionProcessEnvironment,
     SESSION_PROCESS_ENVIRONMENT_ENV, SESSION_RUNTIME_VIEWS_ROOT, SessionProcessEnvironmentPathKind,
     SessionProcessEnvironmentValue, SessionRuntimeViewDelivery, runtime_view_mount_destination,
-    validate_session_process_environment, validate_session_process_environment_name,
+    validate_session_auxiliary_configs, validate_session_process_environment, validate_session_process_environment_name,
     validate_session_process_environment_relative_path,
 };
 pub use placement_runtime_seed::{

@@ -224,9 +224,314 @@ pub enum LinuxSandboxExit {
 pub struct LinuxSandboxProcess {
     #[cfg(target_os = "linux")]
     pid: libc::pid_t,
+    /// Present only for the exact child which passed native PID-1 readiness,
+    /// never for helper/probe children. Kept private and non-serializable.
+    #[cfg(target_os = "linux")]
+    namespace_lifetime: Option<std::os::fd::OwnedFd>,
+}
+
+/// Terminal writer exclusion from an owned native sandbox namespace.
+///
+/// This is not a live freeze, a process-scope replacement or a durable recovery
+/// certificate. The trusted owner must already associate this exact process
+/// with its candidate mounts. Only then may it enumerate/export those mounts.
+/// A cloud occurrence still has its own independent cleanup obligation.
+#[derive(Debug)]
+pub struct LinuxSandboxTermination {
+    exit: LinuxSandboxExit,
+}
+
+impl LinuxSandboxTermination {
+    pub fn exit(&self) -> LinuxSandboxExit {
+        self.exit
+    }
+}
+
+/// Native target prepared through readiness, but held before exec until the
+/// exact owner releases it. Like native launch, construction changes the
+/// calling process's namespaces and belongs in a dedicated launcher process.
+/// It is not safe to call from a daemon's shared async worker.
+pub struct HeldLinuxSandboxProcess {
+    process: LinuxSandboxProcess,
+    #[cfg(target_os = "linux")]
+    release: Option<std::fs::File>,
+}
+
+/// Protected supervisor ends of candidate-only protocol pipes. They carry no
+/// activation or bootstrap material. Ends are nonblocking so a finite relay
+/// can enforce cancellation/backpressure without blocking on the candidate.
+pub struct LinuxSandboxPipes {
+    pub stdin: std::fs::File,
+    pub stdout: std::fs::File,
+    pub stderr: std::fs::File,
+}
+
+pub fn prepare_linux_sandbox_piped(
+    request: LinuxSandboxRequest,
+) -> Result<(HeldLinuxSandboxProcess, LinuxSandboxPipes), String> {
+    if !request.target_channels.is_empty() {
+        return Err("piped candidate cannot inherit extra target channels".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        fn pipe() -> Result<(std::fs::File, std::fs::File), String> {
+            let mut fds = [-1; 2];
+            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return Err(format!(
+                    "create candidate protocol pipe: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if let Err(error) = imp::relocate_internal_descriptors(
+                &mut fds,
+                &std::collections::BTreeSet::from([0, 1, 2]),
+                "candidate protocol pipe",
+            ) {
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(error);
+            }
+            Ok(unsafe {
+                (
+                    std::fs::File::from_raw_fd(fds[0]),
+                    std::fs::File::from_raw_fd(fds[1]),
+                )
+            })
+        }
+        let (input, stdin) = pipe()?;
+        let (stdout, output) = pipe()?;
+        let (stderr, error) = pipe()?;
+        for file in [&stdin, &stdout, &stderr] {
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            if flags < 0
+                || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                    < 0
+            {
+                return Err(format!(
+                    "set candidate relay nonblocking: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        let process = prepare_linux_sandbox_inner(request, Some(&[input, output, error]))?;
+        Ok((
+            process,
+            LinuxSandboxPipes {
+                stdin,
+                stdout,
+                stderr,
+            },
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("piped native sandbox is unavailable on this platform".into())
+}
+
+impl HeldLinuxSandboxProcess {
+    pub fn release_once(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write as _;
+            // Consume authority before writing: even an ambiguous write error
+            // cannot authorize a second release attempt.
+            let mut release = self
+                .release
+                .take()
+                .ok_or("native target release was already consumed")?;
+            release
+                .write_all(&[1])
+                .map_err(|error| format!("release held native target: {error}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("held native sandbox is unavailable on this platform".into())
+    }
+
+    pub fn terminate_namespace_for_export(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<LinuxSandboxTermination, String> {
+        if timeout.is_zero() || timeout > std::time::Duration::from_secs(60) {
+            return Err("sandbox termination requires a timeout within (0,60s]".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.release = None;
+        }
+        self.process.terminate_namespace_for_export(timeout)
+    }
+}
+
+/// Construct the release channel inside Lillux, never from workload parameters.
+pub fn prepare_linux_sandbox(
+    request: LinuxSandboxRequest,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    prepare_linux_sandbox_inner(request, None)
+}
+
+fn prepare_linux_sandbox_inner(
+    mut request: LinuxSandboxRequest,
+    stdio: Option<&[std::fs::File; 3]>,
+) -> Result<HeldLinuxSandboxProcess, String> {
+    if request.lifecycle != LinuxSandboxLifecycle::Run {
+        return Err("held native preparation owns its release channel".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let mut reserved = request
+            .target_channels
+            .iter()
+            .map(|(_, target)| i32::try_from(*target))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        if stdio.is_some() {
+            reserved.extend([0, 1, 2]);
+        }
+        let mut descriptors = [-1; 2];
+        if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(format!(
+                "create native release pipe: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if let Err(error) =
+            imp::relocate_internal_descriptors(&mut descriptors, &reserved, "native release pipe")
+        {
+            unsafe {
+                libc::close(descriptors[0]);
+                libc::close(descriptors[1]);
+            }
+            return Err(error);
+        }
+        // SAFETY: pipe2/relocation returned distinct newly owned descriptors.
+        let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+        let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+            release_fd: u32::try_from(reader.as_raw_fd()).map_err(|error| error.to_string())?,
+            release_keepalive_fd: u32::try_from(writer.as_raw_fd())
+                .map_err(|error| error.to_string())?,
+        };
+        let mut process = imp::launch_with_stdio(request, stdio)?;
+        // Only held execution requests the stronger terminal-export primitive.
+        // Ordinary native launch retains its existing capability floor. The
+        // child remains blocked on release while its exact lifetime is pinned.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, process.pid, 0u32) };
+        if fd < 0 {
+            return Err(format!(
+                "pin held namespace lifetime: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        process.namespace_lifetime = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
+        drop(reader);
+        Ok(HeldLinuxSandboxProcess {
+            process,
+            release: Some(writer),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = &mut request;
+        Err("held native sandbox is unavailable on this platform".into())
+    }
 }
 
 impl LinuxSandboxProcess {
+    /// End the complete namespace writer domain before terminal export.
+    ///
+    /// Native launch itself proved this child was namespace PID 1. Linux tears
+    /// down the namespace's descendants before publishing PID-1 exit. Observe
+    /// that exact pinned lifetime, then reap the owned child. No PID scan,
+    /// process-group membership, signal acknowledgement or elapsed timer can
+    /// produce the returned proof. On timeout this handle retains ownership.
+    pub fn terminate_namespace_for_export(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<LinuxSandboxTermination, String> {
+        if timeout.is_zero() || timeout > std::time::Duration::from_secs(60) {
+            return Err("sandbox termination requires a timeout within (0,60s]".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let lifetime = self
+                .namespace_lifetime
+                .as_ref()
+                .filter(|_| self.pid > 0)
+                .ok_or("sandbox handle is not a live owned namespace-init authority")?;
+            let fd = lifetime.as_raw_fd();
+            let deadline = std::time::Instant::now()
+                .checked_add(timeout)
+                .ok_or("sandbox termination deadline overflow")?;
+            let signalled = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd,
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                )
+            };
+            if signalled != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("terminate exact sandbox namespace: {error}"));
+                }
+            }
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("sandbox namespace termination remains unproved at deadline".into());
+                }
+                let mut descriptor = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let milliseconds = i32::try_from(remaining.as_millis().max(1))
+                    .map_err(|_| "sandbox termination poll bound overflow")?;
+                let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+                if ready == 0 {
+                    continue;
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(format!("observe sandbox namespace exit: {error}"));
+                }
+                if descriptor.revents & libc::POLLIN == 0 {
+                    return Err("sandbox namespace did not provide exact exit readiness".into());
+                }
+                let mut status = 0;
+                let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+                if reaped < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                    continue;
+                }
+                if reaped != self.pid {
+                    return Err("sandbox namespace exit lacks exclusive child-reap evidence".into());
+                }
+                self.pid = 0;
+                self.namespace_lifetime = None;
+                let exit = if libc::WIFEXITED(status) {
+                    LinuxSandboxExit::Code(libc::WEXITSTATUS(status))
+                } else if libc::WIFSIGNALED(status) {
+                    LinuxSandboxExit::Signal(libc::WTERMSIG(status))
+                } else {
+                    return Err("sandbox namespace has an unsupported terminal status".into());
+                };
+                return Ok(LinuxSandboxTermination { exit });
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native sandbox namespace termination is unavailable on this platform".into())
+    }
+
     pub fn child_pid(&self) -> u32 {
         #[cfg(target_os = "linux")]
         {
@@ -241,6 +546,9 @@ impl LinuxSandboxProcess {
     pub fn wait(mut self) -> Result<LinuxSandboxExit, String> {
         #[cfg(target_os = "linux")]
         {
+            if self.pid <= 0 {
+                return Err("sandbox process has already been reaped".into());
+            }
             let mut status = 0;
             loop {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
@@ -603,7 +911,14 @@ mod imp {
         Ok(available)
     }
 
-    pub fn launch(mut request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
+    pub fn launch(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio(request, None)
+    }
+
+    pub(super) fn launch_with_stdio(
+        mut request: LinuxSandboxRequest,
+        stdio: Option<&[std::fs::File; 3]>,
+    ) -> Result<LinuxSandboxProcess, String> {
         validate_request(&request)?;
         if request.aggregate_limits.is_some() {
             return Err(
@@ -703,7 +1018,7 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request)
+        spawn_target(request, stdio)
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -2180,17 +2495,23 @@ mod imp {
         Ok(())
     }
 
-    fn spawn_target(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
+    fn spawn_target(
+        request: LinuxSandboxRequest,
+        stdio: Option<&[std::fs::File; 3]>,
+    ) -> Result<LinuxSandboxProcess, String> {
         let mut ready = [0; 2];
         syscall_zero(
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
             "create sandbox readiness pipe",
         )?;
-        let reserved_target_descriptors = request
+        let mut reserved_target_descriptors = request
             .target_channels
             .iter()
             .map(|(_, target)| raw_fd(*target))
             .collect::<Result<BTreeSet<_>, _>>()?;
+        if stdio.is_some() {
+            reserved_target_descriptors.extend([0, 1, 2]);
+        }
         if let Err(error) = relocate_internal_descriptors(
             &mut ready,
             &reserved_target_descriptors,
@@ -2211,7 +2532,7 @@ mod imp {
         }
         if pid == 0 {
             close_fd(ready[0]);
-            let outcome = child_target_main(&request, ready[1]);
+            let outcome = child_target_main(&request, ready[1], stdio);
             if let Err(error) = outcome {
                 let _ = write_child_error(ready[1], &error);
             }
@@ -2227,10 +2548,17 @@ mod imp {
             }
             return Err(error);
         }
-        Ok(LinuxSandboxProcess { pid })
+        Ok(LinuxSandboxProcess {
+            pid,
+            namespace_lifetime: None,
+        })
     }
 
-    fn child_target_main(request: &LinuxSandboxRequest, ready_fd: RawFd) -> Result<(), String> {
+    fn child_target_main(
+        request: &LinuxSandboxRequest,
+        ready_fd: RawFd,
+        stdio: Option<&[std::fs::File; 3]>,
+    ) -> Result<(), String> {
         if unsafe { libc::getpid() } != 1 {
             return Err("sandbox target is not PID 1 in its isolated namespace".to_string());
         }
@@ -2249,6 +2577,12 @@ mod imp {
             detach_nested_target_terminal()?;
         }
         let mut mapped_channels = Vec::with_capacity(request.target_channels.len());
+        if let Some(stdio) = stdio {
+            use std::os::fd::AsRawFd as _;
+            for (target, source) in stdio.iter().enumerate() {
+                place_target_channel(source.as_raw_fd(), target as RawFd)?;
+            }
+        }
         for (source, target) in &request.target_channels {
             let source = raw_fd(*source)?;
             let target = RawFd::try_from(*target)
@@ -3608,7 +3942,7 @@ mod imp {
     /// coordinate before fork. Target remapping may deliberately replace fd 0
     /// or any descriptor above stderr; an internal readiness pipe must never
     /// silently occupy one of those signed destinations.
-    fn relocate_internal_descriptors(
+    pub(super) fn relocate_internal_descriptors(
         descriptors: &mut [RawFd],
         reserved: &BTreeSet<RawFd>,
         label: &str,
@@ -4156,6 +4490,54 @@ mod imp {
             let Ok(stage) = std::env::var("LILLUX_PROC_EXEC_PROBE") else {
                 return;
             };
+            if stage == "terminal-writer" {
+                use std::io::{Read as _, Write as _};
+                let mut input = [0_u8; 15];
+                std::io::stdin().read_exact(&mut input).unwrap();
+                assert_eq!(&input, b"candidate-input");
+                std::io::stdout().write_all(b"candidate-output\n").unwrap();
+                std::io::stdout().flush().unwrap();
+                let mut descendant = std::process::Command::new("/probe")
+                    .args([
+                        "--exact",
+                        "sandbox::imp::namespace_source_tests::pid_proc_after_exec_target",
+                        "--nocapture",
+                    ])
+                    .env("LILLUX_PROC_EXEC_PROBE", "descendant-writer")
+                    .spawn()
+                    .unwrap();
+                // Namespace termination must include this writer, not merely
+                // the process which owns the returned launch handle.
+                let status = descendant.wait().unwrap();
+                panic!("descendant exited before namespace termination: {status}");
+            }
+            if stage == "descendant-writer" {
+                if std::env::var_os("LILLUX_PROBE_NESTED").is_some() {
+                    assert!(unsafe { libc::setsid() } > 0);
+                    enter_mapped_user_namespace().unwrap();
+                    syscall_zero(
+                        unsafe { libc::unshare(libc::CLONE_NEWPID) },
+                        "terminal test nested PID namespace",
+                    )
+                    .unwrap();
+                    let child = unsafe { libc::fork() };
+                    assert!(child >= 0);
+                    if child > 0 {
+                        let mut status = 0;
+                        unsafe {
+                            libc::waitpid(child, &mut status, 0);
+                        }
+                        panic!("nested namespace writer exited before outer termination");
+                    }
+                    assert_eq!(unsafe { libc::getpid() }, 1);
+                }
+                for counter in 0_u64.. {
+                    std::fs::write("/work/writer", counter.to_le_bytes()).unwrap();
+                    std::fs::write("/work/writer-ready", b"ready").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                unreachable!();
+            }
             if stage == "child" {
                 // Check before this target opens any files. The parent made
                 // this exact directory descriptor inheritable deliberately;
@@ -4586,6 +4968,22 @@ mod imp {
         #[test]
         #[ignore = "executes the test harness in real Linux namespaces"]
         fn pid_proc_supports_exact_realized_and_sealed_executable_after_exec() {
+            exercise_native_proc(false, false);
+        }
+
+        #[test]
+        #[ignore = "requires real native sandbox namespaces and pidfd support"]
+        fn native_namespace_terminal_export_excludes_descendant_writers() {
+            exercise_native_proc(true, true);
+        }
+
+        #[test]
+        #[ignore = "requires real native sandbox namespaces and pidfd support"]
+        fn native_namespace_terminal_export_cancels_before_release() {
+            exercise_native_proc(true, false);
+        }
+
+        fn exercise_native_proc(terminal_export: bool, release_target: bool) {
             let executable = std::env::current_exe().unwrap();
             // Test-only inventory of this harness's exact loader/library
             // mappings. No host directory or PATH is exposed to the target.
@@ -4763,7 +5161,94 @@ mod imp {
                 let pid = unsafe { libc::fork() };
                 assert!(pid >= 0);
                 if pid == 0 {
-                    let result = launch(request).and_then(LinuxSandboxProcess::wait);
+                    if terminal_export {
+                        request.environment.insert(
+                            OsString::from("LILLUX_PROC_EXEC_PROBE"),
+                            OsString::from("terminal-writer"),
+                        );
+                    }
+                    let result = (|| {
+                        if !terminal_export {
+                            return launch(request).and_then(LinuxSandboxProcess::wait);
+                        }
+                        // Missing ambient stdio must not let internal release
+                        // or readiness authority be allocated at fds 0..2.
+                        if sealed {
+                            unsafe {
+                                libc::close(0);
+                                libc::close(1);
+                                libc::close(2);
+                            }
+                        }
+                        request.target_channels.clear();
+                        let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
+                        use std::io::{Read as _, Write as _};
+                        pipes
+                            .stdin
+                            .write_all(b"candidate-input")
+                            .map_err(|error| error.to_string())?;
+                        let view = writable_fixture.path().join("view");
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if view.join("writer-ready").exists() {
+                            return Err("held native target executed before release".into());
+                        }
+                        if !release_target {
+                            process.terminate_namespace_for_export(
+                                std::time::Duration::from_secs(5),
+                            )?;
+                            if view.join("writer-ready").exists() || process.release_once().is_ok()
+                            {
+                                return Err(
+                                    "cancelled held target retained release authority".into()
+                                );
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
+                        }
+                        if process
+                            .terminate_namespace_for_export(std::time::Duration::ZERO)
+                            .is_ok()
+                        {
+                            return Err("invalid deadline produced terminal proof".into());
+                        }
+                        process.release_once()?;
+                        if process.release_once().is_ok() {
+                            return Err("native release was not single use".into());
+                        }
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while !view.join("writer-ready").exists() {
+                            if std::time::Instant::now() >= deadline {
+                                return Err("descendant writer did not become ready".into());
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        let proof = process
+                            .terminate_namespace_for_export(std::time::Duration::from_secs(5))?;
+                        let mut output = String::new();
+                        pipes
+                            .stdout
+                            .read_to_string(&mut output)
+                            .map_err(|error| error.to_string())?;
+                        if !output.contains("candidate-output") {
+                            return Err("candidate output escaped its exact protocol pipe".into());
+                        }
+                        if proof.exit() != LinuxSandboxExit::Signal(libc::SIGKILL) {
+                            return Err("namespace init did not terminate by exact signal".into());
+                        }
+                        let before = std::fs::read(view.join("writer"))
+                            .map_err(|error| error.to_string())?;
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let after = std::fs::read(view.join("writer"))
+                            .map_err(|error| error.to_string())?;
+                        if before != after
+                            || process
+                                .terminate_namespace_for_export(std::time::Duration::from_secs(1))
+                                .is_ok()
+                        {
+                            return Err("terminal writer exclusion was not single-use".into());
+                        }
+                        Ok(LinuxSandboxExit::Code(0))
+                    })();
                     if let Err(error) = &result {
                         eprintln!("proc exec qualification: {error}");
                     }
@@ -4937,6 +5422,34 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd as _;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn terminal_export_rejects_unowned_handles_and_invalid_deadlines() {
+        let mut process = LinuxSandboxProcess {
+            pid: 0,
+            namespace_lifetime: None,
+        };
+        for timeout in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(61),
+        ] {
+            assert!(
+                process
+                    .terminate_namespace_for_export(timeout)
+                    .unwrap_err()
+                    .contains("timeout")
+            );
+        }
+        assert!(
+            process
+                .terminate_namespace_for_export(std::time::Duration::from_secs(1))
+                .unwrap_err()
+                .contains("namespace-init authority")
+        );
+        // waitpid(0, ...) would wait for unrelated process-group children.
+        assert!(process.wait().unwrap_err().contains("already been reaped"));
+    }
 
     pub(super) fn minimal_request() -> LinuxSandboxRequest {
         LinuxSandboxRequest {

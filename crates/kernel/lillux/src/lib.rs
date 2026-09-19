@@ -39,6 +39,9 @@ pub use exec::{
     validate_subprocess_limits,
 };
 pub use exec::{retain_fork_sensitive_descriptors, retain_fork_sensitive_descriptors_until};
+pub use sandbox::{
+    HeldLinuxSandboxProcess, LinuxSandboxPipes, prepare_linux_sandbox, prepare_linux_sandbox_piped,
+};
 
 pub use atomic_fs::{
     AtomicMutationError, AtomicMutationResult, atomic_exchange_paths, atomic_write,
@@ -106,7 +109,7 @@ pub use sandbox::{
     LinuxSandboxCharacterDevice, LinuxSandboxExit, LinuxSandboxFixedParentView,
     LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount, LinuxSandboxMountAccess,
     LinuxSandboxNetwork, LinuxSandboxOverlay, LinuxSandboxOverlayDescendantMount,
-    LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest,
+    LinuxSandboxProcFilesystem, LinuxSandboxProcess, LinuxSandboxRequest, LinuxSandboxTermination,
     create_linux_overlay_template, exit_with_linux_sandbox_status, inspect_linux_sandbox,
     launch_linux_sandbox, operate_linux_overlay_workspace, read_sealed_inherited_descriptor,
     validate_connected_unix_stream_descriptor, validate_current_executable_descriptor,

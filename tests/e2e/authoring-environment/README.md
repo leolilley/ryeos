@@ -1,5 +1,82 @@
 # Authoring environment qualification
 
+## External execution routing checkpoint — 2026-09-19
+
+`probe_pinned_codex_external_execution.py` drives the exact pinned Codex App
+Server with a credential-free scripted Responses endpoint and an actual pinned
+exec-server. Two separate bwrap filesystem views give the same `/workspace`
+path different contents. This is an external diagnostic, not an installed RyeOS
+worker, Render deployment, authenticated channel or Lillux qualification.
+
+```sh
+python3 -B tests/e2e/authoring-environment/probe_pinned_codex_external_execution.py \
+  --package /absolute/path/to/extracted/authored-codex-package
+python3 -B -m unittest discover -s tests/e2e/authoring-environment \
+  -p test_external_execution_probe.py
+```
+
+The probe verifies all five executable artifacts against the existing activation
+declaration, uses fresh empty profiles, mounts no host home or credentials, and
+starts no paid model or RyeOS daemon. It needs Linux user/mount/PID namespaces
+and loopback sockets. The host's explicitly mounted utilities are fixture
+dependencies, not an admitted production runtime. The namespace views share
+the host network for the loopback endpoints: **this does not qualify egress
+restriction**. Files, processes and listeners are disposed on exit; diagnostic
+stdout and protocol input have finite bounds and protocol waits have deadlines.
+
+`pinned-codex-external-routing.json` records the successful checkpoint:
+
+- Actual shell, patch, image, symlink reads and interactive stdin used the
+  external view; the controller workspace stayed unchanged.
+- A synthetic secret in the controller's profile did not reach tool output.
+- Read-only configuration overlays refused direct write and unlink attempts;
+  the exact environment inventory overrode a conflicting ambient execution URL.
+- Explicit `environment_id: local` was refused when local was not configured.
+- Killing the executor produced an explicit failure without local execution.
+  The pinned client first attempted recovery for 25 seconds. The fixture's
+  40-second observation deadline accommodates that existing protocol behavior;
+  it neither adds production retries nor grants permission to replay a command.
+
+The fixture uses `gpt-5.5` **embedded tool metadata**, not a real model call.
+The custom loopback provider is diagnostic-only and does not change production
+subscription authentication. Official App Server/configuration documentation
+guided the fixture; exact protocol behavior is tested against pinned 0.147.0.
+
+This establishes the narrow tool-routing mechanism, not full tool/authority
+closure. Candidate-controlled discovery/hooks, all
+registered tool paths, enforced egress, occurrence authentication, authoritative
+writer exclusion, frozen export and durable RyeOS restart remain open. Do not
+activate the current authoring profile by simply adding an execution URL. A
+mutable `environments.toml` can override that URL; the production binding and
+effective configuration must be owned and protected by the runtime.
+
+### Production configuration work in progress
+
+The implementation branch adds required `auxiliary_configs` to structured
+session profile v7 and retained persistent-session capsule v12. Each entry names
+one signed source file and one flat destination in the existing locked profile
+home. Destinations are sorted/unique, cannot replace the primary baseline, and
+are limited to 16 files of at most 64 KiB each. Primary baseline admission now
+uses that same existing launch-time byte limit.
+
+Admission and recovery refuse nonempty auxiliary inventories without enforced
+read-only isolation. The executor uses pinned source descriptors for overlays;
+the bridge verifies exact bytes before starting the provider. Where portable
+state is supported, exact forbidden selectors reserve configuration names and
+potential portable-session overlap is rejected. Empty inventories remain
+explicit in every current bundle profile; no external authoring profile is
+activated by these changes.
+
+Rust regression tests are authored but **not compiled or run** under the
+operator's no-Cargo instruction. Syntax parsing and Python source-contract
+tests do not establish Rust type correctness, bundle binary coherence or
+installed admission. A focused operator build and bundle refresh are required
+before merging/qualification. The subordinate allocation journal and native
+terminal writer-exclusion primitive now have source implementations; neither
+has Rust/native qualification yet. See
+[external execution qualification](../external-execution/README.md) for the
+exact checkpoint, operator tests and missing lifecycle/channel/export work.
+
 ## Hosted integration checkpoint — 2026-09-09
 
 `hosted-worker-qualification.json` records partial installed two-node evidence,

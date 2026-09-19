@@ -15,6 +15,7 @@ pub mod capability;
 pub mod chain;
 pub mod event_types;
 pub mod external_content;
+pub mod external_execution;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;

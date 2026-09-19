@@ -10,6 +10,8 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod external_execution;
+
 use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
 use crate::process::{
     ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION,
@@ -1698,7 +1700,9 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}"
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}",
+        external_execution::GUARD_SQL,
+        external_execution::JOURNAL_SQL,
     )
 }
 
@@ -2379,7 +2383,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // resource-bearing launch retains an exact Lillux scope allocation and the
 // selected resource set, then atomically converts that reservation into the
 // durable process owner on attachment.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 39;
+// Epoch 40 retains subordinate external allocation obligations and their
+// stable predecode reset guard. Controller death cannot settle these owners.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 40;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2392,6 +2398,217 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
         application_id: RUNTIME_APP_ID,
         tables: &[
+            sqlite_schema::TableSpec {
+                name: "external_execution_import",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "evidence_blob_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completion_request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "export_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_channel",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completion_request_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "export_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "export_evidence_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_frame",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "direction",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sequence",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "ordinal",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frame_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frame_bytes",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "acknowledged_peer_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "application",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_guard",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "singleton",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "schema_version",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "unsettled",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_allocation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "capacity_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reservation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "occurrence_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
             sqlite_schema::TableSpec {
                 name: "execution_lifetime_fence",
                 columns: &[
@@ -4206,6 +4423,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
+                name: "idx_external_execution_capacity",
+                table: "external_execution_allocation",
+                columns: &["capacity_owner", "phase"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_thread_runtime_chain_root",
                 table: "thread_runtime",
                 columns: &["chain_root_id"],
@@ -4710,6 +4933,8 @@ fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::Process
 }
 
 fn ensure_scope_lifetime_resettable(conn: &Connection, stored_epoch: u32) -> Result<()> {
+    // Independent of host lifetime: remote execution can survive its owner.
+    external_execution::ensure_resettable(conn, stored_epoch)?;
     // The coarse owner starts with the first scope-capable runtime cut. Older
     // owned epochs could not allocate these resources; never decode their
     // execution rows. Every epoch from this cut onward requires the witness,
@@ -4745,6 +4970,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         return Err(incompatible_runtime_operator_schema(stored_epoch));
     }
     assert_current_runtime_schema(&tx, path)?;
+    external_execution::validate_current(&tx)?;
     read_scope_lifetime_fence(&tx)?;
     let rows = {
         let mut statement = tx.prepare(

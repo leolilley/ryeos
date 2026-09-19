@@ -27,6 +27,56 @@ pub fn ingest_project_tree_with_operational_exclusions(
     policy: &ProjectSnapshotPolicy,
     operational_exclusions: &[String],
 ) -> Result<ProjectTree> {
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        operational_exclusions,
+        None,
+    )
+}
+
+/// Byte and monotonic-time bounds for a captured candidate. Checks include
+/// directory traversal, streamed file ingestion and final tree construction.
+/// Kernel I/O stalls still require the supervisor's independent lifetime bound.
+#[derive(Clone, Copy)]
+pub struct ProjectCaptureBudget {
+    pub max_bytes: u64,
+    pub deadline: std::time::Instant,
+}
+
+impl ProjectCaptureBudget {
+    fn check(&self) -> Result<()> {
+        anyhow::ensure!(
+            std::time::Instant::now() < self.deadline,
+            "project capture deadline expired"
+        );
+        Ok(())
+    }
+}
+
+pub fn ingest_project_tree_bounded(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    budget: ProjectCaptureBudget,
+) -> Result<ProjectTree> {
+    ingest_project_tree_inner(authority, guard, project_root, policy, &[], Some(budget))
+}
+
+fn ingest_project_tree_inner(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    operational_exclusions: &[String],
+    budget: Option<ProjectCaptureBudget>,
+) -> Result<ProjectTree> {
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
     authority.ensure_guard(guard)?;
     policy.validate()?;
     validate_operational_exclusions(operational_exclusions)?;
@@ -34,12 +84,16 @@ pub fn ingest_project_tree_with_operational_exclusions(
     let cas = authority.cas_store()?;
     let mut files = std::collections::BTreeMap::new();
     let mut descriptor_bytes = 0_u64;
+    let mut content_bytes = 0_u64;
     project_root.visit_regular_files_bounded(
         lillux::DirectoryTraversalBudget::new(
             ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
             ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
         ),
         |relative, is_directory| {
+            if let Some(budget) = budget {
+                budget.check()?;
+            }
             let rel = canonical_relative_path(relative)?;
             if is_operationally_excluded(&rel, operational_exclusions)
                 || ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
@@ -57,6 +111,9 @@ pub fn ingest_project_tree_with_operational_exclusions(
             Ok(false)
         },
         |relative, file| {
+            if let Some(budget) = budget {
+                budget.check()?;
+            }
             if files.len() >= ryeos_state::project_sync::MAX_PROJECT_TREE_FILES {
                 anyhow::bail!(
                     "project capture exceeds {} regular files",
@@ -69,8 +126,22 @@ pub fn ingest_project_tree_with_operational_exclusions(
                 policy.sync_scope,
                 Some(&matcher),
             )?;
-            let streamed =
-                cas.put_blob_from_open_regular(file, &project_root.path().join(relative))?;
+            let streamed = if let Some(budget) = budget {
+                cas.put_blob_from_open_regular_with_deadline(
+                    file,
+                    &project_root.path().join(relative),
+                    budget
+                        .max_bytes
+                        .checked_sub(content_bytes)
+                        .ok_or_else(|| anyhow::anyhow!("capture byte budget exhausted"))?,
+                    budget.deadline,
+                )?
+            } else {
+                cas.put_blob_from_open_regular(file, &project_root.path().join(relative))?
+            };
+            content_bytes = content_bytes
+                .checked_add(streamed.size)
+                .ok_or_else(|| anyhow::anyhow!("project capture content byte overflow"))?;
             let project_file = ProjectFile {
                 blob_hash: streamed.hash,
                 size: streamed.size,
@@ -99,6 +170,9 @@ pub fn ingest_project_tree_with_operational_exclusions(
     )?;
     let tree = ProjectTree { files };
     ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    if let Some(budget) = budget {
+        budget.check()?;
+    }
     Ok(tree)
 }
 
@@ -324,6 +398,49 @@ mod tests {
         .unwrap();
         let tree =
             ingest_project_tree(&authority, &guard, &project_root, &snapshot_policy).unwrap();
+
+        let budget = super::ProjectCaptureBudget {
+            max_bytes: 1024,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        };
+        assert_eq!(
+            super::ingest_project_tree_bounded(
+                &authority,
+                &guard,
+                &project_root,
+                &snapshot_policy,
+                budget
+            )
+            .unwrap()
+            .files,
+            tree.files
+        );
+        assert!(
+            super::ingest_project_tree_bounded(
+                &authority,
+                &guard,
+                &project_root,
+                &snapshot_policy,
+                super::ProjectCaptureBudget {
+                    max_bytes: 1,
+                    ..budget
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            super::ingest_project_tree_bounded(
+                &authority,
+                &guard,
+                &project_root,
+                &snapshot_policy,
+                super::ProjectCaptureBudget {
+                    deadline: std::time::Instant::now(),
+                    ..budget
+                }
+            )
+            .is_err()
+        );
 
         assert_eq!(
             tree.files.keys().cloned().collect::<Vec<_>>(),

@@ -25,7 +25,9 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // v11 places enforced typed-entry session source in the execution runtime,
 // not the project namespace. Do not recover an older capsule with changed
 // workload-visible source paths and project-shadow semantics.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 11;
+// v12 retains the complete signed auxiliary configuration inventory. A prior
+// capsule cannot authorize preparing these additional profile-home files.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 12;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -167,6 +169,33 @@ pub struct PortableSessionStateContract {
 }
 
 impl PortableSessionStateContract {
+    /// Configuration is restored from signed source, never from a portable
+    /// session attachment or a rebuildable cache classification.
+    pub fn validate_configuration_exclusions(
+        &self,
+        configs: &[SessionConfigurationFile],
+    ) -> anyhow::Result<()> {
+        for config in configs {
+            if !self.selectors.iter().any(|selector| {
+                selector.pattern == config.destination
+                    && selector.class == PortableSessionStateClass::ForbiddenOrUnknown
+            }) {
+                anyhow::bail!("auxiliary configuration requires an exact forbidden portable-state selector");
+            }
+            for selector in &self.selectors {
+                // '*' stands for any safe session identity here. The selector
+                // matcher is used only to detect potential overlap, not to
+                // select or restore a real session.
+                if selector.class == PortableSessionStateClass::PortableSessionState
+                    && super::portable_state_selector_matches(selector, &config.destination, "*")?
+                {
+                    anyhow::bail!("auxiliary configuration overlaps portable session state");
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != 1
             || self.restore_contract != "ryeos.worker_session.restore.v1"
@@ -837,6 +866,56 @@ impl AdmittedPersistentSessionCapsule {
     }
 }
 
+/// One immutable configuration file in the admitted worker source closure.
+/// Destinations are flat names in the exclusively held workload profile home;
+/// they are not arbitrary filesystem write authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfigurationFile {
+    pub source: String,
+    pub destination: String,
+}
+
+pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
+pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
+
+impl SessionConfigurationFile {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for value in [&self.source, &self.destination] {
+            if value.is_empty()
+                || value.len() > 128
+                || matches!(value.as_str(), "." | "..")
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                })
+            {
+                anyhow::bail!("session configuration must use bounded relative file names");
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_session_auxiliary_configs(
+    baseline_destination: &str,
+    configs: &[SessionConfigurationFile],
+) -> anyhow::Result<()> {
+    if configs.len() > MAX_SESSION_AUXILIARY_CONFIGS {
+        anyhow::bail!("session auxiliary configuration inventory exceeds its bound");
+    }
+    let mut previous: Option<&str> = None;
+    for config in configs {
+        config.validate()?;
+        if config.destination == baseline_destination
+            || previous.is_some_and(|prior| prior >= config.destination.as_str())
+        {
+            anyhow::bail!("session auxiliary destinations must be sorted, unique and distinct from the baseline");
+        }
+        previous = Some(&config.destination);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedStructuredSessionProfile {
@@ -847,6 +926,7 @@ pub struct AdmittedStructuredSessionProfile {
     pub schema_hashes: std::collections::BTreeMap<String, String>,
     pub baseline_source: String,
     pub baseline_destination: String,
+    pub auxiliary_configs: Vec<SessionConfigurationFile>,
 }
 
 impl AdmittedStructuredSessionProfile {
@@ -862,9 +942,18 @@ impl AdmittedStructuredSessionProfile {
         if contract.is_empty() {
             anyhow::bail!("structured-session contract is empty");
         }
-        self.portable_state_contract()?
-            .map(|contract| contract.validate())
-            .transpose()?;
+        let declared: Vec<SessionConfigurationFile> = serde_json::from_value(
+            contract.get("auxiliary_configs").cloned().ok_or_else(|| {
+                anyhow::anyhow!("structured-session auxiliary configuration inventory is missing")
+            })?,
+        )?;
+        if declared != self.auxiliary_configs {
+            anyhow::bail!("structured-session auxiliary configuration contradicts its contract");
+        }
+        validate_session_auxiliary_configs(&self.baseline_destination, &self.auxiliary_configs)?;
+        if let Some(contract) = self.portable_state_contract()? {
+            contract.validate_configuration_exclusions(&self.auxiliary_configs)?;
+        }
         self.credential_subject_contract()?
             .map(|contract| contract.validate())
             .transpose()?;
@@ -948,6 +1037,63 @@ impl AdmittedStructuredSessionProfile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auxiliary_configuration_inventory_is_closed_and_bounded() {
+        use super::*;
+        let file = SessionConfigurationFile {
+            source: "admitted.conf".into(),
+            destination: "runtime.conf".into(),
+        };
+        validate_session_auxiliary_configs("baseline.conf", &[file.clone()]).unwrap();
+        for invalid in ["", ".", "..", "/runtime", "dir/file", "file/", "file\\name", "a\0b"] {
+            let mut bad = file.clone();
+            bad.destination = invalid.into();
+            assert!(validate_session_auxiliary_configs("baseline.conf", &[bad]).is_err());
+        }
+        assert!(validate_session_auxiliary_configs("runtime.conf", &[file.clone()]).is_err());
+        assert!(validate_session_auxiliary_configs("baseline.conf", &[file.clone(), file.clone()]).is_err());
+        assert!(validate_session_auxiliary_configs("baseline.conf", &vec![file; MAX_SESSION_AUXILIARY_CONFIGS + 1]).is_err());
+        assert!(serde_json::from_value::<SessionConfigurationFile>(
+            serde_json::json!({"source":"a", "destination":"b", "optional":true})
+        ).is_err());
+    }
+
+    #[test]
+    fn auxiliary_configuration_cannot_be_restored_as_session_state() {
+        use super::*;
+        let configs = vec![SessionConfigurationFile {
+            source: "signed.conf".into(), destination: "environment.conf".into(),
+        }];
+        let mut contract = PortableSessionStateContract {
+            schema: 1,
+            restore_contract: "ryeos.worker_session.restore.v1".into(),
+            max_depth: 8, max_entries: 8,
+            max_file_bytes: 1024, max_total_bytes: 2048,
+            selectors: vec![
+                PortableSessionStateSelector {
+                    pattern: "environment.conf".into(),
+                    class: PortableSessionStateClass::ForbiddenOrUnknown, max_matches: 1,
+                },
+                PortableSessionStateSelector {
+                    pattern: "sessions/{session_id}.json".into(),
+                    class: PortableSessionStateClass::PortableSessionState, max_matches: 1,
+                },
+            ],
+        };
+        contract.validate().unwrap();
+        contract.validate_configuration_exclusions(&configs).unwrap();
+        for class in [
+            PortableSessionStateClass::NodePrivateCredentialState,
+            PortableSessionStateClass::RebuildableCache,
+        ] {
+            contract.selectors[0].class = class;
+            assert!(contract.validate_configuration_exclusions(&configs).is_err());
+        }
+        contract.selectors[0].class = PortableSessionStateClass::ForbiddenOrUnknown;
+        contract.selectors[1].pattern = "{session_id}.conf".into();
+        assert!(contract.validate_configuration_exclusions(&configs).is_err());
+    }
+
     #[test]
     fn prepared_session_environment_requires_exact_runtime_view_delivery() {
         use super::*;

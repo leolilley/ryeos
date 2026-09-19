@@ -13775,6 +13775,27 @@ impl StateStore {
         Ok(())
     }
 
+    /// Content-only retention under the existing write/CAS guard owner. The
+    /// caller must keep its assembly guard until this transaction commits.
+    pub fn retain_external_candidate_import(
+        &self,
+        placement: &str,
+        imported: &ryeos_state::external_execution::export::ImportedCandidateContent,
+    ) -> Result<()> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db.retain_external_candidate_import(
+            placement,
+            imported,
+            &self.state_authority,
+            permit.cas_guard(),
+        )
+    }
+
+    pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.external_execution_blob_roots()
+    }
+
     /// Immutable project snapshots required by active or queued runtimes.
     ///
     /// These runtime-DB references are not signed CAS heads, so online GC must
@@ -13826,6 +13847,7 @@ impl StateStore {
         }
         roots.extend(g.runtime_db.retained_candidate_snapshot_roots()?);
         roots.extend(g.runtime_db.runtime_child_cas_object_roots()?);
+        roots.extend(g.runtime_db.external_execution_cas_roots()?);
         Ok(roots.into_iter().collect())
     }
 

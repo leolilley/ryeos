@@ -193,6 +193,7 @@ struct StructuredSessionProfile {
     workload_client: Option<StructuredSessionWorkloadClient>,
     baseline_config: String,
     baseline_destination: String,
+    auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
@@ -593,6 +594,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
     validate_workload_executable_member(&profile.workload_executable)?;
     if let Some(contract) = &profile.portable_state {
         contract.validate()?;
+        contract.validate_configuration_exclusions(&profile.auxiliary_configs)?;
     }
     if let Some(contract) = &profile.credential_subject {
         contract.validate()?;
@@ -600,6 +602,10 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
     file_name(
         "structured-session baseline destination",
         &profile.baseline_destination,
+    )?;
+    ryeos_state::objects::validate_session_auxiliary_configs(
+        &profile.baseline_destination,
+        &profile.auxiliary_configs,
     )?;
     if profile.workload_args.len() > 64
         || profile
@@ -1001,6 +1007,16 @@ fn run() -> Result<()> {
         &baseline_config,
         &profile.baseline_destination,
     )?;
+    for config in &profile.auxiliary_configs {
+        verify_compatibility_baseline_config(
+            std::path::Path::new(&workload_home),
+            &profile_path
+                .parent()
+                .ok_or_else(|| anyhow!("structured-session profile has no parent"))?
+                .join(&config.source),
+            &config.destination,
+        )?;
+    }
     let schemas = load_profile_schemas(
         profile_path
             .parent()
@@ -1429,9 +1445,10 @@ fn verify_compatibility_baseline_config(
     source: &std::path::Path,
     destination_name: &str,
 ) -> Result<()> {
-    let admitted = lillux::read_regular_file_bounded_no_follow(source, 64 * 1024)
+    let byte_limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, byte_limit)
         .context("read admitted structured-session baseline config through Lillux")?;
-    if admitted.is_empty() || admitted.len() > 64 * 1024 {
+    if admitted.is_empty() || admitted.len() > byte_limit {
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
     }
     let home = lillux::PinnedDirectory::open(workload_home)?
@@ -1441,7 +1458,7 @@ fn verify_compatibility_baseline_config(
         .open_pinned_regular(destination_name, false)
         .context("open daemon-prepared compatibility seed through Lillux")?
         .ok_or_else(|| anyhow!("daemon-prepared compatibility seed is missing"))?;
-    if incumbent.read_bounded(64 * 1024)? != admitted {
+    if incumbent.read_bounded(byte_limit)? != admitted {
         bail!("daemon-prepared compatibility seed differs from the admitted baseline");
     }
     Ok(())
@@ -4420,6 +4437,7 @@ mod tests {
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"config.toml",
+            "auxiliary_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
@@ -4896,6 +4914,7 @@ server.serve_forever()
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"fixture.conf",
+            "auxiliary_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],

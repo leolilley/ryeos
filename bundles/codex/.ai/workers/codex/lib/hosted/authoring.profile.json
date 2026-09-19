@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "transport": "stdio_jsonrpc",
   "http_sse": null,
   "configuration_authority": "immutable_argv",
@@ -155,6 +155,7 @@
   },
   "baseline_config": "authoring.config.toml",
   "baseline_destination": "config.toml",
+  "auxiliary_configs": [],
   "portable_state": {
     "schema": 1,
     "restore_contract": "ryeos.worker_session.restore.v1",

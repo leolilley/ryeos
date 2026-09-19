@@ -2215,6 +2215,9 @@ fn admit_session_capsule(
         })?;
         let profile =
             ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)?;
+        if !profile.auxiliary_configs.is_empty() && !state.isolation.is_enforced() {
+            bail!("signed auxiliary session configuration requires enforced read-only isolation");
+        }
         validate_required_session_environment(&profile, environment)?;
         Some(profile)
     } else {
@@ -3011,28 +3014,45 @@ fn prepare_structured_session_baseline(
     state_root: &Path,
     enforced: bool,
 ) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
-    // The profile compiler resolves baseline_source relative to the captured
+    prepare_structured_session_configuration_file(
+        &profile.baseline_source,
+        &profile.baseline_destination,
+        source_directory,
+        state_root,
+        enforced,
+    )
+}
+
+fn prepare_structured_session_configuration_file(
+    source: &str,
+    destination: &str,
+    source_directory: &lillux::PinnedDirectory,
+    state_root: &Path,
+    enforced: bool,
+) -> Result<Option<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
+    // The profile compiler resolves source relative to the captured
     // source manifest root. The worker-visible mount/entry path is not an
-    // ambient daemon path, nor an authority for reopening the baseline.
+    // ambient daemon path, nor an authority for reopening configuration.
+    let byte_limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
     let source_file = source_directory
-        .open_pinned_regular_descendant(Path::new(&profile.baseline_source), false)?
-        .ok_or_else(|| anyhow!("admitted structured-session baseline is missing"))?;
-    let bytes = source_file.read_bounded(64 * 1024)?;
+        .open_pinned_regular_descendant(Path::new(source), false)?
+        .ok_or_else(|| anyhow!("admitted structured-session configuration is missing"))?;
+    let bytes = source_file.read_bounded(byte_limit)?;
     if bytes.is_empty() {
-        bail!("admitted structured-session baseline is empty");
+        bail!("admitted structured-session configuration is empty");
     }
 
     let state_directory = lillux::PinnedDirectory::open(state_root)?
         .ok_or_else(|| anyhow!("structured-session state root is missing"))?;
-    let destination_name = std::ffi::OsStr::new(&profile.baseline_destination);
+    let destination_name = std::ffi::OsStr::new(destination);
     let incumbent = state_directory
         .open_pinned_regular(destination_name, false)
-        .context("open workload compatibility seed through Lillux")?;
+        .context("open workload configuration through Lillux")?;
     let current_matches = incumbent
         .as_ref()
         .map(|entry| {
             Ok::<bool, anyhow::Error>(
-                entry.permission_mode()? == 0o400 && entry.read_bounded(64 * 1024)? == bytes,
+                entry.permission_mode()? == 0o400 && entry.read_bounded(byte_limit)? == bytes,
             )
         })
         .transpose()?
@@ -3040,13 +3060,13 @@ fn prepare_structured_session_baseline(
     if !current_matches {
         state_directory
             .atomic_write_pinned_if_same(destination_name, incumbent.as_ref(), &bytes, 0o400)
-            .context("publish workload compatibility seed through Lillux")?;
+            .context("publish workload configuration through Lillux")?;
     }
     if !enforced {
         return Ok(None);
     }
     let source_path = source_file.path().to_path_buf();
-    let destination = state_root.join(&profile.baseline_destination);
+    let destination = state_root.join(destination);
     let source_descriptor = source_file.inherited_descriptor_authority()?;
     Ok(Some(
         ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_state_overlay(
@@ -3055,6 +3075,41 @@ fn prepare_structured_session_baseline(
             source_descriptor,
         ),
     ))
+}
+
+fn prepare_structured_session_configurations(
+    profile: &ryeos_state::objects::AdmittedStructuredSessionProfile,
+    source_directory: &lillux::PinnedDirectory,
+    state_root: &Path,
+    enforced: bool,
+) -> Result<Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>> {
+    ryeos_state::objects::validate_session_auxiliary_configs(
+        &profile.baseline_destination,
+        &profile.auxiliary_configs,
+    )?;
+    // Mode bits are not a same-UID write boundary. Refuse both fresh launch
+    // and recovery before modifying the profile home unless the backend will
+    // mount every auxiliary config from admitted source read-only.
+    if !profile.auxiliary_configs.is_empty() && !enforced {
+        bail!("signed auxiliary session configuration requires enforced read-only isolation");
+    }
+    let mut mounts = Vec::new();
+    if let Some(mount) = prepare_structured_session_baseline(
+        profile, source_directory, state_root, enforced,
+    )? {
+        mounts.push(mount);
+    }
+    for config in &profile.auxiliary_configs {
+        let mount = prepare_structured_session_configuration_file(
+            &config.source,
+            &config.destination,
+            source_directory,
+            state_root,
+            enforced,
+        )?.ok_or_else(|| anyhow!("auxiliary session configuration has no read-only authority"))?;
+        mounts.push(mount);
+    }
+    Ok(mounts)
 }
 
 fn spawn_capsule_process_held(
@@ -3199,14 +3254,12 @@ fn spawn_capsule_process_held(
         // configuration authority. An enforced generic isolation backend adds
         // a read-only overlay for the compatibility baseline, but the
         // structured-session substrate does not require one.
-        if let Some(overlay) = prepare_structured_session_baseline(
+        mounts.extend(prepare_structured_session_configurations(
             profile,
             bound_source.source_directory(),
             state_root,
             state.isolation.is_enforced(),
-        )? {
-            mounts.push(overlay);
-        }
+        )?);
     }
     let authority = state.state_store.pinned_state_authority()?;
     let guard = authority.acquire_shared_guard()?;
@@ -5009,6 +5062,7 @@ session:
             schema_hashes: BTreeMap::from([("fixture.json".to_owned(), "b".repeat(64))]),
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
+            auxiliary_configs: Vec::new(),
         };
 
         let overlay = prepare_structured_session_baseline(
@@ -5081,6 +5135,35 @@ session:
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn auxiliary_configuration_preparation_requires_read_only_authority() {
+        use ryeos_state::objects::{AdmittedStructuredSessionProfile, SessionConfigurationFile};
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("baseline.conf"), b"baseline=true\n").unwrap();
+        std::fs::write(source.path().join("environment.conf"), b"local=false\n").unwrap();
+        let source_directory = lillux::PinnedDirectory::open(source.path()).unwrap().unwrap();
+        let profile = AdmittedStructuredSessionProfile {
+            profile_hash: "a".repeat(64),
+            contract: json!({"fixture":true}),
+            schema_hashes: BTreeMap::new(),
+            baseline_source: "baseline.conf".into(),
+            baseline_destination: "runtime.conf".into(),
+            auxiliary_configs: vec![SessionConfigurationFile {
+                source: "environment.conf".into(), destination: "environment.conf".into(),
+            }],
+        };
+        assert!(prepare_structured_session_configurations(
+            &profile, &source_directory, state.path(), false,
+        ).is_err());
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+        let mounts = prepare_structured_session_configurations(
+            &profile, &source_directory, state.path(), true,
+        ).unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(std::fs::read(state.path().join("environment.conf")).unwrap(), b"local=false\n");
     }
 
     #[test]

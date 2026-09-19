@@ -400,6 +400,11 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         .with_state_db(|db| db.list_cas_entries_by_state(ryeos_state::CasEntryState::Mirrored))
         .context("read durable mirrored CAS roots before sweep")?;
     let mut operational_blob_roots = std::collections::BTreeSet::new();
+    operational_blob_roots.extend(
+        state_store
+            .external_execution_blob_roots()
+            .context("read retained external candidate evidence roots before sweep")?,
+    );
     for entry in mirrored_entries {
         match entry.entry_kind {
             ryeos_state::CasEntryKind::Object => {

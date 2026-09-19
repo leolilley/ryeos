@@ -11,16 +11,18 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use ryeos_state::objects::AdmittedStructuredSessionProfile;
+use ryeos_state::objects::{
+    AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    SessionConfigurationFile, validate_session_auxiliary_configs,
+};
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v6 makes the HTTP/SSE ignored-event representation explicit. Earlier
-/// profiles relied on a transport-side inference between an event envelope
-/// and its properties; that made the signed schema ambiguous. This remains a
-/// clean authority cut, so prior profiles are not reinterpreted.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 6;
+/// v7 requires an explicit auxiliary configuration inventory, including an
+/// empty list when none is admitted. Earlier profiles cannot supply it from
+/// ambient profile-home state.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 7;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -71,6 +73,7 @@ pub fn compile(
         "workload_client",
         "baseline_config",
         "baseline_destination",
+        "auxiliary_configs",
         "portable_state",
         "credential_subject",
         "initialization",
@@ -988,10 +991,22 @@ pub fn compile(
     }
     let baseline_source = value_string(object, "baseline_config")?.to_owned();
     let baseline_destination = value_string(object, "baseline_destination")?.to_owned();
+    let auxiliary_configs: Vec<SessionConfigurationFile> =
+        serde_json::from_value(object["auxiliary_configs"].clone())
+            .context("decode signed auxiliary configuration inventory")?;
+    validate_session_auxiliary_configs(&baseline_destination, &auxiliary_configs)?;
+    for config in &auxiliary_configs {
+        let bytes = source_files.get(&config.source).ok_or_else(|| {
+            anyhow!("structured-session auxiliary configuration is absent from captured source")
+        })?;
+        if bytes.is_empty() || bytes.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            bail!("structured-session auxiliary configuration exceeds its byte bound");
+        }
+    }
     let baseline = source_files
         .get(&baseline_source)
         .ok_or_else(|| anyhow!("structured-session baseline is absent from the captured source"))?;
-    if baseline.is_empty() || baseline.len() > MAX_SCHEMA_BYTES {
+    if baseline.is_empty() || baseline.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
         bail!("structured-session baseline exceeds its byte bound");
     }
     let admitted = AdmittedStructuredSessionProfile {
@@ -1000,6 +1015,7 @@ pub fn compile(
         schema_hashes,
         baseline_source,
         baseline_destination,
+        auxiliary_configs,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -1924,6 +1940,7 @@ mod tests {
             "workload_client":null,
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
+            "auxiliary_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "configuration_authority":"immutable_argv",
@@ -1989,6 +2006,56 @@ mod tests {
         profile["routes"][0]["http_path"] = json!("/session");
         profile["routes"][0]["http_body_schema"] = json!("schema/request.json");
         profile["routes"][0]["http_path_parameters"] = json!({});
+    }
+
+    #[test]
+    fn auxiliary_configuration_requires_exact_bounded_source_and_current_shape() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let mut files = schemas();
+        profile["auxiliary_configs"] = json!([
+            {"source":"environment.conf", "destination":"environment.conf"}
+        ]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        files.insert("environment.conf".into(), b"local=false\n".to_vec());
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        assert_eq!(admitted.auxiliary_configs.len(), 1);
+        admitted.validate().unwrap();
+        let mut divergent = admitted.clone();
+        divergent.auxiliary_configs[0].destination = "different.conf".into();
+        assert!(divergent.validate().is_err());
+
+        for invalid in [
+            Value::Null,
+            json!({}),
+            json!([{"source":"environment.conf","destination":"runtime.conf"}]),
+            json!([{"source":"../environment.conf","destination":"environment.conf"}]),
+            json!([{"source":"environment.conf","destination":"sub/environment.conf"}]),
+            json!([{"source":"environment.conf","destination":"environment.conf","optional":true}]),
+            json!([
+                {"source":"environment.conf","destination":"z.conf"},
+                {"source":"environment.conf","destination":"a.conf"}
+            ]),
+            json!([
+                {"source":"environment.conf","destination":"environment.conf"},
+                {"source":"environment.conf","destination":"environment.conf"}
+            ]),
+        ] {
+            let mut invalid_profile = profile.clone();
+            invalid_profile["auxiliary_configs"] = invalid;
+            assert!(compile(&serde_json::to_vec(&invalid_profile).unwrap(), &files).is_err());
+        }
+        let mut missing = profile.clone();
+        missing.as_object_mut().unwrap().remove("auxiliary_configs");
+        assert!(compile(&serde_json::to_vec(&missing).unwrap(), &files).is_err());
+        for length in [0, MAX_SESSION_CONFIGURATION_FILE_BYTES + 1] {
+            files.insert("environment.conf".into(), vec![b'x'; length]);
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
+        files.insert("environment.conf".into(), vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES]);
+        compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        files.insert("baseline.conf".into(), vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES + 1]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
     }
 
     #[test]
