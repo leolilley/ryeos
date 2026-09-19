@@ -42,3 +42,10 @@
 .field-warning { color: var(--yellow) !important; }
 .field-accessibility { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .field-warnings { position: absolute; right: 12px; bottom: 10px; max-width: 60%; padding: 5px 8px; border: 1px solid var(--line-strong); background: var(--plane); color: var(--yellow); font: 9px var(--font-data); }
+@container (max-width: 520px) {
+  .field-toolbar { grid-template-columns: minmax(0, 1fr) auto; padding: 7px 9px; }
+  .field-controls { justify-content: end; }
+  .field-controls button:nth-child(n + 5), .field-toolbar input { display: none; }
+  .field-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field-detail { top: 50px; width: min(230px, 58%); }
+}

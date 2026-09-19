@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T00:03:21Z:72bb162818f4715867f078fde3d6ac060e881a4c17b2f300efff3a61b035fd88:nYbAhRQXfCG5u9Wl+PmAcee2ZNtxlJjCrcCYUbBaQ9afu47CBMf40AHvY3ZwAhqhD4xzPByOZLgV9aRIc06HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T03:31:28Z:06425baf74afe2d078cfca65967530ebdb0d74cb774ff33e06dfe4afc143531b:KHd4LxSaWePmkcyPGCtEhkrnYZVEK6gN/ZWoLDVXNoM/63WnflFeGCEMQ98bQUemwIS/mLYxwYBIHS4o/4S9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "3.0.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
@@ -19,6 +19,40 @@ style:
   view_set_tabs: true
 
 view_sets:
+  # The first authored set is the initial set for a fresh seat. Keep the
+  # principal's durable work list at the left and let one explicit "Talk to
+  # work" affordance bind the conversation, changes and execution views to
+  # the same placement. No renderer-owned sample project or thread is used.
+  - id: development
+    title: Development
+    root:
+      type: split
+      axis: horizontal
+      ratio: 0.13
+      first:
+        type: group
+        views: ["view:ryeos/development/explorer", "view:ryeos/projects/list", "view:ryeos/project/files", "view:ryeos/sites/list"]
+        active: 0
+      second:
+        type: split
+        axis: horizontal
+        ratio: 0.7
+        first:
+          type: group
+          views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence", "view:ryeos/project/document"]
+          active: 0
+        second:
+          type: split
+          axis: vertical
+          ratio: 0.55
+          first:
+            type: group
+            views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+            active: 0
+          second:
+            type: group
+            views: ["view:ryeos/development/execution", "view:ryeos/work/children", "view:ryeos/thread/tree"]
+            active: 0
   - id: overview
     title: Overview
     root:
@@ -28,51 +62,11 @@ view_sets:
   - id: work
     title: Work
     slots:
-      left: { content: "view:ryeos/work/list", open: true, size: 30 }
+      left: { content: "view:ryeos/work/list", open: true, size: 205 }
     root:
-      type: split
-      axis: horizontal
-      ratio: 0.68
-      first:
-        type: group
-        views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence"]
-        active: 0
-      second:
-        type: split
-        axis: vertical
-        ratio: 0.55
-        first:
-          type: group
-          views: ["view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-          active: 0
-        second:
-          type: group
-          views: ["view:ryeos/work/children", "view:ryeos/work/overview"]
-          active: 0
-  - id: development
-    title: Development
-    slots:
-      left: { content: "view:ryeos/project/files", open: true, size: 24 }
-    root:
-      type: split
-      axis: horizontal
-      ratio: 0.7
-      first:
-        type: group
-        views: ["view:ryeos/thread/conversation", "view:ryeos/project/document", "view:ryeos/work/evidence"]
-        active: 0
-      second:
-        type: split
-        axis: vertical
-        ratio: 0.54
-        first:
-          type: group
-          views: ["view:ryeos/work/overview", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-          active: 0
-        second:
-          type: group
-          views: ["view:ryeos/work/children", "view:ryeos/thread/tree", "view:ryeos/graph/topology"]
-          active: 0
+      type: group
+      views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+      active: 0
   - id: review
     title: Review
     root:
@@ -93,6 +87,9 @@ library:
       - view:ryeos/work/evidence
       - view:ryeos/work/approvals
       - view:ryeos/work/candidate
+      - view:ryeos/development/explorer
+      - view:ryeos/development/changes
+      - view:ryeos/development/execution
       - view:ryeos/review/pending
       - view:ryeos/review/history
       - view:ryeos/sites/list
@@ -119,6 +116,7 @@ library:
       - view:ryeos/work/evidence
       - view:ryeos/work/candidate
       - view:ryeos/work/approvals
+      - view:ryeos/development/execution
   - group: Node
     views:
       - view:ryeos/projects/list

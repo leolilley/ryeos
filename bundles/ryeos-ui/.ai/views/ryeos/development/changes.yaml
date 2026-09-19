@@ -1,0 +1,54 @@
+# ryeos:signed:2026-09-19T03:31:28Z:c81a99533e9df6e1ac54c8b5c03b2bf97896b4a0bebc1e9d0b7fe393838372c6:VtPcJQi5DNONyiOa2bOdqHddvrPpL10RE8UDGFe9dVo3wvur0ctRg+E/6hNzSr/kVSOLdAF4egcUZRPsFtUNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: development-changes
+title: Changes
+version: "1.0.0"
+description: Exact retained candidate changes for the work selected as this view set's conversation route
+
+widget: sections
+sources:
+  detail:
+    ref: service:ui/ryeos-ui/work/candidate
+    params:
+      thread_id: "@facet:input.route.thread"
+
+sections:
+  - title: Working changes
+    source_channel: detail
+    collection: change_summary
+    projection:
+      primary: state
+      meta: total
+      expand:
+        fields: [reason, added, modified, deleted, truncated]
+      tone:
+        field: state
+        map: { available: good, unavailable: warn }
+        default: neutral
+  - title: Files
+    source_channel: detail
+    collection: changes
+    projection:
+      primary: path
+      meta: change
+      expand:
+        fields: [base_file_hash, candidate_file_hash]
+      tone:
+        field: change
+        map: { added: good, modified: warn, deleted: danger }
+        default: neutral
+  - title: Candidate
+    source_channel: detail
+    collection: candidates
+    projection:
+      primary: candidate_snapshot_hash
+      meta: candidate_disposition
+      expand:
+        fields: [base_snapshot_hash, candidate_validation_hash, evaluation_accepted]
+      tone:
+        field: evaluation_accepted
+        map: { "true": good, "false": danger }
+        default: neutral
+
+refresh:
+  on_facet: input.route
+  on_hint: [thread, activity]

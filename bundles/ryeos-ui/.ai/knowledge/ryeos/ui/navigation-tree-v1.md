@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T00:51:08Z:5df3dbda60996663709e3e8dd7a333cdaa4d8e5a00f08b174e375ca01a6049bf:091K2p3MMZ2j/JU7fYfuPQ9dsjFo0DxyBaMbOVZ/vjIGJF7kwJ0/Ayvqe5O0Y7JcnbczD97LkMwC87ka52ZOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T03:32:19Z:d48c491a5c6fb8f1f22756cff47ae9411cae56e6922aa5d989b101b09952078f:48exl7T3M18Hg7qtI1WWhgIAZfwEMQnvokOKcUyHPFV3a9NSaKHy5zCoxqy5+FpCTZdvlsQasmyjBgfw7b87AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -33,6 +33,9 @@ chain rather than creating a new assistant in the product model.
 
 `surface:ryeos/ui/assistant` composes these signed top-level lenses:
 
+- Development: a nested three-region view set with durable work navigation,
+  one explicitly routed conversation, exact retained candidate changes, and a
+  bounded live execution field;
 - Home: exact operator attention, active executions, recent movement, and
   projects;
 - Work: principal-scoped chains grouped by durable chain root;
@@ -47,6 +50,17 @@ affordance copies those coordinates into `input.route`, where drafts key on the
 stable logical-work address. A restart, new worker epoch, or cross-site
 continuation must therefore read as movement within the same work, not a new
 agent or unrelated conversation.
+
+The Development set uses that one scoped route for its conversation, change
+inventory, and execution field. Its left navigator does not manufacture a
+project or thread from browser state. Until work is explicitly opened, those
+views remain honestly unselected. Candidate changes come from the retained
+candidate owner and the execution diagram comes from
+`service:ui/ryeos-ui/field/execution`; neither is synthetic renderer content.
+The explorer, conversation, changes and execution regions are ordinary view
+groups in the signed nested layout tree. They are not fixed Svelte product
+panes, and the four supporting slots remain free for independently authored
+persistent views.
 
 All sources and affordances come from the daemon-compiled effective signed
 surface/view closure. Browser and terminal clients send only a binding digest,
