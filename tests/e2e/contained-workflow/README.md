@@ -20,6 +20,10 @@ Installed success requires an administrator-signed replacement config and
 verifier that name a concrete attestor and authenticate the canonical evidence
 payload.
 
-No live host adapter is currently selected in this repository. Therefore this
-driver cannot yet produce installed evidence and its presence is not an
-installed-qualification claim.
+The repository now supplies an explicitly selected Docker runtime adapter and
+administrator setup commands. See the
+[adapter runbook](../../../crates/host-adapters/lillux-oci-hook/README.md).
+They connect Docker lifecycle callbacks to the existing hook and initialize a
+private contained node; they do not grant this evidence driver an installed
+attestor. The lifecycle matrix and authenticated candidate-return observations
+must still be collected and authenticated for the selected host.

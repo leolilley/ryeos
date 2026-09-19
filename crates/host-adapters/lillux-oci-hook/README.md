@@ -58,9 +58,50 @@ Docker documents this interface in its
 
 Select `--runtime ryeos-contained` for the contained image, or
 `runtime: ryeos-contained` on its Compose service. Use an immutable image digest.
-This registration does not initialize a node: `/data/app` must already contain
-the matching signed `contained-workflow` profile and belong to UID/GID 10001.
-The supported initialization/setup flow and installed qualification remain pending.
+Registration and node preparation are separate operations. After activating the
+runtime, use the supported node setup command with an already loaded immutable
+contained image:
+
+```sh
+sudo python3 scripts/pkg/setup-contained-docker-node.py \
+  --name ryeos-contained-development \
+  --image <repository@sha256:digest-or-local-sha256:image-id> \
+  --port 7447 --confirm
+```
+
+The command creates private app/project directories beneath
+`/var/lib/ryeos/contained-nodes/<name>`, records their identities, runs offline
+initialization as UID/GID 10001 from the pinned image and signed contained profile,
+then starts the fixed bootstrap through the opt-in runtime. It publishes only a
+loopback endpoint and waits up to 60 seconds for daemon admission readiness.
+Initialization and daemon configuration use the same stored `[::]:8000` bind.
+The project directory is mounted at `/projects` for normal remote project binding.
+
+Nested RyeOS sandboxing requires the outer Docker seccomp/AppArmor filters to
+allow namespace setup. This dedicated deployment sets those filters unconfined;
+it does not select privileged mode or host PID/mount namespaces. The signed RyeOS
+isolation policy and installed process-control probes remain mandatory. A host
+that forbids the required namespaces refuses during initialization/readiness.
+
+Repeated setup checks the retained directory identities and exact container
+configuration, and reuses an existing matching node. It never resets policies,
+changes owners on an existing app root, deletes state, recreates a mismatched
+container, or automatically migrates images/ports. Interrupted setup before its
+record is complete refuses further provisioning. Restart uses the runtime hooks
+and their existing cleanup/reuse checks. Installed lifecycle qualification and
+the authenticated worker proof still need to run on the selected host.
+
+## Hook artifact identity
+
+Release builds embed `.ryeos_contained_oci_hook_build` with exact version, source,
+timestamp, target and profile. `scripts/release/contained-oci-hook-artifact.py`
+packages or verifies those bytes without executing the adapter. Archives contain
+exactly the hook, LICENSE and RYEOS-BUILD. Verification checks the checksum's exact
+filename, bounded decompression, regular-file inventory, modes, owners, ELF
+architecture and embedded identity. Development builds cannot pass exact release
+verification. Checksums establish integrity; release authentication remains the
+publication channel's responsibility. Official promotion remains disabled until
+installed qualification is complete.
 
 ## Lifecycle
 

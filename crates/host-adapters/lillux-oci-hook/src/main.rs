@@ -7,6 +7,15 @@ use std::path::{Path, PathBuf};
 
 mod docker_runtime;
 
+// Release packaging compares this data with the requested release coordinate;
+// verification reads the ELF section without executing the host adapter.
+const BUILD_LEN: usize =
+    include_bytes!(concat!(env!("OUT_DIR"), "/ryeos-contained-oci-hook-build")).len();
+#[used]
+#[unsafe(link_section = ".ryeos_contained_oci_hook_build")]
+static BUILD_TESTIMONY: [u8; BUILD_LEN] =
+    *include_bytes!(concat!(env!("OUT_DIR"), "/ryeos-contained-oci-hook-build"));
+
 const APP_ROOT: &str = "/data/app";
 const BINDING_DIRECTORY: &str = "/run/ryeos";
 const BINDING_NAME: &str = "host-runtime.json";
@@ -131,6 +140,7 @@ impl LifecycleRecord {
 }
 
 fn main() -> Result<()> {
+    std::hint::black_box(&BUILD_TESTIMONY);
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let operation = arguments.next().context("missing OCI hook operation")?;

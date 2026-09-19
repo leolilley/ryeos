@@ -19,6 +19,7 @@ ARG SOURCE_DATE_EPOCH
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG BUNDLE_BUILD_PROFILE=release
+ARG CARGO_BUILD_JOBS
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
 ENV RYEOS_BUILD_VERSION=$VERSION
@@ -35,6 +36,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
     --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked \
+    if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
     cp -a bundles .bundles-writable && \
     rm -rf bundles && \
     mv .bundles-writable bundles && \
@@ -48,7 +50,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --bundle-set release-artifacts \
       --build-profile "$BUNDLE_BUILD_PROFILE" \
       --all && \
-    CARGO_TARGET_DIR=/build/target-cache \
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
     cargo build --release --locked -p lillux -p ryeos-lillux-oci-hook && \
     RYEOS_EXACT_BUILD_PROVENANCE=1 \
     RYEOS_BUILD_VERSION="$VERSION" \
@@ -59,7 +61,7 @@ RUN --mount=type=secret,id=publisher-key,required=true \
     CARGO_TARGET_DIR=/build/target-cache \
     cargo build --release --locked --target x86_64-unknown-linux-gnu \
       -p ryeos-workload-client && \
-    mkdir -p /build/target/release /out /workload-out /contained-hook-out /contained-hook-package && \
+    mkdir -p /build/target/release /out /workload-out /contained-hook-out && \
     cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/release/ryeos && \
     cp /build/target-cache/release/ryeos-core-tools /build/target/release/ryeos-core-tools && \
@@ -78,18 +80,12 @@ RUN --mount=type=secret,id=publisher-key,required=true \
       --binary /build/target-cache/x86_64-unknown-linux-gnu/release/ryeos-workload-client \
       --license /build/LICENSE \
       --output "/workload-out/ryeos-workload-client-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" && \
-    install -m 0555 /build/target-cache/release/ryeos-lillux-oci-hook \
-      /contained-hook-package/ryeos-lillux-oci-hook && \
-    cp /build/LICENSE /contained-hook-package/LICENSE && \
-    tar --sort=name \
-      --mtime="@${SOURCE_DATE_EPOCH}" \
-      --owner=0 --group=0 --numeric-owner \
-      -C /contained-hook-package -czf \
-      "/contained-hook-out/ryeos-contained-oci-hook-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-      LICENSE ryeos-lillux-oci-hook && \
-    cd /contained-hook-out && \
-    sha256sum "ryeos-contained-oci-hook-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" > \
-      "ryeos-contained-oci-hook-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+    python3 scripts/release/contained-oci-hook-artifact.py package \
+      --version "$VERSION" --source-revision "$VCS_REF" \
+      --build-date "$BUILD_DATE" --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --binary /build/target-cache/release/ryeos-lillux-oci-hook \
+      --license /build/LICENSE \
+      --archive "/contained-hook-out/ryeos-contained-oci-hook-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 
 FROM scratch AS bundle-artifact
 COPY --from=published /out/ /
