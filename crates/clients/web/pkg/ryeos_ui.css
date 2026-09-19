@@ -142,24 +142,29 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 @media (max-width: 760px) { .shell-body.with-navigation { grid-template-columns: minmax(0, 1fr); }.shell-body.with-navigation > .navigation { display: none; }.overlay-item > button:first-child { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
 }
 @layer layout{
-.view-set { display: grid; min-width: 0; min-height: 0; gap: 12px; }
+.view-set { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; gap: 12px; }
 .view-set.maximized { gap: 0; }
 .view-set-middle { display: flex; min-width: 0; min-height: 0; gap: 12px; }
 .view-set-center { flex: 1; min-width: 0; min-height: 0; }
+.view-set-center > .tile-frame, .view-set-center > .split { width: 100%; height: 100%; }
 .split { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; gap: 8px; }
 .split[data-axis="horizontal"] { grid-template-columns: minmax(0, calc(var(--split) * 100%)) 1px minmax(0, 1fr); }
 .split[data-axis="vertical"] { grid-template-rows: minmax(0, calc(var(--split) * 100%)) 1px minmax(0, 1fr); }
 .split-divider { background: var(--line); }
 .tile-frame, .dock-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--plane) 94%, transparent); }
+.tile-frame { container-type: inline-size; }
 .tile-frame.focused { border-color: var(--accent); }
 .tile-frame.transparent { background: color-mix(in srgb, var(--plane) 78%, transparent); }
 .tile-header, .dock-slot > header { display: flex; align-items: center; min-height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line); font: 9px var(--font-data); letter-spacing: .11em; text-transform: uppercase; }
+.tile-header.grouped { display: block; padding: 0; }
+.tile-title-row { display: flex; align-items: center; min-height: 34px; padding: 0 12px; }
 .tile-identity { display: flex; align-items: center; gap: 10px; }
 .tile-signal { width: 5px; height: 5px; background: var(--accent-bright); }
 .tile-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); }
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
 .tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
+.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; border-top: 1px solid var(--line); }
 .view-tabs button { padding: 0 13px; color: var(--muted); border-bottom: 1px solid transparent; text-transform: none; letter-spacing: 0; }
 .view-tabs button.active { color: var(--text); border-color: var(--yellow); }
 .content-heading { padding: 28px 34px 22px; border-bottom: 1px solid var(--line); }
@@ -170,6 +175,10 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .dock-slot { flex: 0 0 calc(var(--dock-size) * 1px); }
 .dock-slot > header { justify-content: space-between; color: var(--muted); }
 .dock-slot[data-edge="left"], .dock-slot[data-edge="right"] { width: calc(var(--dock-size) * 1px); }
+@media (max-width: 980px) {
+  .view-set-middle { gap: 8px; }
+  .dock-slot[data-edge="left"], .dock-slot[data-edge="right"] { width: min(calc(var(--dock-size) * 1px), 28vw); }
+}
 }
 @layer components{
 .composer { margin: auto 20px 18px; border: 1px solid var(--line-strong); background: var(--plane); }
@@ -226,4 +235,11 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .field-warning { color: var(--yellow) !important; }
 .field-accessibility { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .field-warnings { position: absolute; right: 12px; bottom: 10px; max-width: 60%; padding: 5px 8px; border: 1px solid var(--line-strong); background: var(--plane); color: var(--yellow); font: 9px var(--font-data); }
+@container (max-width: 520px) {
+  .field-toolbar { grid-template-columns: minmax(0, 1fr) auto; padding: 7px 9px; }
+  .field-controls { justify-content: end; }
+  .field-controls button:nth-child(n + 5), .field-toolbar input { display: none; }
+  .field-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .field-detail { top: 50px; width: min(230px, 58%); }
+}
 }

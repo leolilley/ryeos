@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T22:45:43Z:4dab5b245fadb133d43569718f99ad9857d2b5e1f8b75896b3365fd601a28554:uxRjw8g5bXN2AVhEBL8BX0yT37dUDqOyIE5pv3n4zcJALniRao9CNqZ7z4xtW7wtOE+9xcq+plkQIddvCQqGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T03:38:25Z:1ba5e736e8079023aad4751372f7dcd3d373d861da6aa3502d04ba95741a7145:j6yFfWZL/wDJ3OTk2i3cv8DNAe0F05lAISSobHdirxVR+WPcmP9yyGwVRpbCLtD4DTR8awvfNi5+xRlmUiOyAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
@@ -128,8 +128,11 @@ shared layout machinery, not another UI framework.
 - A surface signs the available views, sources, actions and initial arrangements.
 - A view set owns its live layout, view groups, selection/focus and optional
   anchored slots. Top-level tabs select view sets, not hardcoded product pages.
-- A split allocates space. A group orders view-instance references and selects
-  an active member. A view instance owns its local content/input state.
+- A split allocates space. A group orders view-instance references, selects an
+  active member, and may carry one bounded authored label for its stable role
+  in the arrangement. The renderer presents that label separately from the
+  group's member tabs; it must not infer a product pane from a view ref. A view
+  instance owns its local content/input state.
 - The layout tree is the single placement authority. Master/stack becomes an
   arrange operation, not a second mutable ordered-layout authority.
 - Move preserves view identity, draft, local state and bound subject.

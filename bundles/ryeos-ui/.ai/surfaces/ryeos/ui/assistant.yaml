@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:31:28Z:06425baf74afe2d078cfca65967530ebdb0d74cb774ff33e06dfe4afc143531b:KHd4LxSaWePmkcyPGCtEhkrnYZVEK6gN/ZWoLDVXNoM/63WnflFeGCEMQ98bQUemwIS/mLYxwYBIHS4o/4S9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T03:38:25Z:5880895bb32f37e148611b1437771b790ac994fe6146fbbb7e4999797d1e32f5:ds3MPgOL/i+340vhq/73qXK0mrm9hPUsFNwDG4UPj6MSDAHehgSYuDwCiqKm9xMohPF5Cb69oIVrPkDUHcxfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 version: "3.0.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
@@ -31,6 +31,7 @@ view_sets:
       ratio: 0.13
       first:
         type: group
+        label: Explorer
         views: ["view:ryeos/development/explorer", "view:ryeos/projects/list", "view:ryeos/project/files", "view:ryeos/sites/list"]
         active: 0
       second:
@@ -39,6 +40,7 @@ view_sets:
         ratio: 0.7
         first:
           type: group
+          label: Worker
           views: ["view:ryeos/thread/conversation", "view:ryeos/thread/transcript", "view:ryeos/work/evidence", "view:ryeos/project/document"]
           active: 0
         second:
@@ -47,10 +49,12 @@ view_sets:
           ratio: 0.55
           first:
             type: group
+            label: Changes
             views: ["view:ryeos/development/changes", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
             active: 0
           second:
             type: group
+            label: Execution
             views: ["view:ryeos/development/execution", "view:ryeos/work/children", "view:ryeos/thread/tree"]
             active: 0
   - id: overview

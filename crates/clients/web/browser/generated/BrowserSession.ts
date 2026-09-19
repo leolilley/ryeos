@@ -7,10 +7,14 @@ export interface BrowserSession {
   ui_binding_contract_revision: string;
   session_id: string;
   surface_ref: string;
-  /** Exact effective-definition generation of the authored surface. */
-  surface_generation: string;
   user_principal_id: string | null;
   effective_surface: unknown | null;
+  /**
+   * Exact effective-definition generation of `surface_ref`. Presentation
+   * preferences are scoped to this value so a predecessor composition can
+   * never replace newly authored view-set defaults under the same ref.
+   */
+  surface_generation: string;
   project_path: string | null;
   /**
    * Digest of the daemon-compiled surface/view binding for this exact

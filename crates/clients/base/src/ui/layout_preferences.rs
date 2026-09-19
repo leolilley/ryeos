@@ -12,7 +12,7 @@ use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
-const SCHEMA: &str = "ryeos.ui.layout-preferences.v3";
+const SCHEMA: &str = "ryeos.ui.layout-preferences.v4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +59,13 @@ fn capture_layout(
     view_set: &crate::view_set::ViewSet,
 ) -> Result<LayoutSeedSpec, String> {
     Ok(match tree {
-        LayoutTree::Group { tabs, active, .. } => LayoutSeedSpec::Group {
+        LayoutTree::Group {
+            label,
+            tabs,
+            active,
+            ..
+        } => LayoutSeedSpec::Group {
+            label: label.clone(),
             views: tabs
                 .iter()
                 .map(|id| {
@@ -524,6 +530,7 @@ mod tests {
             .export_active_view_set_template("development".into(), "Development".into())
             .unwrap();
         template.composition.root = Some(LayoutSeedSpec::Group {
+            label: None,
             views: vec![ViewKindSpec("view:unadmitted/private".into())],
             active: 0,
         });

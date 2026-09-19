@@ -9204,7 +9204,7 @@ delegate(["pointerdown", "focusin"]);
 //#region browser/layout/TileFrame.svelte
 var root$3 = /* @__PURE__ */ from_html(`<button role="tab"> </button>`);
 var root_1$1 = /* @__PURE__ */ from_html(`<div class="view-tabs" role="tablist"></div>`);
-var root_2 = /* @__PURE__ */ from_html(`<header class="tile-header"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong></div> <!> <div class="tile-tools"><button class="tile-tool"> </button></div></header>`);
+var root_2 = /* @__PURE__ */ from_html(`<header><div class="tile-title-row"><div class="tile-identity"><span class="tile-signal"></span><strong> </strong></div> <div class="tile-tools"><button class="tile-tool"> </button></div></div> <!></header>`);
 var root_3 = /* @__PURE__ */ from_html(`<p> </p>`);
 var root_4 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
 var root_5 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
@@ -9217,45 +9217,49 @@ function TileFrame($$anchor, $$props) {
 	var node = child(article);
 	var consequent_1 = ($$anchor) => {
 		var header = root_2();
+		let classes_1;
 		var div = child(header);
-		var text = only_child(sibling(child(div)), true);
+		var div_1 = child(div);
+		var text = only_child(sibling(child(div_1)), true);
+		reset(div_1);
+		var div_2 = sibling(div_1, 2);
+		var button = child(div_2);
+		var text_1 = only_child(button, true);
+		reset(div_2);
 		reset(div);
 		var node_1 = sibling(div, 2);
 		var consequent = ($$anchor) => {
-			var div_1 = root_1$1();
-			each(div_1, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
-				var button = root$3();
-				let classes_1;
-				var text_1 = only_child(button, true);
+			var div_3 = root_1$1();
+			each(div_3, 21, () => $$props.model.tabs, (tab) => tab.tile_id, ($$anchor, tab) => {
+				var button_1 = root$3();
+				let classes_2;
+				var text_2 = only_child(button_1, true);
 				template_effect(() => {
-					set_attribute(button, "aria-selected", get(tab).active);
-					classes_1 = set_class(button, 1, "", null, classes_1, { active: get(tab).active });
-					set_text(text_1, get(tab).title);
+					set_attribute(button_1, "aria-selected", get(tab).active);
+					classes_2 = set_class(button_1, 1, "", null, classes_2, { active: get(tab).active });
+					set_text(text_2, get(tab).title);
 				});
-				delegated("click", button, () => dispatch({
+				delegated("click", button_1, () => dispatch({
 					type: "focus_changed",
 					target: get(tab).tile_id
 				}));
-				append($$anchor, button);
+				append($$anchor, button_1);
 			});
-			reset(div_1);
-			append($$anchor, div_1);
+			reset(div_3);
+			append($$anchor, div_3);
 		};
 		if_block(node_1, ($$render) => {
 			if ($$props.model.tabs.length > 1) $$render(consequent);
 		});
-		var div_2 = sibling(node_1, 2);
-		var button_1 = child(div_2);
-		var text_2 = only_child(button_1, true);
-		reset(div_2);
 		reset(header);
 		template_effect(() => {
-			set_text(text, $$props.model.title);
-			set_attribute(button_1, "aria-label", $$props.model.maximized ? "Restore view" : "Maximize view");
-			set_attribute(button_1, "title", $$props.model.maximized ? "Restore view" : "Maximize view");
-			set_text(text_2, $$props.model.maximized ? "↙" : "↗");
+			classes_1 = set_class(header, 1, "tile-header", null, classes_1, { grouped: $$props.model.group_label });
+			set_text(text, $$props.model.group_label ?? $$props.model.title);
+			set_attribute(button, "aria-label", $$props.model.maximized ? "Restore view" : "Maximize view");
+			set_attribute(button, "title", $$props.model.maximized ? "Restore view" : "Maximize view");
+			set_text(text_1, $$props.model.maximized ? "↙" : "↗");
 		});
-		delegated("click", button_1, () => dispatch({
+		delegated("click", button, () => dispatch({
 			type: "activate",
 			intent: {
 				type: "toggle_tile_maximized",
@@ -9269,8 +9273,8 @@ function TileFrame($$anchor, $$props) {
 	});
 	var node_2 = sibling(node, 2);
 	var consequent_4 = ($$anchor) => {
-		var div_3 = root_5();
-		var small = child(div_3);
+		var div_4 = root_5();
+		var small = child(div_4);
 		var text_3 = only_child(small, true);
 		var h1 = sibling(small);
 		var text_4 = only_child(h1, true);
@@ -9286,20 +9290,20 @@ function TileFrame($$anchor, $$props) {
 		});
 		var node_4 = sibling(node_3);
 		var consequent_3 = ($$anchor) => {
-			var div_4 = root_4();
-			var text_6 = only_child(div_4, true);
+			var div_5 = root_4();
+			var text_6 = only_child(div_5, true);
 			template_effect(($0) => set_text(text_6, $0), [() => $$props.model.heading.metadata.join("  /  ")]);
-			append($$anchor, div_4);
+			append($$anchor, div_5);
 		};
 		if_block(node_4, ($$render) => {
 			if ($$props.model.heading.metadata.length) $$render(consequent_3);
 		});
-		reset(div_3);
+		reset(div_4);
 		template_effect(() => {
 			set_text(text_3, $$props.model.heading.eyebrow);
 			set_text(text_4, $$props.model.heading.title);
 		});
-		append($$anchor, div_3);
+		append($$anchor, div_4);
 	};
 	if_block(node_2, ($$render) => {
 		if ($$props.model.heading) $$render(consequent_4);

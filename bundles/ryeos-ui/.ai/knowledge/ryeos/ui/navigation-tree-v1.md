@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T03:32:19Z:d48c491a5c6fb8f1f22756cff47ae9411cae56e6922aa5d989b101b09952078f:48exl7T3M18Hg7qtI1WWhgIAZfwEMQnvokOKcUyHPFV3a9NSaKHy5zCoxqy5+FpCTZdvlsQasmyjBgfw7b87AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T03:38:25Z:5fc6f729f2ea9ea2f6b9797d61bac6bf75377a6fe191b68f93bda60027b2e286:I3812XZoiHKPDm1qxFDtEuB67XZ8egvACJAQhwmdDyhnNORCWh/CXJe/WvUkHViI/klOQAAETNxSjmAGGK+jAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -60,7 +60,9 @@ candidate owner and the execution diagram comes from
 The explorer, conversation, changes and execution regions are ordinary view
 groups in the signed nested layout tree. They are not fixed Svelte product
 panes, and the four supporting slots remain free for independently authored
-persistent views.
+persistent views. Their short group labels are signed arrangement metadata:
+they identify a stable region above its selectable member tabs, survive saved
+view-set round trips, and never create another renderer-owned navigation model.
 
 All sources and affordances come from the daemon-compiled effective signed
 surface/view closure. Browser and terminal clients send only a binding digest,

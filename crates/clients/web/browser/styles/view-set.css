@@ -12,12 +12,15 @@
 .tile-frame.focused { border-color: var(--accent); }
 .tile-frame.transparent { background: color-mix(in srgb, var(--plane) 78%, transparent); }
 .tile-header, .dock-slot > header { display: flex; align-items: center; min-height: 34px; padding: 0 12px; border-bottom: 1px solid var(--line); font: 9px var(--font-data); letter-spacing: .11em; text-transform: uppercase; }
+.tile-header.grouped { display: block; padding: 0; }
+.tile-title-row { display: flex; align-items: center; min-height: 34px; padding: 0 12px; }
 .tile-identity { display: flex; align-items: center; gap: 10px; }
 .tile-signal { width: 5px; height: 5px; background: var(--accent-bright); }
 .tile-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); }
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
 .tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
+.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; border-top: 1px solid var(--line); }
 .view-tabs button { padding: 0 13px; color: var(--muted); border-bottom: 1px solid transparent; text-transform: none; letter-spacing: 0; }
 .view-tabs button.active { color: var(--text); border-color: var(--yellow); }
 .content-heading { padding: 28px 34px 22px; border-bottom: 1px solid var(--line); }

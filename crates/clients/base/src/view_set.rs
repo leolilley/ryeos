@@ -422,7 +422,12 @@ impl ViewSet {
             destination: &mut HashMap<TileId, TileState>,
         ) -> LayoutTree {
             match tree {
-                LayoutTree::Group { active, tabs, .. } => {
+                LayoutTree::Group {
+                    label,
+                    active,
+                    tabs,
+                    ..
+                } => {
                     let mut next_tabs = Vec::with_capacity(tabs.len());
                     let mut next_active = None;
                     for tile_id in tabs {
@@ -445,6 +450,7 @@ impl ViewSet {
                     }
                     LayoutTree::Group {
                         group_id: ViewGroupId::new(next_tabs[0].0),
+                        label: label.clone(),
                         active: next_active.expect("layout group has an active mounted tile"),
                         tabs: next_tabs,
                     }

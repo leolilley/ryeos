@@ -306,6 +306,8 @@ pub enum RyeOsLayoutNodeVm {
     },
     Tile {
         group_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_label: Option<String>,
         tabs: Vec<RyeOsViewTabVm>,
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
@@ -2582,6 +2584,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
     match node {
         LayoutTree::Group {
             group_id,
+            label,
             tabs,
             active: tile_id,
         } => {
@@ -2612,6 +2615,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 .is_some_and(|tile| view_has_transparent_background(core, &tile.view.view_ref));
             RyeOsLayoutNodeVm::Tile {
                 group_id: group_id.0.to_string(),
+                group_label: label.clone(),
                 tabs: tabs
                     .iter()
                     .map(|id| RyeOsViewTabVm {

@@ -31,6 +31,8 @@ pub struct ViewSetSeedSpec {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LayoutSeedSpec {
     Group {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         views: Vec<ViewKindSpec>,
         active: usize,
     },
@@ -126,7 +128,18 @@ pub fn validate_seeds(seeds: &[ViewSetSeedSpec]) -> Result<(), String> {
                 return Err(format!("{path} exceeds layout depth {MAX_LAYOUT_DEPTH}"));
             }
             match node {
-                LayoutSeedSpec::Group { views, active } => {
+                LayoutSeedSpec::Group {
+                    label,
+                    views,
+                    active,
+                } => {
+                    if label.as_ref().is_some_and(|label| {
+                        label.trim().is_empty()
+                            || label.len() > MAX_VIEW_SET_LABEL_BYTES
+                            || label.chars().any(char::is_control)
+                    }) {
+                        return Err(format!("{path}.label is not a bounded display label"));
+                    }
                     if views.is_empty() || *active >= views.len() {
                         return Err(format!("{path}: group requires views and an active member"));
                     }
@@ -185,10 +198,15 @@ impl ViewSetSeedSpec {
             ids: &mut std::slice::Iter<'_, crate::ids::TileId>,
         ) -> LayoutTree {
             match node {
-                LayoutSeedSpec::Group { views, active } => {
+                LayoutSeedSpec::Group {
+                    label,
+                    views,
+                    active,
+                } => {
                     let tabs: Vec<_> = ids.by_ref().take(views.len()).copied().collect();
                     LayoutTree::Group {
                         group_id: ViewGroupId::new(tabs[0].0),
+                        label: label.clone(),
                         active: tabs[*active],
                         tabs,
                     }
@@ -253,8 +271,8 @@ mod tests {
     fn seed() -> serde_json::Value {
         json!({ "id": "work", "title": "Work", "root": {
             "type": "split", "axis": "horizontal", "ratio": 0.7,
-            "first": { "type": "group", "views": ["view:test/conversation", "view:test/evidence"], "active": 1 },
-            "second": { "type": "group", "views": ["view:test/changes"], "active": 0 }
+            "first": { "type": "group", "label": "Worker", "views": ["view:test/conversation", "view:test/evidence"], "active": 1 },
+            "second": { "type": "group", "label": "Changes", "views": ["view:test/changes"], "active": 0 }
         } })
     }
 
@@ -269,6 +287,20 @@ mod tests {
             "view:test/evidence"
         );
         assert_eq!(first.root.as_ref().unwrap().active_tile_ids().len(), 2);
+        let LayoutTree::Split {
+            first: worker,
+            second: changes,
+            ..
+        } = first.root.as_ref().unwrap()
+        else {
+            panic!("authored split was not retained");
+        };
+        assert!(
+            matches!(worker.as_ref(), LayoutTree::Group { label: Some(label), .. } if label == "Worker")
+        );
+        assert!(
+            matches!(changes.as_ref(), LayoutTree::Group { label: Some(label), .. } if label == "Changes")
+        );
         assert_eq!(first.tiles.len(), 3);
         assert!(
             first
