@@ -35,6 +35,17 @@ export async function runEffect(effect: RyeOsEffect): Promise<RyeOsEffectResult>
       location.assign(`${launch.pathname}${launch.search}${launch.hash}`);
       return success(effect, "browser_only", null);
     }
+    case "release_binding_attachment": {
+      const response = await postEncodedJson(
+        "/ui/api/session/attachments/detach",
+        encodeJsonBody({
+          binding_attachment_id: kind.binding_attachment_id,
+          binding_generation: kind.binding_generation,
+          binding_digest: kind.binding_digest,
+        }),
+      );
+      return success(effect, "browser_only", unwrapResult(response));
+    }
   }
 }
 

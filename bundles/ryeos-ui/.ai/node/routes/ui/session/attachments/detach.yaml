@@ -1,0 +1,8 @@
+# ryeos:signed:2026-09-19T06:19:51Z:5391291785177581a4a970b3b10e021ef729d199bb5fe5cb591ba0758db7b126:K1MxC8pOAVxBR4Zws6+z1/I82kx+wiqPsDgPdRCIFQR7uBg4m92ZFF6C54L5H3phi15sAIQd5Fxk73aliCa3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/session/attachments/detach
+path: /ui/api/session/attachments/detach
+methods: [POST]
+auth: browser_session
+limits: { body_bytes_max: 16384, timeout_ms: 10000, concurrent_max: 32 }
+request: { body: json }
+response: { mode: json, source: "service:ui/session/attachments/detach" }

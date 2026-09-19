@@ -6,6 +6,7 @@ use std::sync::Arc;
 use ryeos_client_base::ui::content::views_from_surface;
 use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
 use ryeos_client_base::ui::view_model::build_view_model;
+use ryeos_client_base::ui::{UiBindingAttachment, UiBindingRequestBounds};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::item_resolution::{RegisteredBundleRoot, ResolutionRoots};
@@ -370,13 +371,27 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
 
         let mut views = Map::new();
         views.insert(view_ref.clone(), raw.clone());
+        let effective_surface = json!({
+            "name": "cutover-golden",
+            "tiles": [view_ref],
+            "views": views,
+        });
         let session = BrowserSession {
-            effective_surface: Some(json!({
-                "name": "cutover-golden",
-                "tiles": [view_ref],
-                "views": views,
-            })),
-            project_path: Some("/fixture/project".to_string()),
+            surface_attachment_id: "cutover-golden-attachment".into(),
+            binding_attachments: vec![UiBindingAttachment {
+                binding_attachment_id: "cutover-golden-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "cutover-golden-binding".into(),
+                surface_ref: "surface:fixture/cutover-golden".into(),
+                surface_generation: "cutover-golden-surface".into(),
+                effective_surface,
+                project_path: Some("/fixture/project".into()),
+                posture: Default::default(),
+                binding_request_bounds: UiBindingRequestBounds {
+                    max_request_bytes: 64 * 1024,
+                    max_input_bytes: 16 * 1024,
+                },
+            }],
             ..Default::default()
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);

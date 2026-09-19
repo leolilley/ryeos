@@ -50,8 +50,31 @@ pub fn launch_context(
         effective_surface: serde_json::json!({"kind": "Surface"}),
         granted_caps: vec!["ui.read".into()],
         user_principal_id,
-        project_authority: None,
+        project_authority: project_root.map(|project_root| {
+            Arc::new(
+                lillux::PinnedDirectory::open(std::path::Path::new(project_root))
+                    .expect("open fixture project")
+                    .expect("fixture project exists"),
+            )
+        }),
+        registered_project_id: None,
     }
+}
+
+#[allow(dead_code)]
+pub fn mint_launch(
+    state: &AppState,
+    mut context: ryeos_ui::browser_session::LaunchContext,
+) -> (String, String) {
+    Arc::make_mut(&mut context.compiled_binding)
+        .binding
+        .node_policy_generation_digest = state.node_policy.generation_digest().to_owned();
+    let (session_id, token, _) = ryeos_ui::state::get_ui_state(state)
+        .expect("UI state")
+        .browser_sessions
+        .mint_token(context, 16, state.node_policy.generation_digest())
+        .expect("mint test browser session");
+    (session_id, token)
 }
 
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
@@ -340,9 +363,17 @@ fn build_app_state(
         service_descriptors,
         node_config: Arc::new(snapshot),
         node_policy: Arc::new(
-            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
-                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
-            )]),
+            ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
+                Arc::new(
+                    ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
+                ),
+                Arc::new(
+                    ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
+                        schema: 1,
+                        max_live_binding_attachments_per_session: 16,
+                    },
+                ),
+            ]),
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,

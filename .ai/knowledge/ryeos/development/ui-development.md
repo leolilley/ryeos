@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T05:39:00Z:f612c1c168b319c434299e1aa49af1ada559a25cc0c856443a311879d5ca4c71:nvz2i3KjawmhtmMKQKInVdEprA5/3mgMtVGdNrFKlVo1wBenESU4HibrN6zyBatdtBPxsoFpphWSzgdm8RCNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T06:23:37Z:adbe7d6bd9d7ffc03972eb2bb8b8f25d3c071f8ba9e46605e3dffa4c6c7d33a0:GIfTbvURPGLpy8Gth+owB1aR4e5BSD3c9LTBYdWN1YzY1ca+WYhVIJ41zKHC6G2Fl7ltTGSx+r4FOrti86vZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -15,6 +15,43 @@ launcher, optional slots, authored ambient character and shared Rust-owned UI
 semantics. Do not turn RyeOS into a generic sidebar application.
 
 ## Ownership
+
+### Admitted binding attachments
+
+The browser session authenticates the principal; it does not supply one mutable
+project binding for every view. Each mounted view retains an admitted binding
+attachment. Requests carry its exact id, generation and digest. The daemon
+resolves that triple inside the authenticated session and obtains project
+authority from its retained pinned directory, never from a displayed path.
+
+Resolve definitions by mounted instance → attachment → view reference. Never
+merge same-named views from different attachments into one global view map.
+Moving a view, changing focus or opening another project cannot rebind existing
+views or their composers. A view set's insertion attachment is only the explicit
+context for adding a new view; it is not a fallback for mounted operations.
+Lens return frames retain their original binding as well as selection state.
+
+The immutable `surface_attachment_id` owns authored shell sources and initial
+composition. It is not a default dispatch authority. Project-open adds a newly
+admitted attachment and composition, rather than replacing the browser session.
+Late results must still match their original attachment and mounted view before
+updating presentation. Current policy and attachment admission are also checked
+by the daemon; client checks do not grant authority.
+
+Attachment count is bounded by the signed `ui_browser_sessions` node policy.
+There is no daemon fallback value. Test fixtures must supply that policy too.
+Releasing an unused attachment is an explicit session-wide operation: another
+browser tab may share it. Never infer permission to revoke from one renderer's
+last closed mount. The shared command overlay offers release only when this
+renderer has no mount, insertion context, return frame or pending request using
+the exact attachment. The daemon settles only its UI seat leases before revoking
+the binding; it does not terminate project executions. The original surface
+attachment is retained until the session itself ends. A failed release remains
+visible and requires an explicit retry, not a background mutation loop.
+Reusable arrangements carry no live binding triples. Multi-context resume must
+re-admit owner-specific references before restoring mounts; until that workflow
+is implemented, preference export refuses such contexts rather than silently
+restoring them under the surface attachment.
 
 ### Saved view-set library
 
@@ -36,7 +73,7 @@ the complete binding request against the current compiled session bounds before
 dispatch. Do not enlarge route limits or guess envelope overhead in the UI.
 
 `open_saved_view_set` is a local composition operation. It creates fresh mounted
-identities and revalidates against the current admitted surface. It does not
+identities and revalidates against the invoking view's admitted attachment. It does not
 restore credentials, grants, execution state or input drafts. A saved template
 and a resumed UI session are different contracts.
 
@@ -59,7 +96,12 @@ following a different set is an explicit operation, never a placement side effec
 Pinned views refuse selection writes. A followed set cannot close while external
 mounted followers still depend on it. Accepted closes retire owned sources and
 attachments; explicit reattachment fences earlier responses before refetching.
-Reusable templates exclude pinned values and runtime follow identities.
+Reusable templates exclude pinned values and runtime follow identities. The
+current composition-only schema therefore refuses captures with pins, external
+follow links or mixed project contexts instead of silently flattening them.
+Ordinary layout-preference export likewise refuses unrepresentable relationships.
+The full reusable-context grammar and particular-set resume remain separate
+implementation gates; these refusals must not be reported as completing them.
 Open alongside allocates a fresh mounted viewer, captures its origin's current
 selection, and installs that pin before resolving source requests. It does not
 copy drafts, pending effects or execution authority. Selection-independent views

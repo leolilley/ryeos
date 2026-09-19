@@ -315,7 +315,7 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
-        let channels = cursor_channels(self.views.get(&view_ref));
+        let channels = cursor_channels(self.binding_for_instance(&instance_key, &view_ref));
         if channels.is_empty() {
             return Vec::new();
         }
@@ -594,7 +594,7 @@ impl RyeOsCore {
         else {
             return;
         };
-        if !cursor_channels(self.views.get(&view_ref))
+        if !cursor_channels(self.binding_for_instance(&key.view_instance, &view_ref))
             .iter()
             .any(|candidate| candidate == channel)
         {
@@ -665,8 +665,7 @@ impl RyeOsCore {
     ) -> Option<(String, Vec<(RyeOsViewInstanceKey, String, Vec<String>)>)> {
         let view_ref = self.view_ref_for_instance(instance_key)?;
         let scope = self
-            .views
-            .get(&view_ref)?
+            .binding_for_instance(instance_key, &view_ref)?
             .field_state
             .as_ref()?
             .cursor_scope
@@ -677,7 +676,7 @@ impl RyeOsCore {
             .mounted_field_instances()
             .into_iter()
             .filter_map(|(member, member_view_ref)| {
-                let binding = self.views.get(&member_view_ref)?;
+                let binding = self.binding_for_instance(&member, &member_view_ref)?;
                 let candidate = &binding.field_state.as_ref()?.cursor_scope;
                 (candidate == &scope
                     && self
@@ -738,19 +737,8 @@ impl RyeOsCore {
         instance: &RyeOsViewInstanceKey,
         scope_id: &str,
     ) -> Option<String> {
-        let surface_instance = self
-            .data
-            .session
-            .as_ref()
-            .map(|session| {
-                if session.session_id.is_empty() {
-                    session.surface_ref.as_str()
-                } else {
-                    session.session_id.as_str()
-                }
-            })
-            .filter(|value| !value.is_empty())
-            .unwrap_or("embedded-surface");
+        let surface_instance = &self.data.session.as_ref()?.session_id;
+        let binding = self.binding_attachment_for_instance(instance)?;
         let attachment = match self.selection_attachment_for_instance(instance)? {
             crate::ui::attachment::SelectionAttachment::FollowViewSet { view_set_id } => {
                 format!("follow:{}", view_set_id.0)
@@ -760,7 +748,8 @@ impl RyeOsCore {
             }
         };
         Some(format!(
-            "{surface_instance}\u{1f}{attachment}\u{1f}{scope_id}"
+            "{surface_instance}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{attachment}\u{1f}{scope_id}",
+            binding.binding_attachment_id, binding.binding_generation, binding.binding_digest
         ))
     }
 
@@ -787,8 +776,7 @@ impl RyeOsCore {
         let mut instances = Vec::new();
         for view_set in &self.view_sets {
             instances.extend(view_set.tiles.values().filter_map(|tile| {
-                self.views
-                    .get(&tile.view.view_ref)
+                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
                     .is_some_and(|binding| binding.widget == "field")
                     .then(|| (tile.instance_key.clone(), tile.view.view_ref.clone()))
             }));
@@ -803,8 +791,10 @@ impl RyeOsCore {
                 };
                 let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
                 if self
-                    .views
-                    .get(view_ref)
+                    .binding_for_instance(
+                        &super::model::dock_view_instance_key(view_set.id, edge),
+                        view_ref,
+                    )
                     .is_some_and(|binding| binding.widget == "field")
                 {
                     instances.push((
@@ -825,8 +815,7 @@ impl RyeOsCore {
             .tiles
             .values()
             .filter_map(|tile| {
-                self.views
-                    .get(&tile.view.view_ref)
+                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
                     .is_some_and(|binding| binding.widget == "field")
                     .then(|| (tile.instance_key.clone(), tile.view.view_ref.clone()))
             })
@@ -834,9 +823,8 @@ impl RyeOsCore {
         instances.extend(
             self.visible_dock_views()
                 .into_iter()
-                .filter(|(_, view_ref)| {
-                    self.views
-                        .get(view_ref)
+                .filter(|(instance, view_ref)| {
+                    self.binding_for_instance(instance, view_ref)
                         .is_some_and(|binding| binding.widget == "field")
                 }),
         );
@@ -1022,8 +1010,8 @@ mod tests {
     use super::*;
     use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
     use crate::ui::event::RyeOsEvent;
-    use crate::ui::model::{BrowserSession, BrowserViewport};
-    use crate::ui::reducer::test_support::active_selection;
+    use crate::ui::model::BrowserViewport;
+    use crate::ui::reducer::test_support::{active_selection, session_with_surface};
 
     fn source_request(
         effect: &crate::ui::effect::RyeOsEffect,
@@ -1077,50 +1065,46 @@ mod tests {
 
     fn core() -> RyeOsCore {
         RyeOsCore::new(
-            BrowserSession {
-                effective_surface: Some(serde_json::json!({
-                    "name": "field-test",
-                    "tiles": ["view:test/field"],
-                    "views": {
-                        "view:test/field": {
-                            "widget": "field",
-                            "sources": {
-                                "project": { "ref": "service:project" },
-                                "execution": {
-                                    "ref": "service:execution",
-                                    "params": {
-                                        "thread_id": "@facet:selection.thread_id",
-                                        "cursor": "@field:cursor"
-                                    }
+            session_with_surface(serde_json::json!({
+                "name": "field-test",
+                "tiles": ["view:test/field"],
+                "views": {
+                    "view:test/field": {
+                        "widget": "field",
+                        "sources": {
+                            "project": { "ref": "service:project" },
+                            "execution": {
+                                "ref": "service:execution",
+                                "params": {
+                                    "thread_id": "@facet:selection.thread_id",
+                                    "cursor": "@field:cursor"
                                 }
-                            },
-                            "projections": {
-                                "schema_version": "ryeos.ui.field.projection.v1",
-                                "groups": [{ "id": "runs", "label": "Runs" }],
-                                "layers": [{ "id": "live", "label": "Live" }],
-                                "entity_rules": [{
-                                    "match": { "kind": "run" },
-                                    "set": { "group": "runs", "layer": "live" }
-                                }]
-                            },
-                            "selection": { "change": "select", "activate": "select" },
-                            "affordances": [{
-                                "id": "select",
-                                "invoke": {
-                                    "plane": "ui",
-                                    "facet": "selection",
-                                    "value": {
-                                        "thread_id": "{record.attributes.thread.id}",
-                                        "entity_id": "{record.id}"
-                                    }
-                                }
+                            }
+                        },
+                        "projections": {
+                            "schema_version": "ryeos.ui.field.projection.v1",
+                            "groups": [{ "id": "runs", "label": "Runs" }],
+                            "layers": [{ "id": "live", "label": "Live" }],
+                            "entity_rules": [{
+                                "match": { "kind": "run" },
+                                "set": { "group": "runs", "layer": "live" }
                             }]
-                        }
+                        },
+                        "selection": { "change": "select", "activate": "select" },
+                        "affordances": [{
+                            "id": "select",
+                            "invoke": {
+                                "plane": "ui",
+                                "facet": "selection",
+                                "value": {
+                                    "thread_id": "{record.attributes.thread.id}",
+                                    "entity_id": "{record.id}"
+                                }
+                            }
+                        }]
                     }
-                })),
-                posture: crate::ui::binding::UiEffectivePosture::Interactive,
-                ..Default::default()
-            },
+                }
+            })),
             BrowserViewport::default(),
             0,
         )
@@ -1156,20 +1140,14 @@ mod tests {
             })
         };
         RyeOsCore::new(
-            BrowserSession {
-                session_id: "session:shared-field".to_string(),
-                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                surface_ref: "surface:test/shared-field".to_string(),
-                effective_surface: Some(serde_json::json!({
-                    "name": "shared-field-test",
-                    "tiles": ["view:test/solve", "view:test/board"],
-                    "views": {
-                        "view:test/solve": field_view("service:solve"),
-                        "view:test/board": field_view("service:board")
-                    }
-                })),
-                ..Default::default()
-            },
+            session_with_surface(serde_json::json!({
+                "name": "shared-field-test",
+                "tiles": ["view:test/solve", "view:test/board"],
+                "views": {
+                    "view:test/solve": field_view("service:solve"),
+                    "view:test/board": field_view("service:board")
+                }
+            })),
             BrowserViewport::default(),
             0,
         )
@@ -1177,39 +1155,33 @@ mod tests {
 
     fn two_set_shared_cursor_core() -> RyeOsCore {
         RyeOsCore::new(
-            BrowserSession {
-                session_id: "session:two-set-field".to_string(),
-                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                surface_ref: "surface:test/two-set-field".to_string(),
-                effective_surface: Some(serde_json::json!({
-                    "name": "two-set-field-test",
-                    "view_sets": [
-                        {"id":"one", "title":"One", "root":{"type":"group", "views":["view:test/field"], "active":0}},
-                        {"id":"two", "title":"Two", "root":{"type":"group", "views":["view:test/field"], "active":0}}
-                    ],
-                    "views": {
-                        "view:test/field": {
-                            "widget": "field",
-                            "sources": {"execution": {
-                                "ref": "service:execution",
-                                "params": {
-                                    "thread_id": "@facet:selection.thread_id",
-                                    "cursor": "@field:cursor"
-                                }
-                            }},
-                            "field_state": {"cursor_scope": {
-                                "id": "shared-authored-id",
-                                "subject": ["@facet:selection.thread_id"]
-                            }},
-                            "projections": {
-                                "schema_version": "ryeos.ui.field.projection.v1",
-                                "groups": [], "layers": [], "entity_rules": []
+            session_with_surface(serde_json::json!({
+                "name": "two-set-field-test",
+                "view_sets": [
+                    {"id":"one", "title":"One", "root":{"type":"group", "views":["view:test/field"], "active":0}},
+                    {"id":"two", "title":"Two", "root":{"type":"group", "views":["view:test/field"], "active":0}}
+                ],
+                "views": {
+                    "view:test/field": {
+                        "widget": "field",
+                        "sources": {"execution": {
+                            "ref": "service:execution",
+                            "params": {
+                                "thread_id": "@facet:selection.thread_id",
+                                "cursor": "@field:cursor"
                             }
+                        }},
+                        "field_state": {"cursor_scope": {
+                            "id": "shared-authored-id",
+                            "subject": ["@facet:selection.thread_id"]
+                        }},
+                        "projections": {
+                            "schema_version": "ryeos.ui.field.projection.v1",
+                            "groups": [], "layers": [], "entity_rules": []
                         }
                     }
-                })),
-                ..Default::default()
-            },
+                }
+            })),
             BrowserViewport::default(),
             0,
         )

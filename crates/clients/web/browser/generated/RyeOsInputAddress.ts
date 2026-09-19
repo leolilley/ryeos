@@ -8,6 +8,8 @@ import type { InputBufferKey } from "./InputBufferKey";
  */
 export interface RyeOsInputAddress {
   session_id: string;
+  binding_attachment_id: string;
+  binding_generation: bigint;
   binding_digest: string;
   view_set_id: bigint;
   buffer: InputBufferKey;

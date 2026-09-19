@@ -1,7 +1,9 @@
 // Tests for `ui.invocations.dispatch` handler.
 
 mod test_state;
-use test_state::{build_test_state, build_test_state_with_live_bundles, launch_context};
+use test_state::{
+    build_test_state, build_test_state_with_live_bundles, launch_context, mint_launch,
+};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -77,6 +79,16 @@ fn observation_context() -> ryeos_ui::browser_session::LaunchContext {
     context
 }
 
+fn attachment_coordinate(
+    session: &ryeos_ui::browser_session::BrowserSession,
+) -> ryeos_ui::browser_session::BindingAttachmentCoordinate {
+    session
+        .attachments
+        .get(&session.surface_attachment_id)
+        .expect("surface attachment")
+        .coordinate()
+}
+
 #[test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 fn dispatch_transport_is_unrecorded() {
@@ -109,10 +121,7 @@ fn dispatch_transport_is_unrecorded() {
 #[tokio::test]
 async fn arbitrary_event_targets_are_rejected() {
     let (_tmp, state) = build_test_state();
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(test_context());
+    let (session_id, token) = mint_launch(&state, test_context());
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -148,10 +157,7 @@ async fn arbitrary_event_targets_are_rejected() {
 #[tokio::test]
 async fn legacy_client_authority_flags_are_rejected() {
     let (_tmp, state) = build_test_state();
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(observation_context());
+    let (session_id, token) = mint_launch(&state, observation_context());
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -197,6 +203,8 @@ async fn session_cookie_required() {
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
+            "binding_attachment_id": "attachment-fixture",
+            "binding_generation": 1,
             "binding_digest": "fixture",
             "coordinate": { "kind": "source", "view_ref": "view:test/x", "channel": "default" },
             "payload": { "kind": "source_parameters", "params": {} }
@@ -219,6 +227,7 @@ async fn session_cookie_required() {
 async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, ctx, session) = mint_live_session(&state).await;
+    let coordinate = attachment_coordinate(&session);
 
     // Subscribe to the session bus before invoking.
     let mut rx = get_ui_state(&state)
@@ -228,7 +237,9 @@ async fn session_local_invocation_publishes_to_session_bus() {
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_digest": session.compiled_binding.binding_digest,
+            "binding_attachment_id": coordinate.binding_attachment_id,
+            "binding_generation": coordinate.binding_generation,
+            "binding_digest": coordinate.binding_digest,
             "coordinate": {
                 "kind": "affordance",
                 "view_ref": "view:ryeos/projects/list",
@@ -264,7 +275,7 @@ async fn session_local_invocation_publishes_to_session_bus() {
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let (_session_id, ctx, session) = mint_live_session(&state).await;
-    let binding_digest = session.compiled_binding.binding_digest.clone();
+    let coordinate = attachment_coordinate(&session);
     let state = Arc::new(state);
 
     let opened = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
@@ -332,7 +343,9 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let listed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_digest": binding_digest,
+            "binding_attachment_id": coordinate.binding_attachment_id,
+            "binding_generation": coordinate.binding_generation,
+            "binding_digest": coordinate.binding_digest,
             "coordinate": {
                 "kind": "source",
                 "view_ref": "view:ryeos/input",
@@ -361,7 +374,9 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let replayed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "binding_digest": binding_digest,
+            "binding_attachment_id": coordinate.binding_attachment_id,
+            "binding_generation": coordinate.binding_generation,
+            "binding_digest": coordinate.binding_digest,
             "coordinate": {
                 "kind": "source",
                 "view_ref": "view:ryeos/thread/transcript",

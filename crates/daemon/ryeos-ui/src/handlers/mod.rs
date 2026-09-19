@@ -21,6 +21,7 @@ pub mod ui_projects;
 pub mod ui_remotes;
 pub mod ui_schedules;
 pub mod ui_seat;
+pub mod ui_session_attachments;
 pub mod ui_session_current;
 pub mod ui_thread_tree;
 pub mod ui_threads;
@@ -30,6 +31,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
+    ui_session_attachments::DETACH_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
     ui_field_comparison::DESCRIPTOR,

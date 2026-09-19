@@ -2,7 +2,7 @@
 //! no daemon, credentials, installed state or execution requests are involved.
 use ryeos_client_base::ui::{
     BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent, RyeOsSourceInstanceKey, RyeOsUiEvent,
-    RyeOsUiIntent,
+    RyeOsUiIntent, UiBindingAttachment, UiBindingRequestBounds,
 };
 use serde_json::{Value, json};
 
@@ -143,10 +143,22 @@ fn main() {
         BrowserSession {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             session_id: "visual-fixture".into(),
-            binding_digest: "fixture-not-authority".into(),
-            surface_ref: "surface:fixture/visual".into(),
             user_principal_id: Some("fixture".into()),
-            effective_surface: Some(surface),
+            surface_attachment_id: "visual-fixture-attachment".into(),
+            binding_attachments: vec![UiBindingAttachment {
+                binding_attachment_id: "visual-fixture-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "visual-fixture-binding".into(),
+                surface_ref: "surface:fixture/visual".into(),
+                surface_generation: "visual-fixture-surface".into(),
+                effective_surface: surface,
+                project_path: None,
+                posture: Default::default(),
+                binding_request_bounds: UiBindingRequestBounds {
+                    max_request_bytes: 64 * 1024,
+                    max_input_bytes: 16 * 1024,
+                },
+            }],
             ..Default::default()
         },
         BrowserViewport {

@@ -458,8 +458,21 @@ mod tests {
     fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
             session_id: "S-backdrop".to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
+            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
+            surface_attachment_id: "backdrop-attachment".into(),
+            binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
+                binding_attachment_id: "backdrop-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "backdrop-binding".into(),
+                surface_ref: "surface:ryeos/ryeos/base".to_string(),
+                surface_generation: "backdrop-generation".into(),
+                project_path: None,
+                posture: Default::default(),
+                binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
+                    max_request_bytes: 4096,
+                    max_input_bytes: 1024,
+                },
+                effective_surface: json!({
                 "name": "ryeos-base",
                 "version": "1.0.0",
                 "backdrop": "view:test/backdrop",
@@ -481,7 +494,8 @@ mod tests {
                         ] }
                     }
                 }
-            })),
+                }),
+            }],
             ..Default::default()
         };
         RyeOsCore::new(session, BrowserViewport::default(), 0)

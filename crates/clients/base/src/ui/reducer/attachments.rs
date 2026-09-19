@@ -15,8 +15,7 @@ impl RyeOsCore {
         view_ref: &str,
     ) -> Vec<RyeOsEffect> {
         let channels = self
-            .views
-            .get(view_ref)
+            .binding_for_instance(instance, view_ref)
             .map(|binding| binding.sources.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         self.invalidate_view_sources(instance);
@@ -63,6 +62,12 @@ impl RyeOsCore {
         let Some(view_ref) = self.active_attachment_view(&instance) else {
             return Vec::new();
         };
+        let Some(binding_id) = self
+            .binding_attachment_for_instance(&instance)
+            .map(|attachment| attachment.binding_attachment_id.clone())
+        else {
+            return Vec::new();
+        };
         let pinned = match self.capture_pinned_selection(&instance) {
             Ok(pinned) => pinned,
             Err(error) => {
@@ -73,8 +78,10 @@ impl RyeOsCore {
                 return Vec::new();
             }
         };
-        let Some(tile_id) = self.add_tile_motions(crate::view_set::ViewSpec::bound(&view_ref))
-        else {
+        let Some(tile_id) = self.add_tile_motions_under_binding(
+            crate::view_set::ViewSpec::bound(&view_ref),
+            &binding_id,
+        ) else {
             self.notice(
                 "The layout cannot open another view alongside this one.",
                 super::view_model::RyeOsTone::Warn,
@@ -88,6 +95,7 @@ impl RyeOsCore {
         else {
             return Vec::new();
         };
+        self.stamp_instance_binding(new_instance.clone(), &binding_id);
         self.selection_attachments
             .insert(new_instance.clone(), pinned);
         self.normalize_field_local_states();

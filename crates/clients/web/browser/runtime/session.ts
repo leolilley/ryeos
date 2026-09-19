@@ -26,6 +26,7 @@ const MAX_PENDING_SEAT_BYTES = 512 * 1_024;
 interface SessionRuntimeOptions {
   readonly sessionId: string;
   readonly eventsUrl: string | null;
+  readonly surfaceAttachment: BindingAttachmentCoordinate;
   readonly seatEvents: () => SeatEvent[];
   readonly commitEvent: (event: RyeOsEvent) => void;
   readonly replaySeatEvents: (events: unknown[]) => void;
@@ -75,7 +76,7 @@ export function createSessionRuntime(options: SessionRuntimeOptions): SessionRun
     seatObserved = startupBaseline.length;
     await reconcileRetainedAppend();
     if (closed || epoch !== seatEpoch) return;
-    const opened = unwrapResult(await invokeSeat("open", {}));
+    const opened = unwrapResult(await invokeSeat("open", options.surfaceAttachment));
     if (closed || epoch !== seatEpoch) return;
     seatThreadId = stringField(opened, "thread_id");
     if (!seatThreadId) throw new Error("seat/open returned no durable seat thread");
@@ -140,7 +141,7 @@ export function createSessionRuntime(options: SessionRuntimeOptions): SessionRun
       lastEngineSeq: BigInt(retained.last_engine_seq),
       eventCount: retained.event_count,
       payloadDigest: retained.payload_digest,
-    }, options.sessionId);
+    }, options.sessionId, options.surfaceAttachment);
     clearRetainedAppend(pendingStorageKey);
   }
 
@@ -356,7 +357,7 @@ export function createSessionRuntime(options: SessionRuntimeOptions): SessionRun
       await appendWithExactRetry(encodedRequest, {
         producer, operationId, firstEngineSeq, lastEngineSeq,
         eventCount: batch.length, payloadDigest,
-      }, options.sessionId);
+      }, options.sessionId, options.surfaceAttachment);
       if (closed || epoch !== seatEpoch || threadId !== seatThreadId || producer !== seatProducer) return;
       clearRetainedAppend(pendingStorageKey);
       pendingSeatEvents.splice(0, batch.length);
@@ -426,6 +427,7 @@ async function appendWithExactRetry(
   encodedRequest: string,
   expected: ExpectedAppendAcknowledgement,
   sessionId: string,
+  surfaceAttachment: BindingAttachmentCoordinate,
 ): Promise<void> {
   const url = "/ui/api/session/seat/append";
   let authenticationReconciled = false;
@@ -442,7 +444,7 @@ async function appendWithExactRetry(
       return;
     } catch (error) {
       if (isAuthenticationResponse(error) && !authenticationReconciled) {
-        await requireCurrentSession(sessionId);
+        await requireCurrentSession(sessionId, surfaceAttachment);
         authenticationReconciled = true;
         continue;
       }
@@ -458,11 +460,31 @@ function isAuthenticationResponse(error: unknown): boolean {
   return error instanceof HttpResponseError && (error.status === 401 || error.status === 403);
 }
 
-async function requireCurrentSession(expectedSessionId: string): Promise<void> {
+async function requireCurrentSession(
+  expectedSessionId: string,
+  expectedAttachment: BindingAttachmentCoordinate,
+): Promise<void> {
   const current = unwrapResult(await getJson("/ui/api/session/current"));
   if (requiredStringField(current, "session_id") !== expectedSessionId) {
     throw new Error("browser session changed while reconciling a seat append");
   }
+  const attachments = current.binding_attachments;
+  if (!Array.isArray(attachments)) {
+    throw new Error("browser session attachments changed while reconciling a seat append");
+  }
+  const matches = attachments.filter((value) => isRecord(value)
+    && value.binding_attachment_id === expectedAttachment.binding_attachment_id
+    && exactIntegerField(value, "binding_generation") === BigInt(expectedAttachment.binding_generation)
+    && value.binding_digest === expectedAttachment.binding_digest);
+  if (matches.length !== 1) {
+    throw new Error("browser surface attachment changed while reconciling a seat append");
+  }
+}
+
+interface BindingAttachmentCoordinate {
+  readonly binding_attachment_id: string;
+  readonly binding_generation: number;
+  readonly binding_digest: string;
 }
 
 function isRetryableResponse(error: unknown): boolean {

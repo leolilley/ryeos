@@ -34,7 +34,7 @@ pub enum CompiledUiDispatchClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompiledUiResultEffect {
-    ReplaceSession,
+    AdmitBindingAttachment,
 }
 
 /// Exact execution target resolved from a signed source or affordance.

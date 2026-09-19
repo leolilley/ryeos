@@ -12,13 +12,8 @@ impl RyeOsCore {
     ) -> Vec<RyeOsEffect> {
         use super::event::{RyeOsInputAction, RyeOsUiEvent};
         use super::model::{RyeOsFocusTarget, dock_view_instance_key};
-        let session = self.data.session.as_ref();
         if address.view_set_id != self.view_sets[self.active_view_set].id
-            || address.session_id != session.map(|s| s.session_id.as_str()).unwrap_or_default()
-            || address.binding_digest
-                != session
-                    .map(|s| s.binding_digest.as_str())
-                    .unwrap_or_default()
+            || !self.input_address_is_live(&address)
         {
             return Vec::new();
         }
@@ -55,8 +50,7 @@ impl RyeOsCore {
             RyeOsFocusTarget::Dock { edge }
         };
         let Some(input) = self
-            .views
-            .get(&address.buffer.view_ref)
+            .binding_for_instance(&address.buffer.view_instance_key, &address.buffer.view_ref)
             .and_then(|view| view.input.as_ref())
         else {
             return Vec::new();
@@ -98,7 +92,9 @@ impl RyeOsCore {
     /// Whether the focused input is a live filter (feeds a source, no submit).
     pub(crate) fn focused_input_is_live_filter(&self) -> bool {
         self.focused_input_instance()
-            .and_then(|(_, view_ref)| self.views.get(&view_ref))
+            .and_then(|(key, view_ref)| {
+                self.binding_for_instance(&key.view_instance_key, &view_ref)
+            })
             .and_then(|binding| binding.input.as_ref())
             .is_some_and(|input| input.is_live_filter())
     }
@@ -140,8 +136,7 @@ impl RyeOsCore {
             return Vec::new();
         };
         let Some(input) = self
-            .views
-            .get(&view_ref)
+            .binding_for_instance(&key.view_instance_key, &view_ref)
             .and_then(|binding| binding.input.clone())
         else {
             return Vec::new();
@@ -162,7 +157,7 @@ impl RyeOsCore {
 
         if let Some(affordance_id) = input.submit_affordance() {
             // Mode 2: Enter fires a content affordance with `{value}`.
-            if self.refuse_blocked_mutation() {
+            if self.refuse_blocked_mutation_for_instance(&key.view_instance_key) {
                 return Vec::new();
             }
             return self.invoke_input_affordance(
@@ -304,7 +299,9 @@ impl RyeOsCore {
     /// content-declared, never assumed for every route-input.
     pub(crate) fn focused_input_target_cycle(&self) -> Option<super::content::InputTargetCycle> {
         self.focused_input_instance()
-            .and_then(|(_, view_ref)| self.views.get(&view_ref))
+            .and_then(|(key, view_ref)| {
+                self.binding_for_instance(&key.view_instance_key, &view_ref)
+            })
             .and_then(|binding| binding.input.as_ref())
             // Defense-in-depth: targeting retargets the ROUTE, so it is only
             // meaningful on a route-submit input. Content validation degrades
@@ -323,8 +320,7 @@ impl RyeOsCore {
             return Vec::new();
         };
         let count = self
-            .views
-            .get(&view_ref)
+            .binding_for_instance(&key.view_instance_key, &view_ref)
             .and_then(|binding| binding.input.as_ref())
             .and_then(|input| input.feeds.as_ref())
             .map(|feeds| feeds.field_count())
@@ -446,12 +442,12 @@ impl RyeOsCore {
     /// unchanged; it is now reached through the `input` grammar instead of
     /// the deleted Input dock special-case.
     pub(crate) fn submit_route(&mut self, text: &str, interrupt: bool) -> Vec<RyeOsEffect> {
-        if self.refuse_blocked_mutation() {
-            return Vec::new();
-        }
         let Some((origin_key, _)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.refuse_blocked_mutation_for_instance(&origin_key.view_instance_key) {
+            return Vec::new();
+        }
         let input_origin = self.input_address_for(origin_key.clone());
         let line = match super::tokenize::classify_line(text) {
             Ok(line) => line,
@@ -480,13 +476,16 @@ impl RyeOsCore {
                     );
                     return Vec::new();
                 };
-                let (request, request_bounds) = self.compiled_binding_operation(
+                let Some((request, request_bounds)) = self.compiled_binding_operation(
+                    &origin_key.view_instance_key,
                     coordinate,
                     crate::ui::binding::UiBindingPayload::Tokens {
                         tokens,
                         arguments: serde_json::json!({}),
                     },
-                );
+                ) else {
+                    return Vec::new();
+                };
                 vec![self.emit(RyeOsEffectKind::InvokeBinding {
                     request,
                     request_bounds,
@@ -521,7 +520,8 @@ impl RyeOsCore {
                         // client supplies only input plus the current seat
                         // continuation coordinate; the daemon lowers both
                         // against the session's compiled SurfaceRoute entry.
-                        let (request, request_bounds) = self.compiled_binding_operation(
+                        let Some((request, request_bounds)) = self.compiled_binding_operation(
+                            &origin_key.view_instance_key,
                             crate::ui::binding::UiBindingCoordinate::SurfaceRoute,
                             crate::ui::binding::UiBindingPayload::Input {
                                 value: plain,
@@ -531,7 +531,9 @@ impl RyeOsCore {
                                     interrupt,
                                 }),
                             },
-                        );
+                        ) else {
+                            return Vec::new();
+                        };
                         vec![self.emit(RyeOsEffectKind::InvokeBinding {
                             request,
                             request_bounds,
@@ -564,7 +566,7 @@ impl RyeOsCore {
         affordance_id: &str,
         value: &str,
     ) -> Vec<RyeOsEffect> {
-        let Some(binding) = self.views.get(view_ref) else {
+        let Some(binding) = self.binding_for_instance(invocation_origin, view_ref) else {
             return Vec::new();
         };
         let Some(affordance) = binding
@@ -602,10 +604,11 @@ impl RyeOsCore {
             }
             Some(super::content::AffordanceInvoke::Rye { notice, .. })
             | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
-                if self.refuse_blocked_mutation() {
+                if self.refuse_blocked_mutation_for_instance(&invocation_origin) {
                     return Vec::new();
                 }
-                let (request, request_bounds) = self.compiled_binding_operation(
+                let Some((request, request_bounds)) = self.compiled_binding_operation(
+                    &invocation_origin,
                     crate::ui::binding::UiBindingCoordinate::Affordance {
                         view_ref: view_ref.to_string(),
                         affordance_id: affordance_id.to_string(),
@@ -614,7 +617,9 @@ impl RyeOsCore {
                         value: value.to_string(),
                         route: None,
                     },
-                );
+                ) else {
+                    return Vec::new();
+                };
                 vec![self.emit(RyeOsEffectKind::InvokeBinding {
                     request,
                     request_bounds,
@@ -800,22 +805,18 @@ mod tests {
 
     #[test]
     fn cycling_the_filter_field_switches_the_fed_param_and_clears_text() {
-        let session = BrowserSession {
-            effective_surface: Some(serde_json::json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/list"],
-                "views": { "view:ryeos/threads/list": {
-                    "widget": "table",
-                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "sort": "watch" }, "collection": "threads" } },
-                    "input": { "id": "filter", "feeds": { "fields": [
-                        { "param": "status", "label": "status" },
-                        { "param": "requested_by", "label": "source" }
-                    ] } }
-                }}
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+        let session = session_with_surface(serde_json::json!({
+            "name": "t",
+            "tiles": ["view:ryeos/threads/list"],
+            "views": { "view:ryeos/threads/list": {
+                "widget": "table",
+                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "sort": "watch" }, "collection": "threads" } },
+                "input": { "id": "filter", "feeds": { "fields": [
+                    { "param": "status", "label": "status" },
+                    { "param": "requested_by", "label": "source" }
+                ] } }
+            }}
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         // Type into the first field (status).
         core.dispatch(RyeOsEvent::Ui {
@@ -850,27 +851,23 @@ mod tests {
     fn editing_a_live_filter_resets_the_table_cursor_to_the_top() {
         use crate::ui::view_model::intent_for_focused_row;
         use crate::view_set::ViewLocalState;
-        let session = BrowserSession {
-            effective_surface: Some(serde_json::json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/list"],
-                "views": {
-                    "view:ryeos/threads/list": {
-                        "widget": "table",
-                        "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
-                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
-                        "selection": { "activate": "watch" },
-                        "affordances": [{
-                            "id": "watch",
-                            "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
-                        }],
-                        "input": { "id": "filter", "feeds": { "param": "status" } }
-                    }
+        let session = session_with_surface(serde_json::json!({
+            "name": "t",
+            "tiles": ["view:ryeos/threads/list"],
+            "views": {
+                "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" } },
+                    "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                    "selection": { "activate": "watch" },
+                    "affordances": [{
+                        "id": "watch",
+                        "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
+                    }],
+                    "input": { "id": "filter", "feeds": { "param": "status" } }
                 }
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+            }
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let tile = core.view_sets[core.active_view_set].focused_tile;
         let tile_key = tile.0.to_string();
@@ -1139,13 +1136,13 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
         // Replace the input with one that does NOT declare targeting.
-        core.views.insert(
-            "view:ryeos/input".to_string(),
-            serde_json::from_value(serde_json::json!({
+        seed_view_value(
+            &mut core,
+            "view:ryeos/input",
+            serde_json::json!({
                 "widget": "text",
                 "input": { "id": "line", "submit": "route" }
-            }))
-            .unwrap(),
+            }),
         );
         core.data.threads = Some(RyeOsThreadsDto {
             threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
@@ -1346,13 +1343,13 @@ mod tests {
         // never retargeted onto the produced thread (no false "continuing").
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        core.views.insert(
-            "view:ryeos/input".to_string(),
-            serde_json::from_value(serde_json::json!({
+        seed_view_value(
+            &mut core,
+            "view:ryeos/input",
+            serde_json::json!({
                 "widget": "text",
                 "input": { "id": "line", "submit": "route" }
-            }))
-            .unwrap(),
+            }),
         );
         set_focused_input(&mut core, "go");
         let effect = core
@@ -1392,13 +1389,13 @@ mod tests {
             .expect("submit effect");
 
         // Focus moves to a NON-targeting input while the launch is in flight.
-        core.views.insert(
-            "view:ryeos/input".to_string(),
-            serde_json::from_value(serde_json::json!({
+        seed_view_value(
+            &mut core,
+            "view:ryeos/input",
+            serde_json::json!({
                 "widget": "text",
                 "input": { "id": "line", "submit": "route" }
-            }))
-            .unwrap(),
+            }),
         );
         assert!(
             core.focused_input_target_cycle().is_none(),

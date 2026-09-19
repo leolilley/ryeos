@@ -19,6 +19,7 @@
 
 mod affordances;
 mod attachments;
+mod binding_lifecycle;
 mod effect_results;
 mod field_interaction;
 mod input;
@@ -257,7 +258,7 @@ impl RyeOsCore {
                         .into_iter()
                         .collect(),
                     crate::atlas::AtlasProjectionVm::FileSpace => {
-                        if self.has_project_bound() {
+                        if self.atlas_target_has_project_bound(tile_id.as_deref()) {
                             let (root, path) = {
                                 let atlas = self.atlas_target(&tile_id);
                                 (atlas.file_space_root.clone(), atlas.file_space_path.clone())
@@ -291,7 +292,7 @@ impl RyeOsCore {
                     atlas.set_lens(crate::atlas::AtlasLensVm::None);
                 }
                 self.bump_generation();
-                if self.has_project_bound() {
+                if self.atlas_target_has_project_bound(tile_id.as_deref()) {
                     let (root, path) = {
                         let atlas = self.atlas_target(&tile_id);
                         (atlas.file_space_root.clone(), atlas.file_space_path.clone())
@@ -484,8 +485,7 @@ impl RyeOsCore {
                     .is_some()
                 {
                     let records = self
-                        .views
-                        .get(&view_ref)
+                        .binding_for_instance(&key.view_instance_key, &view_ref)
                         .and_then(|binding| binding.input.as_ref())
                         .and_then(|input| input.mentions.as_ref())
                         .and_then(|mentions| {
@@ -505,8 +505,7 @@ impl RyeOsCore {
                         buffer.cursor,
                     )
                 } else {
-                    self.views
-                        .get(&view_ref)
+                    self.binding_for_instance(&key.view_instance_key, &view_ref)
                         .and_then(|binding| binding.input.as_ref())
                         .and_then(|input| input.completion.as_ref())
                         .and_then(|completion| {
@@ -536,6 +535,9 @@ impl RyeOsCore {
             RyeOsUiEvent::CycleInputTarget { forward } => self.cycle_input_target(forward),
             RyeOsUiEvent::CycleFilterField { forward } => self.cycle_filter_field(forward),
             RyeOsUiEvent::InterruptHead => {
+                let Some((origin, _)) = self.focused_input_instance() else {
+                    return Vec::new();
+                };
                 // Esc while the head thread works → cancel it through the single
                 // ryeos cancel path: `service:commands/submit { cancel }`, the
                 // same channel row affordances use. No-op if
@@ -546,7 +548,7 @@ impl RyeOsCore {
                 if !self.head_thread_running(&head) {
                     return Vec::new();
                 }
-                if self.refuse_blocked_mutation() {
+                if self.refuse_blocked_mutation_for_instance(&origin.view_instance_key) {
                     return Vec::new();
                 }
                 if self.has_pending_cancel(&head) {
@@ -563,7 +565,8 @@ impl RyeOsCore {
                     );
                     return Vec::new();
                 };
-                let (request, request_bounds) = self.compiled_binding_operation(
+                let Some((request, request_bounds)) = self.compiled_binding_operation(
+                    &origin.view_instance_key,
                     coordinate,
                     crate::ui::binding::UiBindingPayload::Selection {
                         record: serde_json::json!({
@@ -571,13 +574,15 @@ impl RyeOsCore {
                             "command_type": "cancel",
                         }),
                     },
-                );
+                ) else {
+                    return Vec::new();
+                };
                 vec![self.emit(RyeOsEffectKind::InvokeBinding {
                     request,
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: None,
-                    invocation_origin: None,
+                    invocation_origin: Some(origin.view_instance_key.clone()),
                     input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -998,7 +1003,7 @@ impl RyeOsCore {
                 };
                 let retains_selection_owner = self
                     .mounted_view_ref(&instance_key)
-                    .and_then(|view_ref| self.views.get(view_ref))
+                    .and_then(|view_ref| self.binding_for_instance(&instance_key, view_ref))
                     .is_some_and(super::attachment::participates_in_selection);
                 let attachment = retains_selection_owner
                     .then(|| self.selection_attachment_for_instance(&instance_key))
@@ -1153,7 +1158,10 @@ impl RyeOsCore {
                 chain_root_id,
                 input,
             } => {
-                if self.refuse_blocked_mutation() {
+                let Some((origin, _)) = self.focused_input_instance() else {
+                    return Vec::new();
+                };
+                if self.refuse_blocked_mutation_for_instance(&origin.view_instance_key) {
                     return Vec::new();
                 }
                 // Retarget the route at the SELECTED failed thread — not the
@@ -1201,6 +1209,15 @@ impl RyeOsCore {
                 .into_iter()
                 .collect()
             }
+            RyeOsUiIntent::ReleaseBindingAttachment {
+                binding_attachment_id,
+                binding_generation,
+                binding_digest,
+            } => self.release_binding_attachment(
+                binding_attachment_id,
+                binding_generation,
+                binding_digest,
+            ),
             RyeOsUiIntent::CopyText { text } => {
                 vec![self.emit(RyeOsEffectKind::CopyToClipboard { text })]
             }
@@ -1208,10 +1225,13 @@ impl RyeOsCore {
                 vec![self.emit(RyeOsEffectKind::OpenUrl { url })]
             }
             RyeOsUiIntent::SubmitThreadCommand { command } => {
-                if self.refuse_blocked_mutation() {
+                let Some((origin, _)) = self.focused_input_instance() else {
+                    return Vec::new();
+                };
+                if self.refuse_blocked_mutation_for_instance(&origin.view_instance_key) {
                     Vec::new()
                 } else if let Some(thread_id) = self.focused_input_route().thread {
-                    // Thread control is a surface-level signed affordance, not
+                    // Thread control is the input view's signed affordance, not
                     // a privileged renderer endpoint. The selection is
                     // bounded data; the binding owns the executable target.
                     let Some(coordinate) = self.thread_control_coordinate() else {
@@ -1222,7 +1242,12 @@ impl RyeOsCore {
                         return Vec::new();
                     };
                     if command == crate::ui::dto::ThreadControlCommand::Cancel
-                        && self.has_pending_thread_command(&thread_id, command, &coordinate)
+                        && self.has_pending_thread_command(
+                            &origin.view_instance_key,
+                            &thread_id,
+                            command,
+                            &coordinate,
+                        )
                     {
                         self.notice(
                             format!("Cancel {thread_id} is already pending."),
@@ -1230,7 +1255,8 @@ impl RyeOsCore {
                         );
                         return Vec::new();
                     }
-                    let (request, request_bounds) = self.compiled_binding_operation(
+                    let Some((request, request_bounds)) = self.compiled_binding_operation(
+                        &origin.view_instance_key,
                         coordinate,
                         crate::ui::binding::UiBindingPayload::Selection {
                             record: serde_json::json!({
@@ -1238,13 +1264,15 @@ impl RyeOsCore {
                                 "command_type": command.as_str(),
                             }),
                         },
-                    );
+                    ) else {
+                        return Vec::new();
+                    };
                     vec![self.emit(RyeOsEffectKind::InvokeBinding {
                         request,
                         request_bounds,
                         intent: super::effect::InvokeIntent::Service,
                         success_notice: None,
-                        invocation_origin: None,
+                        invocation_origin: Some(origin.view_instance_key.clone()),
                         input_origin: None,
                         route_seq: None,
                         ratchet_on_thread_id: false,
@@ -1332,10 +1360,14 @@ impl RyeOsCore {
     }
 
     pub(crate) fn has_pending_cancel(&self, thread_id: &str) -> bool {
+        let Some((origin, _)) = self.focused_input_instance() else {
+            return false;
+        };
         let Some(coordinate) = self.thread_control_coordinate() else {
             return false;
         };
         self.has_pending_thread_command(
+            &origin.view_instance_key,
             thread_id,
             crate::ui::dto::ThreadControlCommand::Cancel,
             &coordinate,
@@ -1344,35 +1376,49 @@ impl RyeOsCore {
 
     fn has_pending_thread_command(
         &self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
         thread_id: &str,
         command: crate::ui::dto::ThreadControlCommand,
         coordinate: &crate::ui::binding::UiBindingCoordinate,
     ) -> bool {
+        let Some(attachment) = self.binding_attachment_for_instance(instance) else {
+            return false;
+        };
         self.pending_effects.values().any(|kind| {
             matches!(
                 kind,
                 RyeOsEffectKind::InvokeBinding {
                     request: crate::ui::binding::UiBindingRequest {
+                        binding_attachment_id,
+                        binding_generation,
+                        binding_digest,
                         coordinate: pending_coordinate,
                         payload: crate::ui::binding::UiBindingPayload::Selection { record },
                         ..
                     },
                     ..
                 } if pending_coordinate == coordinate
+                    && binding_attachment_id == &attachment.binding_attachment_id
+                    && *binding_generation == attachment.binding_generation
+                    && binding_digest == &attachment.binding_digest
                     && record.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
                     && record.get("command_type").and_then(serde_json::Value::as_str) == Some(command.as_str())
             )
         })
     }
 
-    pub(crate) fn mutation_block_reason(&self) -> Option<&'static str> {
-        if !self
-            .data
-            .session
-            .as_ref()
-            .is_some_and(|session| !session.binding_digest.is_empty())
-        {
+    pub(crate) fn mutation_block_reason(
+        &self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
+    ) -> Option<&'static str> {
+        let Some(attachment) = self.binding_attachment_for_instance(instance) else {
             return Some("This UI has no current compiled operation binding.");
+        };
+        if attachment.binding_digest.is_empty() || attachment.binding_generation == 0 {
+            return Some("This view has no current compiled operation binding.");
+        }
+        if attachment.posture == super::binding::UiEffectivePosture::ObservationOnly {
+            return Some("This view's admitted binding is observation-only.");
         }
         match self.runtime.transport.overall_freshness() {
             super::event::RyeOsTransportFreshness::Current => None,
@@ -1389,8 +1435,11 @@ impl RyeOsCore {
         }
     }
 
-    pub(crate) fn refuse_blocked_mutation(&mut self) -> bool {
-        let Some(reason) = self.mutation_block_reason() else {
+    pub(crate) fn refuse_blocked_mutation_for_instance(
+        &mut self,
+        instance: &crate::ids::RyeOsViewInstanceKey,
+    ) -> bool {
+        let Some(reason) = self.mutation_block_reason(instance) else {
             return false;
         };
         self.notice_deduped(reason, RyeOsTone::Warn);
@@ -1704,19 +1753,20 @@ mod tests {
 
     #[test]
     fn view_overlay_lists_embedded_views_including_scene_widgets() {
-        let mut core = RyeOsCore::default();
-        core.views.insert(
-            "view:ryeos/threads/list".to_string(),
-            serde_json::from_value(serde_json::json!({
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
                 "widget": "rows",
                 "description": "Thread list"
-            }))
-            .unwrap(),
+            }),
         );
         // Graph/atlas are ordinary embedded views now — no hardcoded items.
-        core.views.insert(
-            "view:ryeos/graph/topology".to_string(),
-            serde_json::from_value(serde_json::json!({ "widget": "graph" })).unwrap(),
+        seed_view_value(
+            &mut core,
+            "view:ryeos/graph/topology",
+            serde_json::json!({ "widget": "graph" }),
         );
         let items = view_overlay_items(&core);
         // No declared library: the completeness groups still surface every
@@ -1981,9 +2031,10 @@ mod tests {
     fn complete_input_accepts_top_mention() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         // An input declaring an @-mention source (projected from threads).
-        core.views.insert(
-            "view:ryeos/input".to_string(),
-            serde_json::from_value(serde_json::json!({
+        seed_view_value(
+            &mut core,
+            "view:ryeos/input",
+            serde_json::json!({
                 "widget": "text",
                 "input": {
                     "id": "line",
@@ -1995,8 +2046,7 @@ mod tests {
                         "label": "item_ref"
                     }
                 }
-            }))
-            .unwrap(),
+            }),
         );
         // The refs land under the mention source key via the generic fetch.
         core.data.sources.insert(
@@ -2107,6 +2157,31 @@ mod tests {
                 .iter()
                 .any(|notice| notice.message == "Cancel T-run is already pending.")
         );
+
+        let origin = core.focused_input_instance().unwrap().0.view_instance_key;
+        let coordinate = core.thread_control_coordinate().unwrap();
+        let other = fixture_attachment(
+            "other-attachment",
+            9,
+            &"99".repeat(32),
+            Some("/other"),
+            serde_json::json!({"name":"other", "views":{}}),
+        );
+        let retained =
+            crate::ui::binding_context::RetainedUiBindingAttachment::from_descriptor(other)
+                .unwrap();
+        core.binding_attachments
+            .insert("other-attachment".into(), retained);
+        assert!(core.stamp_instance_binding(origin.clone(), "other-attachment"));
+        assert!(
+            !core.has_pending_thread_command(
+                &origin,
+                "T-run",
+                crate::ui::dto::ThreadControlCommand::Cancel,
+                &coordinate,
+            ),
+            "the same thread, command, and coordinate under another attachment is not a duplicate"
+        );
     }
 
     #[test]
@@ -2156,14 +2231,14 @@ mod tests {
     #[test]
     fn overlay_state_is_reduced_in_core() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        core.views.insert(
-            "view:ryeos/items/space".to_string(),
-            serde_json::from_value(serde_json::json!({
+        seed_view_value(
+            &mut core,
+            "view:ryeos/items/space",
+            serde_json::json!({
                 "widget": "rows",
                 "description": "Item space",
                 "sources": { "default": { "ref": "service:ui/ryeos-ui/items/list", "params": {}, "collection": "items" } }
-            }))
-            .unwrap(),
+            }),
         );
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::OpenOverlay {
@@ -2264,8 +2339,7 @@ mod tests {
         // canonical form, bare refs (the legacy flat form) shelve under
         // their path-derived group — and merge into a declared group of
         // the same name rather than duplicating the header.
-        let mut session = session();
-        session.effective_surface = Some(serde_json::json!({
+        let session = session_with_surface(serde_json::json!({
             "name": "mixed",
             "library": [
                 { "group": "Alpha", "views": ["view:test/alpha/one"] },
@@ -2340,8 +2414,7 @@ mod tests {
         // A surface declaring a "Node" group plus an embedded-but-undeclared
         // view under a `node/` path must render ONE header, not "Node" and
         // "node" side by side.
-        let mut session = session();
-        session.effective_surface = Some(serde_json::json!({
+        let session = session_with_surface(serde_json::json!({
             "name": "grouped",
             "library": [
                 { "group": "Node", "views": ["view:test/node/events"] }
@@ -2773,7 +2846,10 @@ mod tests {
             crate::ui::view_model::RyeOsViewVm::Sections { sections, .. } => sections[0].id.clone(),
             other => panic!("expected sections, got {other:?}"),
         };
-        core.views
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .views
             .get_mut("view:test/sections")
             .unwrap()
             .sections

@@ -26,6 +26,7 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `CopyToClipboard` | native | neutral | No terminal clipboard owner. |
 | [x] `OpenUrl` | native | neutral | No terminal browser navigation. |
 | [x] `ReplaceSession` | native | native | Both redeem the one-shot successor session. |
+| [x] `ReleaseBindingAttachment` | native | native | Same exact session-bound attachment triple; explicit release only. |
 <!-- parity:RyeOsEffectKind:end -->
 
 ## Root events
@@ -82,6 +83,7 @@ producers of the same intents, not a second command vocabulary.
 | [x] `PinViewSelection` | shared | shared | exact mounted-view selection snapshot; shared command overlay and web tile menu |
 | [x] `OpenPinnedViewAlongside` | shared | shared | fresh mount pinned to the originating view's captured selection |
 | [x] `FollowViewSetSelection` | shared | shared | explicit retained selection owner; shared command overlay and web tile menu |
+| [x] `ReleaseBindingAttachment` | shared | shared | explicit command for a locally unused non-surface attachment; session-wide effect |
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
 | [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |

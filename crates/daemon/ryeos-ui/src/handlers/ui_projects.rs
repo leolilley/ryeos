@@ -245,25 +245,36 @@ pub async fn handle_projects_forget(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: ForgetProjectRequest = parse_request(params)?;
-    if req.local_id.is_none() && req.root.is_none() {
-        return Err(HandlerError::BadRequest("local_id or root is required".into()).into());
-    }
-    let root = match (req.local_id.as_deref(), req.root.as_deref()) {
-        (Some(_), _) => None,
-        (None, Some(root)) => Some(project_root_locator_for_forget(root)?),
-        (None, None) => None,
-    };
+    let local_id = req.local_id.as_deref().ok_or_else(|| {
+        HandlerError::BadRequest("registered local_id is required for project forget".into())
+    })?;
 
     let store = locked_principal_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
-    let before = projects.projects.len();
-    projects.projects.retain(|p| {
-        if let Some(local_id) = req.local_id.as_deref() {
-            p.local_id != local_id
-        } else {
-            root.as_deref().is_none_or(|r| r != p.root)
+    if !projects
+        .projects
+        .iter()
+        .any(|project| project.local_id == local_id)
+    {
+        return Ok(json!({"removed": 0}));
+    }
+    let principal_id = retained_principal_id(&state)?;
+    if get_ui_state(&state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+        .browser_sessions
+        .has_retained_attachment_for_project(&principal_id, local_id)
+    {
+        return Err(HandlerError::Structured {
+            code: "project_in_use".into(),
+            status: 409,
+            body: json!({"code":"project_in_use","local_id":local_id}),
         }
-    });
+        .into());
+    }
+    let before = projects.projects.len();
+    projects
+        .projects
+        .retain(|project| project.local_id != local_id);
     let removed = before - projects.projects.len();
     store.write_projects(&projects)?;
 
@@ -301,25 +312,16 @@ pub async fn handle_projects_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let caller = require_seat_caller(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let req: OpenProjectRequest = parse_request(params)?;
-    let current_project = caller
-        .project_query_identity()?
-        .map(|path| path.to_string_lossy().into_owned());
-    let store = locked_principal_store(&ctx, &state).await?;
-    let projects = store.load_projects()?;
-    let project = if req.local_id == "current" {
-        let root = current_project.ok_or(HandlerError::NotFound)?;
-        let path = PathBuf::from(&root);
-        ProjectEntry {
-            local_id: "current".to_string(),
-            name: inferred_project_name(&path),
-            root,
-            added_at: String::new(),
-            tags: Vec::new(),
-        }
-    } else {
-        projects
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let origin = crate::seat_auth::compiled_ui_attachment()
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
+    let project = {
+        let store = locked_principal_store(&ctx, &state).await?;
+        store
+            .load_projects()?
             .projects
             .into_iter()
             .find(|p| p.local_id == req.local_id)
@@ -328,76 +330,92 @@ pub async fn handle_projects_open(
 
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
-    let active_session = if let Some(session_id) = session_id_from_context(&ctx) {
-        let session = get_ui_state(&state)
-            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-            .browser_sessions
-            .get_session(session_id)
-            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-        if session.project_root.as_deref() != Some(root.as_str()) {
-            // The selected root came from the already resolved principal
-            // store. Pin it here and carry that exact authority forward;
-            // replacement must not reconstruct ingress authorization.
-            let project_authority = Arc::new(
-                lillux::PinnedDirectory::open(&canonical)?
-                    .context("selected UI project root disappeared")?,
-            );
-            let replacement = super::ui_launch_mint::mint_project_replacement(
-                &session,
-                project_authority,
-                state.as_ref(),
-            )?;
-            let recent = if project.local_id == "current" {
-                RecentFile::default()
-            } else {
-                store.touch_recent_project(&project.local_id)?
-            };
-            return Ok(json!({
-                "project": project_view(
-                    ProjectEntry { root: root.clone(), ..project.clone() },
-                    Some(&root),
-                    project.local_id != "current"
-                ),
-                "recent": recent.recent_projects,
-                "ui_transition": {
-                    "kind": "replace_session",
-                    "launch_url": replacement.launch_url,
-                    "session_id": replacement.session_id,
-                }
-            }));
-        }
-        Some(session)
-    } else {
-        None
+    let project_authority = Arc::new(
+        lillux::PinnedDirectory::open(&canonical)?
+            .context("selected UI project root disappeared")?,
+    );
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let compile_context = HandlerContext::new(
+        session.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    );
+    let compile_request = super::ui_launch_mint::Request {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
+        surface_ref: origin.surface_ref.clone(),
+        project_path: Some(root.clone()),
+        user_principal_id: None,
     };
-    let recent = if project.local_id == "current" {
-        RecentFile::default()
-    } else {
-        store.touch_recent_project(&project.local_id)?
-    };
+    let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+        &compile_request,
+        &compile_context,
+        &state,
+        Some(project_authority.as_ref()),
+    )?;
 
-    let session = if let Some(active_session) = active_session {
-        json!({
-            "session_id": active_session.session_id,
-            "project_root": active_session.project_root,
-            "binding_digest": active_session.compiled_binding.binding_digest,
-            "posture": active_session.compiled_binding.posture,
-        })
-    } else {
-        json!({
-            "session_id": "",
-            "project_root": root.clone(),
-        })
+    // Reacquire the existing principal-registry gate after compilation. Both
+    // publish and forget take registry -> session-store in this order, making
+    // the live-attachment predicate atomic with registry mutation.
+    let store = locked_principal_store(&ctx, &state).await?;
+    let still_registered = store
+        .load_projects()?
+        .projects
+        .into_iter()
+        .any(|entry| entry.local_id == project.local_id && entry.root == project.root);
+    if !still_registered {
+        return Err(
+            HandlerError::Conflict("project registration changed during open".into()).into(),
+        );
+    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+    let attachment = ui.browser_sessions.publish_attachment(
+        session_id,
+        &origin.coordinate(),
+        crate::browser_session::BindingAttachmentCandidate {
+            registered_project_id: Some(project.local_id.clone()),
+            compiled_binding: Arc::new(compiled_binding),
+            effective_surface,
+            project_authority: Some(project_authority),
+        },
+        usize::try_from(policy.max_live_binding_attachments_per_session)?,
+        state.node_policy.generation_digest(),
+    )?;
+    let descriptor = attachment.public_descriptor(request_bounds);
+    // Recent history is presentation metadata, not attachment authority. Once
+    // publication succeeds, a recent-file failure must not turn the admitted
+    // attachment into an unreturned/stranded capability.
+    let recent = match store.touch_recent_project(&project.local_id) {
+        Ok(recent) => recent,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                local_id = %project.local_id,
+                "binding attachment admitted but recent project history was not updated"
+            );
+            store.load_recent().unwrap_or_default()
+        }
     };
 
     Ok(json!({
         "project": project_view(
             ProjectEntry { root: root.clone(), ..project.clone() },
             Some(&root),
-            project.local_id != "current"
+            true
         ),
-        "session": session,
         "recent": recent.recent_projects,
+        "ui_transition": {
+            "kind": "admit_binding_attachment",
+            "attachment": descriptor,
+        }
     }))
 }
 
@@ -590,7 +608,7 @@ impl LockedRyeOsPrincipalStoreExt for LockedPrincipalStore {
 }
 
 fn resolve_principal_store(ctx: &HandlerContext, state: &AppState) -> Result<PrincipalStore> {
-    if let Some(user_principal_id) = compiled_user_principal_id() {
+    if let Some(user_principal_id) = compiled_user_principal_id(state)? {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::resolve_with(&resolver, &user_principal_id);
     }
@@ -602,7 +620,7 @@ async fn locked_principal_store(
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<LockedPrincipalStore> {
-    if let Some(user_principal_id) = compiled_user_principal_id() {
+    if let Some(user_principal_id) = compiled_user_principal_id(state)? {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::locked_with(&resolver, &user_principal_id).await;
     }
@@ -610,17 +628,21 @@ async fn locked_principal_store(
     PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await
 }
 
-fn compiled_user_principal_id() -> Option<String> {
-    crate::seat_auth::compiled_ui_session().and_then(|session| session.user_principal_id)
+fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
+    let Some(attachment) = crate::seat_auth::compiled_ui_attachment() else {
+        return Ok(None);
+    };
+    let operator =
+        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    let principal_id = &attachment.compiled_binding.binding.principal_id;
+    Ok((principal_id != operator.principal_id()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
-    if let Some(session) = crate::seat_auth::compiled_ui_session() {
+    if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
         let operator =
             ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-        if session.user_principal_id.is_some()
-            || session.compiled_binding.binding.principal_id != operator.principal_id()
-        {
+        if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
             return Err(HandlerError::Forbidden(
                 "UI session has no retained local-operator store authority".into(),
             )
@@ -631,6 +653,12 @@ fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Resu
     ryeos_app::operator_authority::require_admitted_operator(state, ctx)
         .map_err(|_| HandlerError::Forbidden("admitted operator required".into()))?;
     Ok(())
+}
+
+fn retained_principal_id(state: &AppState) -> Result<String> {
+    crate::seat_auth::compiled_ui_attachment()
+        .map(|attachment| attachment.compiled_binding.binding.principal_id.clone())
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()).into())
 }
 
 fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
@@ -693,12 +721,19 @@ pub(crate) fn authorize_launch_project(
     ctx: &HandlerContext,
     state: &AppState,
     requested_root: &str,
-) -> Result<lillux::PinnedDirectory> {
+) -> Result<(lillux::PinnedDirectory, Option<String>)> {
     let requested = canonical_project_root(requested_root)?;
     let authority = lillux::PinnedDirectory::open(&requested)?
         .context("authorized UI project root disappeared")?;
     if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
-        return Ok(authority);
+        let store = PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)?;
+        let registered_project_id = store
+            .load_projects()?
+            .projects
+            .into_iter()
+            .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+            .map(|project| project.local_id);
+        return Ok((authority, registered_project_id));
     }
 
     // Non-operator principals may select only a project already recorded in
@@ -707,18 +742,47 @@ pub(crate) fn authorize_launch_project(
     let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
     let store = PrincipalStore::resolve_with(&resolver, &ctx.fingerprint)?;
     let projects = store.load_projects()?;
-    if projects
+    let registered_project_id = projects
         .projects
-        .iter()
-        .any(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
-    {
-        Ok(authority)
+        .into_iter()
+        .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+        .map(|project| project.local_id);
+    if let Some(registered_project_id) = registered_project_id {
+        Ok((authority, Some(registered_project_id)))
     } else {
         Err(HandlerError::Forbidden(
             "requested UI project is not admitted by the caller's project registry".into(),
         )
         .into())
     }
+}
+
+/// Revalidate a registered launch project after binding compilation and keep
+/// the existing principal YAML gate held until the pending launch token is
+/// inserted. Forget takes this same gate before scanning retained attachment
+/// authority, so it cannot pass between revalidation and token publication.
+pub(crate) async fn lock_launch_project_registration(
+    ctx: &HandlerContext,
+    state: &AppState,
+    registered_project_id: &str,
+    canonical_root: &Path,
+) -> Result<LockedPrincipalStore> {
+    let store = if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
+        PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await?
+    } else {
+        let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
+        PrincipalStore::locked_with(&resolver, &ctx.fingerprint).await?
+    };
+    let still_registered = store.load_projects()?.projects.into_iter().any(|project| {
+        project.local_id == registered_project_id
+            && same_existing_dir(&project.root, canonical_root.to_string_lossy().as_ref())
+    });
+    if !still_registered {
+        return Err(
+            HandlerError::Conflict("project registration changed during UI launch".into()).into(),
+        );
+    }
+    Ok(store)
 }
 
 fn same_existing_dir(left: &str, right: &str) -> bool {

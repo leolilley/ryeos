@@ -338,10 +338,24 @@ mod tests {
         let mut work = seed();
         work["slots"] =
             json!({ "left": { "content": "view:test/tree", "open": true, "size": 24 } });
+        let effective_surface =
+            json!({ "name": "test", "view_sets": [work, { "id": "review", "title": "Review" }] });
         let session = crate::ui::model::BrowserSession {
-            effective_surface: Some(
-                json!({ "name": "test", "view_sets": [work, { "id": "review", "title": "Review" }] }),
-            ),
+            surface_attachment_id: "view-sets-test-attachment".into(),
+            binding_attachments: vec![crate::ui::binding::UiBindingAttachment {
+                binding_attachment_id: "view-sets-test-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "view-sets-test-binding".into(),
+                surface_ref: "surface:test/view-sets".into(),
+                surface_generation: "view-sets-test-surface".into(),
+                effective_surface,
+                project_path: None,
+                posture: Default::default(),
+                binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {
+                    max_request_bytes: 64 * 1024,
+                    max_input_bytes: 16 * 1024,
+                },
+            }],
             ..Default::default()
         };
         let core = crate::ui::model::RyeOsCore::new(session, Default::default(), 0);

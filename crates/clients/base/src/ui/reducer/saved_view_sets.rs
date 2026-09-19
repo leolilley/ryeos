@@ -23,11 +23,10 @@ mod tests {
     use crate::ui::binding::{UiBindingCoordinate, UiBindingPayload};
     use crate::ui::effect::RyeOsEffectKind;
     use crate::ui::model::{BrowserViewport, RyeOsCore};
-    use crate::ui::reducer::test_support::writable_session;
+    use crate::ui::reducer::test_support::session_with_surface;
 
     fn core() -> RyeOsCore {
-        let mut session = writable_session();
-        session.effective_surface = Some(json!({
+        let session = session_with_surface(json!({
             "name": "test",
             "tiles": ["view:test/library"],
             "views": {
@@ -109,8 +108,13 @@ mod tests {
             .unwrap()
             .instance_key
             .clone();
-        core.views.get_mut("view:test/library").unwrap().affordances[0]["invoke"]["plane"] =
-            json!("ui");
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .views
+            .get_mut("view:test/library")
+            .unwrap()
+            .affordances[0]["invoke"]["plane"] = json!("ui");
         assert!(
             core.save_view_set_record(
                 &instance,
@@ -135,7 +139,12 @@ mod tests {
             .unwrap()
             .instance_key
             .clone();
-        core.data.session.as_mut().unwrap().binding_digest.clear();
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .descriptor
+            .binding_digest
+            .clear();
         assert!(
             core.save_view_set_record(
                 &instance,
@@ -181,10 +190,10 @@ mod tests {
             .unwrap()
             .instance_key
             .clone();
-        core.data
-            .session
-            .as_mut()
+        core.binding_attachments
+            .get_mut("fixture-attachment")
             .unwrap()
+            .descriptor
             .binding_request_bounds
             .max_request_bytes = 1;
         assert!(
@@ -229,10 +238,10 @@ mod tests {
                 .instance_key
                 .clone();
             candidate
-                .data
-                .session
-                .as_mut()
+                .binding_attachments
+                .get_mut("fixture-attachment")
                 .unwrap()
+                .descriptor
                 .binding_request_bounds
                 .max_request_bytes = limit;
             let effects = candidate.save_view_set_record(
@@ -247,10 +256,24 @@ mod tests {
 }
 
 impl RyeOsCore {
-    pub(crate) fn open_view_set_record(&mut self, value: Value) -> Vec<RyeOsEffect> {
+    pub(crate) fn open_view_set_record(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        value: Value,
+    ) -> Vec<RyeOsEffect> {
+        let Some(attachment_id) = self
+            .binding_attachment_for_instance(instance)
+            .map(|attachment| attachment.binding_attachment_id.clone())
+        else {
+            self.notice(
+                "Cannot open saved view set: its admitted binding is unavailable.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
         let result = serde_json::from_value::<SavedViewSetTemplate>(value)
             .map_err(|error| error.to_string())
-            .and_then(|template| self.open_saved_view_set_template(&template));
+            .and_then(|template| self.open_saved_view_set_template(&template, &attachment_id));
         match result {
             Ok(effects) => effects,
             Err(error) => {
@@ -272,12 +295,14 @@ impl RyeOsCore {
     ) -> Vec<RyeOsEffect> {
         // The companion must be executable, never another local operation:
         // this prevents cycles and leaves its target solely in signed content.
-        let companion = self.views.get(view_ref).and_then(|binding| {
-            binding
-                .affordances
-                .iter()
-                .find(|a| a.get("id").and_then(Value::as_str) == Some(persist_id))
-        });
+        let companion = self
+            .binding_for_instance(instance, view_ref)
+            .and_then(|binding| {
+                binding
+                    .affordances
+                    .iter()
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(persist_id))
+            });
         if !companion.is_some_and(|a| {
             a.pointer("/invoke/plane").and_then(Value::as_str) == Some("rye")
                 && a.pointer("/invoke/ref").and_then(Value::as_str).is_some()
@@ -320,7 +345,8 @@ impl RyeOsCore {
                 // The durable library ceiling is not the session's transport
                 // allowance. Check the complete envelope against compiled
                 // bounds, rather than hardcoding a guessed payload reserve.
-                let (request, bounds) = self.compiled_binding_operation(
+                let Some((request, bounds)) = self.compiled_binding_operation(
+                    instance,
                     crate::ui::binding::UiBindingCoordinate::Affordance {
                         view_ref: view_ref.into(),
                         affordance_id: persist_id.into(),
@@ -328,7 +354,13 @@ impl RyeOsCore {
                     crate::ui::binding::UiBindingPayload::Selection {
                         record: record.clone(),
                     },
-                );
+                ) else {
+                    self.notice(
+                        "Cannot save view set: its admitted binding is unavailable.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                };
                 if let Err(error) = request.validate_bounds(bounds) {
                     self.notice(
                         format!("Cannot save view set through this session: {error:?}"),

@@ -49,7 +49,7 @@ async fn request_project_path_does_not_create_project_authority() {
 
 #[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
-async fn opening_another_project_mints_an_immutable_successor_session() {
+async fn opening_another_project_admits_an_independent_attachment() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let first = tempfile::TempDir::new().expect("first project");
     let second = tempfile::TempDir::new().expect("second project");
@@ -99,14 +99,22 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
         .browser_sessions
         .get_session(first_session_id)
         .expect("first session retained");
-    let first_binding_digest = first_session.compiled_binding.binding_digest.clone();
+    let first_coordinate = first_session
+        .attachments
+        .get(&first_session.surface_attachment_id)
+        .expect("first attachment")
+        .coordinate();
     let predecessor_context = HandlerContext::new(
         format!("session:{first_session_id}"),
         vec!["*".into()],
         false,
     );
     let predecessor_seat = (ryeos_ui::handlers::ui_seat::OPEN_DESCRIPTOR.handler)(
-        json!({}),
+        json!({
+            "binding_attachment_id": first_coordinate.binding_attachment_id,
+            "binding_generation": first_coordinate.binding_generation,
+            "binding_digest": first_coordinate.binding_digest,
+        }),
         predecessor_context.clone(),
         state.clone(),
     )
@@ -115,7 +123,9 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
 
     let opened = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         json!({
-            "binding_digest": first_binding_digest,
+            "binding_attachment_id": first_coordinate.binding_attachment_id,
+            "binding_generation": first_coordinate.binding_generation,
+            "binding_digest": first_coordinate.binding_digest,
             "coordinate": {
                 "kind": "affordance",
                 "view_ref": "view:ryeos/projects/list",
@@ -132,31 +142,21 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     .await
     .expect("open second project");
     let transition = &opened["result"]["ui_transition"];
-    assert_eq!(transition["kind"], "replace_session");
-    let successor_id = transition["session_id"].as_str().expect("successor id");
-    assert_ne!(successor_id, first_session_id);
-
-    let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
-    assert!(ui.browser_sessions.get_session(successor_id).is_none());
-    let successor_token = transition["launch_url"]
+    assert_eq!(transition["kind"], "admit_binding_attachment");
+    let attachment_id = transition["attachment"]["binding_attachment_id"]
         .as_str()
-        .unwrap()
-        .strip_prefix("/ui/launch/")
-        .unwrap();
-    let activated = ryeos_ui::handlers::ui_launch::handle(
-        json!({"token": successor_token}),
-        HandlerContext::anonymous(),
-        state.clone(),
-    )
-    .await
-    .expect("activate successor session");
-    assert_eq!(activated["session_id"], successor_id);
-    let successor = ui
+        .expect("attachment id");
+    let ui = ryeos_ui::state::get_ui_state(&state).unwrap();
+    let retained = ui
         .browser_sessions
-        .get_session(successor_id)
-        .expect("successor retained");
+        .get_session(first_session_id)
+        .expect("session retained");
+    let successor = retained
+        .attachments
+        .get(attachment_id)
+        .expect("new attachment");
     assert_eq!(
-        successor.project_root.as_deref(),
+        successor.project_query_identity.as_deref(),
         Some(
             second
                 .path()
@@ -168,16 +168,12 @@ async fn opening_another_project_mints_an_immutable_successor_session() {
     );
     assert_ne!(
         successor.compiled_binding.binding_digest,
-        first_binding_digest
-    );
-    assert!(
-        ui.browser_sessions.get_session(first_session_id).is_none(),
-        "committed successor activation must retire the predecessor"
+        first_coordinate.binding_digest
     );
     let predecessor_seat = state
         .state_store
         .get_thread(predecessor_seat["thread_id"].as_str().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(predecessor_seat.status, "completed");
+    assert_eq!(predecessor_seat.status, "running");
 }

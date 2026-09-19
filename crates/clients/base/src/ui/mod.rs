@@ -7,6 +7,7 @@
 
 pub mod attachment;
 pub mod binding;
+pub mod binding_context;
 pub mod content;
 pub mod dto;
 pub mod effect;
@@ -24,8 +25,8 @@ pub mod tokenize;
 pub mod view_model;
 
 pub use binding::{
-    UiBindingCoordinate, UiBindingPayload, UiBindingRequest, UiBindingRequestBounds,
-    UiBindingRequestError, UiBindingRouteContext, UiEffectivePosture,
+    UiBindingAttachment, UiBindingCoordinate, UiBindingPayload, UiBindingRequest,
+    UiBindingRequestBounds, UiBindingRequestError, UiBindingRouteContext, UiEffectivePosture,
 };
 pub use content::{ProjectedRecord, SourceBinding, ViewBinding};
 pub use effect::{

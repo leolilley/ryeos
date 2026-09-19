@@ -48,6 +48,7 @@ export type RyeOsUiIntent =
   | { type: "pin_view_selection"; instance_key: RyeOsViewInstanceKey }
   | { type: "open_pinned_view_alongside"; instance_key: RyeOsViewInstanceKey }
   | { type: "follow_view_set_selection"; instance_key: RyeOsViewInstanceKey; view_set_id: bigint }
+  | { type: "release_binding_attachment"; binding_attachment_id: string; binding_generation: bigint; binding_digest: string }
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }
   | { type: "toggle_top_status_bar" }
   | { type: "toggle_bottom_status_bar" }

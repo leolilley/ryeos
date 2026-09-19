@@ -8,8 +8,7 @@ impl RyeOsCore {
             return Vec::new();
         };
         let feeds = self
-            .views
-            .get(&view_ref)
+            .binding_for_instance(&key.view_instance_key, &view_ref)
             .and_then(|binding| binding.input.as_ref())
             .and_then(|input| input.feeds.as_ref())
             .is_some();
@@ -60,7 +59,7 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
-        let Some(binding) = self.views.get(view_ref) else {
+        let Some(binding) = self.binding_for_instance(instance_key, view_ref) else {
             return Vec::new();
         };
         let Some(affordance) = binding
@@ -84,7 +83,7 @@ impl RyeOsCore {
             &payload,
         ) {
             Some(super::content::AffordanceInvoke::OpenSavedViewSet { template }) => {
-                self.open_view_set_record(template)
+                self.open_view_set_record(instance_key, template)
             }
             Some(super::content::AffordanceInvoke::SaveActiveViewSet {
                 context,
@@ -106,10 +105,11 @@ impl RyeOsCore {
             ),
             Some(super::content::AffordanceInvoke::Rye { notice, .. })
             | Some(super::content::AffordanceInvoke::Service { notice, .. }) => {
-                if self.refuse_blocked_mutation() {
+                if self.refuse_blocked_mutation_for_instance(instance_key) {
                     return Vec::new();
                 }
-                let (request, request_bounds) = self.compiled_binding_operation(
+                let Some((request, request_bounds)) = self.compiled_binding_operation(
+                    instance_key,
                     crate::ui::binding::UiBindingCoordinate::Affordance {
                         view_ref: view_ref.to_string(),
                         affordance_id: affordance_id.to_string(),
@@ -117,7 +117,9 @@ impl RyeOsCore {
                     crate::ui::binding::UiBindingPayload::Selection {
                         record: record.clone(),
                     },
-                );
+                ) else {
+                    return Vec::new();
+                };
                 vec![self.emit(RyeOsEffectKind::InvokeBinding {
                     request,
                     request_bounds,
@@ -158,6 +160,16 @@ impl RyeOsCore {
         drill: bool,
     ) -> Vec<RyeOsEffect> {
         let route_subject = facet == super::seat::KEY_INPUT_ROUTE;
+        let opening_binding = origin
+            .and_then(|instance| self.binding_attachment_for_instance(instance))
+            .map(|attachment| attachment.binding_attachment_id.clone());
+        if open_view.is_some() && opening_binding.is_none() {
+            self.notice(
+                "The originating view's admitted binding is unavailable.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         let selection_subject =
             facet == super::seat::KEY_SELECTION || facet.starts_with("selection.");
         let origin_selection_attachment = selection_subject
@@ -194,15 +206,56 @@ impl RyeOsCore {
             && !self.view_sets[self.active_view_set].center_is_empty()
             && let Some(view) = self.view_sets[self.active_view_set].focused_view().cloned()
         {
-            let facets = self.seat.fold().snapshot();
+            let focused_instance = self.focused_view_instance_key();
+            let attachment = focused_instance
+                .as_ref()
+                .and_then(|instance| self.selection_attachment_for_instance(instance));
+            let selection_view_set_id = match &attachment {
+                Some(super::super::attachment::SelectionAttachment::FollowViewSet {
+                    view_set_id,
+                }) => Some(*view_set_id),
+                Some(super::super::attachment::SelectionAttachment::Pinned { .. }) => None,
+                None => Some(self.view_sets[self.active_view_set].id),
+            };
+            let folded = self.seat.fold();
+            let dependencies = self
+                .focused_view_instance_key()
+                .and_then(|instance| self.binding_for_instance(&instance, &view.view_ref))
+                .map(super::super::attachment::facet_dependencies)
+                .unwrap_or_default();
+            let facets = dependencies
+                .into_iter()
+                .filter_map(|facet| {
+                    let key = if facet == super::super::seat::KEY_SELECTION
+                        || facet.starts_with("selection.")
+                    {
+                        super::super::seat::selection_storage_key(selection_view_set_id?, &facet)?
+                    } else if facet == super::super::seat::KEY_INPUT_ROUTE {
+                        super::super::seat::input_route_facet_key(focused_instance.as_ref()?)
+                    } else {
+                        facet
+                    };
+                    let value = folded.get(&key).filter(|value| !value.is_null()).cloned();
+                    Some((key, value))
+                })
+                .collect();
             // The frame carries the label of the level being left (the
             // current lens label), so the breadcrumb reads the ancestor
             // cognitions, not repeated view titles.
             let label = self.view_sets[self.active_view_set].lens_label.clone();
-            let attachment = self
+            let Some(binding_attachment_id) = self
                 .focused_view_instance_key()
-                .and_then(|instance| self.selection_attachment_for_instance(&instance));
-            self.view_sets[self.active_view_set].push_lens_frame(view, facets, label, attachment);
+                .and_then(|instance| self.instance_binding_attachments.get(&instance).cloned())
+            else {
+                return Vec::new();
+            };
+            self.view_sets[self.active_view_set].push_lens_frame(
+                binding_attachment_id,
+                view,
+                facets,
+                label,
+                attachment,
+            );
         }
         // A route carried by an affordance belongs to the view it opens. Mount
         // that view first so its durable instance key—not current focus—is the
@@ -211,7 +264,12 @@ impl RyeOsCore {
         let mut effects = if route_subject {
             open_view
                 .as_ref()
-                .map(|view_ref| self.open_view(ViewSpec::bound(view_ref.clone())))
+                .map(|view_ref| {
+                    self.open_view_under_binding(
+                        ViewSpec::bound(view_ref.clone()),
+                        opening_binding.as_deref().expect("open attachment checked"),
+                    )
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -221,8 +279,13 @@ impl RyeOsCore {
                 // An explicitly opened destination may own the route only if
                 // it actually mounted. Refused opens must not retarget the
                 // previously focused view.
-                self.focused_view_instance_key()
-                    .filter(|instance| self.mounted_view_ref(instance) == Some(view_ref.as_str()))
+                self.focused_view_instance_key().filter(|instance| {
+                    self.mounted_view_ref(instance) == Some(view_ref.as_str())
+                        && self
+                            .binding_attachment_for_instance(instance)
+                            .map(|binding| binding.binding_attachment_id.as_str())
+                            == opening_binding.as_deref()
+                })
             } else {
                 origin.cloned()
             }
@@ -311,7 +374,12 @@ impl RyeOsCore {
                     .into_iter()
                     .find_map(|tile_id| {
                         let tile = self.view_sets[active].tiles.get(&tile_id)?;
-                        (tile.view.view_ref == view_ref).then(|| tile.instance_key.clone())
+                        (tile.view.view_ref == view_ref
+                            && self
+                                .binding_attachment_for_instance(&tile.instance_key)
+                                .map(|binding| binding.binding_attachment_id.as_str())
+                                == opening_binding.as_deref())
+                        .then(|| tile.instance_key.clone())
                     });
             let replaced_destination = (existing_destination.is_none()
                 && self.view_sets[active].tiling.mode
@@ -324,18 +392,31 @@ impl RyeOsCore {
                     .map(|tile| tile.instance_key.clone())
             })
             .flatten();
-            let premature = self.open_view(ViewSpec::bound(view_ref.clone()));
+            let premature = self.open_view_under_binding(
+                ViewSpec::bound(view_ref.clone()),
+                opening_binding.as_deref().expect("open attachment checked"),
+            );
             // Resolve the result of this exact layout operation. Current
             // keyboard focus is not a subject-routing input.
-            let destination = existing_destination.or(replaced_destination).or_else(|| {
-                self.view_sets[active].tiles.values().find_map(|tile| {
-                    (tile.view.view_ref == view_ref && !mounted_before.contains(&tile.instance_key))
+            let destination = existing_destination
+                .or(replaced_destination)
+                .or_else(|| {
+                    self.view_sets[active].tiles.values().find_map(|tile| {
+                        (tile.view.view_ref == view_ref
+                            && !mounted_before.contains(&tile.instance_key))
                         .then(|| tile.instance_key.clone())
+                    })
                 })
-            });
-            let destination_participates = self
-                .views
-                .get(&view_ref)
+                .filter(|instance| {
+                    self.mounted_view_ref(instance) == Some(view_ref.as_str())
+                        && self
+                            .binding_attachment_for_instance(instance)
+                            .map(|binding| binding.binding_attachment_id.as_str())
+                            == opening_binding.as_deref()
+                });
+            let destination_participates = destination
+                .as_ref()
+                .and_then(|instance| self.binding_for_instance(instance, &view_ref))
                 .is_some_and(super::super::attachment::participates_in_selection);
             if selection_subject
                 && destination_participates
@@ -434,8 +515,7 @@ impl RyeOsCore {
                 return None;
             }
             let channels = self
-                .views
-                .get(&view_ref)
+                .binding_for_instance(&instance_key, &view_ref)
                 .map(&subscribed_channels)
                 .unwrap_or_default();
             (!channels.is_empty()).then_some((instance_key, view_ref, channels))
@@ -489,7 +569,7 @@ impl RyeOsCore {
         let Some((instance, view_ref)) = target else {
             return Vec::new();
         };
-        let Some(binding) = self.views.get(&view_ref) else {
+        let Some(binding) = self.binding_for_instance(&instance, &view_ref) else {
             return Vec::new();
         };
         let channels = binding
@@ -817,6 +897,42 @@ mod tests {
             Some((fetched, "view:test/follower", "default", params))
                 if fetched == source_key && params["thread"] == "T-written"
         ));
+    }
+
+    #[test]
+    fn drill_captures_selection_from_followed_owner_not_containing_set() {
+        let (mut core, _owner, owner_id, follower, _) = cross_set_follower_fixture();
+        core.view_sets[core.active_view_set].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
+        let containing_id = core.view_sets[core.active_view_set].id;
+        let owner_key = crate::ui::seat::selection_storage_key(owner_id, "selection.work").unwrap();
+        let containing_key =
+            crate::ui::seat::selection_storage_key(containing_id, "selection.work").unwrap();
+        core.seat
+            .append_facet(owner_key.clone(), serde_json::json!({"thread":"T-owner"}));
+        core.seat.append_facet(
+            containing_key.clone(),
+            serde_json::json!({"thread":"T-containing"}),
+        );
+
+        core.apply_ui_affordance_from(
+            Some(&follower),
+            "selection.work".into(),
+            Some(serde_json::json!({"thread":"T-child"})),
+            None,
+            None,
+            true,
+        );
+
+        let frame = core.view_sets[core.active_view_set]
+            .lens_stack
+            .last()
+            .expect("drill pushes a return frame");
+        assert_eq!(
+            frame.facets.get(&owner_key),
+            Some(&Some(serde_json::json!({"thread":"T-owner"})))
+        );
+        assert!(!frame.facets.contains_key(&containing_key));
     }
 
     #[test]
@@ -1215,7 +1331,10 @@ mod tests {
             "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
-        core.views
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .views
             .insert("view:ryeos/threads/list".to_string(), binding);
         seed_view_value(
             &mut core,
@@ -1231,7 +1350,10 @@ mod tests {
         );
         // The signed initial route is the template for a newly opened view;
         // its fields must survive the instance-local subject merge.
-        core.initial_input_route = serde_json::from_value(serde_json::json!({
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .initial_input_route = serde_json::from_value(serde_json::json!({
             "params": { "directive": "directive:ryeos/ops/base" }
         }))
         .unwrap();
@@ -1283,9 +1405,15 @@ mod tests {
             "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/runs/comparison.yaml"
         ))
         .unwrap();
-        core.views
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .views
             .insert("view:ryeos/threads/history".to_string(), history);
-        core.views
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .views
             .insert("view:ryeos/runs/comparison".to_string(), comparison);
         core.view_sets[core.active_view_set]
             .add_tile(ViewSpec {

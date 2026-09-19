@@ -29,24 +29,23 @@ fn is_selection_facet(path: &str) -> bool {
         || path.starts_with(&format!("{}.", super::seat::KEY_SELECTION))
 }
 
-fn collect_value_dependencies(value: &Value, dependencies: &mut BTreeSet<String>) {
+fn collect_facet_dependencies(value: &Value, dependencies: &mut BTreeSet<String>) {
     match value {
         Value::String(value) => {
             if let Some(path) = value.strip_prefix("@facet:")
                 && let Some(path) = path.split('|').next()
-                && is_selection_facet(path)
             {
                 dependencies.insert(path.to_string());
             }
         }
         Value::Array(values) => {
             for value in values {
-                collect_value_dependencies(value, dependencies);
+                collect_facet_dependencies(value, dependencies);
             }
         }
         Value::Object(values) => {
             for value in values.values() {
-                collect_value_dependencies(value, dependencies);
+                collect_facet_dependencies(value, dependencies);
             }
         }
         _ => {}
@@ -56,19 +55,27 @@ fn collect_value_dependencies(value: &Value, dependencies: &mut BTreeSet<String>
 /// Logical selection values a binding reads. Refresh declarations and UI
 /// writes are subscriptions/actions, not values that can define a pin.
 pub(crate) fn selection_dependencies(binding: &ViewBinding) -> BTreeSet<String> {
+    facet_dependencies(binding)
+        .into_iter()
+        .filter(|path| is_selection_facet(path))
+        .collect()
+}
+
+/// Logical facet values a binding reads. Lens return frames use this broader
+/// set so they restore the originating route as well as selection, without
+/// rolling back unrelated seat state.
+pub(crate) fn facet_dependencies(binding: &ViewBinding) -> BTreeSet<String> {
     let mut dependencies = BTreeSet::new();
-    collect_value_dependencies(&binding.body, &mut dependencies);
+    collect_facet_dependencies(&binding.body, &mut dependencies);
     for source in binding.sources.values() {
-        collect_value_dependencies(&source.params, &mut dependencies);
+        collect_facet_dependencies(&source.params, &mut dependencies);
     }
-    if let Some(facet) = binding.facet.as_deref()
-        && is_selection_facet(facet)
-    {
+    if let Some(facet) = binding.facet.as_deref() {
         dependencies.insert(facet.to_string());
     }
     if let Some(field_state) = binding.field_state.as_ref() {
         for subject in &field_state.cursor_scope.subject {
-            collect_value_dependencies(&Value::String(subject.clone()), &mut dependencies);
+            collect_facet_dependencies(&Value::String(subject.clone()), &mut dependencies);
         }
     }
     dependencies
@@ -175,8 +182,7 @@ impl RyeOsCore {
             .mounted_view_ref(instance)
             .ok_or("view instance is not mounted")?;
         let binding = self
-            .views
-            .get(view_ref)
+            .binding_for_instance(instance, view_ref)
             .ok_or("view binding is unavailable")?;
         let dependencies = selection_dependencies(binding);
         if dependencies.is_empty() {
@@ -193,9 +199,7 @@ impl RyeOsCore {
         }
         let encoded = serde_json::to_vec(&values).map_err(|error| error.to_string())?;
         let byte_limit = self
-            .data
-            .session
-            .as_ref()
+            .binding_attachment_for_instance(instance)
             .ok_or("active session request bounds are unavailable")?
             .binding_request_bounds
             .max_request_bytes;
@@ -315,7 +319,8 @@ mod tests {
             "view has no readable selection dependency to pin"
         );
         assert!(participates_in_selection(
-            core.views.get("view:test/writer").unwrap()
+            core.binding_for_insertion(core.view_sets[core.active_view_set].id, "view:test/writer")
+                .unwrap()
         ));
     }
 
@@ -324,7 +329,11 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:test/unrelated");
         assert!(!participates_in_selection(
-            core.views.get("view:test/unrelated").unwrap()
+            core.binding_for_insertion(
+                core.view_sets[core.active_view_set].id,
+                "view:test/unrelated"
+            )
+            .unwrap()
         ));
     }
 
@@ -348,10 +357,10 @@ mod tests {
     #[test]
     fn pin_requires_an_admitted_nonzero_request_bound() {
         let (mut core, instance) = mounted_selection_view();
-        core.data
-            .session
-            .as_mut()
+        core.binding_attachments
+            .get_mut("fixture-attachment")
             .unwrap()
+            .descriptor
             .binding_request_bounds
             .max_request_bytes = 0;
         assert_eq!(
@@ -359,7 +368,7 @@ mod tests {
             "active session request byte bound is zero"
         );
 
-        core.data.session = None;
+        core.binding_attachments.remove("fixture-attachment");
         assert_eq!(
             core.capture_pinned_selection(&instance).unwrap_err(),
             "active session request bounds are unavailable"
@@ -380,18 +389,18 @@ mod tests {
         };
         let encoded_len = serde_json::to_vec(&values).unwrap().len();
 
-        core.data
-            .session
-            .as_mut()
+        core.binding_attachments
+            .get_mut("fixture-attachment")
             .unwrap()
+            .descriptor
             .binding_request_bounds
             .max_request_bytes = u64::try_from(encoded_len).unwrap();
         assert!(core.capture_pinned_selection(&instance).is_ok());
 
-        core.data
-            .session
-            .as_mut()
+        core.binding_attachments
+            .get_mut("fixture-attachment")
             .unwrap()
+            .descriptor
             .binding_request_bounds
             .max_request_bytes = u64::try_from(encoded_len - 1).unwrap();
         assert_eq!(

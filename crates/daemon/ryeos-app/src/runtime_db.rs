@@ -15030,6 +15030,20 @@ impl RuntimeDb {
         Ok(())
     }
 
+    pub fn seat_leases_for_owner_client(
+        &self,
+        owner: &str,
+        client_ref: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seat_thread_id FROM seat_lease
+             WHERE owner=?1 AND client_ref=?2
+             ORDER BY seat_thread_id",
+        )?;
+        let rows = stmt.query_map(params![owner, client_ref], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT seat_thread_id FROM seat_lease WHERE last_seen_at_ms < ?1 ORDER BY last_seen_at_ms",

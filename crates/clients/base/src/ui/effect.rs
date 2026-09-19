@@ -58,6 +58,14 @@ pub enum RyeOsEffectKind {
         session_id: String,
         launch_url: String,
     },
+    /// Explicitly release one exact non-surface binding attachment from the
+    /// authenticated session. This is session-wide and never implied by
+    /// closing local presentation.
+    ReleaseBindingAttachment {
+        binding_attachment_id: String,
+        binding_generation: u64,
+        binding_digest: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

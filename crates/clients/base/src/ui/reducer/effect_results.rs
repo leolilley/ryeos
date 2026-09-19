@@ -29,6 +29,33 @@ impl RyeOsCore {
             return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
+        if result.ok
+            && let RyeOsEffectKind::ReleaseBindingAttachment {
+                binding_attachment_id,
+                binding_generation,
+                binding_digest,
+            } = &expected
+        {
+            if let Some(data) = result.data {
+                self.apply_released_binding_attachment(
+                    binding_attachment_id,
+                    *binding_generation,
+                    binding_digest,
+                    data,
+                );
+            } else {
+                self.notice(
+                    "The project-context release returned no confirmation; local state was retained.",
+                    RyeOsTone::Danger,
+                );
+            }
+            return Vec::new();
+        }
+
+        if !self.effect_binding_is_still_live(&expected) {
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
+        }
+
         if !result.ok {
             let error = result
                 .error
@@ -132,18 +159,16 @@ impl RyeOsCore {
         else {
             return Vec::new();
         };
-        if !self
-            .data
-            .session
-            .as_ref()
-            .is_some_and(|session| session.binding_digest == request.binding_digest)
-            || !self.views.get(view_ref).is_some_and(|binding| {
-                binding
-                    .refresh
-                    .get("after_invoke")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            })
+        if !self.effect_binding_is_still_live(expected)
+            || !self
+                .binding_for_instance(invocation_origin, view_ref)
+                .is_some_and(|binding| {
+                    binding
+                        .refresh
+                        .get("after_invoke")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
         {
             return Vec::new();
         }
@@ -151,6 +176,68 @@ impl RyeOsCore {
             return Vec::new();
         }
         self.emit_fetch_source_for_instance(invocation_origin.clone(), view_ref)
+    }
+
+    fn effect_binding_is_still_live(&self, expected: &RyeOsEffectKind) -> bool {
+        let (request, origin, surface_channel) = match expected {
+            RyeOsEffectKind::FetchSource {
+                tile_id, request, ..
+            } => {
+                let decoded = crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id);
+                (
+                    request,
+                    decoded.map(|key| key.view_instance),
+                    tile_id.strip_prefix("surface/").map(str::to_string),
+                )
+            }
+            RyeOsEffectKind::InvokeBinding {
+                request,
+                invocation_origin,
+                input_origin,
+                ..
+            } => (
+                request,
+                invocation_origin.clone().or_else(|| {
+                    input_origin
+                        .as_ref()
+                        .map(|address| address.buffer.view_instance_key.clone())
+                }),
+                None,
+            ),
+            _ => return true,
+        };
+        let Some(attachment) = self.binding_attachment(&request.binding_attachment_id) else {
+            return false;
+        };
+        if attachment.binding_generation != request.binding_generation
+            || attachment.binding_digest != request.binding_digest
+        {
+            return false;
+        }
+        if let Some(surface_channel) = surface_channel {
+            let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
+                &request.coordinate
+            else {
+                return false;
+            };
+            return !surface_channel.is_empty()
+                && surface_channel == *channel
+                && request.binding_attachment_id == self.surface_attachment_id
+                && attachment.surface_ref == *view_ref;
+        }
+        let requested_view = match &request.coordinate {
+            crate::ui::binding::UiBindingCoordinate::Source { view_ref, .. }
+            | crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, .. } => {
+                Some(view_ref.as_str())
+            }
+            crate::ui::binding::UiBindingCoordinate::SurfaceRoute => None,
+        };
+        origin.is_some_and(|instance| {
+            self.instance_binding_attachments.get(&instance) == Some(&request.binding_attachment_id)
+                && self.mounted_view_ref(&instance).is_some_and(|mounted| {
+                    requested_view.is_none_or(|requested| requested == mounted)
+                })
+        })
     }
 
     fn finish_source_effect(
@@ -243,32 +330,10 @@ impl RyeOsCore {
             _ => None,
         };
         if let Some(transition) = data.get("ui_transition")
-            && transition.get("kind").and_then(serde_json::Value::as_str) == Some("replace_session")
+            && transition.get("kind").and_then(serde_json::Value::as_str)
+                == Some("admit_binding_attachment")
         {
-            let Some(session_id) = transition
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-            else {
-                self.notice(
-                    "The replacement UI session has no session id.",
-                    RyeOsTone::Danger,
-                );
-                return Vec::new();
-            };
-            let Some(launch_url) = transition
-                .get("launch_url")
-                .and_then(serde_json::Value::as_str)
-            else {
-                self.notice(
-                    "The replacement UI session has no launch URL.",
-                    RyeOsTone::Danger,
-                );
-                return Vec::new();
-            };
-            return vec![self.emit(RyeOsEffectKind::ReplaceSession {
-                session_id: session_id.to_string(),
-                launch_url: launch_url.to_string(),
-            })];
+            return self.apply_admitted_binding_attachment(transition);
         }
         if let Some(success_notice) = service_notice
             && outcome.delivery.is_none()
@@ -421,7 +486,7 @@ impl RyeOsCore {
         }
         let mut route = fold
             .input_route(&facet_key)
-            .unwrap_or_else(|| self.initial_input_route.clone());
+            .unwrap_or_else(|| self.route_for_instance(&origin.buffer.view_instance_key));
         // First turn of a conversation: the launched
         // thread IS the chain root (root == head).
         // Continuations (route already had a head) keep
@@ -495,6 +560,112 @@ impl RyeOsCore {
         Vec::new()
     }
 
+    fn apply_admitted_binding_attachment(
+        &mut self,
+        transition: &serde_json::Value,
+    ) -> Vec<RyeOsEffect> {
+        let Some(value) = transition.get("attachment") else {
+            self.notice(
+                "The project response omitted its admitted binding.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        };
+        let Ok(descriptor) =
+            serde_json::from_value::<crate::ui::UiBindingAttachment>(value.clone())
+        else {
+            self.notice(
+                "The admitted project binding is invalid.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        };
+        if descriptor.binding_attachment_id.is_empty()
+            || descriptor.binding_generation == 0
+            || descriptor.binding_digest.is_empty()
+            || descriptor.surface_ref.is_empty()
+            || descriptor.surface_generation.is_empty()
+            || descriptor.binding_request_bounds.max_request_bytes == 0
+            || descriptor.binding_request_bounds.max_input_bytes == 0
+            || self
+                .binding_attachments
+                .contains_key(&descriptor.binding_attachment_id)
+        {
+            self.notice(
+                "The admitted project binding is stale or duplicated.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        }
+        let Ok(retained) = crate::ui::binding_context::RetainedUiBindingAttachment::from_descriptor(
+            descriptor.clone(),
+        ) else {
+            self.notice(
+                "The admitted project surface is invalid.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        };
+        let Ok(surface) = serde_json::from_value::<crate::surface::SurfaceSpec>(
+            descriptor.effective_surface.clone(),
+        ) else {
+            self.notice(
+                "The admitted project surface is invalid.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        };
+        let Ok(mut admitted_sets) = surface.to_view_sets() else {
+            self.notice(
+                "The admitted project composition is invalid.",
+                RyeOsTone::Danger,
+            );
+            return Vec::new();
+        };
+        let distinct_admitted_ids = admitted_sets
+            .iter()
+            .map(|view_set| view_set.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if admitted_sets.is_empty()
+            || distinct_admitted_ids != admitted_sets.len()
+            || self.view_sets.len() + admitted_sets.len() > crate::surface::view_sets::MAX_VIEW_SETS
+            || admitted_sets.iter().any(|candidate| {
+                self.view_sets
+                    .iter()
+                    .any(|existing| existing.id == candidate.id)
+            })
+        {
+            self.notice(
+                "The admitted project composition exceeds the view-set limit.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
+
+        let attachment_id = descriptor.binding_attachment_id.clone();
+        let first_new = self.view_sets.len();
+        self.binding_attachments
+            .insert(attachment_id.clone(), retained);
+        if let Some(session) = self.data.session.as_mut() {
+            session.binding_attachments.push(descriptor);
+        }
+        self.view_sets.append(&mut admitted_sets);
+        for index in first_new..self.view_sets.len() {
+            if !self.stamp_view_set_mounts(index, &attachment_id) {
+                self.notice(
+                    "The admitted project composition could not be mounted.",
+                    RyeOsTone::Danger,
+                );
+                return Vec::new();
+            }
+        }
+        self.active_view_set = first_new;
+        self.focus_default_input();
+        self.notice("Project opened in new view sets.", RyeOsTone::Good);
+        self.refresh_view_set_sources()
+    }
+
     /// Project the small set of renderer-wide scene datasets from signed
     /// source coordinates. The coordinate names presentation roles; it does
     /// not select an endpoint or grant authority. Ordinary table/timeline/
@@ -510,15 +681,32 @@ impl RyeOsCore {
         else {
             return;
         };
-        let role = self
-            .data
-            .session
-            .as_ref()
-            .filter(|session| session.surface_ref == *view_ref)
-            .and_then(|_| self.surface_sources.get(channel))
-            .or_else(|| self.views.get(view_ref)?.sources.get(channel))
-            .and_then(|source| source.role.as_deref());
-        match role {
+        let Some(context) = self.binding_attachments.get(&request.binding_attachment_id) else {
+            return;
+        };
+        let role = (context.descriptor.surface_ref == *view_ref)
+            .then(|| context.surface_sources.get(channel))
+            .flatten()
+            .or_else(|| context.views.get(view_ref)?.sources.get(channel))
+            .and_then(|source| source.role.clone());
+        if request.binding_attachment_id != self.surface_attachment_id
+            && role.as_deref() == Some("projects")
+        {
+            // The ambient shell's project list belongs only to the immutable
+            // root attachment. A project-specific view still renders this
+            // response from its exact source key below; do not copy it into
+            // the shared shell projection or warn for a successful fetch.
+            return;
+        }
+        // Mounted scenes read these roles back from their exact source key.
+        // Never copy a project attachment's scene facts into ambient/global
+        // state where another mounted project could overwrite them.
+        if request.binding_attachment_id != self.surface_attachment_id
+            && matches!(role.as_deref(), Some("dimension" | "topology"))
+        {
+            return;
+        }
+        match role.as_deref() {
             Some("dimension") => {
                 if let Ok(value) = serde_json::from_value(data.clone()) {
                     self.data.dimension = Some(value);
@@ -701,6 +889,9 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
         ) | (
             RyeOsEffectKind::ReplaceSession { .. },
             RyeOsEffectResultKind::BrowserOnly
+        ) | (
+            RyeOsEffectKind::ReleaseBindingAttachment { .. },
+            RyeOsEffectResultKind::BrowserOnly
         )
     )
 }
@@ -722,7 +913,9 @@ mod tests {
         RyeOsEffectKind::FetchSource {
             tile_id,
             request: crate::ui::binding::UiBindingRequest {
-                binding_digest: "sha256:test-binding".to_string(),
+                binding_attachment_id: "fixture-attachment".to_string(),
+                binding_generation: 1,
+                binding_digest: "11".repeat(32),
                 coordinate: crate::ui::binding::UiBindingCoordinate::Source {
                     view_ref: "view:test/source".to_string(),
                     channel: "default".to_string(),
@@ -741,7 +934,7 @@ mod tests {
     #[test]
     fn delayed_after_invoke_refresh_targets_exact_origin_after_view_set_switch() {
         let mut session = writable_session();
-        session.effective_surface = Some(serde_json::json!({
+        session.binding_attachments[0].effective_surface = serde_json::json!({
             "name": "refresh-origin",
             "view_sets": [
                 {"id":"one", "title":"One", "root":{"type":"group", "views":["view:test/library"], "active":0}},
@@ -752,7 +945,7 @@ mod tests {
                 "sources":{"default":{"ref":"service:test/config", "collection":"rows"}},
                 "refresh":{"after_invoke":true}
             }}
-        }));
+        });
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let origin = core.view_sets[0]
             .tiles
@@ -770,6 +963,8 @@ mod tests {
             .clone();
         let invocation = core.emit(RyeOsEffectKind::InvokeBinding {
             request: crate::ui::binding::UiBindingRequest {
+                binding_attachment_id: "fixture-attachment".into(),
+                binding_generation: 1,
                 binding_digest: "11".repeat(32),
                 coordinate: crate::ui::binding::UiBindingCoordinate::Affordance {
                     view_ref: "view:test/library".into(),
@@ -779,7 +974,10 @@ mod tests {
                     record: serde_json::json!({}),
                 },
             },
-            request_bounds: core.data.session.as_ref().unwrap().binding_request_bounds,
+            request_bounds: core
+                .binding_attachment("fixture-attachment")
+                .unwrap()
+                .binding_request_bounds,
             intent: crate::ui::effect::InvokeIntent::Service,
             success_notice: None,
             invocation_origin: Some(origin.clone()),
@@ -812,16 +1010,15 @@ mod tests {
 
     #[test]
     fn signed_surface_source_role_projects_shell_data() {
-        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.surface_sources.insert(
-            "projects".to_string(),
-            serde_json::from_value(serde_json::json!({
+        let mut session = writable_session();
+        session.binding_attachments[0].effective_surface["sources"] = serde_json::json!({
+            "projects": {
                 "ref": "service:projects/list",
                 "role": "projects",
                 "params": {}
-            }))
-            .unwrap(),
-        );
+            }
+        });
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
         let effect = core
             .initial_effects()
             .into_iter()
@@ -850,14 +1047,34 @@ mod tests {
     }
 
     #[test]
-    fn project_transition_replaces_the_complete_native_session_generation() {
+    fn project_transition_adds_attachment_scoped_sets_without_replacing_session() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 41);
-        let delayed_predecessor = core.emit(test_fetch_source("delayed-predecessor".into()));
+        let original_session = core.data.session.as_ref().unwrap().session_id.clone();
+        let original_sets = core.view_sets.len();
+        let origin = core.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let view_ref = core.mounted_view_ref(&origin).unwrap().to_string();
+        let source_attachment = core
+            .binding_attachment_for_instance(&origin)
+            .unwrap()
+            .clone();
+        let mut admitted = source_attachment.clone();
+        admitted.binding_attachment_id = "project-attachment".into();
+        admitted.binding_generation += 1;
+        admitted.binding_digest = "22".repeat(32);
+        admitted.project_path = Some("/tmp/project-2".into());
         let invocation = core.emit(RyeOsEffectKind::InvokeBinding {
             request: crate::ui::binding::UiBindingRequest {
-                binding_digest: "11".repeat(32),
+                binding_attachment_id: source_attachment.binding_attachment_id,
+                binding_generation: source_attachment.binding_generation,
+                binding_digest: source_attachment.binding_digest,
                 coordinate: crate::ui::binding::UiBindingCoordinate::Affordance {
-                    view_ref: "view:ryeos/projects/list".to_string(),
+                    view_ref,
                     affordance_id: "open-project".to_string(),
                 },
                 payload: crate::ui::binding::UiBindingPayload::Selection {
@@ -870,93 +1087,39 @@ mod tests {
             },
             intent: crate::ui::effect::InvokeIntent::Service,
             success_notice: None,
-            invocation_origin: None,
+            invocation_origin: Some(origin),
             input_origin: None,
             route_seq: None,
             ratchet_on_thread_id: false,
         });
-        let transition = core.dispatch(RyeOsEvent::EffectResult {
+        let effects = core.dispatch(RyeOsEvent::EffectResult {
             result: RyeOsEffectResult {
                 id: invocation.id,
                 ok: true,
                 kind: RyeOsEffectResultKind::BindingInvoked,
                 data: Some(serde_json::json!({
                     "ui_transition": {
-                        "kind": "replace_session",
-                        "session_id": "session-2",
-                        "launch_url": "/ui/launch/successor"
+                        "kind": "admit_binding_attachment",
+                        "attachment": admitted
                     }
                 })),
                 error: None,
             },
         });
-        assert!(matches!(
-            transition.as_slice(),
-            [RyeOsEffect {
-                kind: RyeOsEffectKind::ReplaceSession { session_id, .. },
-                ..
-            }] if session_id == "session-2"
-        ));
-
-        let replacement_effect = &transition[0];
-        let mut successor = writable_session();
-        successor.session_id = "session-2".to_string();
-        successor.project_path = Some("/tmp/project-2".to_string());
-        successor.binding_digest = "22".repeat(32);
-        successor.effective_surface.as_mut().unwrap()["sources"] = serde_json::json!({
-            "projects": {
-                "ref": "service:projects/list",
-                "role": "projects",
-                "params": {}
-            }
-        });
-        let initial = core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: replacement_effect.id,
-                ok: true,
-                kind: RyeOsEffectResultKind::BrowserOnly,
-                data: Some(serde_json::to_value(&successor).unwrap()),
-                error: None,
-            },
-        });
-        assert_eq!(
-            core.data
-                .session
-                .as_ref()
-                .map(|session| session.session_id.as_str()),
-            Some("session-2")
-        );
-        assert_eq!(
-            core.data
-                .session
-                .as_ref()
-                .and_then(|session| session.project_path.as_deref()),
-            Some("/tmp/project-2")
-        );
-        assert!(
-            !initial.is_empty(),
-            "successor must bootstrap its own sources"
-        );
-        assert!(
-            initial
-                .iter()
-                .all(|effect| effect.id > delayed_predecessor.id),
-            "successor effects must not reuse a predecessor correlation id"
-        );
-        let session_id = core.data.session.as_ref().unwrap().session_id.clone();
-        core.dispatch(RyeOsEvent::EffectResult {
-            result: RyeOsEffectResult {
-                id: delayed_predecessor.id,
-                ok: true,
-                kind: RyeOsEffectResultKind::SourceData,
-                data: Some(serde_json::json!({"stale": true})),
-                error: None,
-            },
-        });
         assert_eq!(
             core.data.session.as_ref().unwrap().session_id,
-            session_id,
-            "a delayed predecessor result cannot affect the successor generation"
+            original_session
+        );
+        assert!(core.binding_attachments.contains_key("project-attachment"));
+        assert!(core.view_sets.len() > original_sets);
+        assert_eq!(
+            core.insertion_attachment_id(core.view_sets[core.active_view_set].id),
+            Some("project-attachment")
+        );
+        assert!(
+            effects
+                .iter()
+                .all(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. }))
         );
     }
 

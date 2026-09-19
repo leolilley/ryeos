@@ -131,14 +131,17 @@ impl RyeOsCore {
             .as_ref()
             .filter(|id| !id.is_empty())
             .ok_or("layout preferences require an authenticated principal")?;
-        if session.surface_generation.is_empty() {
+        let surface = self
+            .binding_attachment(&self.surface_attachment_id)
+            .ok_or("layout preferences require the admitted surface attachment")?;
+        if surface.surface_generation.is_empty() {
             return Err("layout preferences require an exact surface generation".into());
         }
         Ok(Scope {
             principal: principal.clone(),
-            surface: session.surface_ref.clone(),
-            surface_generation: session.surface_generation.clone(),
-            project: session.project_path.clone(),
+            surface: surface.surface_ref.clone(),
+            surface_generation: surface.surface_generation.clone(),
+            project: surface.project_path.clone(),
         })
     }
 
@@ -149,6 +152,7 @@ impl RyeOsCore {
     }
 
     pub fn export_layout_preferences(&self) -> Result<String, String> {
+        self.validate_layout_export_contexts()?;
         let view_sets = self
             .view_sets
             .iter()
@@ -174,6 +178,60 @@ impl RyeOsCore {
             return Err("layout preferences exceed byte limit".into());
         }
         Ok(encoded)
+    }
+
+    /// The current preference schema records composition only; it cannot
+    /// represent which admitted attachment owns each insertion point/mount.
+    /// Refuse mixed or unresolved layouts instead of exporting a snapshot
+    /// that restoration would silently retarget onto the authored surface.
+    fn validate_layout_export_contexts(&self) -> Result<(), String> {
+        use super::model::{RyeOsDockEdge, dock_view_instance_key};
+
+        for (instance, attachment) in &self.selection_attachments {
+            let owner = self
+                .view_set_index_for_instance(instance)
+                .map(|index| self.view_sets[index].id);
+            match attachment {
+                super::attachment::SelectionAttachment::FollowViewSet { view_set_id }
+                    if owner == Some(*view_set_id) => {}
+                _ => return Err(
+                    "layout preferences cannot preserve pinned or cross-set subject relationships"
+                        .into(),
+                ),
+            }
+        }
+        for view_set in &self.view_sets {
+            if self.view_set_insertion_attachments.get(&view_set.id)
+                != Some(&self.surface_attachment_id)
+            {
+                return Err(
+                    "layout preferences cannot represent this view set's insertion context".into(),
+                );
+            }
+            let tile_contexts_match = view_set.tiles.values().all(|tile| {
+                self.instance_binding_attachments.get(&tile.instance_key)
+                    == Some(&self.surface_attachment_id)
+            });
+            let dock_contexts_match = [
+                RyeOsDockEdge::Top,
+                RyeOsDockEdge::Bottom,
+                RyeOsDockEdge::Left,
+                RyeOsDockEdge::Right,
+            ]
+            .into_iter()
+            .filter(|edge| view_set.docks.slot(*edge).is_some())
+            .all(|edge| {
+                self.instance_binding_attachments
+                    .get(&dock_view_instance_key(view_set.id, edge))
+                    == Some(&self.surface_attachment_id)
+            });
+            if !tile_contexts_match || !dock_contexts_match {
+                return Err(
+                    "layout preferences cannot represent mixed or unresolved mount contexts".into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Capture only the active set's reusable composition. The caller supplies
@@ -234,6 +292,48 @@ impl RyeOsCore {
                 }
             }
         }
+        // The current template grammar names view refs and layout, not runtime
+        // context relationships. Never silently flatten a pin, external link,
+        // or mixed project composition into follow-own-set on reopening.
+        let insertion = self
+            .insertion_attachment_id(captured.id)
+            .ok_or("the view set's insertion context is unavailable")?;
+        let instances = captured
+            .tiles
+            .values()
+            .map(|tile| tile.instance_key.clone())
+            .chain(
+                [
+                    super::model::RyeOsDockEdge::Top,
+                    super::model::RyeOsDockEdge::Bottom,
+                    super::model::RyeOsDockEdge::Left,
+                    super::model::RyeOsDockEdge::Right,
+                ]
+                .into_iter()
+                .filter(|edge| captured.docks.slot(*edge).is_some())
+                .map(|edge| super::model::dock_view_instance_key(captured.id, edge)),
+            );
+        for instance in instances {
+            if self
+                .instance_binding_attachments
+                .get(&instance)
+                .map(String::as_str)
+                != Some(insertion)
+            {
+                return Err("this composition has mixed or unresolved project contexts; the reusable template cannot preserve them".into());
+            }
+            match self.selection_attachment_for_instance(&instance) {
+                Some(super::attachment::SelectionAttachment::Pinned { .. }) => {
+                    return Err("this composition contains a pinned subject; reusable pin inputs are not yet supported".into());
+                }
+                Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id })
+                    if view_set_id != captured.id =>
+                {
+                    return Err("this composition follows another open set; the reusable template cannot preserve that relationship".into());
+                }
+                _ => {}
+            }
+        }
         let template = SavedViewSetTemplate {
             composition: capture_view_set(&captured, id.clone())?,
             id,
@@ -249,11 +349,16 @@ impl RyeOsCore {
     pub fn open_saved_view_set_template(
         &mut self,
         template: &SavedViewSetTemplate,
+        insertion_attachment_id: &str,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
         if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
             return Err("view set limit reached".into());
         }
         validate_saved_view_set_templates(std::slice::from_ref(template))?;
+        let insertion_context = self
+            .binding_attachments
+            .get(insertion_attachment_id)
+            .ok_or("saved view set requires a live admitted insertion context")?;
         let tiling = self
             .view_sets
             .get(self.active_view_set)
@@ -262,7 +367,7 @@ impl RyeOsCore {
             .clone();
         let view_set = template.composition.instantiate(&tiling)?;
         for tile in view_set.tiles.values() {
-            if !self.views.contains_key(&tile.view.view_ref) {
+            if !insertion_context.views.contains_key(&tile.view.view_ref) {
                 return Err(format!(
                     "saved view is not admitted: {}",
                     tile.view.view_ref
@@ -279,12 +384,17 @@ impl RyeOsCore {
         .flatten()
         {
             let RyeOsDockContent::View { view_ref } = &slot.content;
-            if !self.views.contains_key(view_ref) {
+            if !insertion_context.views.contains_key(view_ref) {
                 return Err(format!("saved slot is not admitted: {view_ref}"));
             }
         }
         self.view_sets.push(view_set);
         self.active_view_set = self.view_sets.len() - 1;
+        if !self.stamp_view_set_mounts(self.active_view_set, insertion_attachment_id) {
+            self.view_sets.pop();
+            self.active_view_set = self.active_view_set.saturating_sub(1);
+            return Err("saved view set lost its admitted insertion context".into());
+        }
         Ok(self.refresh_view_set_sources())
     }
 
@@ -324,11 +434,16 @@ impl RyeOsCore {
                 .collect::<Vec<_>>(),
         )?;
         let tiling = self.view_sets[self.active_view_set].tiling.clone();
+        let insertion_attachment_id = self.surface_attachment_id.clone();
+        let insertion_context = self
+            .binding_attachments
+            .get(&insertion_attachment_id)
+            .ok_or("layout restoration requires the admitted surface attachment")?;
         let mut restored = Vec::with_capacity(snapshot.view_sets.len());
         for saved in snapshot.view_sets {
             let mut view_set = saved.seed.instantiate(&tiling)?;
             for tile in view_set.tiles.values() {
-                if !self.views.contains_key(&tile.view.view_ref) {
+                if !insertion_context.views.contains_key(&tile.view.view_ref) {
                     return Err(format!(
                         "saved view is not admitted: {}",
                         tile.view.view_ref
@@ -347,7 +462,7 @@ impl RyeOsCore {
             .flatten()
             {
                 let RyeOsDockContent::View { view_ref } = &slot.content;
-                if !self.views.contains_key(view_ref) {
+                if !insertion_context.views.contains_key(view_ref) {
                     return Err(format!("saved slot is not admitted: {view_ref}"));
                 }
             }
@@ -364,8 +479,15 @@ impl RyeOsCore {
         // an input/command, mutates the seat route or imports saved privileges.
         // Fresh mounts must not retain pins/follow links to retired instances.
         self.selection_attachments.clear();
+        self.instance_binding_attachments.clear();
+        self.view_set_insertion_attachments.clear();
         self.view_sets = restored;
         self.active_view_set = snapshot.active_view_set;
+        for index in 0..self.view_sets.len() {
+            if !self.stamp_view_set_mounts(index, &insertion_attachment_id) {
+                return Err("layout restoration lost its admitted insertion context".into());
+            }
+        }
         Ok(self.refresh_view_set_sources())
     }
 }
@@ -382,13 +504,27 @@ mod tests {
                 ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
                 session_id: "session:test".into(),
                 user_principal_id: Some("fp:operator".into()),
-                surface_ref: "surface:test/work".into(),
-                binding_digest: "binding-generation-one".into(),
-                surface_generation: "surface-generation-one".into(),
-                effective_surface: Some(
-                    json!({ "name": "Work", "tiles": ["view:test/one", "view:test/two"],
-                "views": { "view:test/one": { "widget": "text" }, "view:test/two": { "widget": "text" } } }),
-                ),
+                surface_attachment_id: "attachment:test".into(),
+                binding_attachments: vec![crate::ui::UiBindingAttachment {
+                    binding_attachment_id: "attachment:test".into(),
+                    binding_generation: 1,
+                    binding_digest: "binding-generation-one".into(),
+                    surface_ref: "surface:test/work".into(),
+                    surface_generation: "surface-generation-one".into(),
+                    effective_surface: json!({
+                        "name": "Work", "tiles": ["view:test/one", "view:test/two"],
+                        "views": {
+                            "view:test/one": { "widget": "text" },
+                            "view:test/two": { "widget": "text" }
+                        }
+                    }),
+                    project_path: None,
+                    posture: Default::default(),
+                    binding_request_bounds: crate::ui::UiBindingRequestBounds {
+                        max_request_bytes: 64 * 1024,
+                        max_input_bytes: 16 * 1024,
+                    },
+                }],
                 ..Default::default()
             },
             BrowserViewport::default(),
@@ -519,8 +655,12 @@ mod tests {
         let source_key = source.layout_preference_key().unwrap();
 
         let mut successor = core();
-        successor.data.session.as_mut().unwrap().surface_generation =
-            "surface-generation-two".into();
+        successor
+            .binding_attachments
+            .get_mut("attachment:test")
+            .unwrap()
+            .descriptor
+            .surface_generation = "surface-generation-two".into();
 
         assert_ne!(source_key, successor.layout_preference_key().unwrap());
         assert!(successor.restore_layout_preferences(&saved).is_err());
@@ -532,7 +672,12 @@ mod tests {
         let source_key = source.layout_preference_key().unwrap();
 
         let mut successor = core();
-        successor.data.session.as_mut().unwrap().binding_digest = "binding-generation-two".into();
+        successor
+            .binding_attachments
+            .get_mut("attachment:test")
+            .unwrap()
+            .descriptor
+            .binding_digest = "binding-generation-two".into();
 
         assert_eq!(source_key, successor.layout_preference_key().unwrap());
     }
@@ -541,14 +686,55 @@ mod tests {
     fn missing_surface_generation_disables_layout_persistence() {
         let mut target = core();
         target
-            .data
-            .session
-            .as_mut()
+            .binding_attachments
+            .get_mut("attachment:test")
             .unwrap()
+            .descriptor
             .surface_generation
             .clear();
 
         assert!(target.layout_preference_key().is_err());
+        assert!(target.export_layout_preferences().is_err());
+    }
+
+    #[test]
+    fn mixed_attachment_mounts_cannot_be_exported_as_surface_preferences() {
+        let mut target = core();
+        let instance = target.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        target
+            .instance_binding_attachments
+            .insert(instance, "attachment:project".into());
+
+        assert!(target.export_layout_preferences().is_err());
+    }
+
+    #[test]
+    fn reusable_template_does_not_silently_flatten_a_pinned_subject() {
+        let mut target = core();
+        let instance = target.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        target.selection_attachments.insert(
+            instance,
+            super::super::attachment::SelectionAttachment::Pinned {
+                values: std::collections::BTreeMap::new(),
+                fingerprint: "fixture-pin".into(),
+            },
+        );
+        let error = target
+            .export_active_view_set_template("saved".into(), "Saved".into())
+            .unwrap_err();
+        assert!(error.contains("pinned subject"));
         assert!(target.export_layout_preferences().is_err());
     }
 
@@ -600,7 +786,9 @@ mod tests {
         assert!(!encoded.contains("session:test"));
 
         let mut target = core();
-        let effects = target.open_saved_view_set_template(&template).unwrap();
+        let effects = target
+            .open_saved_view_set_template(&template, "attachment:test")
+            .unwrap();
         assert_eq!(target.view_sets.len(), 2);
         assert_eq!(target.active_view_set, 1);
         assert!(target.view_sets[1].input_buffers.is_empty());
@@ -617,6 +805,22 @@ mod tests {
     }
 
     #[test]
+    fn reusable_template_refuses_an_unresolved_insertion_attachment() {
+        let mut target = core();
+        let template = target
+            .export_active_view_set_template("development".into(), "Development".into())
+            .unwrap();
+        let set_count = target.view_sets.len();
+
+        assert!(
+            target
+                .open_saved_view_set_template(&template, "attachment:revoked")
+                .is_err()
+        );
+        assert_eq!(target.view_sets.len(), set_count);
+    }
+
+    #[test]
     fn reusable_template_revalidates_views_before_mutating_open_sets() {
         let source = core();
         let mut template = source
@@ -629,7 +833,11 @@ mod tests {
         });
         let mut target = core();
         let before = target.view_sets.len();
-        assert!(target.open_saved_view_set_template(&template).is_err());
+        assert!(
+            target
+                .open_saved_view_set_template(&template, "attachment:test")
+                .is_err()
+        );
         assert_eq!(target.view_sets.len(), before);
     }
 
@@ -644,7 +852,11 @@ mod tests {
         }
         let before = target.view_sets.len();
 
-        assert!(target.open_saved_view_set_template(&template).is_err());
+        assert!(
+            target
+                .open_saved_view_set_template(&template, "attachment:test")
+                .is_err()
+        );
         assert_eq!(target.view_sets.len(), before);
     }
 }

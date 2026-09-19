@@ -313,12 +313,14 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
 /// is the only record of where a drill came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LensFrame {
+    /// Exact retained binding of the replaced lens; placement is not authority.
+    pub binding_attachment_id: String,
     /// The view the step-in replaced.
     pub view: ViewSpec,
     /// Snapshot of the seat facet fold at push time, keyed by facet name. On
     /// pop, any facet whose current value differs is re-appended to this value,
     /// restoring the braid/selection context the leaving view was reading.
-    pub facets: BTreeMap<String, Value>,
+    pub facets: BTreeMap<String, Option<Value>>,
     /// Human label for the level this frame represents (the cognition/thread it
     /// was showing — e.g. `study`), for the breadcrumb. `None` falls back to the
     /// view's title. Because a single-lens braid shows *which* execution via a
@@ -501,12 +503,14 @@ impl ViewSet {
     /// facet write + center swap so a pop can restore the pre-drill state.
     pub fn push_lens_frame(
         &mut self,
+        binding_attachment_id: String,
         view: ViewSpec,
-        facets: BTreeMap<String, Value>,
+        facets: BTreeMap<String, Option<Value>>,
         label: Option<String>,
         attachment: Option<crate::ui::attachment::SelectionAttachment>,
     ) {
         self.lens_stack.push(LensFrame {
+            binding_attachment_id,
             view,
             facets,
             label,

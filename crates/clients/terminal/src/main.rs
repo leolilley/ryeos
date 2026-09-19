@@ -238,11 +238,24 @@ fn main() {
                         );
                     }
                     if let Some(progress) = progress.as_mut() {
-                        let _ = progress.update("resolving surface via daemon", Some(ref_str));
+                        let _ = progress.update("reading admitted surface binding", Some(ref_str));
                     }
-                    let resolved = client
-                        .resolve_effective_surface(ref_str, Some(&project_path))
-                        .await;
+                    let resolved = client.current_ui_session().await.and_then(|session| {
+                        let mut matches = session.binding_attachments.into_iter().filter(|attachment| {
+                            attachment.binding_attachment_id == session.surface_attachment_id
+                        });
+                        let attachment = matches.next().ok_or_else(|| {
+                            transport::daemon::ClientError::UiBindingRequest(
+                                "UI session omitted its authored surface attachment".into(),
+                            )
+                        })?;
+                        if matches.next().is_some() {
+                            return Err(transport::daemon::ClientError::UiBindingRequest(
+                                "UI session duplicated its authored surface attachment".into(),
+                            ));
+                        }
+                        Ok(attachment.effective_surface)
+                    });
                     finish_progress(&mut progress);
                     daemon_client = Some(client);
                     match resolved {
@@ -349,6 +362,44 @@ fn main() {
                         .await
                     {
                         Ok(()) => {
+                            let admitted_views = client.current_ui_session().await.and_then(|session| {
+                                let mut matches = session
+                                    .binding_attachments
+                                    .into_iter()
+                                    .filter(|attachment| {
+                                        attachment.binding_attachment_id
+                                            == session.surface_attachment_id
+                                    });
+                                let attachment = matches.next().ok_or_else(|| {
+                                    transport::daemon::ClientError::UiBindingRequest(
+                                        "preview session omitted its authored surface attachment"
+                                            .into(),
+                                    )
+                                })?;
+                                if matches.next().is_some() {
+                                    return Err(
+                                        transport::daemon::ClientError::UiBindingRequest(
+                                            "preview session duplicated its authored surface attachment"
+                                                .into(),
+                                        ),
+                                    );
+                                }
+                                Ok(attachment
+                                    .effective_surface
+                                    .get("views")
+                                    .and_then(serde_json::Value::as_object)
+                                    .cloned()
+                                    .unwrap_or_default())
+                            });
+                            let admitted_views = match admitted_views {
+                                Ok(views) => views,
+                                Err(e) => {
+                                    diagnostics.push(format!(
+                                        "preview binding unavailable: {e}"
+                                    ));
+                                    serde_json::Map::new()
+                                }
+                            };
                             for (index, view_ref) in view_refs.into_iter().enumerate() {
                                 if let Some(progress) = progress.as_mut() {
                                     let _ = progress.update_determinate(
@@ -358,19 +409,13 @@ fn main() {
                                         Some(&view_ref),
                                     );
                                 }
-                                match client
-                                    .resolve_effective_item(&view_ref, "view", Some(&project_path))
-                                    .await
-                                {
-                                    Ok(binding) => {
-                                        let composed = binding
-                                            .get("composed_value")
-                                            .cloned()
-                                            .unwrap_or(binding);
-                                        views.insert(view_ref, composed);
+                                match admitted_views.get(&view_ref).cloned() {
+                                    Some(binding) => {
+                                        views.insert(view_ref, binding);
                                     }
-                                    Err(e) => diagnostics
-                                        .push(format!("view {view_ref} unavailable: {e}")),
+                                    None => diagnostics.push(format!(
+                                        "view {view_ref} unavailable in admitted preview binding"
+                                    )),
                                 }
                             }
                             if let Some(progress) = progress.as_mut() {

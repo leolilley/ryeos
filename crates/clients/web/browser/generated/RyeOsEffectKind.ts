@@ -27,4 +27,10 @@ export type RyeOsEffectKind =
    * the one-shot URL through the predecessor session, then adopts only the
    * authenticated successor and reloads its compiled presentation.
    */
-  | { type: "replace_session"; session_id: string; launch_url: string };
+  | { type: "replace_session"; session_id: string; launch_url: string }
+  /**
+   * Explicitly release one exact non-surface binding attachment from the
+   * authenticated session. This is session-wide and never implied by
+   * closing local presentation.
+   */
+  | { type: "release_binding_attachment"; binding_attachment_id: string; binding_generation: bigint; binding_digest: string };

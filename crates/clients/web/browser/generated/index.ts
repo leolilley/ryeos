@@ -131,6 +131,7 @@ export type { SeatEvent } from "./SeatEvent";
 export type { SeatEventKind } from "./SeatEventKind";
 export type { SplitBranch } from "./SplitBranch";
 export type { ThreadControlCommand } from "./ThreadControlCommand";
+export type { UiBindingAttachment } from "./UiBindingAttachment";
 export type { UiBindingCoordinate } from "./UiBindingCoordinate";
 export type { UiBindingPayload } from "./UiBindingPayload";
 export type { UiBindingRequest } from "./UiBindingRequest";

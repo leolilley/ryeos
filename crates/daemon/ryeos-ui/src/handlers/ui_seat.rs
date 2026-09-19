@@ -1,8 +1,9 @@
 //! Session-authenticated RyeOS UI seat services for browser renderers.
 //!
-//! Renderers arrive through a `session:<id>` wrapper. Seat identity and its
-//! surface/project authority are derived from that exact immutable session;
-//! renderer parameters cannot select or reuse another session's seat.
+//! Renderers arrive through a `session:<id>` wrapper and open a seat against
+//! one exact retained binding-attachment triple. The triple is only a lookup
+//! coordinate: surface/project authority comes from the retained attachment,
+//! and placement or display paths cannot rebind it.
 //!
 //! The signed services use ordinary verified dispatch, like session/current.
 //! Here "verified" selects descriptor verification and preservation of the
@@ -24,7 +25,7 @@ use ryeos_app::state_store::NewEventRecord;
 use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadFinalizeParams};
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::browser_session::BrowserSession;
+use crate::browser_session::{BindingAttachmentCoordinate, BrowserSession};
 use crate::state::get_ui_state;
 
 const SEAT_KIND: &str = "seat_session";
@@ -35,7 +36,21 @@ const MAX_SEAT_APPEND_EVENTS: usize = 128;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OpenRequest {}
+struct OpenRequest {
+    binding_attachment_id: String,
+    binding_generation: u64,
+    binding_digest: String,
+}
+
+impl OpenRequest {
+    fn coordinate(&self) -> BindingAttachmentCoordinate {
+        BindingAttachmentCoordinate {
+            binding_attachment_id: self.binding_attachment_id.clone(),
+            binding_generation: self.binding_generation,
+            binding_digest: self.binding_digest.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -355,12 +370,38 @@ pub async fn handle_open(
         .lock_seat_transition()
         .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
-    let owner = seat_owner(&session);
     let req: OpenRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    let _ = req;
-    let surface_ref = session.surface_ref.clone();
-    let client_ref = "client:ryeos/ui-session".to_string();
+    let coordinate = req.coordinate();
+    let attachment = ui_state
+        .browser_sessions
+        .resolve_attachment(&session.session_id, &coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    if attachment
+        .compiled_binding
+        .binding
+        .node_policy_generation_digest
+        != state.node_policy.generation_digest()
+    {
+        return Err(HandlerError::Structured {
+            code: "ui_binding_stale".into(),
+            status: 409,
+            body: json!({
+                "code": "ui_binding_stale",
+                "error": "the node policy generation changed after attachment admission",
+                "retryable": false,
+            }),
+        }
+        .into());
+    }
+    let owner = seat_owner(&session);
+    let surface_ref = attachment.surface_ref.clone();
+    let client_ref = format!(
+        "client:ryeos/ui-session/{}/{}:{}",
+        attachment.binding_attachment_id,
+        attachment.binding_generation,
+        attachment.compiled_binding.binding_digest,
+    );
 
     let existing = state
         .state_store
@@ -368,10 +409,17 @@ pub async fn handle_open(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .into_iter()
         .filter(|thread| {
-            thread.kind == SEAT_KIND && thread.status == "running" && thread.item_ref == surface_ref
+            thread.kind == SEAT_KIND
+                && thread.status == "running"
+                && thread.item_ref == surface_ref
+                && thread.executor_ref == client_ref
         })
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
     if let Some(thread) = existing {
+        let _admission = ui_state
+            .browser_sessions
+            .admit_attachment_dispatch(&session.session_id, &coordinate)
+            .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
         let detail = require_owned_seat(&state, &thread.thread_id, &owner)?;
         let (producer_incarnation, next_engine_seq) = issue_producer(&state, &detail, &owner)?;
         return Ok(json!({
@@ -383,7 +431,7 @@ pub async fn handle_open(
         }));
     }
 
-    let project_access = crate::seat_auth::session_project_access(&session)?;
+    let project_access = crate::seat_auth::attachment_project_access(&attachment)?;
     let project_root = match project_access.as_ref() {
         Some(access) => access.path().to_path_buf(),
         None => state.config.app_root.clone(),
@@ -402,6 +450,14 @@ pub async fn handle_open(
         SEAT_KIND.to_string(),
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+
+    // Linearize the durable seat creation after all descriptor-rooted
+    // preparation. A concurrent revocation either wins here or happens after
+    // this operation has crossed admission.
+    let _admission = ui_state
+        .browser_sessions
+        .admit_attachment_dispatch(&session.session_id, &coordinate)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
 
     let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let site_id = state.threads.site_id().to_string();
@@ -659,11 +715,19 @@ pub async fn handle_replay(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
     let owner = seat_owner(&session);
     let req: ReplayRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
     let detail = require_owned_seat(&state, &req.chain_root_id, &owner)?;
+    if detail.status != "running" {
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
+        return Err(HandlerError::BadRequest("seat session is not running".into()).into());
+    }
     state.state_store.touch_seat_lease(
         &detail.thread_id,
         &owner,
@@ -695,6 +759,10 @@ pub async fn handle_close(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
     let owner = seat_owner(&session);
     let req: CloseRequest = serde_json::from_value(params)
@@ -730,6 +798,10 @@ pub async fn handle_touch(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
+    let ui_state = get_ui_state(&state).expect("UiState not set");
+    let _transition = ui_state
+        .lock_seat_transition()
+        .map_err(|_| HandlerError::Internal("seat transition lock poisoned".into()))?;
     let session = browser_session(&ctx, &state)?;
     let owner = seat_owner(&session);
     let req: TouchRequest = serde_json::from_value(params)
