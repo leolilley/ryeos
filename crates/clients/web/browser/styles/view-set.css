@@ -20,7 +20,8 @@
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
 .tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
-.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; border-top: 1px solid var(--line); }
+.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; overflow-x: auto; overflow-y: hidden; border-top: 1px solid var(--line); scrollbar-width: thin; }
+.tile-header.grouped .view-tabs button { flex: 0 0 auto; }
 .view-tabs button { padding: 0 13px; color: var(--muted); border-bottom: 1px solid transparent; text-transform: none; letter-spacing: 0; }
 .view-tabs button.active { color: var(--text); border-color: var(--yellow); }
 .content-heading { padding: 28px 34px 22px; border-bottom: 1px solid var(--line); }
@@ -34,4 +35,15 @@
 @media (max-width: 980px) {
   .view-set-middle { gap: 8px; }
   .dock-slot[data-edge="left"], .dock-slot[data-edge="right"] { width: min(calc(var(--dock-size) * 1px), 28vw); }
+}
+@media (max-width: 760px) {
+  /* Preserve the authored tree while presenting only the focused leaf's
+     ancestry. Focus changes reveal another group; no split or mount is
+     rewritten in browser state. */
+  .split { display: block; }
+  .split > .split:not(:has(.tile-frame.focused)),
+  .split > .tile-frame:not(.focused),
+  .split > .split-divider { display: none; }
+  .split > .split:has(.tile-frame.focused),
+  .split > .tile-frame.focused { width: 100%; height: 100%; }
 }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T03:38:25Z:5fc6f729f2ea9ea2f6b9797d61bac6bf75377a6fe191b68f93bda60027b2e286:I3812XZoiHKPDm1qxFDtEuB67XZ8egvACJAQhwmdDyhnNORCWh/CXJe/WvUkHViI/klOQAAETNxSjmAGGK+jAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T04:02:47Z:e5c9c49d5fe8b15b3603041c353c5133139222fc9a23ffdd4aad64d26cd1d480:CLgjlQ7et5DMTFzaDJQ21A49AlZXws6S719L/QbUF6Ir4aDUXh8IKOU8HH6HUbuoy56n+680RQjU/5dZWeayBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -51,11 +51,14 @@ stable logical-work address. A restart, new worker epoch, or cross-site
 continuation must therefore read as movement within the same work, not a new
 agent or unrelated conversation.
 
-The Development set uses that one scoped route for its conversation, change
-inventory, and execution field. Its left navigator does not manufacture a
-project or thread from browser state. Until work is explicitly opened, those
-views remain honestly unselected. Candidate changes come from the retained
-candidate owner and the execution diagram comes from
+The Development set keeps two distinct authored contexts. Its conversation
+uses the conversation view instance's explicit input route. Its navigator
+writes the view-set-scoped `selection.work`, which the change inventory and
+execution field share. Selecting evidence must never silently retarget a
+composer. The navigator does not manufacture a project or thread from browser
+state, and until work is explicitly selected the inspector views remain
+honestly unselected. Candidate changes come from the retained candidate owner
+and the execution diagram comes from
 `service:ui/ryeos-ui/field/execution`; neither is synthetic renderer content.
 The explorer, conversation, changes and execution regions are ordinary view
 groups in the signed nested layout tree. They are not fixed Svelte product

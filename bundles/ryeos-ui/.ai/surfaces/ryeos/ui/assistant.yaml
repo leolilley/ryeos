@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-19T03:38:25Z:5880895bb32f37e148611b1437771b790ac994fe6146fbbb7e4999797d1e32f5:ds3MPgOL/i+340vhq/73qXK0mrm9hPUsFNwDG4UPj6MSDAHehgSYuDwCiqKm9xMohPF5Cb69oIVrPkDUHcxfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:03:23Z:9a9e0f4ad64129ca7c1906f2ade0533aa53ea279dc391599d06565b52f027b44:0t5UvgmgH3xtAYAjL/Uk5jmg48x9FDHScLhEWn1f3Yvw9jzNxj7f9Y3FUrNzSG3UGDcxTNwbkScCTIKbr97PAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
-version: "3.0.0"
+version: "3.1.0"
 description: Named tiled RyeOS view sets with contextual views and optional supporting slots
 
 extends: surface:ryeos/ui/lens
@@ -20,9 +20,10 @@ style:
 
 view_sets:
   # The first authored set is the initial set for a fresh seat. Keep the
-  # principal's durable work list at the left and let one explicit "Talk to
-  # work" affordance bind the conversation, changes and execution views to
-  # the same placement. No renderer-owned sample project or thread is used.
+  # principal's durable work list at the left. Inspection is shared by the
+  # changes and execution groups through the view-set-scoped selection owner;
+  # the conversation keeps its independently explicit input route. No
+  # renderer-owned sample project or thread is used.
   - id: development
     title: Development
     root:
@@ -65,12 +66,20 @@ view_sets:
       active: 0
   - id: work
     title: Work
-    slots:
-      left: { content: "view:ryeos/work/list", open: true, size: 205 }
     root:
-      type: group
-      views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
-      active: 0
+      type: split
+      axis: horizontal
+      ratio: 0.22
+      first:
+        type: group
+        label: Work
+        views: ["view:ryeos/work/list"]
+        active: 0
+      second:
+        type: group
+        label: Detail
+        views: ["view:ryeos/work/overview", "view:ryeos/work/children", "view:ryeos/work/evidence", "view:ryeos/work/candidate", "view:ryeos/work/approvals"]
+        active: 0
   - id: review
     title: Review
     root:

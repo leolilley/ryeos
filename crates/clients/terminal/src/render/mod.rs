@@ -62,10 +62,10 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    // There is no "home" mode. The bars, docks (incl. the real bottom
-    // input slot), and overlays render in EVERY state. The only branch is
-    // backdrop-vs-tiles in the center: an empty center draws the backdrop
-    // scene; tiles fill it otherwise.
+    // There is no "home" mode. Bars, ordinary docks and overlays render in
+    // every state. A maximized tile is the one deliberate exception: the
+    // shared presentation layout projects it as the sole root and all clients
+    // give it the complete body rather than retaining supporting docks.
     let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
         chrome::draw_top_bar(&mut surface, vm);
         1
@@ -80,7 +80,18 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     };
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
-    let center = chrome::draw_docks(&mut surface, body, vm);
+    let maximized = matches!(
+        vm.view_set.root.as_ref(),
+        Some(RyeOsLayoutNodeVm::Tile {
+            maximized: true,
+            ..
+        })
+    );
+    let center = if maximized {
+        body
+    } else {
+        chrome::draw_docks(&mut surface, body, vm)
+    };
     let draw_backdrop_underlay = vm.view_set.root.is_some()
         && vm.session.ambient.show_background
         && vm

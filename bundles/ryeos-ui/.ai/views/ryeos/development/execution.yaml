@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:31:28Z:f79ad32213f334cce6dee125cb185057ad1ce5f0f704e1bfb368f8fd47cf8268:9OvU7Te+bydW7+KzSl5YLISt0/oH5nzsGGHRoe7TQRQPd8nskTZV0wT7XDa11ChKCJHQ6eXrQsi8mw69CdyiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:02:47Z:43ad3aa84b8f15a1d88b777243d2cd75f0f0c8d178aecab022e7c682a2dea8e4:/3rGLwmwM52ZVdagagiWZpLu+IYtI70t6vowEjNECDtQTyHer9D+pyK/a2/GE8SEkNkFWagBYUCvCYokT8lsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-execution
 title: Execution
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   execution:
     ref: service:ui/ryeos-ui/field/execution
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.work.thread"
       max_depth: 16
       max_nodes: 160
       expansions: []
@@ -89,5 +89,5 @@ affordances:
       merge:
         entity_id: "{record.id}"
 refresh:
-  on_facet: input.route
+  on_facet: selection.work
   on_hint: [thread, activity]

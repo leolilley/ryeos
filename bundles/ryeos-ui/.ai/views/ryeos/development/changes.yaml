@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:31:28Z:c81a99533e9df6e1ac54c8b5c03b2bf97896b4a0bebc1e9d0b7fe393838372c6:VtPcJQi5DNONyiOa2bOdqHddvrPpL10RE8UDGFe9dVo3wvur0ctRg+E/6hNzSr/kVSOLdAF4egcUZRPsFtUNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:02:47Z:2ace4cfa0831ff6ae76d72930ef8afd0265bf37def0265f84b34be294f198261:M2Or43TPcK6emIF9tpUKOrDtkbB5MOsK4of/W2jYZDVqnLzyXp29lc5rmw5rzSQIUZW7GbtvqqyzqgrCFUlOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-changes
 title: Changes
 version: "1.0.0"
@@ -9,7 +9,7 @@ sources:
   detail:
     ref: service:ui/ryeos-ui/work/candidate
     params:
-      thread_id: "@facet:input.route.thread"
+      thread_id: "@facet:selection.work.thread"
 
 sections:
   - title: Working changes
@@ -50,5 +50,5 @@ sections:
         default: neutral
 
 refresh:
-  on_facet: input.route
+  on_facet: selection.work
   on_hint: [thread, activity]
