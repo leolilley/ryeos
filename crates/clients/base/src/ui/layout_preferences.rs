@@ -12,13 +12,19 @@ use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
-const SCHEMA: &str = "ryeos.ui.layout-preferences.v2";
+const SCHEMA: &str = "ryeos.ui.layout-preferences.v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Scope {
     principal: String,
     surface: String,
+    /// Exact compiled surface generation that admitted this arrangement.
+    /// A stable surface ref is not enough: authored view sets and slots may
+    /// change beneath it, and an older complete composition must not replace
+    /// the newly compiled defaults merely because all of its views remain
+    /// individually admitted.
+    surface_generation: String,
     project: Option<String>,
 }
 
@@ -119,9 +125,13 @@ impl RyeOsCore {
             .as_ref()
             .filter(|id| !id.is_empty())
             .ok_or("layout preferences require an authenticated principal")?;
+        if session.surface_generation.is_empty() {
+            return Err("layout preferences require an exact surface generation".into());
+        }
         Ok(Scope {
             principal: principal.clone(),
             surface: session.surface_ref.clone(),
+            surface_generation: session.surface_generation.clone(),
             project: session.project_path.clone(),
         })
     }
@@ -319,6 +329,8 @@ mod tests {
                 session_id: "session:test".into(),
                 user_principal_id: Some("fp:operator".into()),
                 surface_ref: "surface:test/work".into(),
+                binding_digest: "binding-generation-one".into(),
+                surface_generation: "surface-generation-one".into(),
                 effective_surface: Some(
                     json!({ "name": "Work", "tiles": ["view:test/one", "view:test/two"],
                 "views": { "view:test/one": { "widget": "text" }, "view:test/two": { "widget": "text" } } }),
@@ -399,6 +411,46 @@ mod tests {
                 .restore_layout_preferences(&" ".repeat(MAX_LAYOUT_PREFERENCE_BYTES + 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn authored_surface_generation_retires_predecessor_layout() {
+        let source = core();
+        let saved = source.export_layout_preferences().unwrap();
+        let source_key = source.layout_preference_key().unwrap();
+
+        let mut successor = core();
+        successor.data.session.as_mut().unwrap().surface_generation =
+            "surface-generation-two".into();
+
+        assert_ne!(source_key, successor.layout_preference_key().unwrap());
+        assert!(successor.restore_layout_preferences(&saved).is_err());
+    }
+
+    #[test]
+    fn unrelated_binding_generation_does_not_retire_layout() {
+        let source = core();
+        let source_key = source.layout_preference_key().unwrap();
+
+        let mut successor = core();
+        successor.data.session.as_mut().unwrap().binding_digest = "binding-generation-two".into();
+
+        assert_eq!(source_key, successor.layout_preference_key().unwrap());
+    }
+
+    #[test]
+    fn missing_surface_generation_disables_layout_persistence() {
+        let mut target = core();
+        target
+            .data
+            .session
+            .as_mut()
+            .unwrap()
+            .surface_generation
+            .clear();
+
+        assert!(target.layout_preference_key().is_err());
+        assert!(target.export_layout_preferences().is_err());
     }
 
     #[test]

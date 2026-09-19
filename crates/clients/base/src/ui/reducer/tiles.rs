@@ -1072,6 +1072,7 @@ mod tests {
                     "view:b": { "widget": "rows", "sources": { "default": { "ref": "service:x", "params": {}, "collection": "rows" } } }
                 }
             })),
+            surface_generation: "22".repeat(32),
             project_path: Some("/tmp/p".to_string()),
             posture: crate::ui::binding::UiEffectivePosture::Interactive,
             binding_digest: "11".repeat(32),

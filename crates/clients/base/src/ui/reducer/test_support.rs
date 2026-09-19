@@ -33,6 +33,7 @@ pub(crate) fn session() -> BrowserSession {
                 }
             }
         })),
+        surface_generation: "22".repeat(32),
         project_path: Some("/tmp/project".to_string()),
         binding_digest: "11".repeat(32),
         binding_request_bounds: crate::ui::binding::UiBindingRequestBounds {

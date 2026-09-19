@@ -30,6 +30,7 @@ pub struct Response {
     pub ui_binding_contract_revision: &'static str,
     pub session_id: String,
     pub surface_ref: String,
+    pub surface_generation: String,
     pub effective_surface: Value,
     pub project_path: Option<String>,
     pub binding_digest: String,
@@ -82,6 +83,13 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION,
         session_id: session.session_id.clone(),
         surface_ref,
+        surface_generation: session
+            .compiled_binding
+            .binding
+            .surface
+            .effective_definition_digest
+            .as_str()
+            .to_owned(),
         effective_surface: session.effective_surface.clone(),
         project_path,
         binding_digest: session.compiled_binding.binding_digest.clone(),

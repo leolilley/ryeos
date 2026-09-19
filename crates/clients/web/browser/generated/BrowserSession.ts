@@ -7,6 +7,8 @@ export interface BrowserSession {
   ui_binding_contract_revision: string;
   session_id: string;
   surface_ref: string;
+  /** Exact effective-definition generation of the authored surface. */
+  surface_generation: string;
   user_principal_id: string | null;
   effective_surface: unknown | null;
   project_path: string | null;

@@ -31,6 +31,11 @@ pub struct BrowserSession {
     pub user_principal_id: Option<String>,
     #[serde(default)]
     pub effective_surface: Option<serde_json::Value>,
+    /// Exact effective-definition generation of `surface_ref`. Presentation
+    /// preferences are scoped to this value so a predecessor composition can
+    /// never replace newly authored view-set defaults under the same ref.
+    #[serde(default)]
+    pub surface_generation: String,
     #[serde(default)]
     pub project_path: Option<String>,
     /// Digest of the daemon-compiled surface/view binding for this exact
