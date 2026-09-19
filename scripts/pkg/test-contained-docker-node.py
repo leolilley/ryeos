@@ -10,6 +10,11 @@ SPEC.loader.exec_module(SETUP)
 
 
 class SetupTests(unittest.TestCase):
+    def test_development_publisher_trust_requires_explicit_opt_in(self):
+        self.assertEqual(SETUP.publisher_trust_args(False), [])
+        self.assertEqual(SETUP.publisher_trust_args(True),
+                         ["--trust-file", "/opt/ryeos/.ai/PUBLISHER_TRUST.toml"])
+
     def image(self):
         return {"Id": "sha256:" + "a" * 64, "Os": "linux", "Architecture": "amd64", "Config": {
             "Entrypoint": SETUP.ENTRY, "Cmd": None, "Labels": {

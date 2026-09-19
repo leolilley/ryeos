@@ -25,6 +25,12 @@ ENTRY = ["/usr/bin/tini", "--", "/usr/local/bin/contained-workflow-entrypoint"]
 LABEL = "io.ryeos.contained-setup"
 
 
+def publisher_trust_args(enabled):
+    # The root source publisher signs this build's node profiles and bundles.
+    # This is an explicit operator decision, never inferred from image labels.
+    return ["--trust-file", "/opt/ryeos/.ai/PUBLISHER_TRUST.toml"] if enabled else []
+
+
 def validate_image(image):
     config = image.get("Config") or {}
     labels = config.get("Labels") or {}
@@ -68,6 +74,8 @@ def main():
     parser.add_argument("--name", required=True)
     parser.add_argument("--image", required=True, help="local sha256 image ID or repository@sha256 digest")
     parser.add_argument("--port", required=True, type=int, help="host loopback port")
+    parser.add_argument("--trust-source-publisher", action="store_true",
+                        help="explicitly trust the pinned image's source publisher (local development only)")
     parser.add_argument("--confirm", action="store_true", required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
@@ -102,6 +110,8 @@ def main():
         os.fchmod(parent, 0o700)
         fcntl.flock(parent, fcntl.LOCK_EX)
         contract = {"schema": 1, "name": args.name, "image": image["Id"], "port": args.port}
+        if args.trust_source_publisher:
+            contract["trust_source_publisher"] = True
         try:
             record = json.loads(HOST.read_regular("setup.json", parent, True, 16384), object_pairs_hook=HOST.unique_object)
         except FileNotFoundError:
@@ -126,7 +136,8 @@ def main():
                 stream.flush()
                 os.fsync(stream.fileno())
             os.fsync(parent)
-        if any(record.get(key) != value for key, value in contract.items()):
+        if (any(record.get(key) != value for key, value in contract.items())
+                or bool(record.get("trust_source_publisher", False)) != args.trust_source_publisher):
             raise ValueError("existing node setup differs; image/port changes require explicit stopped-node migration")
         for name in ["app", "projects"]:
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
@@ -156,7 +167,8 @@ def main():
                 "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined",
                 "--mount", mount, "--entrypoint", "/usr/local/bin/ryeos", image["Id"],
                 "init", "--non-interactive", "--app-root", "/data/app", "--source", "/opt/ryeos",
-                "--bind", "[::]:8000", *profile_args, capture=False)
+                "--bind", "[::]:8000", *profile_args,
+                *publisher_trust_args(args.trust_source_publisher), capture=False)
             run("create", "--name", args.name, "--runtime", "ryeos-contained", "--user", "0:0",
                 "--label", f"{LABEL}={state}", "--publish", f"127.0.0.1:{args.port}:8000",
                 "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined",

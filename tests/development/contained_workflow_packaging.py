@@ -19,6 +19,18 @@ def docker_stage(text, name):
 
 
 class ContainedWorkflowPackagingTests(unittest.TestCase):
+    def test_local_dev_publication_does_not_bypass_official_artifact_gate(self):
+        release = (ROOT / "Dockerfile.release").read_text()
+        self.assertIn("ARG CONTAINED_PUBLICATION_STAGE=published", release)
+        self.assertIn("package-bundle-artifact.sh", docker_stage(release, "published"))
+        self.assertNotIn("package-bundle-artifact.sh", docker_stage(release, "compiled-publication"))
+        self.assertIn("PUBLISHER_DEV_TRUST.toml", docker_stage(release, "development-publication"))
+        self.assertIn("--from=published", docker_stage(release, "bundle-artifact"))
+        self.assertIn("--from=published", docker_stage(release, "ryeos-hosted-workflow"))
+        dev = (ROOT / "docker-bake.contained-dev.hcl").read_text()
+        self.assertIn('CONTAINED_PUBLICATION_STAGE = "development-publication"', dev)
+        self.assertNotIn("type=registry", dev)
+
     def test_general_hosted_image_and_entrypoint_are_not_repurposed(self):
         general = (ROOT / "Dockerfile.hosted-workflow").read_text()
         ordinary_entry = (ROOT / "deploy/entrypoint.sh").read_text()
@@ -28,7 +40,9 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
     def test_contained_target_has_exact_fail_closed_packaging(self):
         release = (ROOT / "Dockerfile.release").read_text()
         stage = docker_stage(release, "ryeos-contained-workflow")
-        self.assertIn("/build/target-cache/release/lillux", stage)
+        self.assertIn("/build/target/release/lillux", stage)
+        self.assertNotIn("/build/target-cache/", stage)
+        self.assertIn("cp /build/target-cache/release/lillux /build/target/release/lillux", release)
         self.assertNotIn("/usr/local/bin/ryeos-lillux-oci-hook", stage)
         self.assertIn("io.ryeos.image=\"contained-workflow\"", stage)
         self.assertIn("io.ryeos.required-node-profile=\"contained-workflow\"", stage)

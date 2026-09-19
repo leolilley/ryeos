@@ -27,3 +27,17 @@ They connect Docker lifecycle callbacks to the existing hook and initialize a
 private contained node; they do not grant this evidence driver an installed
 attestor. The lifecycle matrix and authenticated candidate-return observations
 must still be collected and authenticated for the selected host.
+
+Local development builds use `docker-bake.contained-dev.hcl` with explicit
+`VERSION`, `VCS_REF`, `BUILD_DATE`, and `SOURCE_DATE_EPOCH` coordinates. Set
+`CONTAINED_SOURCE` to a frozen checkout. This produces a local contained image
+and hook archive in one solve using the repository's public development key;
+it does not produce an official bundle archive or push registry images.
+
+When preparing a disposable node from that immutable image ID, explicitly pass
+`--trust-source-publisher` to `scripts/pkg/setup-contained-docker-node.py`.
+This records consent to trust the pinned image's source publisher and supplies
+its public trust document to initialization. The option is off by default and
+must remain consistent on retries. It does not change the runtime adapter,
+signed containment profile, or installed qualification requirements. Never use
+the public development publisher for production nodes.
