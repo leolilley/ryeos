@@ -58,7 +58,7 @@ class ContainedWorkflowPackagingTests(unittest.TestCase):
     def test_signed_profile_requires_scopes_and_enforcement(self):
         profile = (ROOT / "bundles/.ai/node/init/profiles/contained-workflow.yaml").read_text()
         self.assertTrue(profile.startswith("# ryeos:signed:"))
-        self.assertRegex(profile, r"(?ms)process_scopes:\n(?:.*\n){0,5}\s+mode: required")
+        self.assertRegex(profile, r"(?m)process_scopes:\n(?:[^\n]*\n){0,5}[^\S\n]+mode: required")
         self.assertRegex(profile, r"(?m)^\s+mode: enforce$")
         self.assertIn("implementation: linux-lillux", profile)
         self.assertIn("proc_filesystem: pid_namespace_nested", profile)
