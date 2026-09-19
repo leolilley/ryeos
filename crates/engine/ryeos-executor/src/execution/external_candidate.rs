@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, ensure};
 use ryeos_state::external_execution::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
-    ExecutionChannelPayload, NativeNamespaceExit, NativeWriterExclusionMechanism,
-    NativeWriterExclusionObservation,
+    ExecutionChannelPayload, MAX_CANDIDATE_CONTENT_BYTES, NativeNamespaceExit,
+    NativeWriterExclusionMechanism, NativeWriterExclusionObservation,
 };
 use ryeos_state::project_materialization::VerifiedProjectSnapshotClosure;
 use ryeos_state::{CasMutationGuard, PinnedProjectMaterialization, PinnedStateAuthority};
@@ -178,7 +178,7 @@ impl NativeExternalCandidate {
                     .checked_add(file.size)
                     .context("external base byte count overflow")?;
                 ensure!(
-                    total <= 1024 * 1024 * 1024,
+                    total <= MAX_CANDIDATE_CONTENT_BYTES,
                     "external base exceeds first-generation private-copy bound"
                 );
             }
@@ -357,7 +357,10 @@ impl NativeExternalCandidate {
             .terminate_namespace_for_export(timeout)
             .map_err(anyhow::Error::msg)?;
         authority.ensure_guard(guard)?;
-        self.root.ensure_path_binding()?;
+        // The live owner retains the exact admitted inode. Native launch may
+        // mask its original pathname in the dedicated launcher's namespace;
+        // all capture operations remain descriptor-relative. Reopening that
+        // path is neither needed nor authorized recovery of this live owner.
         let cas = authority.cas_store()?;
         let base = VerifiedProjectSnapshotClosure::load(&cas, &self.binding.base_snapshot_hash)?;
         let mut retained_bytes = 0_u64;
@@ -382,7 +385,7 @@ impl NativeExternalCandidate {
                     .checked_add(file.metadata()?.len())
                     .context("external candidate byte count overflow")?;
                 ensure!(
-                    retained_bytes <= 1024 * 1024 * 1024,
+                    retained_bytes <= MAX_CANDIDATE_CONTENT_BYTES,
                     "external candidate exceeds capture byte bound"
                 );
                 Ok(())
@@ -401,7 +404,7 @@ impl NativeExternalCandidate {
             &self.root,
             base.tree().policy(),
             super::ingest::ProjectCaptureBudget {
-                max_bytes: 1024 * 1024 * 1024,
+                max_bytes: MAX_CANDIDATE_CONTENT_BYTES,
                 deadline: capture_deadline,
             },
         )?;

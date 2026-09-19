@@ -267,6 +267,53 @@ mod tests {
     use ryeos_app::node_policy::NodePolicySection as _;
 
     #[test]
+    fn live_descriptor_capture_cannot_be_redirected_by_rebinding_diagnostic_path() {
+        let fixture = tempfile::tempdir().unwrap();
+        let original = fixture.path().join("candidate");
+        let displaced = fixture.path().join("displaced");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("policy.py"), b"exact candidate").unwrap();
+        let root = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        let state_root = tempfile::tempdir().unwrap();
+        let db =
+            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let policy = ryeos_state::objects::ProjectSnapshotPolicy::new(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let before = ingest_project_tree(&authority, &guard, &root, &policy).unwrap();
+        std::fs::rename(&original, &displaced).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("policy.py"), b"unrelated replacement").unwrap();
+        assert!(root.ensure_path_binding().is_err());
+        let after = super::ingest_project_tree_bounded(
+            &authority,
+            &guard,
+            &root,
+            &policy,
+            super::ProjectCaptureBudget {
+                max_bytes: 1024,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(before.files, after.files);
+        let replaced = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        assert_ne!(
+            after.files,
+            ingest_project_tree(&authority, &guard, &replaced, &policy)
+                .unwrap()
+                .files,
+        );
+    }
+
+    #[test]
     fn private_input_shadows_preserve_base_files_and_do_not_publish_evidence() {
         use ryeos_state::objects::ProjectTree;
         let base = ProjectTree {

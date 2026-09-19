@@ -4512,31 +4512,43 @@ mod imp {
                 panic!("descendant exited before namespace termination: {status}");
             }
             if stage == "descendant-writer" {
-                if std::env::var_os("LILLUX_PROBE_NESTED").is_some() {
-                    assert!(unsafe { libc::setsid() } > 0);
-                    enter_mapped_user_namespace().unwrap();
-                    syscall_zero(
-                        unsafe { libc::unshare(libc::CLONE_NEWPID) },
-                        "terminal test nested PID namespace",
-                    )
-                    .unwrap();
-                    let child = unsafe { libc::fork() };
-                    assert!(child >= 0);
-                    if child > 0 {
-                        let mut status = 0;
-                        unsafe {
-                            libc::waitpid(child, &mut status, 0);
+                // libtest retains its main thread even with one test selected.
+                // Enter user namespaces only in a fresh single-threaded child.
+                let helper = unsafe { libc::fork() };
+                assert!(helper >= 0);
+                if helper > 0 {
+                    let mut status = 0;
+                    assert_eq!(unsafe { libc::waitpid(helper, &mut status, 0) }, helper);
+                    panic!("writer helper exited before namespace termination: {status}");
+                }
+                let result = std::panic::catch_unwind(|| {
+                    if std::env::var_os("LILLUX_PROBE_NESTED").is_some() {
+                        assert!(unsafe { libc::setsid() } > 0);
+                        enter_mapped_user_namespace().unwrap();
+                        syscall_zero(
+                            unsafe { libc::unshare(libc::CLONE_NEWPID) },
+                            "terminal test nested PID namespace",
+                        )
+                        .unwrap();
+                        let child = unsafe { libc::fork() };
+                        assert!(child >= 0);
+                        if child > 0 {
+                            let mut status = 0;
+                            unsafe {
+                                libc::waitpid(child, &mut status, 0);
+                            }
+                            panic!("nested namespace writer exited before outer termination");
                         }
-                        panic!("nested namespace writer exited before outer termination");
+                        assert_eq!(unsafe { libc::getpid() }, 1);
                     }
-                    assert_eq!(unsafe { libc::getpid() }, 1);
-                }
-                for counter in 0_u64.. {
-                    std::fs::write("/work/writer", counter.to_le_bytes()).unwrap();
-                    std::fs::write("/work/writer-ready", b"ready").unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                unreachable!();
+                    for counter in 0_u64.. {
+                        std::fs::write("/work/writer", counter.to_le_bytes()).unwrap();
+                        std::fs::write("/work/writer-ready", b"ready").unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    unreachable!();
+                });
+                unsafe { libc::_exit(if result.is_ok() { 0 } else { 125 }) };
             }
             if stage == "child" {
                 // Check before this target opens any files. The parent made
@@ -5025,6 +5037,11 @@ mod imp {
                     &writable_fixture.path().join("view"),
                 )
                 .unwrap();
+                let writer_view = crate::secure_fs::PinnedDirectory::from_open_directory(
+                    writable_fixture.path().join("view"),
+                    writable_source.file().try_clone().unwrap(),
+                )
+                .unwrap();
                 let entry = if sealed {
                     crate::sealed_memfd(c"proc-exec-test", &std::fs::read(&executable).unwrap())
                         .unwrap()
@@ -5187,17 +5204,51 @@ mod imp {
                             .stdin
                             .write_all(b"candidate-input")
                             .map_err(|error| error.to_string())?;
-                        let view = writable_fixture.path().join("view");
+                        // Native setup mounts its private root over /tmp in
+                        // this launcher namespace. The original temp pathname
+                        // no longer names our view; retain descriptor authority.
+                        let writer_ready = || {
+                            writer_view
+                                .open_regular(std::ffi::OsStr::new("writer-ready"), false)
+                                .map(|file| file.is_some())
+                                .map_err(|error| error.to_string())
+                        };
+                        let writer_bytes = || {
+                            writer_view
+                                .open_pinned_regular(std::ffi::OsStr::new("writer"), false)
+                                .and_then(|file| {
+                                    file.ok_or_else(|| anyhow::anyhow!("writer absent"))
+                                })
+                                .and_then(|file| file.read_bounded(8))
+                                .map_err(|error| error.to_string())
+                        };
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        if view.join("writer-ready").exists() {
+                        if writer_ready()? {
                             return Err("held native target executed before release".into());
                         }
                         if !release_target {
+                            // Exercise a valid but exhausted observation budget,
+                            // not merely validation of Duration::ZERO. Signalling
+                            // may already have killed init; without observing and
+                            // exclusively reaping it no proof may escape, and
+                            // the exact lifetime must remain owned for retry.
+                            let owned_pid = process.process.child_pid();
+                            let timeout_error = process
+                                .terminate_namespace_for_export(std::time::Duration::from_nanos(1))
+                                .err()
+                                .ok_or("expired observation budget produced terminal proof")?;
+                            if !timeout_error.contains("unproved at deadline")
+                                || process.process.child_pid() != owned_pid
+                                || process.process.namespace_lifetime.is_none()
+                            {
+                                return Err(
+                                    "termination timeout discarded exact lifetime authority".into(),
+                                );
+                            }
                             process.terminate_namespace_for_export(
                                 std::time::Duration::from_secs(5),
                             )?;
-                            if view.join("writer-ready").exists() || process.release_once().is_ok()
-                            {
+                            if writer_ready()? || process.release_once().is_ok() {
                                 return Err(
                                     "cancelled held target retained release authority".into()
                                 );
@@ -5216,9 +5267,20 @@ mod imp {
                         }
                         let deadline =
                             std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        while !view.join("writer-ready").exists() {
+                        while !writer_ready()? {
                             if std::time::Instant::now() >= deadline {
-                                return Err("descendant writer did not become ready".into());
+                                process.terminate_namespace_for_export(
+                                    std::time::Duration::from_secs(5),
+                                )?;
+                                let mut diagnostic = String::new();
+                                pipes
+                                    .stderr
+                                    .take(8192)
+                                    .read_to_string(&mut diagnostic)
+                                    .map_err(|error| error.to_string())?;
+                                return Err(format!(
+                                    "descendant writer did not become ready: {diagnostic}"
+                                ));
                             }
                             std::thread::sleep(std::time::Duration::from_millis(5));
                         }
@@ -5235,11 +5297,9 @@ mod imp {
                         if proof.exit() != LinuxSandboxExit::Signal(libc::SIGKILL) {
                             return Err("namespace init did not terminate by exact signal".into());
                         }
-                        let before = std::fs::read(view.join("writer"))
-                            .map_err(|error| error.to_string())?;
+                        let before = writer_bytes()?;
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                        let after = std::fs::read(view.join("writer"))
-                            .map_err(|error| error.to_string())?;
+                        let after = writer_bytes()?;
                         if before != after
                             || process
                                 .terminate_namespace_for_export(std::time::Duration::from_secs(1))

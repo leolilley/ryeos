@@ -68,13 +68,15 @@ impl RuntimeDb {
     pub(crate) fn retain_external_candidate_import(
         &self,
         placement: &str,
-        imported: &ryeos_state::external_execution::export::ImportedCandidateContent,
+        verified: &ryeos_state::external_execution::export::ValidatedCandidateRetention<'_>,
         authority: &ryeos_state::PinnedStateAuthority,
-        guard: &ryeos_state::CasMutationGuard,
     ) -> Result<()> {
+        let imported = verified.content_for_store(authority)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let binding = load_binding(&tx, placement)?;
-        imported.validate_retention(authority, guard, &binding)?;
+        if imported.channel_binding_digest() != binding.digest()? {
+            bail!("validated candidate import changed its exact channel");
+        }
         let allocation = read(&tx, placement)?.context("external allocation absent")?;
         require_session_owner(&tx, &allocation.reservation)?;
         let (snapshot, evidence, completion): (Option<String>, Option<String>, Option<String>) = tx

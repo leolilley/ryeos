@@ -19,8 +19,9 @@ session or workspace cleanup while external execution remains unsettled.
 
 The Rust API additionally validates exact dedicated-session/capsule/workspace
 ownership, canonical bounded records, contact deadlines, capacity across binding
-generations, unique occurrence binding and CAS retention roots. Its tests still
-require an operator-run build. Runtime schema epoch 40 is provisional until
+generations, unique occurrence binding and CAS retention roots. The initial
+12-test Rust allocation/channel group passed after Cargo was authorized.
+Runtime schema epoch 40 is provisional until
 integration with the then-current `next`; it must not collide with another cut.
 Schema mismatch is checked before decoding version-specific journal rows. The
 independent stable reset guard refuses destructive history reset even when the
@@ -91,9 +92,10 @@ process group and enters a nested user/PID namespace when permitted, and must
 stop before export. Reusing the consumed
 termination handle is refused. Held preparation also covers no execution before
 release, single-use release, invalid-deadline refusal and cancellation before
-release. An actual unresolved kernel-termination timeout still needs a dedicated
-qualification case. These tests are
-**not run yet**.
+release. A valid, exhausted observation deadline retains the exact handle for
+subsequent cleanup. An actual stalled kernel termination still needs a dedicated
+qualification case. All three focused native terminal-export tests now pass,
+including their realized/sealed and nested-sandbox variants.
 
 ## Guest candidate and content import
 
@@ -135,8 +137,12 @@ objects, requires the exact base and policy, and refuses members outside the
 completed candidate/evidence closure. It fails permanently on a transfer error.
 The caller must retain completed roots before releasing its CAS mutation guard.
 The private-constructed imported-content value is revalidated against the
-receiving CAS, then retained by `StateStore::retain_external_candidate_import`
-under its write permit/guard. Immutable runtime rows bind the exact authenticated
+receiving CAS, including bounded streaming hash verification of reused blobs,
+then retained by `StateStore::retain_external_candidate_import` under its write
+permit/guard. The full B/C check occurs outside the global state lock and SQLite
+write transaction. Its privately constructed, guard-borrowing proof permits a
+short commit that rechecks the exact channel and export coordinates; it cannot
+authorize roots in another receiving store. Immutable runtime rows bind the exact authenticated
 export frame. GC adds candidate object roots and observation blob roots
 separately, including through quarantine. Merely recording a signed export claim
 does not add any candidate root. The authored state test exercises closure/blob
@@ -155,8 +161,11 @@ supervisor, settle cloud cleanup, complete the worker, evaluate or publish C.
 Durable transfer recovery and the existing candidate completion owner remain
 integration gates; no fresh assembler may blindly replay an uncertain frame.
 
-Operator-only commands (not installation; use the feature worktree, never the
-primary checkout's target directory):
+Cargo is now authorized, with one build job and the feature worktree's own
+target directory. These commands do not install anything. On space-constrained
+hosts add `--config profile.dev.debug=0 --config profile.test.debug=0
+--config build.incremental=false` to each command (keep those settings consistent
+between packages to avoid redundant builds):
 
 ```sh
 cargo test --locked --jobs 1 --target-dir target -p lillux --lib terminal_export
@@ -214,7 +223,44 @@ independently verified external cleanup. Do not bypass the current journal
 guards to enable a trial run. Evaluation/integration/publication stay with their
 existing owners. No worker profile is enabled by this source checkpoint.
 
-Latest local source checks (2026-09-19): 143 authoring-environment, 21 allocation/
+Pre-Cargo local source checks (2026-09-19): 143 authoring-environment, 21 allocation/
 channel SQL, 31 Codex bundle and 5 OpenCode bundle tests passed (200 total).
 `git diff --check` and standalone Rust syntax parsing passed. No Cargo commands,
 node lifecycle operations, installs or external allocations were performed.
+
+## Cargo qualification in progress (2026-09-19)
+
+One-job, offline builds use this feature worktree's `target`, with dev/test
+debug information and incremental compilation disabled. Initial results:
+
+- State framing/export: 5 passed, including actual CAS sweep/reopen.
+- Persistent-session capsule: 9 passed from the same compiled state harness.
+- Application allocation/channel journal: 12 passed.
+- Native terminal export: 3 passed with ignored native tests explicitly enabled,
+  including cancellation before release and descendant writer exclusion.
+- External SQLite schema regressions: 21 passed on independent review.
+- Broader Lillux harness: 234 passed, 18 ignored, one stale descriptor-error
+  assertion failed outside the tool sandbox. The assertion is corrected in
+  source (stdout/stderr remain refused); its rebuilt rerun is pending. The
+  tool sandbox additionally refused three Unix-socket operations; all three
+  passed in the exact unsandboxed harness rerun, with no runtime weakening.
+
+Subsequent reviewed corrections add reused-blob corruption refusal, move full
+verification outside the state lock, and repair the nested-writer fixture to
+fork a single-threaded helper before user namespace creation. A valid 1 ns
+native termination deadline now exercises pre-poll expiry and exact-handle
+retention/retry; it does not prove behavior under a stalled kernel exit. Native
+execution also exposed polling through a source pathname masked by setup's
+private root. The fixture now observes the exact pinned directory; the live
+capture owner likewise retains descriptor authority, without reopening a hidden
+diagnostic path. The native group passed after these corrections. State/app
+integrity corrections and executor capture still require affected Cargo groups
+to be rerun. No live execution
+backend, installation, cloud allocation or model contact is qualified here.
+
+The affected state/app rerun was interrupted explicitly (exit 130) when the
+home filesystem fell below 1 GiB free. It is not a test failure or passing
+evidence. This thread's single-job target occupied approximately 1 GiB; other
+artifacts were not deleted. Moving only this worktree's target to a separate
+filesystem is awaiting the operator's choice. Existing binaries remain usable
+for non-building diagnostics. No Cargo process from this run remains active.

@@ -14,6 +14,9 @@ pub mod export;
 
 pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
+/// First-generation logical base/candidate ceiling shared by native capture
+/// and receiver verification; transport budgets may independently be smaller.
+pub const MAX_CANDIDATE_CONTENT_BYTES: u64 = 1024 * 1024 * 1024;
 /// One terminal control frame per direction has capacity independent of data.
 /// Acknowledgements cannot consume this reserve. Lifecycle validation also
 /// refuses repeated Cancel/Stopped, so it is not an unbounded emergency lane.

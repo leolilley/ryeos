@@ -13783,12 +13783,23 @@ impl StateStore {
         imported: &ryeos_state::external_execution::export::ImportedCandidateContent,
     ) -> Result<()> {
         let permit = self.acquire_write_permit()?;
+        let binding = self
+            .lock()?
+            .runtime_db
+            .external_execution_channel(placement)?;
+        // Hash potentially large reused content outside the global state lock
+        // and SQLite write transaction. The CAS guard remains held throughout;
+        // the short commit rechecks immutable channel/export coordinates.
+        let verified = imported.validate_retention(
+            &self.state_authority,
+            permit.cas_guard(),
+            &binding,
+        )?;
         let g = self.lock()?;
         g.runtime_db.retain_external_candidate_import(
             placement,
-            imported,
+            &verified,
             &self.state_authority,
-            permit.cas_guard(),
         )
     }
 

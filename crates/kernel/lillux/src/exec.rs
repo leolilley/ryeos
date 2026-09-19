@@ -1801,15 +1801,17 @@ mod inherited_unix_stream_tests {
     }
 
     #[test]
-    fn inherited_stream_rejects_noncanonical_and_stdio_descriptors() {
+    fn inherited_stream_rejects_noncanonical_and_output_descriptors() {
         let noncanonical = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "3\n") }
             .err()
             .expect("control characters must be rejected");
         assert!(noncanonical.contains("not canonical"), "{noncanonical}");
-        let stdio = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", "2") }
-            .err()
-            .expect("standard I/O descriptors must be rejected");
-        assert!(stdio.contains("overlaps standard I/O"), "{stdio}");
+        for descriptor in ["1", "2"] {
+            let error = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", descriptor) }
+                .err()
+                .expect("standard output/error descriptors must be rejected");
+            assert!(error.contains("overlaps standard output or error"), "{error}");
+        }
     }
 }
 

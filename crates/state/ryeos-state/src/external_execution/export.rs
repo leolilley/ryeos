@@ -15,6 +15,70 @@ use crate::{CasMutationGuard, PinnedStateAuthority};
 const MAX_TRANSFER_MEMBERS: usize = 100_000;
 const MAX_SINGLE_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Descriptor closure validation intentionally checks blob presence/size only.
+/// Import authority must also consume and verify reused receiver-CAS content.
+/// Verify each distinct blob once, with bounded memory, logical tree bytes and
+/// cooperative elapsed time. This does not claim to interrupt blocked kernel I/O.
+fn verify_closure_blobs(
+    cas: &lillux::CasStore,
+    closures: &[&VerifiedProjectSnapshotClosure],
+) -> Result<()> {
+    use sha2::{Digest as _, Sha256};
+    use std::io::Read as _;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut verified = BTreeSet::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    for closure in closures {
+        let mut total = 0_u64;
+        for entry in closure.tree().files().values() {
+            ensure!(
+                Instant::now() < deadline,
+                "import blob verification expired"
+            );
+            total = total
+                .checked_add(entry.size)
+                .context("import tree size overflow")?;
+            ensure!(
+                total <= MAX_CANDIDATE_CONTENT_BYTES,
+                "import tree exceeds byte bound"
+            );
+            if !verified.insert(entry.blob_hash.clone()) {
+                continue;
+            }
+            let (mut file, size) = cas
+                .open_blob(&entry.blob_hash)?
+                .context("import lost referenced blob")?;
+            ensure!(size == entry.size, "import blob size changed");
+            let mut consumed = 0_u64;
+            let mut digest = Sha256::new();
+            loop {
+                ensure!(
+                    Instant::now() < deadline,
+                    "import blob verification expired"
+                );
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                consumed = consumed
+                    .checked_add(count as u64)
+                    .context("import blob size overflow")?;
+                ensure!(consumed <= size, "import blob grew during verification");
+                digest.update(&buffer[..count]);
+            }
+            ensure!(
+                Instant::now() < deadline
+                    && consumed == size
+                    && format!("{:x}", digest.finalize()) == entry.blob_hash,
+                "import blob content failed verification"
+            );
+        }
+    }
+    Ok(())
+}
+
 struct PartialMember {
     kind: ExportContentKind,
     hash: String,
@@ -54,8 +118,18 @@ mod tests {
             Default::default(),
         )
         .unwrap();
+        let file = ProjectFile {
+            blob_hash: cas.store_blob(b"reused-base-content").unwrap(),
+            size: b"reused-base-content".len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
         let tree = ProjectTree {
-            files: Default::default(),
+            files: [(
+                "input.txt".to_owned(),
+                cas.store_object(&file.to_value()).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
         };
         let snapshot = ProjectSnapshot {
             project_tree_hash: cas.store_object(&tree.to_value()).unwrap(),
@@ -141,9 +215,24 @@ mod tests {
         );
         let imported = assembler.accept(&sealed).unwrap().unwrap();
         assert_eq!(imported.snapshot_hash(), candidate_hash);
-        imported
+        let retained = imported
             .validate_retention(&authority, &guard, &binding)
             .unwrap();
+        assert_eq!(
+            retained
+                .content_for_store(&authority)
+                .unwrap()
+                .snapshot_hash(),
+            candidate_hash
+        );
+        let foreign_root = tempfile::tempdir().unwrap();
+        let foreign_db =
+            crate::StateDb::open(foreign_root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        assert!(
+            retained
+                .content_for_store(&foreign_db.pinned_authority().unwrap())
+                .is_err()
+        );
         let mut other_binding = binding.clone();
         other_binding.channel_nonce = "8".repeat(64);
         assert!(
@@ -179,6 +268,53 @@ mod tests {
         imported
             .validate_retention(&reopened_authority, &reopened_guard, &binding)
             .unwrap();
+
+        // A new import can reuse existing CAS members without retransmitting
+        // them. Same-size cache corruption must not turn a descriptor-only
+        // closure into authoritative imported content at any entry boundary.
+        let mut reused = CandidateExportAssembler::new(
+            &reopened_authority,
+            &reopened_guard,
+            binding.clone(),
+            &quiesce,
+        )
+        .unwrap();
+        let reused_hash = lillux::sha256_hex(b"reused-base-content");
+        let blob_path = cas
+            .root()
+            .join("blobs")
+            .join(&reused_hash[..2])
+            .join(&reused_hash[2..4])
+            .join(&reused_hash);
+        std::fs::write(blob_path, b"corrupt-base-bytes!").unwrap();
+        // Deliberately the same size: descriptor validation still succeeds.
+        assert_eq!(b"corrupt-base-bytes!".len(), b"reused-base-content".len());
+        VerifiedProjectSnapshotClosure::load(&cas, imported.snapshot_hash()).unwrap();
+        assert!(
+            reused
+                .accept(&sealed)
+                .err()
+                .expect("corrupt reused candidate must be refused")
+                .to_string()
+                .contains("blob content")
+        );
+        assert!(
+            imported
+                .validate_retention(&reopened_authority, &reopened_guard, &binding)
+                .err()
+                .expect("corrupt reused content must not gain retention authority")
+                .to_string()
+                .contains("blob content")
+        );
+        assert!(
+            CandidateExportAssembler::new(
+                &reopened_authority,
+                &reopened_guard,
+                binding.clone(),
+                &quiesce,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -242,6 +378,25 @@ pub struct ImportedCandidateContent {
     claimed_writer_exclusion_evidence_hash: String,
 }
 
+/// A completed receiving-store verification while that exact CAS namespace
+/// remains pinned. It cannot be deserialized or constructed by a peer. The
+/// application may verify outside its global lock, then commit exact roots
+/// without repeating potentially large reads inside a SQLite transaction.
+pub struct ValidatedCandidateRetention<'a> {
+    imported: &'a ImportedCandidateContent,
+    guard: &'a CasMutationGuard,
+}
+
+impl ValidatedCandidateRetention<'_> {
+    pub fn content_for_store(
+        &self,
+        authority: &PinnedStateAuthority,
+    ) -> Result<&ImportedCandidateContent> {
+        authority.ensure_guard(self.guard)?;
+        Ok(self.imported)
+    }
+}
+
 impl ImportedCandidateContent {
     pub fn snapshot_hash(&self) -> &str {
         self.closure.snapshot_hash()
@@ -259,12 +414,12 @@ impl ImportedCandidateContent {
     /// Revalidate under the receiving store's still-held CAS guard before
     /// creating durable roots. This value is private-constructed by assembly;
     /// a peer's ExportSealed frame alone cannot create retained candidate state.
-    pub fn validate_retention(
-        &self,
+    pub fn validate_retention<'a>(
+        &'a self,
         authority: &PinnedStateAuthority,
-        guard: &CasMutationGuard,
+        guard: &'a CasMutationGuard,
         binding: &ExecutionChannelBinding,
-    ) -> Result<()> {
+    ) -> Result<ValidatedCandidateRetention<'a>> {
         authority.ensure_guard(guard)?;
         ensure!(
             self.channel_binding_digest == binding.digest()?,
@@ -273,6 +428,7 @@ impl ImportedCandidateContent {
         let cas = authority.cas_store()?;
         let base = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
         let candidate = VerifiedProjectSnapshotClosure::load(&cas, self.snapshot_hash())?;
+        verify_closure_blobs(&cas, &[&base, &candidate])?;
         ensure!(
             candidate.snapshot().parent_hashes == [binding.base_snapshot_hash.clone()]
                 && candidate.snapshot().effective_policy_hash
@@ -296,7 +452,10 @@ impl ImportedCandidateContent {
             lillux::canonical_json(&serde_json::to_value(observation)?)?.as_bytes() == bytes,
             "import observation is noncanonical"
         );
-        Ok(())
+        Ok(ValidatedCandidateRetention {
+            imported: self,
+            guard,
+        })
     }
 }
 
@@ -319,7 +478,9 @@ impl<'a> CandidateExportAssembler<'a> {
             _ => bail!("candidate export requires the exact authenticated quiesce command"),
         };
         // Verify the existing base before accepting any foreign bytes.
-        VerifiedProjectSnapshotClosure::load(&authority.cas_store()?, &binding.base_snapshot_hash)?;
+        let cas = authority.cas_store()?;
+        let base = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
+        verify_closure_blobs(&cas, &[&base])?;
         Ok(Self {
             authority,
             guard,
@@ -496,6 +657,7 @@ impl<'a> CandidateExportAssembler<'a> {
                     VerifiedProjectSnapshotClosure::load(&cas, &self.binding.base_snapshot_hash)?;
                 let candidate =
                     VerifiedProjectSnapshotClosure::load(&cas, candidate_snapshot_hash)?;
+                verify_closure_blobs(&cas, &[&base, &candidate])?;
                 ensure!(
                     candidate.snapshot().parent_hashes == [self.binding.base_snapshot_hash.clone()]
                         && candidate.snapshot().effective_policy_hash
