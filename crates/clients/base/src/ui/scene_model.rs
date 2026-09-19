@@ -387,6 +387,28 @@ pub fn build_scene_model(
     items: Option<&super::dto::RyeOsItemsDto>,
     file_space: Option<&super::dto::RyeOsFileSpaceDto>,
 ) -> RyeOsSceneModel {
+    build_scene_model_for_instance(core, atlas, items, file_space, None)
+}
+
+/// Mounted scenes resolve selection through their attachment. Ambient scenes
+/// intentionally describe the active set and have no mounted subject owner.
+pub(crate) fn build_scene_model_for_instance(
+    core: &RyeOsCore,
+    atlas: &AtlasUiStateVm,
+    items: Option<&super::dto::RyeOsItemsDto>,
+    file_space: Option<&super::dto::RyeOsFileSpaceDto>,
+    instance: Option<&crate::ids::RyeOsViewInstanceKey>,
+) -> RyeOsSceneModel {
+    let selection = if let Some(instance) = instance {
+        core.facet_value_for_instance(instance, crate::ui::seat::KEY_SELECTION)
+    } else {
+        core.seat
+            .fold()
+            .get(&crate::ui::seat::selection_facet_key(
+                core.view_sets[core.active_view_set].id,
+            ))
+            .cloned()
+    };
     let mut scene = RyeOsSceneModel {
         generation: core.scene_frame(),
         ..RyeOsSceneModel::default()
@@ -605,12 +627,8 @@ pub fn build_scene_model(
         ));
         // Selection is a seat facet — the scene highlights what the
         // seat braid says is selected.
-        let selection_key =
-            crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
-        let selected_ref = core
-            .seat
-            .fold()
-            .get(&selection_key)
+        let selected_ref = selection
+            .as_ref()
             .and_then(|sel| sel.get("item"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
@@ -652,12 +670,8 @@ pub fn build_scene_model(
 
     if atlas.active_projection == AtlasProjectionVm::FileSpace {
         let file_space = file_space.or(core.data.file_space.as_ref());
-        let selection_key =
-            crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
-        let selected_ref = core
-            .seat
-            .fold()
-            .get(&selection_key)
+        let selected_ref = selection
+            .as_ref()
             .and_then(|sel| sel.get("file"))
             .map(|file| {
                 format!(

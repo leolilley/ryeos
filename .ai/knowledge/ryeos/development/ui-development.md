@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T05:11:30Z:71cdce879966b16a84f994012add7e45b7469a2cfa355dffc6ed22dc8ed48160:cjhhvRYCrM1bYkXT6RROVPfMYBKPmYJp42r18qPo3AgjAyRgL2N/T78LifTDv77bGu4GNnTqbMqjwz7tkTjjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T05:39:00Z:f612c1c168b319c434299e1aa49af1ada559a25cc0c856443a311879d5ca4c71:nvz2i3KjawmhtmMKQKInVdEprA5/3mgMtVGdNrFKlVo1wBenESU4HibrN6zyBatdtBPxsoFpphWSzgdm8RCNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -51,11 +51,26 @@ source-level trigger and must not retry mutations or recreate closed views.
 Settlement uses the retained invocation mount, not whichever view set is active
 when the response arrives. This coordinate is separate from an input origin.
 
-Selection-dependent views currently refuse cross-set placement moves. Their
-selection owner is still the containing set; allowing the move would silently
-retarget reads or writes. Full pin/follow needs explicit retained attachment
-ownership and rebind/lifetime semantics. Do not replace this boundary with a
-browser toggle or describe the current refusal as completed pinning.
+Selection attachments are shared Rust runtime state keyed by mounted instance.
+Following names a retained open view set; pinning captures bounded declared
+selection values, including unresolved absence, from the current attachment.
+Neither is project admission or a capability. Moves preserve that attachment;
+following a different set is an explicit operation, never a placement side effect.
+Pinned views refuse selection writes. A followed set cannot close while external
+mounted followers still depend on it. Accepted closes retire owned sources and
+attachments; explicit reattachment fences earlier responses before refetching.
+Reusable templates exclude pinned values and runtime follow identities.
+Open alongside allocates a fresh mounted viewer, captures its origin's current
+selection, and installs that pin before resolving source requests. It does not
+copy drafts, pending effects or execution authority. Selection-independent views
+must not acquire fake follow relationships merely because they moved. Writers
+and subscribers can follow another set even when they have nothing to pin.
+
+Selection and composer route are separate owners. A conversation's input.route
+remains instance-scoped even when selection is pinned or rebound. A signed
+cross-view Talk action must explicitly open its destination before assigning
+that destination's route. Without an opened destination, a route write belongs
+to its originating mount, never whichever control has keyboard focus.
 
 The browser is a renderer, not a second application model:
 

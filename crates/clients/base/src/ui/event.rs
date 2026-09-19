@@ -95,6 +95,16 @@ pub enum RyeOsUiIntent {
         tile_id: String,
         view_set_id: crate::ids::ViewSetId,
     },
+    PinViewSelection {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    OpenPinnedViewAlongside {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    FollowViewSetSelection {
+        instance_key: RyeOsViewInstanceKey,
+        view_set_id: crate::ids::ViewSetId,
+    },
     ResizeSplit {
         layout_guard: String,
         path: Vec<crate::layout::SplitBranch>,

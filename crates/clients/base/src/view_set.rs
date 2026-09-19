@@ -326,6 +326,11 @@ pub struct LensFrame {
     /// legible instead of `threads ▸ timeline ▸ timeline`.
     #[serde(default)]
     pub label: Option<String>,
+    /// Effective selection subject of the lens being left. This runtime-only
+    /// frame state lets pop restore the prior lens without silently attaching
+    /// it to whatever selection the drilled lens currently follows.
+    #[serde(default)]
+    pub attachment: Option<crate::ui::attachment::SelectionAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,11 +504,13 @@ impl ViewSet {
         view: ViewSpec,
         facets: BTreeMap<String, Value>,
         label: Option<String>,
+        attachment: Option<crate::ui::attachment::SelectionAttachment>,
     ) {
         self.lens_stack.push(LensFrame {
             view,
             facets,
             label,
+            attachment,
         });
     }
 

@@ -5,6 +5,7 @@
 //! JavaScript owns adapters for fetch/EventSource/DOM/Three.js and returns
 //! events/effect results to this core.
 
+pub mod attachment;
 pub mod binding;
 pub mod content;
 pub mod dto;

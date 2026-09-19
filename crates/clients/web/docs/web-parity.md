@@ -79,6 +79,9 @@ producers of the same intents, not a second command vocabulary.
 | [x] `DuplicateViewSet` | shared | shared | composition-only view-set duplication |
 | [x] `CloseViewSet` | shared | shared | view-set edit |
 | [x] `MoveTileToViewSet` | shared | shared | guarded view-set edit |
+| [x] `PinViewSelection` | shared | shared | exact mounted-view selection snapshot; shared command overlay and web tile menu |
+| [x] `OpenPinnedViewAlongside` | shared | shared | fresh mount pinned to the originating view's captured selection |
+| [x] `FollowViewSetSelection` | shared | shared | explicit retained selection owner; shared command overlay and web tile menu |
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
 | [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |

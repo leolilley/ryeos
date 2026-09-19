@@ -27,70 +27,7 @@ fn derived_group_title(view_ref: &str) -> String {
     }
 }
 
-fn is_selection_facet(path: &str) -> bool {
-    path == super::super::seat::KEY_SELECTION
-        || path.starts_with(&format!("{}.", super::super::seat::KEY_SELECTION))
-}
-
-fn value_reads_selection(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(value) => value
-            .strip_prefix("@facet:")
-            .and_then(|path| path.split('|').next())
-            .is_some_and(is_selection_facet),
-        serde_json::Value::Array(values) => values.iter().any(value_reads_selection),
-        serde_json::Value::Object(values) => values.values().any(value_reads_selection),
-        _ => false,
-    }
-}
-
-fn refresh_reads_selection(refresh: &serde_json::Value) -> bool {
-    refresh
-        .get("on_facet")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(is_selection_facet)
-}
-
 impl RyeOsCore {
-    /// Until a mounted view can retain an explicit attachment owner across
-    /// view sets, moving a selection-dependent instance would silently change
-    /// which scoped fold it reads or writes. Keep that ambiguity out of the
-    /// layout operation instead of pretending the destination owns it.
-    pub(crate) fn tile_uses_view_set_selection(&self, tile: TileId) -> bool {
-        let Some(view_ref) = self.view_sets[self.active_view_set]
-            .tiles
-            .get(&tile)
-            .map(|tile| tile.view.view_ref.as_str())
-        else {
-            return false;
-        };
-        let Some(binding) = self.views.get(view_ref) else {
-            return false;
-        };
-
-        binding.facet.as_deref().is_some_and(is_selection_facet)
-            || value_reads_selection(&binding.body)
-            || refresh_reads_selection(&binding.refresh)
-            || binding.sources.values().any(|source| {
-                value_reads_selection(&source.params) || refresh_reads_selection(&source.refresh)
-            })
-            || binding.field_state.as_ref().is_some_and(|state| {
-                state.cursor_scope.subject.iter().any(|subject| {
-                    value_reads_selection(&serde_json::Value::String(subject.clone()))
-                })
-            })
-            || binding.affordances.iter().any(|affordance| {
-                let Some(invoke) = affordance.get("invoke") else {
-                    return false;
-                };
-                invoke.get("plane").and_then(serde_json::Value::as_str) == Some("ui")
-                    && invoke
-                        .get("facet")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(is_selection_facet)
-            })
-    }
-
     /// Presentation concurrency fence, not execution authority. Derive it from
     /// the canonical tree instead of maintaining a second mutable revision.
     pub fn layout_guard(&self) -> String {
@@ -162,6 +99,25 @@ impl RyeOsCore {
         if self.view_sets.len() == 1 {
             return Vec::new();
         }
+        let externally_followed =
+            self.selection_attachments
+                .iter()
+                .any(|(instance, attachment)| {
+                    matches!(
+                        attachment,
+                        super::super::attachment::SelectionAttachment::FollowViewSet { view_set_id }
+                            if *view_set_id == id
+                    ) && self
+                        .view_set_index_for_instance(instance)
+                        .is_some_and(|owner| self.view_sets[owner].id != id)
+                });
+        if externally_followed {
+            self.notice(
+                "ViewSet is still followed by a view in another set. Reattach that view before closing.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         if self.view_sets[index]
             .input_buffers
             .values()
@@ -172,6 +128,26 @@ impl RyeOsCore {
                 super::view_model::RyeOsTone::Warn,
             );
             return Vec::new();
+        }
+        let mut closed_instances = self.view_sets[index]
+            .tiles
+            .values()
+            .map(|tile| tile.instance_key.clone())
+            .chain(self.view_sets[index].dock_local.keys().cloned())
+            .collect::<Vec<_>>();
+        for edge in [
+            super::model::RyeOsDockEdge::Top,
+            super::model::RyeOsDockEdge::Bottom,
+            super::model::RyeOsDockEdge::Left,
+            super::model::RyeOsDockEdge::Right,
+        ] {
+            if self.view_sets[index].docks.slot(edge).is_some() {
+                closed_instances.push(super::model::dock_view_instance_key(id, edge));
+            }
+        }
+        for instance in &closed_instances {
+            self.invalidate_view_sources(instance);
+            self.selection_attachments.remove(instance);
         }
         let previous_active = self.view_sets[self.active_view_set].id;
         self.view_sets.remove(index);
@@ -523,6 +499,7 @@ impl RyeOsCore {
                 self.view_sets[self.active_view_set].replace_focused_view(view.clone())
         {
             self.invalidate_view_sources(&instance_key);
+            self.selection_attachments.remove(&instance_key);
             self.normalize_field_local_states();
             let tile_id_text = tile_id.0.to_string();
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
@@ -570,6 +547,14 @@ impl RyeOsCore {
             self.invalidate_view_sources(instance_key);
         }
         self.view_sets[self.active_view_set].replace_focused_view(frame.view.clone());
+        if let Some(instance_key) = &replaced_instance {
+            if let Some(attachment) = frame.attachment {
+                self.selection_attachments
+                    .insert(instance_key.clone(), attachment);
+            } else {
+                self.selection_attachments.remove(instance_key);
+            }
+        }
         self.normalize_field_local_states();
         self.view_sets[self.active_view_set].lens_label = frame.label.clone();
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
@@ -629,14 +614,16 @@ impl RyeOsCore {
                 return false;
             }
             self.invalidate_view_sources(&instance_key);
+            self.selection_attachments.remove(&instance_key);
             self.push_motion(RyeOsMotionEventVm::TileExit {
                 tile_id: tile_id_text,
             });
             self.view_sets[self.active_view_set].reset_to_empty();
             return true;
         }
-        self.invalidate_view_sources(&instance_key);
         if self.view_sets[self.active_view_set].close_tile(tile_id) {
+            self.invalidate_view_sources(&instance_key);
+            self.selection_attachments.remove(&instance_key);
             self.push_motion(RyeOsMotionEventVm::TileExit {
                 tile_id: tile_id_text,
             });
@@ -717,8 +704,11 @@ mod tests {
     use crate::ui::reducer::test_support::*;
 
     #[test]
-    fn cross_view_set_move_refuses_selection_readers_and_writers() {
-        for binding in [
+    fn cross_view_set_move_preserves_the_source_selection_attachment() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/selection-dependent",
             serde_json::json!({
                 "widget": "rows",
                 "sources": {"default": {
@@ -726,54 +716,18 @@ mod tests {
                     "params": {"thread": "@facet:selection.work.thread"}
                 }}
             }),
-            serde_json::json!({
-                "widget": "rows",
-                "affordances": [{
-                    "id": "select",
-                    "invoke": {"plane": "ui", "facet": "selection.work", "value": {}}
-                }]
-            }),
-        ] {
-            let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-            seed_view_value(&mut core, "view:test/selection-dependent", binding);
-            core.add_center_tile(ViewSpec::bound("view:test/selection-dependent"));
-            let source = core.active_view_set;
-            let tile = core.view_sets[source].focused_tile;
-
-            core.new_view_set();
-            let target_id = core.view_sets[core.active_view_set].id;
-            core.switch_view_set_tab(source);
-            let guard = core.layout_guard();
-
-            let effects = core.dispatch(RyeOsEvent::Ui {
-                event: RyeOsUiEvent::Activate {
-                    intent: RyeOsUiIntent::MoveTileToViewSet {
-                        layout_guard: guard,
-                        tile_id: tile.0.to_string(),
-                        view_set_id: target_id,
-                    },
-                },
-            });
-
-            assert!(effects.is_empty());
-            assert!(core.view_sets[source].tiles.contains_key(&tile));
-            assert!(!core.view_sets[1].tiles.contains_key(&tile));
-            assert_eq!(core.active_view_set, source);
-            assert!(core.ui.notices.iter().any(|notice| {
-                notice
-                    .message
-                    .contains("selection scoped to its current view set")
-            }));
-        }
-    }
-
-    #[test]
-    fn cross_view_set_move_still_allows_selection_independent_views() {
-        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        seed_view(&mut core, "view:test/independent");
-        core.add_center_tile(ViewSpec::bound("view:test/independent"));
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/selection-dependent"));
         let source = core.active_view_set;
+        let source_id = core.view_sets[source].id;
         let tile = core.view_sets[source].focused_tile;
+        let instance = core.view_sets[source].tiles[&tile].instance_key.clone();
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance.clone(), "default")
+                .encode();
+        core.data
+            .sources
+            .insert(source_key.clone(), serde_json::json!({"retained": true}));
 
         core.new_view_set();
         let target = core.active_view_set;
@@ -794,6 +748,96 @@ mod tests {
         assert!(!core.view_sets[source].tiles.contains_key(&tile));
         assert!(core.view_sets[target].tiles.contains_key(&tile));
         assert_eq!(core.active_view_set, target);
+        assert_eq!(core.data.sources[&source_key]["retained"], true);
+        assert_eq!(
+            core.selection_attachments.get(&instance),
+            Some(&crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: source_id,
+            })
+        );
+    }
+
+    #[test]
+    fn cross_view_set_move_still_allows_selection_independent_views() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/independent");
+        core.add_center_tile(ViewSpec::bound("view:test/independent"));
+        let source = core.active_view_set;
+        let tile = core.view_sets[source].focused_tile;
+        let instance = core.view_sets[source].tiles[&tile].instance_key.clone();
+
+        core.new_view_set();
+        let target = core.active_view_set;
+        let target_id = core.view_sets[target].id;
+        core.switch_view_set_tab(source);
+        let guard = core.layout_guard();
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::MoveTileToViewSet {
+                    layout_guard: guard,
+                    tile_id: tile.0.to_string(),
+                    view_set_id: target_id,
+                },
+            },
+        });
+
+        assert!(!core.view_sets[source].tiles.contains_key(&tile));
+        assert!(core.view_sets[target].tiles.contains_key(&tile));
+        assert_eq!(core.active_view_set, target);
+        assert!(!core.selection_attachments.contains_key(&instance));
+    }
+
+    #[test]
+    fn cross_view_set_move_preserves_writer_owner_and_offers_follow_not_pin() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/selection-writer",
+            serde_json::json!({
+                "widget": "rows",
+                "affordances": [{
+                    "id": "select",
+                    "invoke": {"plane": "ui", "facet": "selection.work", "value": {}}
+                }]
+            }),
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/selection-writer"));
+        let source = core.active_view_set;
+        let source_id = core.view_sets[source].id;
+        let tile = core.view_sets[source].focused_tile;
+        let instance = core.view_sets[source].tiles[&tile].instance_key.clone();
+        core.new_view_set();
+        let target = core.active_view_set;
+        let target_id = core.view_sets[target].id;
+        core.switch_view_set_tab(source);
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::MoveTileToViewSet {
+                    layout_guard: core.layout_guard(),
+                    tile_id: tile.0.to_string(),
+                    view_set_id: target_id,
+                },
+            },
+        });
+
+        assert_eq!(
+            core.selection_attachments.get(&instance),
+            Some(&crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: source_id,
+            })
+        );
+        let actions = super::super::view_model::command_overlay_items_for(&core);
+        assert!(actions.iter().any(|action| matches!(
+            &action.intent,
+            RyeOsUiIntent::FollowViewSetSelection { view_set_id, .. } if *view_set_id == target_id
+        )));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(&action.intent, RyeOsUiIntent::PinViewSelection { .. }))
+        );
     }
 
     #[test]
@@ -1138,6 +1182,14 @@ mod tests {
             },
         });
         assert_eq!(core.view_sets[core.active_view_set].tile_ids().len(), 1);
+        let instance = core.focused_view_instance_key().unwrap();
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::Pinned {
+                values: std::collections::BTreeMap::new(),
+                fingerprint: "old-lens".into(),
+            },
+        );
         core.ui.motion.clear();
 
         // Switching the lens replaces in place — still exactly one tile.
@@ -1175,6 +1227,10 @@ mod tests {
             ),
             "the swapped-in lens fetches its source"
         );
+        assert!(
+            !core.selection_attachments.contains_key(&instance),
+            "a different lens must not inherit the replaced subject attachment"
+        );
 
         // OpenNewView also collapses to a replace — no second tile.
         core.dispatch(RyeOsEvent::Ui {
@@ -1191,6 +1247,39 @@ mod tests {
             1,
             "OpenNewView does not add a tile in single-lens"
         );
+    }
+
+    #[test]
+    fn lens_pop_restores_the_attachment_captured_by_the_return_frame() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        core.view_sets[core.active_view_set].tiling.mode =
+            crate::surface::TilingModeSpec::SingleLens;
+        seed_view(&mut core, "view:test/parent");
+        seed_view(&mut core, "view:test/child");
+        core.open_view(ViewSpec::bound("view:test/parent"));
+        let instance = core.focused_view_instance_key().unwrap();
+        let attachment = crate::ui::attachment::SelectionAttachment::Pinned {
+            values: std::collections::BTreeMap::new(),
+            fingerprint: "parent-subject".into(),
+        };
+        core.selection_attachments
+            .insert(instance.clone(), attachment.clone());
+        core.view_sets[core.active_view_set].push_lens_frame(
+            ViewSpec::bound("view:test/parent"),
+            std::collections::BTreeMap::new(),
+            Some("parent".into()),
+            Some(attachment.clone()),
+        );
+
+        core.open_view(ViewSpec::bound("view:test/child"));
+        assert!(!core.selection_attachments.contains_key(&instance));
+        core.pop_view();
+
+        assert_eq!(core.selection_attachments.get(&instance), Some(&attachment));
+        assert!(matches!(
+            core.view_sets[core.active_view_set].focused_view(),
+            Some(ViewSpec { view_ref }) if view_ref == "view:test/parent"
+        ));
     }
 
     #[test]
@@ -1419,6 +1508,14 @@ mod tests {
         let surviving_instance = core.view_sets[core.active_view_set].tiles[&surviving_tile]
             .instance_key
             .clone();
+        let pinned = crate::ui::attachment::SelectionAttachment::Pinned {
+            values: std::collections::BTreeMap::new(),
+            fingerprint: "captured".into(),
+        };
+        core.selection_attachments
+            .insert(closing_instance.clone(), pinned.clone());
+        core.selection_attachments
+            .insert(surviving_instance.clone(), pinned);
 
         let closing_keys = [
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
@@ -1493,6 +1590,8 @@ mod tests {
             assert!(!core.deferred_source_fetches.contains_key(key));
         }
         assert!(core.data.sources.contains_key(&surviving_key));
+        assert!(!core.selection_attachments.contains_key(&closing_instance));
+        assert!(core.selection_attachments.contains_key(&surviving_instance));
         assert!(core.data.source_errors.contains_key(&surviving_key));
         assert!(core.data.source_epoch.contains_key(&surviving_key));
         assert!(core.data.source_stored_epoch.contains_key(&surviving_key));
@@ -1616,6 +1715,33 @@ mod tests {
         assert_eq!(core.view_sets[core.active_view_set].id, first);
         core.close_view_set(first);
         assert_eq!(core.view_sets.len(), 1, "retain a usable final view_set");
+    }
+
+    #[test]
+    fn view_set_close_refuses_an_external_follow_attachment() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let followed = core.view_sets[0].id;
+        core.new_view_set();
+        seed_view(&mut core, "view:test/follower");
+        core.add_center_tile(ViewSpec::bound("view:test/follower"));
+        let tile = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile]
+            .instance_key
+            .clone();
+        core.selection_attachments.insert(
+            instance,
+            crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: followed,
+            },
+        );
+
+        assert!(core.close_view_set(followed).is_empty());
+        assert_eq!(core.view_sets.len(), 2);
+        assert!(core.ui.notices.iter().any(|notice| {
+            notice
+                .message
+                .contains("still followed by a view in another set")
+        }));
     }
 
     #[test]

@@ -252,6 +252,7 @@ pub struct RyeOsDockTileVm {
     pub instance_key: RyeOsViewInstanceKey,
     pub edge: RyeOsDockEdge,
     pub title: String,
+    pub attachment_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heading: Option<RyeOsViewHeadingVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +315,7 @@ pub enum RyeOsLayoutNodeVm {
         focused: bool,
         maximized: bool,
         title: String,
+        attachment_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<RyeOsViewHeadingVm>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1242,6 +1244,7 @@ fn dock_tile_vm(
         instance_key: instance_key.clone(),
         edge,
         title: view_title(core, view_ref).to_owned(),
+        attachment_label: selection_attachment_label(core, &instance_key),
         heading: view_heading(core, view_ref),
         supplement: view_supplement(core, view_ref),
         size: state.size,
@@ -1380,11 +1383,12 @@ fn bound_view_vm_keyed(
         "atlas" => {
             // This tile's own scoped dataset when it has one (keyed by tile
             // id == source_key); otherwise None falls back to the shared data.
-            let mut scene = build_scene_model(
+            let mut scene = super::scene_model::build_scene_model_for_instance(
                 core,
                 atlas,
                 scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
                 scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
+                Some(instance_key),
             );
             let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
@@ -1392,7 +1396,13 @@ fn bound_view_vm_keyed(
         }
         "graph" => {
             // Graph renders shared topology; no per-tile content scope yet.
-            let mut scene = build_scene_model(core, atlas, None, None);
+            let mut scene = super::scene_model::build_scene_model_for_instance(
+                core,
+                atlas,
+                None,
+                None,
+                Some(instance_key),
+            );
             let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
             return RyeOsViewVm::Map { scene };
@@ -1548,7 +1558,7 @@ fn bound_view_vm_keyed(
     let facet_response = binding
         .facet
         .as_deref()
-        .and_then(|facet| facet_backed_response(core, facet));
+        .and_then(|facet| facet_backed_response(core, instance_key, facet));
     let response = facet_response.as_ref().or_else(|| {
         source_key
             .as_ref()
@@ -2637,6 +2647,10 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 focused: *tile_id == core.view_sets[core.active_view_set].focused_tile,
                 maximized: core.view_sets[core.active_view_set].maximized_tile == Some(*tile_id),
                 title,
+                attachment_label: core.view_sets[core.active_view_set]
+                    .tiles
+                    .get(tile_id)
+                    .and_then(|tile| selection_attachment_label(core, &tile.instance_key)),
                 heading: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
@@ -2878,6 +2892,11 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
             |key| {
                 if key == super::seat::KEY_INPUT_ROUTE {
                     Some(initial_route.clone())
+                } else if key == super::seat::KEY_SELECTION || key.starts_with("selection.") {
+                    // Launcher availability describes a fresh mount in the
+                    // active set, not an unrelated surface-global selection.
+                    super::seat::selection_storage_key(core.view_sets[core.active_view_set].id, key)
+                        .and_then(|storage_key| fold.get(&storage_key).cloned())
                 } else {
                     fold.get(key).cloned()
                 }
@@ -3105,6 +3124,19 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
         secondary_intent: None,
         enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
     });
+    if let Some(instance) = core.focused_view_instance_key() {
+        items.extend(
+            selection_attachment_intents(core, &instance)
+                .into_iter()
+                .map(|action| RyeOsOverlayChoice {
+                    label: action.label,
+                    hint: action.title,
+                    intent: action.intent,
+                    secondary_intent: None,
+                    enabled: true,
+                }),
+        );
+    }
     if view_set.tiles.contains_key(&view_set.focused_tile) {
         items.extend(
             placement_intents(core, view_set.focused_tile)
@@ -3123,7 +3155,8 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
             }
             items.push(RyeOsOverlayChoice {
                 label: format!("Move view to {}", destination.title),
-                hint: "move this mounted view and its drafts; follow it to that view set".into(),
+                hint: "move this mounted view and its drafts; preserve its subject attachment"
+                    .into(),
                 intent: RyeOsUiIntent::MoveTileToViewSet {
                     layout_guard: core.layout_guard(),
                     tile_id: view_set.focused_tile.0.to_string(),
@@ -3553,12 +3586,92 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
 
 fn tile_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
     let mut actions = placement_intents(core, tile_id);
+    if let Some(tile) = core.view_sets[core.active_view_set].tiles.get(&tile_id) {
+        actions.extend(selection_attachment_intents(core, &tile.instance_key));
+    }
     let tile_id = tile_id_text(tile_id);
     actions.push(RyeOsTileIntentVm {
         label: "Close view".to_string(),
         title: "Close this view; its running work is unaffected".to_string(),
         intent: RyeOsUiIntent::CloseTile { tile_id },
     });
+    actions
+}
+
+fn selection_attachment_label(core: &RyeOsCore, instance: &RyeOsViewInstanceKey) -> Option<String> {
+    match core.selection_attachment_for_instance(instance)? {
+        super::attachment::SelectionAttachment::Pinned { .. } => Some("Selection pinned".into()),
+        super::attachment::SelectionAttachment::FollowViewSet { view_set_id } => {
+            let containing = core.view_set_index_for_instance(instance)?;
+            (core.view_sets[containing].id != view_set_id).then(|| {
+                core.view_sets
+                    .iter()
+                    .find(|set| set.id == view_set_id)
+                    .map(|set| format!("Following {}", set.title))
+                    .unwrap_or_else(|| "Selection owner unavailable".into())
+            })
+        }
+    }
+}
+
+fn selection_attachment_intents(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+) -> Vec<RyeOsTileIntentVm> {
+    let Some(binding) = core
+        .mounted_view_ref(instance)
+        .and_then(|view_ref| core.views.get(view_ref))
+    else {
+        return Vec::new();
+    };
+    if !super::attachment::participates_in_selection(binding) {
+        return Vec::new();
+    }
+    let can_pin = !super::attachment::selection_dependencies(binding).is_empty();
+    let current = core.selection_attachment_for_instance(instance);
+    let mut actions = Vec::new();
+    if can_pin
+        && !matches!(
+            current,
+            Some(super::attachment::SelectionAttachment::Pinned { .. })
+        )
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Pin this selection".into(),
+            title: "Keep this view on the captured selection; later selections do not retarget it"
+                .into(),
+            intent: RyeOsUiIntent::PinViewSelection {
+                instance_key: instance.clone(),
+            },
+        });
+    }
+    if can_pin
+        && core.view_sets[core.active_view_set].tiling.mode
+            != crate::surface::TilingModeSpec::SingleLens
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Open pinned alongside".into(),
+            title: "Open another instance fixed to this view's exact current selection".into(),
+            intent: RyeOsUiIntent::OpenPinnedViewAlongside {
+                instance_key: instance.clone(),
+            },
+        });
+    }
+    for set in &core.view_sets {
+        if matches!(&current, Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id }) if *view_set_id == set.id)
+        {
+            continue;
+        }
+        actions.push(RyeOsTileIntentVm {
+            label: format!("Follow selection in {}", set.title),
+            title: "Explicitly reattach this view's selection; its composer route is unchanged"
+                .into(),
+            intent: RyeOsUiIntent::FollowViewSetSelection {
+                instance_key: instance.clone(),
+                view_set_id: set.id,
+            },
+        });
+    }
     actions
 }
 

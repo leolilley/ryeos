@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -10,7 +10,7 @@ const stage = path.resolve(process.env.RYEOS_UI_SVELTE_STAGE || "../../../target
 const server = createServer(async (request, response) => {
   if (request.url === "/") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end('<!doctype html><html><body><div id="root"></div></body></html>');
+    response.end('<!doctype html><html><head><link rel="stylesheet" href="/ui/assets/ryeos_ui.css"></head><body><div id="root" style="width:100%;height:100%"></div></body></html>');
     return;
   }
   const file = request.url === "/ui/assets/ryeos_ui.js" ? "ryeos_ui.js"
@@ -29,7 +29,10 @@ let browser;
 try {
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  browser = await require("playwright").chromium.launch({ headless: true });
+  const browserName = process.env.RYEOS_PLAYWRIGHT_BROWSER || "chromium";
+  const browserType = require("playwright")[browserName];
+  assert.ok(browserType, `unknown RYEOS_PLAYWRIGHT_BROWSER: ${browserName}`);
+  browser = await browserType.launch({ headless: true });
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${address.port}`);
   const result = await page.evaluate(async () => {
@@ -171,6 +174,43 @@ try {
   assert.equal(encoding.canonical, '{"a":"\\u0001\\n\\t\\\"\\\\","\\ue000":"bmp","\\ud800\\udc00":"supplementary","\\ud83d\\ude00":"\\u00e9"}');
   assert.equal(encoding.mapRejected, true);
   assert.equal(encoding.surrogateRejected, true);
+
+  const visualFixturePath = process.env.RYEOS_UI_VISUAL_FIXTURE;
+  if (visualFixturePath) {
+    const encodedFixture = await readFile(path.resolve(visualFixturePath), "utf8");
+    const screenshotDir = path.resolve(process.env.RYEOS_UI_SCREENSHOT_DIR || "/tmp/ryeos-ui-production-preview");
+    await mkdir(screenshotDir, { recursive: true });
+    const captures = [
+      ["work", 1600, 1000],
+      ["overview", 1600, 1000],
+      ["launcher", 1600, 1000],
+      ["work", 1024, 768],
+      ["work", 390, 844],
+    ];
+    for (const [name, width, height] of captures) {
+      const preview = await browser.newPage({ viewport: { width, height }, reducedMotion: "reduce" });
+      await preview.route(/^https?:\/\/(?!127\.0\.0\.1(?::|\/))/, (route) => route.abort());
+      await preview.goto(`http://127.0.0.1:${address.port}`);
+      const mounted = await preview.evaluate(async ({ encodedFixture, name, source }) => {
+        const { decodeJsonBody, mountRyeOsRenderer } = await import("/ui/assets/ryeos_ui.js");
+        const fixture = decodeJsonBody(encodedFixture);
+        if (!fixture || typeof fixture !== "object" || !(name in fixture)) return { found: false, labeled: false };
+        const envelope = fixture[name];
+        const labeled = envelope?.view_model?.notices?.some((notice) => /synthetic|sample|visual preview/i.test(notice.message)) ?? false;
+        const root = document.getElementById("root");
+        root.dataset.visualFixture = "synthetic";
+        root.dataset.fixtureSource = source;
+        mountRyeOsRenderer(root, envelope, () => {});
+        return { found: true, labeled };
+      }, { encodedFixture, name, source: path.basename(visualFixturePath) });
+      assert.equal(mounted.found, true, `visual fixture is missing the ${name} Rust envelope`);
+      assert.equal(mounted.labeled, true, `${name} fixture must visibly identify itself as synthetic/sample data`);
+      await preview.evaluate(() => document.fonts.ready);
+      await preview.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await preview.screenshot({ path: path.join(screenshotDir, `${name}-${width}x${height}.png`), fullPage: true });
+      await preview.close();
+    }
+  }
   console.log(JSON.stringify({ root: result, ordering, encoding }));
 } finally {
   await browser?.close();

@@ -35,6 +35,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_field_comparison::DESCRIPTOR,
     ui_field_definition::DESCRIPTOR,
     ui_field_execution::DESCRIPTOR,
+    ui_field_execution::OCCURRENCE_DESCRIPTOR,
     ui_field_project::DESCRIPTOR,
     ui_field_runs::DESCRIPTOR,
     ui_dimension::DESCRIPTOR,

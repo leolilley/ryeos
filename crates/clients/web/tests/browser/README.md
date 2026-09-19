@@ -44,6 +44,13 @@ overview and launcher arrangements at 1600×1000, plus work at 1024×768 and
 390×844. It checks narrow focus reachability, composer/content separation and
 reduced motion. External HTTPS requests are blocked for this preview.
 
+The runner reads those envelopes with the production exact-integer JSON decoder;
+it does not recreate or patch their semantics in JavaScript. The mounted root is
+marked `data-visual-fixture="synthetic"` and records the fixture filename in
+`data-fixture-source` for screenshot provenance. Keep a generated fixture only
+when its generating revision and command are recorded alongside it; never hand
+author a replacement envelope in the browser test.
+
 All projects, transcripts and evidence are synthetic. The preview intentionally
 has no executable input route; a disabled send control is not a live failure.
 It proves component composition, not signed bundle publication, installed boot,

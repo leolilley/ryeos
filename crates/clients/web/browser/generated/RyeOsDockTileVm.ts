@@ -11,6 +11,7 @@ export interface RyeOsDockTileVm {
   instance_key: RyeOsViewInstanceKey;
   edge: RyeOsDockEdge;
   title: string;
+  attachment_label: string | null;
   heading?: RyeOsViewHeadingVm | null;
   supplement?: RyeOsViewSupplementVm | null;
   size: number;

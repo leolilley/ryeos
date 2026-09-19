@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:02:47Z:645b607b37dcc3781e156ac1cabd831847d13c3e426ecc3c2a79b2bfd953cee3:NCeTiBoub5VRrleRHfEGEwiv2Y5rlVZD3O44wF1piuLsxl6t8ncGoFuukbh81UYGWXgucq3f/3zlQdg9Lij3AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:18:21Z:3ade1d380b970dea43dbdc461980daa23dd053107dfbfd3a196fcdb0fff7e639:5oFOMvjj7Rg93RUFhQ95wNyfQnsSF8fxXpycGFNuo25vzD2m0mZvaY9IH8QYl0XY6prs1TXBcTk0uUKGiJQnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-explorer
 title: Explorer
 version: "1.0.0"
@@ -29,5 +29,14 @@ affordances:
       merge:
         thread: "{record.placement.thread_id}"
         chain_root: "{record.coordinate.chain_root_id}"
+  - id: talk
+    label: Talk to work
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement.thread_id}"
+        chain_root: "{record.coordinate.chain_root_id}"
+      open_view: view:ryeos/thread/conversation
 refresh:
   on_hint: [thread, activity]

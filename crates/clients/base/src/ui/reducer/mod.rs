@@ -18,6 +18,7 @@
 //! builders, so it is not split preemptively.
 
 mod affordances;
+mod attachments;
 mod effect_results;
 mod field_interaction;
 mod input;
@@ -988,13 +989,20 @@ impl RyeOsCore {
                 if target == source {
                     return Vec::new();
                 }
-                if self.tile_uses_view_set_selection(tile) {
-                    self.notice(
-                        "This view uses selection scoped to its current view set. It cannot be moved to another view set yet; open it there instead.",
-                        super::view_model::RyeOsTone::Warn,
-                    );
+                let Some(instance_key) = self.view_sets[source]
+                    .tiles
+                    .get(&tile)
+                    .map(|tile| tile.instance_key.clone())
+                else {
                     return Vec::new();
-                }
+                };
+                let retains_selection_owner = self
+                    .mounted_view_ref(&instance_key)
+                    .and_then(|view_ref| self.views.get(view_ref))
+                    .is_some_and(super::attachment::participates_in_selection);
+                let attachment = retains_selection_owner
+                    .then(|| self.selection_attachment_for_instance(&instance_key))
+                    .flatten();
                 let moved = if source < target {
                     let (before, after) = self.view_sets.split_at_mut(target);
                     before[source].move_tile_to_view_set(&mut after[0], tile)
@@ -1003,11 +1011,27 @@ impl RyeOsCore {
                     after[0].move_tile_to_view_set(&mut before[target], tile)
                 };
                 if moved {
+                    if let Some(attachment) = attachment {
+                        self.selection_attachments
+                            .insert(instance_key.clone(), attachment);
+                    } else {
+                        self.selection_attachments.remove(&instance_key);
+                    }
                     self.switch_view_set_tab(target)
                 } else {
                     Vec::new()
                 }
             }
+            RyeOsUiIntent::PinViewSelection { instance_key } => {
+                self.pin_view_selection(instance_key)
+            }
+            RyeOsUiIntent::OpenPinnedViewAlongside { instance_key } => {
+                self.open_pinned_view_alongside(instance_key)
+            }
+            RyeOsUiIntent::FollowViewSetSelection {
+                instance_key,
+                view_set_id,
+            } => self.follow_view_set_selection(instance_key, view_set_id),
             RyeOsUiIntent::ResizeSplit {
                 layout_guard,
                 path,

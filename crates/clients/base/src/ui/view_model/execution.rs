@@ -39,13 +39,66 @@ pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<Rye
 /// resolved through the shared `@facet:` grammar (so a dotted path like
 /// `selection.summary` reads the field within the `selection` facet). `None`
 /// when the facet is unset — the view then falls back to its `source` fetch.
-pub(super) fn facet_backed_response(core: &RyeOsCore, facet: &str) -> Option<serde_json::Value> {
-    let fold = core.seat.fold();
+pub(super) fn facet_backed_response(
+    core: &RyeOsCore,
+    instance: &crate::ids::RyeOsViewInstanceKey,
+    facet: &str,
+) -> Option<serde_json::Value> {
     let resolved = super::super::content::resolve_params(
         &serde_json::Value::String(format!("@facet:{facet}")),
-        |key| fold.get(key).cloned(),
+        |key| core.facet_value_for_instance(instance, key),
     );
     (!resolved.is_null()).then_some(resolved)
+}
+
+#[cfg(test)]
+mod facet_scope_tests {
+    use super::*;
+    use crate::ui::model::BrowserViewport;
+    use crate::ui::reducer::test_support::session;
+    use crate::view_set::{ViewSet, ViewSpec};
+    use serde_json::json;
+
+    #[test]
+    fn facet_backed_views_resolve_their_mount_not_active_or_global_selection() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        for value in ["first", "second"] {
+            let set = ViewSet::from_tiling(
+                core.view_sets[0].tiling.clone(),
+                vec![ViewSpec::bound("view:test/detail")],
+            );
+            core.seat.append_facet(
+                crate::ui::seat::selection_facet_key(set.id),
+                json!({"summary": value}),
+            );
+            core.view_sets.push(set);
+        }
+        core.seat
+            .append_facet("selection", json!({"summary": "wrong-global"}));
+        let first = core.view_sets[core.view_sets.len() - 2]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let second = core.view_sets[core.view_sets.len() - 1]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        core.active_view_set = core.view_sets.len() - 1;
+        assert_eq!(
+            facet_backed_response(&core, &first, "selection.summary"),
+            Some(json!("first"))
+        );
+        assert_eq!(
+            facet_backed_response(&core, &second, "selection.summary"),
+            Some(json!("second"))
+        );
+    }
 }
 
 /// Map a thread/chain status to a tone (the same status→tone vocabulary the

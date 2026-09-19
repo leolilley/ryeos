@@ -160,9 +160,23 @@ impl RyeOsCore {
         let route_subject = facet == super::seat::KEY_INPUT_ROUTE;
         let selection_subject =
             facet == super::seat::KEY_SELECTION || facet.starts_with("selection.");
-        let selection_view_set = selection_subject
-            .then(|| origin.and_then(|instance| self.view_set_index_for_instance(instance)))
+        let origin_selection_attachment = selection_subject
+            .then(|| origin.and_then(|instance| self.selection_attachment_for_instance(instance)))
             .flatten();
+        let selection_view_set = if selection_subject {
+            match origin_selection_attachment.as_ref() {
+                Some(crate::ui::attachment::SelectionAttachment::FollowViewSet { view_set_id }) => {
+                    self.view_sets.iter().position(|set| set.id == *view_set_id)
+                }
+                Some(crate::ui::attachment::SelectionAttachment::Pinned { .. }) => {
+                    self.notice("This view's selection is pinned. Follow a view set before changing its selection.", super::view_model::RyeOsTone::Warn);
+                    return Vec::new();
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         if selection_subject && selection_view_set.is_none() {
             return Vec::new();
         }
@@ -185,7 +199,10 @@ impl RyeOsCore {
             // current lens label), so the breadcrumb reads the ancestor
             // cognitions, not repeated view titles.
             let label = self.view_sets[self.active_view_set].lens_label.clone();
-            self.view_sets[self.active_view_set].push_lens_frame(view, facets, label);
+            let attachment = self
+                .focused_view_instance_key()
+                .and_then(|instance| self.selection_attachment_for_instance(&instance));
+            self.view_sets[self.active_view_set].push_lens_frame(view, facets, label, attachment);
         }
         // A route carried by an affordance belongs to the view it opens. Mount
         // that view first so its durable instance key—not current focus—is the
@@ -199,9 +216,26 @@ impl RyeOsCore {
         } else {
             Vec::new()
         };
-        let route_instance = route_subject
-            .then(|| self.focused_view_instance_key())
-            .flatten();
+        let route_instance = if route_subject {
+            if let Some(view_ref) = open_view.as_ref() {
+                // An explicitly opened destination may own the route only if
+                // it actually mounted. Refused opens must not retarget the
+                // previously focused view.
+                self.focused_view_instance_key()
+                    .filter(|instance| self.mounted_view_ref(instance) == Some(view_ref.as_str()))
+            } else {
+                origin.cloned()
+            }
+        } else {
+            None
+        };
+        if route_subject && route_instance.is_none() {
+            self.notice(
+                "The route destination is not mounted.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return effects;
+        }
         let storage_facet = if let Some(index) = selection_view_set {
             super::seat::selection_storage_key(self.view_sets[index].id, &facet)
                 .expect("selection subject was classified above")
@@ -265,7 +299,61 @@ impl RyeOsCore {
         // row drill-in sets input.route.chain_root, then the braid lens fetches
         // that chain). Single-lens surfaces replace the center in place.
         if !route_subject && let Some(view_ref) = open_view {
-            effects.extend(self.open_view(ViewSpec::bound(view_ref)));
+            let active = self.active_view_set;
+            let mounted_before = self.view_sets[active]
+                .tiles
+                .values()
+                .map(|tile| tile.instance_key.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let existing_destination =
+                self.view_sets[active]
+                    .tile_ids()
+                    .into_iter()
+                    .find_map(|tile_id| {
+                        let tile = self.view_sets[active].tiles.get(&tile_id)?;
+                        (tile.view.view_ref == view_ref).then(|| tile.instance_key.clone())
+                    });
+            let replaced_destination = (existing_destination.is_none()
+                && self.view_sets[active].tiling.mode
+                    == crate::surface::TilingModeSpec::SingleLens
+                && !self.view_sets[active].center_is_empty())
+            .then(|| {
+                self.view_sets[active]
+                    .tiles
+                    .get(&self.view_sets[active].focused_tile)
+                    .map(|tile| tile.instance_key.clone())
+            })
+            .flatten();
+            let premature = self.open_view(ViewSpec::bound(view_ref.clone()));
+            // Resolve the result of this exact layout operation. Current
+            // keyboard focus is not a subject-routing input.
+            let destination = existing_destination.or(replaced_destination).or_else(|| {
+                self.view_sets[active].tiles.values().find_map(|tile| {
+                    (tile.view.view_ref == view_ref && !mounted_before.contains(&tile.instance_key))
+                        .then(|| tile.instance_key.clone())
+                })
+            });
+            let destination_participates = self
+                .views
+                .get(&view_ref)
+                .is_some_and(super::super::attachment::participates_in_selection);
+            if selection_subject
+                && destination_participates
+                && let (Some(destination), Some(attachment)) =
+                    (destination, origin_selection_attachment)
+            {
+                // `open_view` necessarily resolves initial sources before this
+                // relationship can be installed. Cancel those default-context
+                // requests and evict their coordinates, then issue the exact
+                // same view through the origin's retained attachment.
+                self.invalidate_view_sources(&destination);
+                self.selection_attachments
+                    .insert(destination.clone(), attachment);
+                effects.retain(|effect| self.pending_effects.contains_key(&effect.id));
+                effects.extend(self.emit_fetch_source_for_instance(destination, &view_ref));
+            } else {
+                effects.extend(premature);
+            }
         }
         effects
     }
@@ -312,46 +400,46 @@ impl RyeOsCore {
                 .map(|(channel, _)| channel.clone())
                 .collect::<Vec<_>>()
         };
-        let mut targets: Vec<(crate::ids::RyeOsViewInstanceKey, String, Vec<String>)> = self
-            .view_sets[view_set_index]
-            .tile_ids()
-            .into_iter()
-            .filter_map(|tile_id| {
-                let tile = self.view_sets[view_set_index].tiles.get(&tile_id)?;
-                let view_ref = &tile.view.view_ref;
-                let binding = self.views.get(view_ref)?;
-                let channels = subscribed_channels(binding);
-                (!channels.is_empty())
-                    .then(|| (tile.instance_key.clone(), view_ref.clone(), channels))
-            })
-            .collect();
-        let view_set_id = self.view_sets[view_set_index].id;
-        let visible_docks = [
-            crate::ui::model::RyeOsDockEdge::Top,
-            crate::ui::model::RyeOsDockEdge::Bottom,
-            crate::ui::model::RyeOsDockEdge::Left,
-            crate::ui::model::RyeOsDockEdge::Right,
-        ]
-        .into_iter()
-        .filter_map(|edge| {
-            let slot = self.view_sets[view_set_index].docks.slot(edge)?;
-            if !slot.visible {
+        let selection_change =
+            facet == super::seat::KEY_SELECTION || facet.starts_with("selection.");
+        let owner = self.view_sets[view_set_index].id;
+        let mut mounted = Vec::new();
+        for (index, set) in self.view_sets.iter().enumerate() {
+            if !selection_change && index != view_set_index {
+                continue;
+            }
+            mounted.extend(
+                set.tiles
+                    .values()
+                    .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone())),
+            );
+            for edge in [
+                super::model::RyeOsDockEdge::Top,
+                super::model::RyeOsDockEdge::Bottom,
+                super::model::RyeOsDockEdge::Left,
+                super::model::RyeOsDockEdge::Right,
+            ] {
+                if let Some(slot) = set.docks.slot(edge) {
+                    let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
+                    mounted.push((
+                        super::model::dock_view_instance_key(set.id, edge),
+                        view_ref.clone(),
+                    ));
+                }
+            }
+        }
+        let targets = mounted.into_iter().filter_map(|(instance_key, view_ref)| {
+            if selection_change && !matches!(self.selection_attachment_for_instance(&instance_key),
+                Some(crate::ui::attachment::SelectionAttachment::FollowViewSet { view_set_id }) if view_set_id == owner) {
                 return None;
             }
-            let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
-            Some((
-                super::model::dock_view_instance_key(view_set_id, edge),
-                view_ref.clone(),
-            ))
-        });
-        targets.extend(visible_docks.filter_map(|(instance_key, view_ref)| {
             let channels = self
                 .views
                 .get(&view_ref)
                 .map(&subscribed_channels)
                 .unwrap_or_default();
             (!channels.is_empty()).then_some((instance_key, view_ref, channels))
-        }));
+        }).collect::<Vec<_>>();
         targets
             .into_iter()
             .flat_map(|(instance_key, view_ref, channels)| {
@@ -514,6 +602,293 @@ mod tests {
         core.view_sets[core.active_view_set].tiles[&tile_id]
             .instance_key
             .clone()
+    }
+
+    #[test]
+    fn route_write_without_open_destination_uses_origin_not_keyboard_focus() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        let origin = mount_affordance_view(&mut core, "view:test/origin");
+        let other = mount_affordance_view(&mut core, "view:test/other");
+        assert_eq!(core.focused_view_instance_key(), Some(other.clone()));
+        core.apply_ui_affordance_from(
+            Some(&origin),
+            crate::ui::seat::KEY_INPUT_ROUTE.into(),
+            Some(serde_json::json!({"thread": "T-origin"})),
+            None,
+            None,
+            false,
+        );
+        let fold = core.seat.fold();
+        assert_eq!(
+            fold.get(&crate::ui::seat::input_route_facet_key(&origin))
+                .unwrap()["thread"],
+            "T-origin"
+        );
+        assert!(
+            fold.get(&crate::ui::seat::input_route_facet_key(&other))
+                .is_none()
+        );
+        assert!(fold.get(crate::ui::seat::KEY_INPUT_ROUTE).is_none());
+    }
+
+    #[test]
+    fn pinned_selection_neither_refreshes_nor_writes_its_former_owner() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/pinned",
+            serde_json::json!({
+                "widget":"rows", "sources":{"default":{
+                    "ref":"service:test/read", "params":{"thread":"@facet:selection.work.thread"}
+                }}
+            }),
+        );
+        let origin = mount_affordance_view(&mut core, "view:test/pinned");
+        let owner = core.active_view_set;
+        let key =
+            crate::ui::seat::selection_storage_key(core.view_sets[owner].id, "selection.work")
+                .unwrap();
+        core.seat
+            .append_facet(key.clone(), serde_json::json!({"thread":"T-one"}));
+        let pin = core.capture_pinned_selection(&origin).unwrap();
+        core.selection_attachments.insert(origin.clone(), pin);
+        core.seat
+            .append_facet(key.clone(), serde_json::json!({"thread":"T-two"}));
+        assert!(
+            core.effects_for_facet_in_view_set("selection.work", owner)
+                .is_empty()
+        );
+        assert!(
+            core.apply_ui_affordance_from(
+                Some(&origin),
+                "selection.work".into(),
+                Some(serde_json::json!({"thread":"T-three"})),
+                None,
+                None,
+                false
+            )
+            .is_empty()
+        );
+        assert_eq!(core.seat.fold().get(&key).unwrap()["thread"], "T-two");
+        assert_eq!(
+            core.facet_value_for_instance(&origin, "selection.work")
+                .unwrap()["thread"],
+            "T-one"
+        );
+    }
+
+    fn cross_set_follower_fixture() -> (
+        RyeOsCore,
+        usize,
+        crate::ids::ViewSetId,
+        crate::ids::RyeOsViewInstanceKey,
+        String,
+    ) {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/follower",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {"default": {
+                    "ref": "service:test/follower",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }},
+                "affordances": [
+                    {
+                        "id": "select-work",
+                        "invoke": {
+                            "plane": "ui",
+                            "facet": "selection.work",
+                            "value": {"thread": "{record.thread}"}
+                        }
+                    },
+                    {
+                        "id": "open-work",
+                        "invoke": {
+                            "plane": "ui",
+                            "facet": "selection.work",
+                            "value": {"thread": "{record.thread}"},
+                            "open_view": "view:test/detail"
+                        }
+                    }
+                ]
+            }),
+        );
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "text",
+                "sources": {"default": {
+                    "ref": "service:test/detail",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }}
+            }),
+        );
+        let owner = core.active_view_set;
+        let owner_id = core.view_sets[owner].id;
+        core.view_sets[owner]
+            .add_tile(ViewSpec::bound("view:test/owner"))
+            .expect("owner set accepts an origin view");
+        core.new_view_set();
+        let follower_tile = core.view_sets[core.active_view_set]
+            .add_tile(ViewSpec::bound("view:test/follower"))
+            .unwrap();
+        let follower = core.view_sets[core.active_view_set].tiles[&follower_tile]
+            .instance_key
+            .clone();
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(follower.clone(), "default")
+                .encode();
+        core.selection_attachments.insert(
+            follower.clone(),
+            crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: owner_id,
+            },
+        );
+        (core, owner, owner_id, follower, source_key)
+    }
+
+    #[test]
+    fn owner_selection_change_refreshes_cross_set_follower_from_owner_value() {
+        let (mut core, owner, owner_id, follower, source_key) = cross_set_follower_fixture();
+        core.switch_view_set_tab(owner);
+        core.data
+            .sources
+            .insert(source_key.clone(), serde_json::json!({"old": true}));
+        let origin = core
+            .focused_view_instance_key()
+            .expect("owner set has a mounted focused view");
+
+        let effects = core.apply_ui_affordance_from(
+            Some(&origin),
+            "selection.work".into(),
+            Some(serde_json::json!({"thread": "T-owner"})),
+            None,
+            None,
+            false,
+        );
+
+        assert_eq!(
+            core.seat
+                .fold()
+                .get(&crate::ui::seat::selection_storage_key(owner_id, "selection.work").unwrap())
+                .unwrap()["thread"],
+            "T-owner"
+        );
+        assert!(!core.data.sources.contains_key(&source_key));
+        assert!(matches!(
+            effects.first().and_then(source_request),
+            Some((fetched, "view:test/follower", "default", params))
+                if fetched == source_key && params["thread"] == "T-owner"
+        ));
+        assert_eq!(
+            core.facet_value_for_instance(&follower, "selection.work")
+                .unwrap()["thread"],
+            "T-owner"
+        );
+    }
+
+    #[test]
+    fn cross_set_follower_write_targets_followed_owner_and_refreshes_itself() {
+        let (mut core, owner, owner_id, follower, source_key) = cross_set_follower_fixture();
+        let follower_set = core.active_view_set;
+        assert_ne!(follower_set, owner);
+
+        let effects = core.invoke_affordance(
+            &follower,
+            "view:test/follower",
+            "select-work",
+            &serde_json::json!({"thread": "T-written"}),
+        );
+
+        let fold = core.seat.fold();
+        let owner_key = crate::ui::seat::selection_storage_key(owner_id, "selection.work").unwrap();
+        let containing_key = crate::ui::seat::selection_storage_key(
+            core.view_sets[follower_set].id,
+            "selection.work",
+        )
+        .unwrap();
+        assert_eq!(fold.get(&owner_key).unwrap()["thread"], "T-written");
+        assert!(fold.get(&containing_key).is_none());
+        assert!(matches!(
+            effects.first().and_then(source_request),
+            Some((fetched, "view:test/follower", "default", params))
+                if fetched == source_key && params["thread"] == "T-written"
+        ));
+    }
+
+    #[test]
+    fn selection_open_transfers_origin_attachment_and_discards_default_fetch() {
+        let (mut core, _owner, owner_id, follower, _) = cross_set_follower_fixture();
+        let containing_id = core.view_sets[core.active_view_set].id;
+        core.seat.append_facet(
+            crate::ui::seat::selection_storage_key(containing_id, "selection.work").unwrap(),
+            serde_json::json!({"thread": "T-wrong-default"}),
+        );
+
+        let effects = core.invoke_affordance(
+            &follower,
+            "view:test/follower",
+            "open-work",
+            &serde_json::json!({"thread": "T-owner-open"}),
+        );
+
+        let destination = core
+            .focused_view_instance_key()
+            .expect("opened destination is focused");
+        assert_eq!(
+            core.mounted_view_ref(&destination),
+            Some("view:test/detail")
+        );
+        assert_eq!(
+            core.selection_attachment_for_instance(&destination),
+            Some(crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: owner_id
+            })
+        );
+        let detail_fetches = effects
+            .iter()
+            .filter_map(source_request)
+            .filter(|(_, view_ref, _, _)| *view_ref == "view:test/detail")
+            .collect::<Vec<_>>();
+        assert_eq!(detail_fetches.len(), 1);
+        assert_eq!(detail_fetches[0].3["thread"], "T-owner-open");
+        assert!(
+            effects
+                .iter()
+                .all(|effect| core.pending_effects.contains_key(&effect.id)),
+            "discarded default-context effects must not escape the reducer"
+        );
+    }
+
+    #[test]
+    fn selection_open_does_not_attach_an_unrelated_destination() {
+        let (mut core, _owner, _owner_id, follower, _) = cross_set_follower_fixture();
+        seed_view(&mut core, "view:test/unrelated");
+
+        core.apply_ui_affordance_from(
+            Some(&follower),
+            "selection.work".into(),
+            Some(serde_json::json!({"thread": "T-owner-open"})),
+            None,
+            Some("view:test/unrelated".into()),
+            false,
+        );
+
+        let destination = core
+            .focused_view_instance_key()
+            .expect("opened destination is focused");
+        assert_eq!(
+            core.mounted_view_ref(&destination),
+            Some("view:test/unrelated")
+        );
+        assert!(!core.selection_attachments.contains_key(&destination));
+        assert_eq!(
+            core.followed_selection_view_set(&destination),
+            Some(core.view_sets[core.active_view_set].id)
+        );
     }
 
     #[test]

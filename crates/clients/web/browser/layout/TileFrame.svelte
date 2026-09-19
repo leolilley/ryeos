@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RyeOsLayoutNodeVm } from "../generated";
   import InputComposer from "../components/InputComposer.svelte";
+  import ViewSupplement from "../components/ViewSupplement.svelte";
   import ViewRenderer from "../views/ViewRenderer.svelte";
   import { dispatchUi } from "../runtime/context";
   type Tile = Extract<RyeOsLayoutNodeVm, { type: "tile" }>;
@@ -14,8 +15,9 @@
   {#if !model.chrome_hidden}
     <header class="tile-header" class:grouped={model.group_label}>
       <div class="tile-title-row">
-        <div class="tile-identity"><span class="tile-signal"></span><strong>{model.group_label ?? model.title}</strong></div>
+        <div class="tile-identity"><span class="tile-signal"></span><strong>{model.supplement?.frame_label || model.group_label || model.title}</strong>{#if model.supplement?.frame_detail}<span class="tile-frame-detail">{model.supplement.frame_detail}</span>{/if}</div>
         <div class="tile-tools">
+        {#if model.attachment_label}<span class="tile-frame-detail" title="Selection attachment">{model.attachment_label}</span>{/if}
         <button
           class="tile-tool"
           aria-label={model.maximized ? "Restore view" : "Maximize view"}
@@ -44,6 +46,8 @@
   {/if}
   {#if model.heading}<div class="content-heading"><small>{model.heading.eyebrow}</small><h1>{model.heading.title}</h1>{#if model.heading.summary}<p>{model.heading.summary}</p>{/if}{#if model.heading.metadata.length}<div class="heading-meta">{model.heading.metadata.join("  /  ")}</div>{/if}</div>{/if}
   {#if model.input?.live_filter}<InputComposer model={model.input} />{/if}
+  {#if model.supplement}<ViewSupplement model={model.supplement} phase="content" />{/if}
   <ViewRenderer model={model.view} tileId={model.tile_id} instanceKey={model.instance_key} />
+  {#if model.supplement}<ViewSupplement model={model.supplement} phase="footer" />{/if}
   {#if model.input && !model.input.live_filter}<InputComposer model={model.input} />{/if}
 </article>

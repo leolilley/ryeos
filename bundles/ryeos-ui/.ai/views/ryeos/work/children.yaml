@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:11:43Z:c3a27725b50c128d93bfa3532d566a4706903d775f89e493555c48508c99b9eb:ZQOwRF48pMmDLJYkcMR9pyv1qpTpBP3+pfwAn9UL89M7167lgyX+8A3F0Xi9eCYr8tFe47wvyc4lhJVr4VNbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:18:00Z:b8db738f60aab9859dc610fe3cb43492bc345b6522ca303633643c02f2f4c69a:9tRyqQer7twDBiXDdLN2mGMfT7sleE1PYwkUEQWbpBYxx0Dnr5W3OXjGj+MnsP6yTpAtZ0k6gcmbl61dlkVSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-children
 title: Children
 version: "1.0.0"
@@ -11,16 +11,16 @@ sources:
     params:
       thread_id: "@facet:selection.work.thread"
       max_depth: 16
-      limit: 500
-    collection: items
+      max_nodes: 500
+    collection: threads
 
 projections:
   columns:
     - { label: status, field: status, present: words }
     - { label: work, field: item_ref, present: leaf }
-    - { label: relation, field: relation, present: words }
+    - { label: relation, field: tree.relation, present: words }
   expand:
-    fields: [thread_id, chain_root_id, item_ref, kind, status, relation, depth, current_site_id, origin_site_id]
+    fields: [thread_id, chain_root_id, item_ref, kind, status, tree.relation, tree.depth, current_site_id, origin_site_id]
   tone:
     field: status
     map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }

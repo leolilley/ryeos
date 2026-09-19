@@ -235,7 +235,17 @@ fn draw_dock_tile(
     surface.draw_text(
         x + 2,
         y,
-        &truncate(&format!(" {} ", dock.title), w.saturating_sub(4)),
+        &truncate(
+            &format!(
+                " {}{} ",
+                dock.title,
+                dock.attachment_label
+                    .as_ref()
+                    .map(|label| format!(" · {label}"))
+                    .unwrap_or_default()
+            ),
+            w.saturating_sub(4),
+        ),
         Style::new().fg(ACCENT).bg(BG).bold(),
     );
     // Dock content renders through the SAME widget dispatch as center
@@ -402,6 +412,7 @@ mod tests {
             ),
             edge,
             title: "t".into(),
+            attachment_label: None,
             heading: None,
             supplement: None,
             size,

@@ -202,6 +202,13 @@ impl RyeOsCore {
             .ok_or("active view set is unavailable")?;
         let mut captured = view_set.clone();
         if let Some(instance) = exclude {
+            if self.view_set_index_for_instance(instance) != Some(self.active_view_set)
+                || self.mounted_view_ref(instance).is_none()
+            {
+                return Err(
+                    "composition-management instance is not mounted in this view set".into(),
+                );
+            }
             if let Some(tile) = captured
                 .tiles
                 .iter()
@@ -355,6 +362,8 @@ impl RyeOsCore {
         }
         // Complete validation precedes replacement. This operation never replays
         // an input/command, mutates the seat route or imports saved privileges.
+        // Fresh mounts must not retain pins/follow links to retired instances.
+        self.selection_attachments.clear();
         self.view_sets = restored;
         self.active_view_set = snapshot.active_view_set;
         Ok(self.refresh_view_set_sources())
@@ -471,6 +480,36 @@ mod tests {
                 .restore_layout_preferences(&" ".repeat(MAX_LAYOUT_PREFERENCE_BYTES + 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn management_capture_checks_slot_mount_and_preserves_other_instances() {
+        use super::super::model::{RyeOsDockEdge, dock_view_instance_key};
+        let mut source = core();
+        let instance = dock_view_instance_key(source.view_sets[0].id, RyeOsDockEdge::Left);
+        assert!(
+            source
+                .capture_view_set_template("saved".into(), "Saved".into(), Some(&instance))
+                .is_err()
+        );
+        source.view_sets[0].docks.left = Some(RyeOsDockSlotState {
+            visible: true,
+            size: 24,
+            content: RyeOsDockContent::View {
+                view_ref: "view:test/one".into(),
+            },
+        });
+        let original = source.export_layout_preferences().unwrap();
+        let template = source
+            .capture_view_set_template("saved".into(), "Saved".into(), Some(&instance))
+            .unwrap();
+        assert!(template.composition.slots.left.is_none());
+        assert!(
+            serde_json::to_string(&template)
+                .unwrap()
+                .contains("view:test/one")
+        );
+        assert_eq!(source.export_layout_preferences().unwrap(), original);
     }
 
     #[test]

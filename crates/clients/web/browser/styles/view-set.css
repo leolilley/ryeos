@@ -19,6 +19,7 @@
 .tile-header.grouped { display: block; padding: 0; }
 .tile-title-row { display: flex; align-items: center; min-height: 34px; padding: 0 12px; }
 .tile-identity { display: flex; align-items: center; gap: 10px; }
+.tile-frame-detail { color: var(--muted); font-weight: 400; letter-spacing: .04em; text-transform: none; }
 .tile-signal { width: 5px; height: 5px; background: var(--accent-bright); }
 .tile-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); }
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
@@ -39,6 +40,19 @@
 .content-heading h1 { margin: 14px 0 10px; max-width: 720px; font-size: clamp(28px, 3vw, 46px); font-weight: 400; letter-spacing: -.04em; }
 .content-heading p { max-width: 620px; color: var(--text); line-height: 1.6; }
 .heading-meta { margin-top: 17px; }
+.view-supplement-scene { flex: 0 1 42%; min-height: 150px; border-bottom: 1px solid var(--line); }
+.view-supplement-scene .scene-view, .view-supplement-scene .scene-view svg { min-height: 150px; }
+.view-supplement-excerpt { flex: 0 1 auto; max-height: 38%; overflow: auto; border-top: 1px solid var(--line); font-family: var(--font-data); }
+.view-supplement-excerpt > header, .view-supplement-footer > strong { display: block; padding: 8px 12px; color: var(--muted); font: 9px var(--font-data); letter-spacing: .08em; text-transform: uppercase; }
+.view-supplement-code > div { display: grid; grid-template-columns: 42px minmax(0, 1fr); min-height: 20px; padding: 2px 12px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.view-supplement-code > div > span { color: var(--faint); }
+.view-supplement-code code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.view-supplement-code [data-tone="good"] { background: color-mix(in srgb, var(--green) 9%, transparent); color: var(--green); }
+.view-supplement-code [data-tone="warn"] { color: var(--yellow); }
+.view-supplement-code [data-tone="bad"] { color: var(--red); }
+.view-supplement-footer { flex: 0 0 auto; padding: 4px 0; border-top: 1px solid var(--line); color: var(--muted); }
+.view-supplement-footer > div { display: flex; justify-content: space-between; gap: 12px; padding: 5px 14px; font-size: 10px; }
+.view-supplement-footer > div > small { color: var(--muted); }
 .dock-slot { flex: 0 0 calc(var(--dock-size) * 1px); }
 .dock-slot > header { justify-content: space-between; color: var(--muted); }
 .dock-slot[data-edge="left"], .dock-slot[data-edge="right"] { width: calc(var(--dock-size) * 1px); }

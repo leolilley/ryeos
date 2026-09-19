@@ -725,6 +725,11 @@ pub struct RyeOsCore {
     /// folds from here, never from renderer state.
     #[serde(default)]
     pub seat: super::seat::SeatLog,
+    /// Runtime-only mounted-view selection relationships. Reusable layout
+    /// preferences intentionally never serialize this map.
+    #[serde(default)]
+    pub selection_attachments:
+        BTreeMap<RyeOsViewInstanceKey, super::attachment::SelectionAttachment>,
     /// Immutable initial route authored by the effective surface. Live subject
     /// changes are stored only in the mounted input's scoped seat facet.
     #[serde(default)]
@@ -1472,7 +1477,6 @@ impl RyeOsCore {
             .cloned();
         let input_id = binding.input.as_ref().map(|input| input.id.clone());
         let single_channel = (sources.len() == 1).then_some(());
-        let fold = self.seat.fold();
         let resolved = sources
             .into_iter()
             .filter(|(channel, _)| only_channel.is_none_or(|only| channel == only))
@@ -1488,8 +1492,7 @@ impl RyeOsCore {
                     if key == super::seat::KEY_INPUT_ROUTE {
                         Some(route.clone())
                     } else {
-                        self.facet_storage_key_for_instance(&instance_key, key)
-                            .and_then(|storage_key| fold.get(&storage_key).cloned())
+                        self.facet_value_for_instance(&instance_key, key)
                     }
                 });
                 if binding.widget == "field" {
@@ -2247,8 +2250,10 @@ impl RyeOsCore {
         logical_facet: &str,
     ) -> Option<String> {
         if logical_facet == super::seat::KEY_SELECTION || logical_facet.starts_with("selection.") {
-            let index = self.view_set_index_for_instance(instance)?;
-            super::seat::selection_storage_key(self.view_sets[index].id, logical_facet)
+            super::seat::selection_storage_key(
+                self.followed_selection_view_set(instance)?,
+                logical_facet,
+            )
         } else {
             Some(logical_facet.to_string())
         }
@@ -2991,6 +2996,7 @@ impl Default for RyeOsCore {
             views: std::collections::BTreeMap::new(),
             ui: RyeOsUiState::default(),
             seat: super::seat::SeatLog::default(),
+            selection_attachments: BTreeMap::new(),
             initial_input_route: super::seat::InputRoute::default(),
             style: surface.style,
             view_sets,

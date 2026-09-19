@@ -145,6 +145,7 @@ fn draw_layout_node(
             focused,
             group_label,
             title,
+            attachment_label,
             intents,
             view,
             chrome_hidden,
@@ -181,13 +182,19 @@ fn draw_layout_node(
                 }
                 draw_view(surface, rect, view, now_ms);
             } else {
+                let title = match attachment_label {
+                    Some(attachment) => {
+                        format!("{} · {attachment}", group_label.as_deref().unwrap_or(title))
+                    }
+                    None => group_label.as_deref().unwrap_or(title).to_string(),
+                };
                 chrome::draw_tile(
                     surface,
                     rect,
                     instance_key,
                     tile_id,
                     *focused,
-                    group_label.as_deref().unwrap_or(title),
+                    &title,
                     intents.len(),
                     view,
                     input.as_ref(),

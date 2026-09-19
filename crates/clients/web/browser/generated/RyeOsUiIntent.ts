@@ -45,6 +45,9 @@ export type RyeOsUiIntent =
   | { type: "duplicate_view_set"; view_set_id: bigint }
   | { type: "close_view_set"; view_set_id: bigint }
   | { type: "move_tile_to_view_set"; layout_guard: string; tile_id: string; view_set_id: bigint }
+  | { type: "pin_view_selection"; instance_key: RyeOsViewInstanceKey }
+  | { type: "open_pinned_view_alongside"; instance_key: RyeOsViewInstanceKey }
+  | { type: "follow_view_set_selection"; instance_key: RyeOsViewInstanceKey; view_set_id: bigint }
   | { type: "resize_split"; layout_guard: string; path: SplitBranch[]; ratio: number }
   | { type: "toggle_top_status_bar" }
   | { type: "toggle_bottom_status_bar" }

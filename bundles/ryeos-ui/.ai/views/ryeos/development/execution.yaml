@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:02:47Z:43ad3aa84b8f15a1d88b777243d2cd75f0f0c8d178aecab022e7c682a2dea8e4:/3rGLwmwM52ZVdagagiWZpLu+IYtI70t6vowEjNECDtQTyHer9D+pyK/a2/GE8SEkNkFWagBYUCvCYokT8lsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:26:03Z:3339faa0e70b0334e9a9814ee00b3372ac67ff01f74cb8de4e2c49bc84389374:I2waDGuFzxQ6It2xu0ahcycuWDTxOo1kLctXxbw9F3s24GpfroQBOuoLRHXSPs/YT2aGbF9Vtn9r8bMILdGxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-execution
 title: Execution
 version: "1.0.0"
@@ -52,7 +52,7 @@ projections:
         shape: rect
         tone:
           field: status
-          map: { completed: good, running: accent, failed: danger, skipped: neutral }
+          map: { completed: good, running: accent, retry: warn, suspended: warn, failed: danger, cancelled: warn, timed_out: danger, skipped: neutral }
           default: neutral
     - match: { source: execution, kind: hook_observation }
       set:
@@ -83,11 +83,13 @@ selection:
 affordances:
   - id: select
     label: Inspect
+    visible_when: { field: kind, equals: occurrence }
     invoke:
       plane: ui
-      facet: execution
+      facet: selection.execution
       merge:
         entity_id: "{record.id}"
+      open_view: view:ryeos/development/occurrence
 refresh:
   on_facet: selection.work
   on_hint: [thread, activity]
