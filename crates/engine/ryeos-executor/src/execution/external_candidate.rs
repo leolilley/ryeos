@@ -27,6 +27,79 @@ pub struct NativeExternalCandidate {
     channel_deadline: Instant,
     released: bool,
     terminal: bool,
+    input: Option<std::fs::File>,
+    protocol: CandidateProtocolInput,
+}
+
+/// Output streams are untrusted bytes; no writable input descriptor escapes
+/// the serialized candidate owner. The supervisor applies independent output
+/// budgets and cannot derive completion from either stream.
+pub struct NativeCandidateOutput {
+    pub stdout: std::fs::File,
+    pub stderr: std::fs::File,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CandidateProtocolProgress {
+    pub frame_digest: String,
+    pub written_bytes: usize,
+    /// All bytes reached the pipe, not endpoint processing or command success.
+    pub complete: bool,
+}
+
+#[derive(Default)]
+struct CandidateProtocolInput {
+    frontier: u64,
+    revoked: bool,
+    pending: Option<(String, Vec<u8>, usize)>,
+}
+
+impl CandidateProtocolInput {
+    fn begin(&mut self, sequence: u64, digest: &str, bytes: Vec<u8>) -> Result<()> {
+        ensure!(
+            !self.revoked && self.pending.is_none() && sequence > self.frontier,
+            "candidate protocol is revoked, busy or already started"
+        );
+        ensure!(
+            !bytes.is_empty() && bytes.len() <= ryeos_state::external_execution::MAX_CHUNK_BYTES,
+            "candidate protocol chunk exceeds its bound"
+        );
+        self.frontier = sequence;
+        self.pending = Some((digest.to_owned(), bytes, 0));
+        Ok(())
+    }
+
+    fn flush(&mut self, writer: &mut impl std::io::Write) -> Result<CandidateProtocolProgress> {
+        ensure!(!self.revoked, "candidate protocol input is revoked");
+        let (digest, bytes, offset) = self
+            .pending
+            .as_mut()
+            .context("candidate has no pending protocol input")?;
+        match writer.write(&bytes[*offset..]) {
+            Ok(0) => anyhow::bail!("candidate protocol pipe closed before complete application"),
+            Ok(count) => *offset += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let progress = CandidateProtocolProgress {
+            frame_digest: digest.clone(),
+            written_bytes: *offset,
+            complete: *offset == bytes.len(),
+        };
+        if progress.complete {
+            self.pending = None;
+        }
+        Ok(progress)
+    }
+
+    fn revoke(&mut self) {
+        self.revoked = true;
+        self.pending = None;
+    }
 }
 
 /// This value can only be returned after exact native namespace termination
@@ -51,7 +124,7 @@ impl NativeExternalCandidate {
         authority: &PinnedStateAuthority,
         private_parent: &lillux::PinnedDirectory,
         mut request: lillux::LinuxSandboxRequest,
-    ) -> Result<(Self, lillux::LinuxSandboxPipes)> {
+    ) -> Result<(Self, NativeCandidateOutput)> {
         binding.validate()?;
         ensure!(
             request.network == lillux::LinuxSandboxNetwork::Isolated
@@ -164,8 +237,13 @@ impl NativeExternalCandidate {
                 channel_deadline,
                 released: false,
                 terminal: false,
+                input: Some(pipes.stdin),
+                protocol: CandidateProtocolInput::default(),
             },
-            pipes,
+            NativeCandidateOutput {
+                stdout: pipes.stdout,
+                stderr: pipes.stderr,
+            },
         ))
     }
 
@@ -181,7 +259,61 @@ impl NativeExternalCandidate {
         );
         // A release error may have crossed the boundary. Never retry it.
         self.released = true;
-        self.process.release_once().map_err(anyhow::Error::msg)
+        self.protocol.frontier = frame.frame().sequence;
+        if let Err(error) = self.process.release_once() {
+            self.close_input();
+            return Err(anyhow::Error::msg(error));
+        }
+        Ok(())
+    }
+
+    /// Called only after the supervisor's exact durable application claim and
+    /// sticky-revocation check. This object cannot be reconstructed to replay
+    /// an uncertain command. Its mutable owner serializes writes with stop.
+    pub fn begin_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
+        self.require_owner(frame)?;
+        ensure!(
+            self.released && !self.terminal && !self.execution_expired(),
+            "candidate is not executable"
+        );
+        self.protocol.begin(
+            frame.frame().sequence,
+            frame.digest(),
+            frame.protocol_bytes()?,
+        )
+    }
+
+    /// At most one nonblocking write. Partial progress remains the same claimed
+    /// frame; another begin, retry from offset zero or input after stop fails.
+    pub fn flush_protocol_input(&mut self) -> Result<CandidateProtocolProgress> {
+        ensure!(
+            self.released && !self.terminal && !self.execution_expired(),
+            "candidate is not executable"
+        );
+        let result = self
+            .protocol
+            .flush(self.input.as_mut().context("candidate input is closed")?);
+        if result.is_err() {
+            self.close_input();
+        }
+        result
+    }
+
+    pub fn cancel(&mut self, frame: &AuthenticatedExecutionFrame, timeout: Duration) -> Result<()> {
+        self.require_owner(frame)?;
+        ensure!(
+            matches!(frame.frame().payload, ExecutionChannelPayload::Cancel),
+            "not a cancellation command"
+        );
+        // A terminal revocation does not wait for a missing data predecessor.
+        // The supervisor persists its sticky record before calling this method.
+        self.stop(timeout)
+    }
+
+    fn close_input(&mut self) {
+        self.terminal = true;
+        self.protocol.revoke();
+        self.input = None;
     }
 
     pub fn execution_expired(&self) -> bool {
@@ -191,7 +323,7 @@ impl NativeExternalCandidate {
     /// Call from the finite supervisor control loop on cancellation, deadline,
     /// transport loss or endpoint failure. This settles local writers only.
     pub fn stop(&mut self, timeout: Duration) -> Result<()> {
-        self.terminal = true;
+        self.close_input();
         self.process
             .terminate_namespace_for_export(timeout)
             .map_err(anyhow::Error::msg)?;
@@ -213,10 +345,13 @@ impl NativeExternalCandidate {
             _ => anyhow::bail!("external capture requires authenticated quiescence"),
         };
         ensure!(
-            self.released && !self.terminal,
+            self.released
+                && !self.terminal
+                && self.protocol.pending.is_none()
+                && frame.frame().sequence > self.protocol.frontier,
             "external candidate is not capturable"
         );
-        self.terminal = true;
+        self.close_input();
         let proof = self
             .process
             .terminate_namespace_for_export(timeout)
@@ -321,5 +456,75 @@ impl NativeExternalCandidate {
             "external candidate command channel expired"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BoundedWriter {
+        bytes: Vec<u8>,
+        limit: usize,
+        blocked: bool,
+    }
+
+    impl std::io::Write for BoundedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.blocked {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let count = self.limit.min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn candidate_protocol_partial_write_never_restarts_or_crosses_revocation() {
+        let mut input = CandidateProtocolInput::default();
+        input.frontier = 1;
+        let mut writer = BoundedWriter {
+            bytes: Vec::new(),
+            limit: 1,
+            blocked: false,
+        };
+        input.begin(2, "first", b"abc".to_vec()).unwrap();
+        assert_eq!(
+            input.flush(&mut writer).unwrap(),
+            CandidateProtocolProgress {
+                frame_digest: "first".into(),
+                written_bytes: 1,
+                complete: false,
+            }
+        );
+        assert!(input.begin(3, "second", b"xyz".to_vec()).is_err());
+        writer.blocked = true;
+        assert_eq!(input.flush(&mut writer).unwrap().written_bytes, 1);
+        writer.blocked = false;
+        writer.limit = 10;
+        assert!(input.flush(&mut writer).unwrap().complete);
+        assert!(input.begin(2, "first", b"abc".to_vec()).is_err());
+        input.begin(3, "second", b"xyz".to_vec()).unwrap();
+        input.revoke();
+        assert!(input.flush(&mut writer).is_err());
+        assert!(input.begin(4, "third", b"later".to_vec()).is_err());
+        assert_eq!(writer.bytes, b"abc");
+    }
+
+    #[test]
+    fn candidate_protocol_refuses_oversized_or_empty_input_without_moving_frontier() {
+        let mut input = CandidateProtocolInput::default();
+        for bytes in [
+            Vec::new(),
+            vec![0; ryeos_state::external_execution::MAX_CHUNK_BYTES + 1],
+        ] {
+            assert!(input.begin(1, "invalid", bytes).is_err());
+            assert_eq!(input.frontier, 0);
+            assert!(input.pending.is_none());
+        }
     }
 }

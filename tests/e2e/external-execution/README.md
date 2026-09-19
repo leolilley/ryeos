@@ -56,6 +56,15 @@ quiesce application. Export application requires that exact quiesce to have
 been applied. A sealed export cannot finish application before its validated
 content has durable retention roots.
 
+An owner-signed Cancel also has a narrow sticky-revocation path. It commits an
+immutable occurrence-bound record independently of contiguous transcript
+reconciliation. Missing predecessors, forks, restart and later data backfill
+cannot undo it. Pending and subsequently backfilled input is revoked; claimed
+input stays uncertain. This path accepts no ordinary command and proves no
+cleanup. Its Rust regression covers cancellation before a missing protocol
+frame, reopen and non-executable catch-up. Actual supervisor-side persistence
+and dispatch must honor this gate before network replay is enabled.
+
 These are source-level protocol/journal implementations. They are **not** a
 running network transport, protected admission binding, guest reconnect loop,
 or installed qualification. No HTTP route, general daemon grant or enrolled
@@ -98,6 +107,19 @@ Piped preparation creates dedicated candidate stdin/stdout/stderr, with
 nonblocking protected relay ends. Native child setup installs these exact ends,
 never supervisor bootstrap stdio. Internal release/readiness descriptors reserve
 0–2 even when ambient stdio starts closed; the sealed native test covers this.
+The candidate owner retains stdin privately; only output readers escape.
+Its mutable control methods serialize release, bounded nonblocking partial
+input writes, cancellation and capture. Each input has one started sequence
+and exact offset; neither a blocked write nor retransmission starts it again.
+Cancellation closes stdin and discards unsent bytes before native termination.
+Quiesce refuses outstanding partial input. A failed release likewise closes
+input instead of permitting subsequent command delivery. These in-process
+guards do not replace the supervisor's durable application and revocation
+journals or authorize reconstruction of an uncertain execution.
+Complete input progress means only that bytes reached the pipe—not endpoint
+processing, command completion or a candidate fence. Object-level native tests
+for failed release, cancellation during partial writes and capture refusal with
+pending input remain qualification gates beyond the input-state unit tests.
 
 This component belongs in a dedicated trusted launcher process: native launch
 changes the caller's namespaces. It is not an async-daemon launch function.
@@ -146,6 +168,7 @@ cargo test --locked --jobs 1 --target-dir target -p ryeos-state --lib external_e
 cargo test --locked --jobs 1 --target-dir target -p ryeos-state --lib persistent_session_capsule
 cargo test --locked --jobs 1 --target-dir target -p ryeos-engine --lib structured_session_profile
 cargo test --locked --jobs 1 --target-dir target -p ryeos-executor --lib execution::ingest
+cargo test --locked --jobs 1 --target-dir target -p ryeos-executor --lib execution::external_candidate
 cargo test --locked --jobs 1 --target-dir target -p ryeos-executor --lib execution::persistent_session
 cargo test --locked --jobs 1 --target-dir target -p ryeos-structured-session --bin ryeos-structured-session-bridge
 cargo test --locked --jobs 1 --target-dir target -p ryeos-api --test hosted_command_terminal_replay
@@ -191,7 +214,7 @@ independently verified external cleanup. Do not bypass the current journal
 guards to enable a trial run. Evaluation/integration/publication stay with their
 existing owners. No worker profile is enabled by this source checkpoint.
 
-Latest local source checks (2026-09-19): 143 authoring-environment, 20 allocation/
-channel SQL, 31 Codex bundle and 5 OpenCode bundle tests passed (199 total).
+Latest local source checks (2026-09-19): 143 authoring-environment, 21 allocation/
+channel SQL, 31 Codex bundle and 5 OpenCode bundle tests passed (200 total).
 `git diff --check` and standalone Rust syntax parsing passed. No Cargo commands,
 node lifecycle operations, installs or external allocations were performed.

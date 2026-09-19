@@ -323,6 +323,12 @@ impl AuthenticatedExecutionFrame {
     pub fn canonical(&self) -> &str {
         &self.canonical
     }
+    pub fn protocol_bytes(&self) -> Result<Vec<u8>> {
+        match &self.frame().payload {
+            ExecutionChannelPayload::ProtocolBytes { bytes_base64 } => chunk(bytes_base64, false),
+            _ => bail!("external frame does not carry protocol bytes"),
+        }
+    }
 }
 
 impl SignedExecutionFrame {

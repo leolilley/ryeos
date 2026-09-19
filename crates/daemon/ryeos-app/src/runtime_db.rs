@@ -2399,6 +2399,29 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
         application_id: RUNTIME_APP_ID,
         tables: &[
             sqlite_schema::TableSpec {
+                name: "external_execution_revocation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_digest",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frame_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "external_execution_import",
                 columns: &[
                     sqlite_schema::ColumnSpec {

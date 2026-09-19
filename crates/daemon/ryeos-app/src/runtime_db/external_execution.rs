@@ -66,6 +66,17 @@ CREATE TABLE external_execution_import (
     completion_request_digest TEXT NOT NULL,
     export_frame_digest TEXT NOT NULL
 );
+CREATE TABLE external_execution_revocation (
+    binding_digest TEXT PRIMARY KEY,
+    frame_digest TEXT NOT NULL,
+    frame_json TEXT NOT NULL
+);
+CREATE TRIGGER external_execution_revocation_no_update
+BEFORE UPDATE ON external_execution_revocation
+BEGIN SELECT RAISE(ABORT, 'external revocation is sticky and immutable'); END;
+CREATE TRIGGER external_execution_revocation_no_delete
+BEFORE DELETE ON external_execution_revocation
+BEGIN SELECT RAISE(ABORT, 'external revocation requires explicit cleanup retention handoff'); END;
 CREATE TRIGGER external_execution_import_no_update
 BEFORE UPDATE ON external_execution_import
 BEGIN SELECT RAISE(ABORT, 'retained external import is immutable'); END;

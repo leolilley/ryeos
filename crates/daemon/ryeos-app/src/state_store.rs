@@ -13796,6 +13796,25 @@ impl StateStore {
         self.lock()?.runtime_db.external_execution_blob_roots()
     }
 
+    pub fn record_external_execution_revocation(
+        &self,
+        placement: &str,
+        wire: &[u8],
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .record_external_execution_revocation(placement, wire)
+    }
+
+    /// A relay must serialize this sticky gate with actual dispatch. This
+    /// read by itself is not a release permit and does not settle cleanup.
+    pub fn external_execution_revoked(&self, placement: &str) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .external_execution_revoked(placement)
+    }
+
     /// Immutable project snapshots required by active or queued runtimes.
     ///
     /// These runtime-DB references are not signed CAS heads, so online GC must

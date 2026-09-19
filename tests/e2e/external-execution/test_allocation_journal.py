@@ -215,6 +215,15 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         self.db.rollback()
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM external_execution_import").fetchone()[0], 0)
 
+    def test_sticky_revocation_cannot_be_rewritten_or_cleared(self):
+        self.channel_and_frame()
+        self.db.execute("INSERT INTO external_execution_revocation VALUES('binding','cancel','wire')")
+        for statement in ("UPDATE external_execution_revocation SET frame_digest='other'",
+                          "DELETE FROM external_execution_revocation"):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute(statement)
+        self.assertEqual(self.guard(), 1)
+
     def test_external_frames_are_single_claim_then_single_completion(self):
         self.channel_and_frame()
         for state in ("applied", "pending"):

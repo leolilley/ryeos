@@ -6,6 +6,63 @@ use ryeos_state::external_execution::{
 };
 
 impl RuntimeDb {
+    /// Accept only terminal revocation without waiting for missing protocol
+    /// predecessors. This closes execution; it cannot create/complete a command
+    /// or prove cleanup. The eventual relay must share this gate with its actual
+    /// dispatch boundary, not rely solely on a prior application claim.
+    pub fn record_external_execution_revocation(
+        &self,
+        placement: &str,
+        wire: &[u8],
+    ) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&tx, placement)?;
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            &binding,
+            lillux::time::timestamp_millis(),
+        )?;
+        if verified.frame().direction != ChannelDirection::OwnerToSupervisor
+            || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
+            || wire.len() as u64 > ryeos_state::external_execution::TERMINAL_CONTROL_BYTES
+        {
+            bail!("external fast path accepts only bounded owner revocation");
+        }
+        let allocation = read(&tx, placement)?.context("external allocation absent")?;
+        require_session_owner(&tx, &allocation.reservation)?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT frame_digest,frame_json
+            FROM external_execution_revocation WHERE binding_digest=?1",
+                [binding.digest()?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            if prior.0 != verified.digest() || prior.1 != verified.canonical() {
+                bail!("external cancellation changed its exact retained frame");
+            }
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO external_execution_revocation VALUES(?1,?2,?3)",
+            params![binding.digest()?, verified.digest(), verified.canonical()],
+        )?;
+        tx.execute(
+            "UPDATE external_execution_frame SET application='revoked'
+            WHERE binding_digest=?1 AND application='pending'
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            [binding.digest()?],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn external_execution_revoked(&self, placement: &str) -> Result<bool> {
+        let binding = load_binding(&self.conn, placement)?;
+        revoked(&self.conn, &binding.digest()?)
+    }
+
     /// Retain a fully validated content closure before releasing the import
     /// guard. This is not worker completion, writer qualification or cleanup.
     pub(crate) fn retain_external_candidate_import(
@@ -133,11 +190,16 @@ impl RuntimeDb {
     /// Persist one authenticated frame before it is acknowledged or applied.
     /// false is an exact duplicate, never permission to forward bytes again.
     pub fn record_external_execution_frame(&self, placement: &str, wire: &[u8]) -> Result<bool> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
+        let binding = load_binding(&self.conn, placement)?;
         let now = lillux::time::timestamp_millis();
         let verified = SignedExecutionFrame::decode_and_verify(wire, &binding, now)?;
         let frame = verified.frame();
+        if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
+            // Commit revocation even if contiguous transcript reconciliation
+            // below rejects a gap/fork. History cannot reopen execution.
+            self.record_external_execution_revocation(placement, wire)?;
+        }
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let allocation = read(&tx, placement)?.context("external allocation absent")?;
         require_session_owner(&tx, &allocation.reservation)?;
         let direction = frame.direction.as_str();
@@ -221,6 +283,12 @@ impl RuntimeDb {
             "UPDATE external_execution_channel SET state=?2 WHERE placement_thread_id=?1",
             params![placement, next],
         )?;
+        if revoked(&tx, &frame.binding_digest)? {
+            tx.execute("UPDATE external_execution_frame SET application='revoked'
+                WHERE binding_digest=?1 AND application='pending'
+                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+                [&frame.binding_digest])?;
+        }
         match &frame.payload {
             ExecutionChannelPayload::Cancel | ExecutionChannelPayload::Stopped { .. } => {
                 // Pending input has provably not been applied. Claimed input
@@ -292,6 +360,9 @@ impl RuntimeDb {
             )
         {
             bail!("quarantined external frame is not executable");
+        }
+        if revoked(&tx, &binding_digest)? && !urgent_control(&verified.frame().payload) {
+            bail!("external execution is durably revoked");
         }
         if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
             && matches!(
@@ -421,10 +492,41 @@ fn load_binding(conn: &Connection, placement: &str) -> Result<ExecutionChannelBi
     Ok(binding)
 }
 
+fn revoked(conn: &Connection, digest: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_revocation WHERE binding_digest=?1)",
+        [digest],
+        |row| row.get(0),
+    )?)
+}
+
 /// Validate retained signed transcripts after the runtime schema was accepted.
 /// Historical authentication uses the binding's issue instant; its expiration
 /// refuses new use, not retention/recovery of already recorded observations.
 pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
+    let mut revocations = conn.prepare("SELECT r.binding_digest,r.frame_digest,r.frame_json,c.placement_thread_id
+        FROM external_execution_revocation r LEFT JOIN external_execution_channel c ON c.binding_digest=r.binding_digest")?;
+    let mut rows = revocations.query([])?;
+    while let Some(row) = rows.next()? {
+        let placement = row
+            .get::<_, Option<String>>(3)?
+            .context("external revocation has no channel owner")?;
+        let binding = load_binding(conn, &placement)?;
+        let wire: String = row.get(2)?;
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        if row.get::<_, String>(0)? != binding.digest()?
+            || row.get::<_, String>(1)? != verified.digest()
+            || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
+            || verified.frame().direction != ChannelDirection::OwnerToSupervisor
+            || wire.len() as u64 > ryeos_state::external_execution::TERMINAL_CONTROL_BYTES
+        {
+            bail!("retained external revocation changed authority");
+        }
+    }
     let mut statement = conn.prepare(
         "SELECT placement_thread_id,state,completion_request_digest,
         export_snapshot_hash,export_evidence_hash FROM external_execution_channel",
@@ -485,6 +587,19 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
                 binding.issued_at_ms,
             )?;
             let frame = verified.frame();
+            if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
+                let retained: Option<String> = conn
+                    .query_row(
+                        "SELECT frame_digest FROM external_execution_revocation
+                    WHERE binding_digest=?1",
+                        [&binding_digest],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if retained.as_deref() != Some(verified.digest()) {
+                    bail!("external transcript cancellation lost its sticky revocation");
+                }
+            }
             let index = match frame.direction {
                 ChannelDirection::OwnerToSupervisor => 0,
                 ChannelDirection::SupervisorToOwner => 1,
@@ -738,6 +853,103 @@ mod tests {
                 .unwrap()
         );
         digest
+    }
+
+    #[test]
+    fn cancellation_closes_execution_before_missing_data_catches_up() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        let direction = ChannelDirection::OwnerToSupervisor;
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        db.record_external_execution_frame(placement, &release)
+            .unwrap();
+        let (input, input_digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            2,
+            Some(release_digest.clone()),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"never-dispatch"),
+            },
+        );
+        assert!(
+            db.record_external_execution_revocation(placement, &input)
+                .is_err()
+        );
+        assert!(!db.external_execution_revoked(placement).unwrap());
+        let (cancel, cancel_digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            3,
+            Some(input_digest.clone()),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        // Transcript gap is refused, but cannot roll back cancellation.
+        assert!(
+            db.record_external_execution_frame(placement, &cancel)
+                .is_err()
+        );
+        assert!(db.external_execution_revoked(placement).unwrap());
+        assert!(
+            !db.claim_external_frame_application(placement, direction, 1, &release_digest)
+                .unwrap()
+        );
+        drop(db);
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(db.external_execution_revoked(placement).unwrap());
+        db.record_external_execution_frame(placement, &input)
+            .unwrap();
+        assert!(
+            !db.claim_external_frame_application(placement, direction, 2, &input_digest)
+                .unwrap()
+        );
+        db.record_external_execution_frame(placement, &cancel)
+            .unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, direction, 3, &cancel_digest)
+                .unwrap()
+        );
+        db.finish_external_frame_application(placement, direction, 3, &cancel_digest)
+            .unwrap();
+        assert!(
+            !db.record_external_execution_revocation(placement, &cancel)
+                .unwrap()
+        );
+        let (different, _) = wire(
+            &binding,
+            &owner,
+            direction,
+            4,
+            Some(cancel_digest),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        assert!(
+            db.record_external_execution_revocation(placement, &different)
+                .is_err()
+        );
+        validate_channels(&db.conn).unwrap();
+        assert_eq!(read_guard(&db.conn).unwrap(), 1);
+        assert!(
+            db.release_credential_profile("P-channel", "worker-channel")
+                .is_err()
+        );
     }
 
     #[test]
