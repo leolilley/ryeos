@@ -11,7 +11,7 @@ impl RyeOsCore {
         action: super::event::RyeOsInputAction,
     ) -> Vec<RyeOsEffect> {
         use super::event::{RyeOsInputAction, RyeOsUiEvent};
-        use super::model::{InputBufferKey, RyeOsFocusTarget, dock_view_instance_key};
+        use super::model::{RyeOsFocusTarget, dock_view_instance_key};
         let session = self.data.session.as_ref();
         if address.view_set_id != self.view_sets[self.active_view_set].id
             || address.session_id != session.map(|s| s.session_id.as_str()).unwrap_or_default()

@@ -5,6 +5,7 @@ import type { RyeOsLayoutNodeVm } from "./RyeOsLayoutNodeVm";
 import type { RyeOsSceneModel } from "./RyeOsSceneModel";
 
 export interface RyeOsViewSetVm {
+  view_set_id: bigint;
   layout_guard: string;
   split_min_ratio: number;
   split_max_ratio: number;

@@ -1182,6 +1182,7 @@ impl RyeOsCore {
             }
         }
 
+        let active_view_set_id = self.view_sets[self.active_view_set].id;
         for (edge, view_ref) in self.view_sets[self.active_view_set]
             .docks
             .visible_slot_views()
@@ -1193,10 +1194,7 @@ impl RyeOsCore {
             {
                 self.view_sets[self.active_view_set]
                     .dock_local
-                    .entry(dock_view_instance_key(
-                        self.view_sets[self.active_view_set].id,
-                        edge,
-                    ))
+                    .entry(dock_view_instance_key(active_view_set_id, edge))
                     .and_modify(|local| {
                         if !matches!(local, ViewLocalState::Field(_)) {
                             *local = ViewLocalState::Field(Default::default());
@@ -2997,6 +2995,7 @@ impl Default for RyeOsCore {
             views: std::collections::BTreeMap::new(),
             ui: RyeOsUiState::default(),
             seat: super::seat::SeatLog::default(),
+            initial_input_route: super::seat::InputRoute::default(),
             style: surface.style,
             view_sets,
             active_view_set: 0,

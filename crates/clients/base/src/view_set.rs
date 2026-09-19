@@ -4,7 +4,7 @@
 //! it must never flatten a nested layout on an ordinary open/close/move edit.
 //! Traversal order is derived, not a second mutable placement authority.
 
-use crate::ids::{RyeOsViewInstanceKey, TileId};
+use crate::ids::{RyeOsViewInstanceKey, TileId, ViewGroupId};
 use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
 use crate::surface::{ArrangeSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
