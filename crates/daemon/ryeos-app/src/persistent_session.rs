@@ -1389,6 +1389,23 @@ impl PersistentSessionPool {
         Ok(state.exclusive_failure_cleanup.remove(session_id))
     }
 
+    /// Consume cleanup testimony after the durable possible-contact boundary.
+    ///
+    /// A missing in-memory proof is never evidence that the worker was reaped.
+    /// It can occur when an exclusive request refuses before the process I/O
+    /// helper installs its ordinary retirement result. The durable owner has
+    /// already recorded possible contact at this point, so it must fence the
+    /// worker as `unproved` and settle the command outcome as unknown instead
+    /// of abandoning that settlement with a second error.
+    pub fn take_exclusive_failure_cleanup_state_or_unproved(
+        &self,
+        session_id: &str,
+    ) -> Result<&'static str> {
+        Ok(self
+            .take_exclusive_failure_cleanup_state(session_id)?
+            .unwrap_or("unproved"))
+    }
+
     /// Read the existing exclusive owner without consuming any cleanup proof.
     /// `None` means pool absence only; callers still need durable no-contact or
     /// exact process-death authority. Pending and uncertain owners always refuse.
@@ -3258,9 +3275,6 @@ fn begin_resource_request_evidence(
         (Some(_), None) if require_attribution => {
             bail!("resource-bearing exclusive request lacks attribution identity")
         }
-        (None, Some(_)) if require_attribution => {
-            bail!("exclusive request attribution identity has no admitted resource sink")
-        }
         _ => None,
     };
     Ok((lease, start))
@@ -4219,6 +4233,46 @@ while True:
     }
 
     #[test]
+    fn zero_resource_exclusive_request_accepts_command_identity_without_attribution() {
+        let pool = PersistentSessionPool::new();
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 2_000;
+        lifecycle.request_timeout_ms = 2_000;
+        let wire = test_wire();
+        let session_id = "z".repeat(64);
+        pool.reserve_exclusive(&session_id, &lifecycle, &wire)
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let identity = PersistentSessionRequestIdentity {
+            thread_id: "T-zero-resource".to_owned(),
+            request_digest: ryeos_accounting::HexDigest::new("a".repeat(64)).unwrap(),
+        };
+
+        let result = pool
+            .execute_exclusive_attributed_with_deadline(
+                &session_id,
+                Some(&identity),
+                serde_json::json!({"message":"zero-resource"}),
+                || false,
+                |_| Ok(None),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result["echo"]["message"], "zero-resource");
+        assert!(
+            pool.take_exclusive_failure_cleanup_state(&session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            pool.retire_exclusive(&session_id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
+    }
+
+    #[test]
     fn exclusive_capture_readiness_refuses_pending_and_preserves_cleanup_proof() {
         let pool = PersistentSessionPool::new();
         let id = "c".repeat(64);
@@ -4240,6 +4294,53 @@ while True:
         pool.inner.state.lock().unwrap().cleanup_unproved =
             Some("fixture unknown process".to_owned());
         assert!(pool.exclusive_capture_boot_identity(&id).is_err());
+    }
+
+    #[test]
+    fn pre_io_exclusive_failure_is_retained_as_unproved() {
+        let pool = PersistentSessionPool::new();
+        let id = "u".repeat(64);
+        pool.reserve_exclusive(&id, &test_lifecycle(), &test_wire())
+            .unwrap()
+            .bind(fake_framed_session().unwrap())
+            .unwrap();
+        let process = {
+            let state = pool.inner.state.lock().unwrap();
+            Arc::clone(&state.exclusive.get(&id).unwrap().process)
+        };
+        process.leased.store(true, Ordering::Release);
+        let error = pool
+            .execute_exclusive(&id, serde_json::json!({}), || false, |_| Ok(()))
+            .unwrap_err();
+        assert!(error.to_string().contains("already has an active request"));
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state_or_unproved(&id)
+                .unwrap(),
+            "unproved"
+        );
+
+        process.leased.store(false, Ordering::Release);
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
+
+        pool.inner
+            .state
+            .lock()
+            .unwrap()
+            .exclusive_failure_cleanup
+            .insert(id.clone(), "reaped");
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state_or_unproved(&id)
+                .unwrap(),
+            "reaped"
+        );
+        assert!(
+            pool.take_exclusive_failure_cleanup_state(&id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

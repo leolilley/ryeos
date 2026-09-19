@@ -350,6 +350,9 @@ fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyh
                 path.push(namespace);
             }
         }
+        ryeos_state::objects::SourceLogicalBinding::ToolDirectory { root, .. } => {
+            path.push(root);
+        }
         ryeos_state::objects::SourceLogicalBinding::Worker { root, .. } => {
             let namespace = binding
                 .owner
@@ -372,6 +375,7 @@ fn logical_mount(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyh
 fn logical_entry(binding: &ryeos_state::objects::EffectiveSourceBinding) -> anyhow::Result<&str> {
     Ok(match &binding.logical_binding {
         ryeos_state::objects::SourceLogicalBinding::Tool { root_entry, .. } => root_entry,
+        ryeos_state::objects::SourceLogicalBinding::ToolDirectory { root_entry, .. } => root_entry,
         ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
     })
 }
@@ -534,6 +538,69 @@ fn open_source_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn directory_binding() -> ryeos_state::objects::EffectiveSourceBinding {
+        ryeos_state::objects::EffectiveSourceBinding {
+            schema: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            kind: ryeos_state::objects::EFFECTIVE_SOURCE_BINDING_KIND.to_owned(),
+            owner: ryeos_state::objects::SourceOwnerIdentity {
+                canonical_ref: "tool:ryeos/development/authoring-environment-production/runtime"
+                    .to_owned(),
+                item_kind: "tool".to_owned(),
+                source_space: ryeos_state::objects::SourceSpaceIdentity::Bundle,
+                source_root: ryeos_state::objects::SourceRootIdentity::Bundle {
+                    name: "standard".to_owned(),
+                },
+                root_source_content_digest: "a".repeat(64),
+                root_raw_content_digest: "b".repeat(64),
+                signer_fingerprint: "c".repeat(64),
+                logical_item_key: "ryeos/development/authoring-environment-production/runtime"
+                    .to_owned(),
+            },
+            kind_ceiling: ryeos_state::objects::SignedKindSourceCeiling {
+                schema_ref: "kind:tool".to_owned(),
+                source_content_digest: "d".repeat(64),
+                raw_content_digest: "e".repeat(64),
+                signer_fingerprint: "f".repeat(64),
+                signature_header: "signed".to_owned(),
+                schema_body: "kind: tool\n".to_owned(),
+                schema_document: serde_json::json!({"location": {"directory": "tools"}}),
+                normalized_declaration: serde_json::json!({}),
+                root_kind_format: serde_json::json!({}),
+                root_signature_envelope: serde_json::json!({}),
+            },
+            content_manifest_hash: "1".repeat(64),
+            testimony: ryeos_state::objects::SourceTestimonyProof::OwnerSignedFiles {
+                signer_fingerprint: "c".repeat(64),
+                file_count: 1,
+                entries_digest: "2".repeat(64),
+            },
+            execution_policy: ryeos_state::objects::SourceExecutionPolicyIdentity::Executor {
+                declarer_ref: "tool:ryeos/core/runtimes/python/function".to_owned(),
+                signer_fingerprint: "3".repeat(64),
+                source_content_digest: "4".repeat(64),
+                raw_content_digest: "5".repeat(64),
+                policy_digest: "6".repeat(64),
+                chain_digest: "7".repeat(64),
+            },
+            logical_binding: ryeos_state::objects::SourceLogicalBinding::ToolDirectory {
+                loader_roots: vec![ryeos_state::objects::SourceLoaderRoot::ItemDirectory],
+                root: "ryeos/development/authoring-environment-production".to_owned(),
+                root_entry: "runtime.yaml".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn directory_source_redeems_at_its_exact_authored_coordinate() {
+        let binding = directory_binding();
+        assert_eq!(
+            logical_mount(&binding).unwrap(),
+            ".ai/tools/ryeos/development/authoring-environment-production"
+        );
+        assert_eq!(logical_entry(&binding).unwrap(), "runtime.yaml");
+        assert_ne!(logical_mount(&binding).unwrap(), ".ai/tools/ryeos");
+    }
 
     #[test]
     fn runtime_source_coordinate_does_not_require_or_modify_project_namespace() {
