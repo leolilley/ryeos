@@ -685,7 +685,7 @@ mod tests {
         else {
             panic!("dock should retain generic list state");
         };
-        assert_eq!(cursor, 7);
+        assert_eq!(*cursor, 7);
         assert_eq!(collapsed.iter().copied().collect::<Vec<_>>(), vec![2]);
     }
 
