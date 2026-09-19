@@ -24,6 +24,10 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
         source_dir: root.join("bundles"),
         trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
         node_profile: None,
+        substrate_identity: Some(
+            ryeos_node::SubstrateIdentity::new(format!("sha256:{}", "1".repeat(64)), 1, None)
+                .unwrap(),
+        ),
         replace_node_policy_generation: false,
         skip_preflight: true,
     })

@@ -433,9 +433,6 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");
     }
-    if !config.operator_signing_key_path.exists() {
-        tracing::warn!("no user signing key found — operator-signed items will fail to verify");
-    }
     Ok(())
 }
 
@@ -447,8 +444,8 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 /// partially substitute for any of those.
 ///
 /// This function:
-///   1. Verifies the operator artifacts that `ryeos init` is
-///      responsible for. Missing → fail with guidance.
+///   1. Verifies the pinned operator public authority from the signed init
+///      completion. Daemon startup never requires the operator private key.
 ///   2. Verifies the node signing key exists. Missing → fail (we cannot
 ///      safely regenerate the node key here because doing so would
 ///      invalidate the existing node trust doc in operator config).
@@ -458,32 +455,9 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 ///
 /// Trust docs in operator config are NEVER written here.
 pub fn repair_daemon_local(config: &Config) -> Result<()> {
-    // Derive the trust dir from the resolved user signing key path
-    // rather than re-reading ambient environment. The user signing key path was
-    // already resolved at config-load time and is the authoritative anchor.
-    //
-    // Layout:
-    //   <app_root>/.ai/config/keys/signing/private_key.pem
-    //   <app_root>/.ai/config/keys/trusted/
-    let trust_dir = config
-        .operator_signing_key_path
-        .parent() // .../keys/signing
-        .and_then(|p| p.parent()) // .../keys
-        .map(|p| p.join("trusted"))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "operator_signing_key_path {} has no parent",
-                config.operator_signing_key_path.display()
-            )
-        })?;
-
-    // ── 1. Required operator config artifacts ──
-    if !config.operator_signing_key_path.exists() {
-        bail!(
-            "operator signing key missing at {} — run: ryeos init",
-            config.operator_signing_key_path.display()
-        );
-    }
+    let completion = ryeos_node::verify_init_completion(&config.app_root)?
+        .context("node has no complete signed initialization transaction")?;
+    let trust_dir = config.app_root.join(AI_DIR).join("config/keys/trusted");
 
     if !config.node_signing_key_path.exists() {
         bail!(
@@ -494,14 +468,13 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
         );
     }
 
-    let user_identity = NodeIdentity::load(&config.operator_signing_key_path)?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
-    let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
-    if !user_trust_entry.exists() {
+    let operator_trust_entry = trust_dir.join(format!("{}.toml", completion.operator_fingerprint));
+    if !operator_trust_entry.exists() {
         bail!(
-            "user trust doc missing at {} — run: ryeos init",
-            user_trust_entry.display()
+            "pinned operator trust document missing at {} — run: ryeos init",
+            operator_trust_entry.display()
         );
     }
     let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
@@ -1067,96 +1040,21 @@ mod tests {
         assert!(items[0].ends_with("nested.yaml"));
     }
 
-    /// `repair_daemon_local` must derive the user trust dir from the
-    /// resolved `operator_signing_key_path` (not by re-reading the env), and
-    /// the derivation must match the canonical layout
-    /// `<app_root>/.ai/config/keys/{signing,trusted}/`.
+    /// Daemon verification derives public trust from the app-root authority
+    /// namespace, never from the operator private-key location.
     #[test]
-    fn repair_daemon_local_trust_dir_derives_from_operator_signing_key_path() {
+    fn repair_daemon_local_uses_app_root_public_trust_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let app_root = tmp.path().join("home");
-        let signing_path = app_root
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem");
         let expected_trust_dir = app_root
             .join(".ai")
             .join("config")
             .join("keys")
             .join("trusted");
 
-        // Mirror the derivation in `repair_daemon_local`.
-        let derived = signing_path
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("trusted"))
-            .expect("derive trust dir");
         assert_eq!(
-            derived, expected_trust_dir,
-            "trust dir derivation must follow canonical layout"
-        );
-    }
-
-    /// `repair_daemon_local` must refuse to start when operator
-    /// init artifacts are missing — daemon never substitutes for
-    /// `ryeos init`.
-    #[test]
-    fn repair_daemon_local_fails_when_operator_signing_key_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app_root = tmp.path().join("home");
-        let signing_dir = app_root
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("signing");
-        fs::create_dir_all(&signing_dir).unwrap();
-        let app_root = tmp.path().join("state");
-        fs::create_dir_all(app_root.join(".ai").join("node").join("bundles")).unwrap();
-        // Plant a signed bundle registration so verify_initialized would
-        // pass; we want repair_daemon_local itself to be the one that
-        // surfaces the missing operator artifact.
-        fs::write(
-            app_root
-                .join(".ai")
-                .join("node")
-                .join("bundles")
-                .join("core.yaml"),
-            "# ryeos:signed:test\nkind: node\n",
-        )
-        .unwrap();
-
-        let config = Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: app_root.join(".ai").join("state").join("runtime.sqlite3"),
-            uds_path: app_root.join("ryeosd.sock"),
-            app_root: app_root.clone(),
-            node_signing_key_path: app_root
-                .join(".ai")
-                .join("node")
-                .join("identity")
-                .join("private_key.pem"),
-            operator_signing_key_path: signing_dir.join("private_key.pem"),
-            authorized_keys_dir: app_root
-                .join(".ai")
-                .join("node")
-                .join("auth")
-                .join("authorized_keys"),
-        };
-        fs::create_dir_all(app_root.join(AI_DIR).join("node")).unwrap();
-        fs::write(
-            app_root.join(AI_DIR).join("node").join("config.yaml"),
-            serde_yaml::to_string(&config).unwrap(),
-        )
-        .unwrap();
-
-        let err = repair_daemon_local(&config).expect_err("should refuse without user key");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("operator signing key missing"), "got: {msg}");
-        assert!(
-            msg.contains("ryeos init"),
-            "must guide to ryeos init, got: {msg}"
+            app_root.join(AI_DIR).join("config/keys/trusted"),
+            expected_trust_dir
         );
     }
 }

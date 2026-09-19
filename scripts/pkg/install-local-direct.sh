@@ -55,10 +55,9 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: RyeOS Development)
-  --bundle-set SET      Bundle set to populate/install: full, standard
-                        (core+central-auth+standard), hosted-node
-                        (core+central-auth+hosted-node), or hosted-workflow
-                        (core+central-auth+standard+hosted-node+codex). Each set
+  --bundle-set SET      Bundle set to populate/install: full, central-host,
+                        standard, local-inference, hosted-node, hosted-workflow,
+                        bundle-source, or release-authority. Each set
                         has an explicit default publisher-authored node init
                         profile; an existing signed generation is preserved.
                         (default: full)
@@ -638,7 +637,7 @@ while IFS= read -r _bundle_name; do
     bundle_names+=("$_bundle_name")
 done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
-    die "--bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+    die "unknown or non-installable --bundle-set: $bundle_set"
 fi
 if [[ -n "$node_profile_override" ]]; then
     node_init_profile="$node_profile_override"

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-19T03:51:20Z:a52bcabaa23c35ba56ef260d7f1398a8aa805d7c8b2356a9822a04b4d2fa2001:NhU6Olf6/J67s54ykx8vABmbu8aaJLUfO8Qz/NkdfcU+HI0q/qlOhNGTjPO/1UDEvaD2oaPmwVtMXsZElqL1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: stage-local
+version: "1.0.0"
+description: Optional combined-node optimization that protects a complete publisher-authored catalog closure already present in a deliberately shared local CAS.
+endpoint: bundle_catalog.stage_local
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-catalog/stage-local"]
+schema:
+  catalog_namespace: string
+  candidate_publication_attestation_hash: string
+  expected_catalog_head: string?

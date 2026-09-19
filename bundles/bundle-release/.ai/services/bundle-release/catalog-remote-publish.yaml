@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-19T03:51:21Z:d8bce5322af02cc96360e1d82a4201c89185d0fd8bf0e8aa6f3378d09557f932:Hqx6dsJ5DVsFace9xQFqSG0HULUUUAGt0EeIGJrT1tteNrZD/LvTaCjysedXaKUJbwWvlDfKf3EDVBE8Z5xNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: catalog-remote-publish
+version: "1.0.0"
+description: Transfer an exact publisher CAS closure to a named authenticated bundle-source remote and publish it.
+endpoint: bundle_release.catalog_remote_publish
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/catalog-remote-publish"]
+result_retention: digest_only
+schema:
+  remote: string
+  catalog_namespace: string
+  candidate_publication_attestation_hash: string
+  expected_catalog_head: string?

@@ -1,0 +1,198 @@
+# ryeos:signed:2026-09-19T04:10:25Z:29881be8e9331c91b906b63ccd339e1a1d3befd4d5aa3fc416dcb35183d6dbc0:rYMPgrMBqB+j+aKg7uOGU3Mkp3LOG9MngzvUXgc9iUNSsLcPC4sRgDmmXgn4mJJTD7RUo1z8fmXpwoncbZzRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
+effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.bundle-release/input-inspect
+      - ryeos.execute.service.bundle-release/generation-build
+      - ryeos.execute.service.bundle-release/request-tree-signing
+      - ryeos.execute.service.bundle-release/generation-capture
+      - ryeos.execute.service.bundle-release/generation-qualify
+      - ryeos.execute.service.bundle-release/generation-finalize
+      - ryeos.execute.service.bundle-release/request-authorization
+      - ryeos.execute.service.bundle-release/set-compose
+      - ryeos.execute.service.bundle-release/catalog-request-publication
+      - ryeos.execute.service.bundle-release/catalog-remote-publish
+config:
+  start: inspect
+  max_steps: 12
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required:
+      - project_path
+      - catalog_remote
+      - bundle_name
+      - source_snapshot_hash
+      - target
+      - build_profile
+      - substrate_protocol
+      - predecessor_set_hash
+      - predecessor_catalog_publication_attestation_hash
+      - expected_catalog_sequence
+      - catalog_namespace
+      - channel
+    properties:
+      project_path: {type: string}
+      catalog_remote: {type: string}
+      bundle_name: {type: string}
+      source_snapshot_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      target: {type: object}
+      build_profile: {type: string, enum: [release]}
+      substrate_protocol: {type: integer, minimum: 1}
+      predecessor_set_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      predecessor_catalog_publication_attestation_hash:
+        type: [string, "null"]
+        pattern: "^[0-9a-f]{64}$"
+      expected_catalog_sequence: {type: integer, minimum: 0}
+      catalog_namespace: {type: string}
+      channel: {type: string}
+  state: {}
+  nodes:
+    inspect:
+      action:
+        item_id: service:bundle-release/input-inspect
+        params:
+          project_path: "${inputs.project_path}"
+          bundle_name: "${inputs.bundle_name}"
+          source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          target: "${inputs.target}"
+          build_profile: "${inputs.build_profile}"
+          predecessor_set_hash: "${inputs.predecessor_set_hash}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+      assign:
+        release_input: "${result.release_input}"
+        release_metadata: "${result}"
+      next: {type: unconditional, to: build}
+    build:
+      action:
+        item_id: service:bundle-release/generation-build
+        params:
+          release_input: "${state.release_input}"
+      assign:
+        accepted_product: "${result}"
+      next: {type: unconditional, to: request_tree_signing}
+    request_tree_signing:
+      action:
+        item_id: service:bundle-release/request-tree-signing
+        params:
+          accepted_product_result_hash: "${state.accepted_product.accepted_product_result_hash}"
+          selected_product_identity: "${state.accepted_product.selected_product_identity}"
+          selected_product_witness: "${state.accepted_product.selected_product_witness}"
+          input_content_manifest_hash: "${state.accepted_product.input_content_manifest_hash}"
+      assign:
+        materialization: "${result}"
+      next: {type: unconditional, to: capture}
+    capture:
+      action:
+        item_id: service:bundle-release/generation-capture
+        params:
+          materialization_result_hash: "${state.materialization.materialization_result_hash}"
+          signed_tree_manifest_hash: "${state.materialization.output_content_manifest_hash}"
+      assign:
+        captured: "${result}"
+      next: {type: unconditional, to: qualify}
+    qualify:
+      action:
+        item_id: service:bundle-release/generation-qualify
+        params:
+          release_input: "${state.release_input}"
+          captured_tree_manifest_hash: "${state.captured.content_manifest_hash}"
+          manifest_item_hash: "${state.materialization.output_manifest_item_hash}"
+      assign:
+        qualification: "${result}"
+      next: {type: unconditional, to: finalize}
+    finalize:
+      action:
+        item_id: service:bundle-release/generation-finalize
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
+          generation:
+            schema: ryeos.bundle_generation.v1
+            kind: bundle_generation
+            bundle_name: "${inputs.bundle_name}"
+            authored_version: "${state.release_metadata.authored_version}"
+            content_manifest_hash: "${state.captured.content_manifest_hash}"
+            manifest_item_hash: "${state.materialization.output_manifest_item_hash}"
+            target: "${inputs.target}"
+            build_profile: release
+            substrate_protocol: "${inputs.substrate_protocol}"
+            bundle_manifest_format: "${state.release_metadata.bundle_manifest_format}"
+            accepted_product_result_hash: "${state.accepted_product.accepted_product_result_hash}"
+            selected_product_identity: "${state.accepted_product.selected_product_identity}"
+            selected_product_witness: "${state.accepted_product.selected_product_witness}"
+            publisher_materialization_result_hash: "${state.materialization.materialization_result_hash}"
+            source_snapshot_hash: "${inputs.source_snapshot_hash}"
+            qualification_evidence_hashes: "${state.qualification.evidence_hashes}"
+            provenance_hash: "${state.qualification.provenance_hash}"
+            sbom_hash: "${state.qualification.sbom_hash}"
+      assign:
+        generation: "${result}"
+      next: {type: unconditional, to: request_generation_authorization}
+    request_generation_authorization:
+      action:
+        item_id: service:bundle-release/request-authorization
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
+          generation_hash: "${state.generation.generation_hash}"
+          qualification_evidence_hashes: "${state.qualification.evidence_hashes}"
+          expected_publisher_fingerprint: "${state.materialization.publisher_fingerprint}"
+      assign:
+        generation_authorization: "${result}"
+      next: {type: unconditional, to: compose_set}
+    compose_set:
+      action:
+        item_id: service:bundle-release/set-compose
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
+          predecessor_set_hash: "${inputs.predecessor_set_hash}"
+          replacement:
+            bundle_name: "${inputs.bundle_name}"
+            generation_hash: "${state.generation.generation_hash}"
+            publisher_attestation_hash: "${state.generation_authorization.generation_attestation_hash}"
+          substrate_protocol: "${inputs.substrate_protocol}"
+      assign:
+        bundle_set: "${result}"
+      next: {type: unconditional, to: publish_catalog}
+    publish_catalog:
+      action:
+        item_id: service:bundle-release/catalog-request-publication
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          channel: "${inputs.channel}"
+          bundle_name: "${inputs.bundle_name}"
+          generation_attestation_hash: "${state.generation_authorization.generation_attestation_hash}"
+          bundle_set_hash: "${state.bundle_set.bundle_set_hash}"
+          predecessor_publication_attestation_hash: "${inputs.predecessor_catalog_publication_attestation_hash}"
+          expected_sequence: "${inputs.expected_catalog_sequence}"
+      assign:
+        publication: "${result}"
+      next: {type: unconditional, to: commit_catalog}
+    commit_catalog:
+      action:
+        item_id: service:bundle-release/catalog-remote-publish
+        params:
+          remote: "${inputs.catalog_remote}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+          candidate_publication_attestation_hash: "${state.publication.publication_attestation_hash}"
+          expected_catalog_head: "${inputs.predecessor_catalog_publication_attestation_hash}"
+      assign:
+        catalog_commit: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        generation_hash: "${state.generation.generation_hash}"
+        generation_attestation_hash: "${state.generation_authorization.generation_attestation_hash}"
+        bundle_set_hash: "${state.bundle_set.bundle_set_hash}"
+        catalog_publication_attestation_hash: "${state.catalog_commit.catalog_publication_attestation_hash}"

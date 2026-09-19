@@ -9,6 +9,7 @@ mapfile -t full < <(ryeos_bundle_set_names full)
 mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
 mapfile -t local_inference < <(ryeos_bundle_set_names local-inference)
 mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
+mapfile -t release_authority < <(ryeos_bundle_set_names release-authority)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
 
 contains() {
@@ -58,7 +59,7 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard local-inference hosted-node hosted-workflow" ]]
+[[ "${bundle_set_ids[*]}" == "full central-host standard local-inference hosted-node hosted-workflow bundle-source release-authority" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
@@ -69,7 +70,14 @@ done
 for forbidden in hosted-node codex opencode web browser ryeos-ui; do
   ! contains "$forbidden" "${local_inference[@]}"
 done
-[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring" ]]
+[[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
+[[ "${release_authority[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference bundle-release" ]]
+contains bundle-release "${release_authority[@]}"
+! contains bundle-source "${release_authority[@]}"
+for ordinary_set in full central-host standard local-inference hosted-node hosted-workflow bundle-source; do
+  mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
+  ! contains bundle-release "${ordinary_members[@]}"
+done
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
 done
@@ -77,9 +85,10 @@ done
 ! ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "${bundle_set_ids[*]} contained-workflow development" ]]
+[[ "${node_init_profiles[*]}" == "full central-host standard local-inference hosted-node hosted-workflow bundle-source contained-workflow development release-authority" ]]
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set development)" == "full" ]]
+[[ "$(ryeos_node_init_profile_bundle_set release-authority)" == "release-authority" ]]
 ! ryeos_node_init_profile_bundle_set release-artifacts
 ! ryeos_node_init_profile_bundle_set unknown
 node_init_profile_dir="$ROOT/bundles/.ai/node/init/profiles"
@@ -119,6 +128,14 @@ for profile_name in "${node_init_profiles[@]}"; do
       | sort
   )"
   [[ "$actual_exact_bundles" == "$expected_exact_bundles" ]]
+  if [[ "$profile_name" == release-authority ]]; then
+    grep -Eq '^  - bundle-release$' "$node_init_profile"
+    grep -Eq '^      bundle-release:$' "$node_init_profile"
+    grep -Eq '^        - ryeos\.execute\.service\.bundle-release/submit$' "$node_init_profile"
+  else
+    ! grep -Eq '^  - bundle-release$' "$node_init_profile"
+    ! grep -Fq 'ryeos.execute.service.bundle-release/' "$node_init_profile"
+  fi
 done
 
 contains local-inference "${full[@]}"
@@ -146,12 +163,18 @@ trap 'rm -rf "$scope_tmp"' EXIT
 mkdir -p \
   "$scope_tmp/repo/scripts/lib" \
   "$scope_tmp/repo/scripts/pkg" \
+  "$scope_tmp/repo/scripts/release" \
+  "$scope_tmp/repo/bundles/bundle-release/.ai/config/bundle-release" \
+  "$scope_tmp/repo/bundles/.ai" \
   "$scope_tmp/repo/bundles/core/.ai/refs" \
   "$scope_tmp/repo/bundles/.ai/node/init/profiles" \
   "$scope_tmp/target"
 cp "$ROOT/scripts/populate-bundles.sh" "$scope_tmp/repo/scripts/populate-bundles.sh"
 cp "$ROOT/scripts/lib/ryeos-terminal.sh" "$scope_tmp/repo/scripts/lib/ryeos-terminal.sh"
 cp "$ROOT/scripts/pkg/bundle-sets.sh" "$scope_tmp/repo/scripts/pkg/bundle-sets.sh"
+cp "$ROOT/scripts/release/bundle-payload-ownership.py" "$scope_tmp/repo/scripts/release/bundle-payload-ownership.py"
+cp "$ROOT/bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml" "$scope_tmp/repo/bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+cp "$ROOT/bundles/.ai/PUBLISHER_TRUST.toml" "$scope_tmp/repo/bundles/.ai/PUBLISHER_TRUST.toml"
 cp "$node_init_profile_dir"/*.yaml "$scope_tmp/repo/bundles/.ai/node/init/profiles/"
 touch "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 openssl genpkey -algorithm ED25519 -out "$scope_tmp/publisher.pem" 2>/dev/null

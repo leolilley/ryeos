@@ -261,6 +261,40 @@ RUN test -x /usr/bin/tini
 RUN test -x /usr/bin/python3
 WORKDIR /app
 
+# Stable substrate for native bundle publication. This image contains only the
+# bootstrap set required to run a bundle-source node. Subsequent bundle
+# releases advance CAS/catalog and node-selection coordinates; they do not
+# rebuild this image or replace its seed on restart.
+FROM hosted-runtime AS ryeos-substrate
+COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=published /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+COPY --from=published /build/bundles/.ai           /opt/ryeos/.ai
+COPY --from=published /build/bundles/core          /opt/ryeos/core
+COPY --from=published /build/bundles/central-auth  /opt/ryeos/central-auth
+COPY --from=published /build/bundles/bundle-source /opt/ryeos/bundle-source
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+ENV RYEOS_INIT_NODE_PROFILE=bundle-source
+EXPOSE 8000
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG BUNDLE_BUILD_PROFILE=release
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFILE"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="substrate"
+LABEL io.ryeos.bundle-protocol="1.0"
+LABEL io.ryeos.bundle-seed-mode="first-boot-only"
+LABEL io.ryeos.build-profile="$BUNDLE_BUILD_PROFILE"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+
 FROM hosted-runtime AS ryeos-hosted-workflow
 COPY --from=published /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=published /build/target/release/ryeos            /usr/local/bin/ryeos

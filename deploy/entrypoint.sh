@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Entrypoint for ryeosd-full container.
 #
-# Ordinary mode runs `ryeos init --non-interactive` on every boot. Init is
-# idempotent — on first boot it creates keys, trust, and lays down bundles; on
-# subsequent boots it re-verifies and re-copies to bring bundles up to date
-# with the image. External host-runtime mode consumes an administrator-created
+# Ordinary mode seeds an absent installed generation exactly once. Subsequent
+# boots never reconcile installed bundles from image contents: native bundle
+# selection and stopped-node activation own those changes. External
+# host-runtime mode consumes an administrator-created
 # protected binding and does not run image-owned initialization.
 #
 # App root (/data/app) lives on the persistent /data volume, so operator
@@ -93,12 +93,22 @@ build_ryeos_init_args() {
     echo "[entrypoint] RYEOS_INIT_NODE_PROFILE is required" >&2
     return 1
   }
+  [[ "${RYEOS_SUBSTRATE_IMAGE:-}" =~ @sha256:[0-9a-f]{64}$ ]] || {
+    echo "[entrypoint] RYEOS_SUBSTRATE_IMAGE must be pinned by digest" >&2
+    return 1
+  }
+  [[ "${RYEOS_SUBSTRATE_PROTOCOL:-}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "[entrypoint] RYEOS_SUBSTRATE_PROTOCOL must be a nonzero integer" >&2
+    return 1
+  }
   INIT_ARGS=(
     init
     --non-interactive
     --app-root "$app_root"
     --source "$source_dir"
     --bind "$bind"
+    --substrate-image-digest "${RYEOS_SUBSTRATE_IMAGE##*@}"
+    --substrate-protocol "$RYEOS_SUBSTRATE_PROTOCOL"
   )
   case "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" in
     0|"")
@@ -158,13 +168,19 @@ main() {
     exec ryeosd "${DAEMON_ARGS[@]}"
   fi
 
-  echo "[entrypoint] running ryeos init --non-interactive"
   mkdir -p /data
-
-  collect_baked_publisher_trust_args /opt/ryeos
-  build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
-
-  ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
+  if [[ ! -e /data/app/.ai/bundles && ! -L /data/app/.ai/bundles ]]; then
+    echo "[entrypoint] installed bundle generation absent; seeding from substrate image"
+    collect_baked_publisher_trust_args /opt/ryeos
+    build_ryeos_init_args /opt/ryeos /data/app "$effective_bind"
+    ryeos "${INIT_ARGS[@]}" "${TRUST_ARGS[@]}"
+  else
+    if [[ "${RYEOS_RESET_NODE_POLICY_GENERATION:-0}" != 0 && -n "${RYEOS_RESET_NODE_POLICY_GENERATION:-}" ]]; then
+      echo "[entrypoint] node-policy replacement cannot use the first-boot image seed; use an authorized offline operation" >&2
+      return 1
+    fi
+    echo "[entrypoint] preserving installed bundle generation; image seed is first-boot only"
+  fi
 
   build_execution_history_schema_cut_args /data/app
   if [[ ${#EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]} -gt 0 ]]; then
@@ -172,7 +188,7 @@ main() {
     ryeos "${EXECUTION_HISTORY_SCHEMA_CUT_ARGS[@]}"
   fi
 
-  echo "[entrypoint] init complete, starting daemon"
+  echo "[entrypoint] bootstrap check complete, starting daemon"
   # Daemon bootstrap auto-inits any artifacts `ryeos init` doesn't produce
   # (e.g. public-identity.json, vault keypair). Idempotent — no-op when
   # already written.

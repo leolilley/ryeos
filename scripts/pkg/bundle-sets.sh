@@ -21,7 +21,7 @@
 # populate-bundles.sh).
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow
+  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow bundle-source release-authority
 }
 
 ryeos_bundle_set_names() {
@@ -32,12 +32,16 @@ ryeos_bundle_set_names() {
     local-inference) printf '%s\n' core central-auth standard local-inference ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
     hosted-workflow) printf '%s\n' core central-auth standard hosted-node codex opencode ;;
+    bundle-source)   printf '%s\n' core central-auth bundle-source ;;
+    release-authority)
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference bundle-release
+      ;;
     # Internal publication superset. This is not an installable bundle set and
     # deliberately has no node init profile: one release build publishes every
     # bundle needed by the native archive and release images, whose final
     # stages still select one exact deployable set above.
     release-artifacts)
-      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring
+      printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring bundle-source bundle-release
       ;;
     *) return 1 ;;
   esac
@@ -47,7 +51,7 @@ ryeos_bundle_set_names() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow contained-workflow development
+  printf '%s\n' full central-host standard local-inference hosted-node hosted-workflow bundle-source contained-workflow development release-authority
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -55,9 +59,10 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|local-inference|hosted-node|hosted-workflow) printf '%s\n' "$1" ;;
+    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source) printf '%s\n' "$1" ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
     development) printf '%s\n' full ;;
+    release-authority) printf '%s\n' release-authority ;;
     *) return 1 ;;
   esac
 }
@@ -158,7 +163,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|local-inference|hosted-node|hosted-workflow)
+    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-authority)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -173,7 +178,7 @@ ryeos_bundle_set_bin_managed_names() {
     # central-auth (Python tool support) and tv-tracker-authoring (reuses
     # bin:core/ryeos-core-tools) own no compiled
     # binaries; local-inference owns separately built payloads.
-    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" ]] && continue
+    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" || "$name" == "local-inference" || "$name" == "bundle-source" || "$name" == "bundle-release" ]] && continue
     printf '%s\n' "$name"
   done
 }

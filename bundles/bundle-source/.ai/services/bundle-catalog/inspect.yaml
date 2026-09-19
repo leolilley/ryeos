@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-19T03:43:17Z:12e246b3bcc96c08d5e44edd86d15ade33ffd6be9d3bab809df56dfa2944bfc1:oxZBOG2gy61tmo5d0IO2MtmpyBJexYTHr5Fuj4JezclfL3hEh62jg89xrZkYblQrGgvvuf4RaYYPcPgvM5WtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle_catalog.inspect
+required_caps: ["ryeos.execute.service.bundle-catalog/inspect"]
+result_retention: digest_only
+schema:
+  catalog_namespace: string
+  catalog_publication_attestation_hash: string?
+description: "Inspect one exact catalog publication without resolving floating state"

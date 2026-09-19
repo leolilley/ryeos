@@ -1,0 +1,40 @@
+# ryeos:signed:2026-09-19T03:51:20Z:2edea3dd0f4bb69ac234efff77129b3190b3d61920d411012409bfe7738b2331:Z6VrDbYuWXZBJhHp7nCKoPX/MDbdKk2vFe2EaKWjzbcKs0Vkmn1Jz8DmWg6JURhPDzM2kBtIO6IQe+PIpyySDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Run the exact native bundle verifier against the admitted captured producer product.
+effects: live
+external_product_slots:
+  - id: subject
+    relationship_ref: config:bundle-release/native-build-products
+    relationship: native_bundle_to_release_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: native-bundle
+config:
+  start: qualify
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [release_input, release_input_digest, captured_tree_manifest_hash, manifest_item_hash]
+    properties:
+      release_input: {type: object}
+      release_input_digest: {type: string, pattern: "^[0-9a-f]{64}$"}
+      captured_tree_manifest_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      manifest_item_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+  state: {}
+  nodes:
+    qualify:
+      action:
+        item_id: tool:ryeos/bundle-release/native-qualify
+        params:
+          release_input: "${inputs.release_input}"
+          release_input_digest: "${inputs.release_input_digest}"
+          captured_tree_manifest_hash: "${inputs.captured_tree_manifest_hash}"
+          manifest_item_hash: "${inputs.manifest_item_hash}"
+      assign: {qualification: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.qualification}"

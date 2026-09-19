@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-18T23:55:30Z:936ee3ef7f21bdd1c65676a807a592e5ca782d723a4b895f540f9ca93d9e16ca:MCg8gN+qlb97W4Od7zD4KqWThEp6DhpiBmP0EG2GCsNmLcpXe96t37OQ6gobqSjMOGD20nn8C/TgyVJjeAfWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T03:43:17Z:9148a7ba6c7b61f7e7eb72162051d86a5bea47a1053c792844b3102802dd11dc:Hlz05tHCuQP9qTRu9a5S0Le8J0iFmyiBPVW7RsCJWzVF0T/I4C5lmEy/UyQX/NQdXgQpZrtGKdI9yozR94XQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
@@ -35,6 +35,16 @@ changes, while bundle generations are built, qualified, signed, and uploaded
 independently. A deployed bundle-source node serves a bounded current catalog
 and explicitly retained immutable release closures. Other nodes select an exact bundle set, fetch its closure, apply local
 admission, and compose their installed generation.
+
+The canonical publication topology crosses an authenticated remote boundary:
+the release authority uploads the exact bounded closure through a pinned RyeOS
+named remote to a persistent bundle-source node and advances its catalog with
+the resulting durable upload session. The normal RyeOS remote client preserves
+authenticated node identity; this path does not introduce a parallel bearer
+protocol. Sharing a substrate image does not imply sharing a CAS or collapsing
+those authorities. A deliberately combined node may use local closure staging
+as an explicit optimization, but the normal release Graph and default release
+profile do not depend on or receive that capability.
 
 This is also the first concrete release slice of the
 [RyeOS-native development platform](ryeos-native-development-platform.md).
@@ -353,6 +363,13 @@ The service surface should remain small:
 - publisher-authorized catalog publication; and
 - operator diagnostics, retention, and repair.
 
+Normal publication always uses the authenticated named-remote upload route
+from the release authority to the bundle-source node, followed by catalog publication against
+the exact expected predecessor. A local-stage route may exist for a dedicated
+combined topology where both roles intentionally share a CAS. It is not part
+of the default release-authority capability set and must never silently replace
+a failed or missing remote transport configuration.
+
 The current `objects/put` session is bound to a principal-scoped project HEAD
 and cannot be reused unchanged. The catalog path needs its own typed durable
 publication key and upload route, while sharing the bounded chunking, hashing,
@@ -544,6 +561,9 @@ lineage.
 - Publish one data-only bundle, then one non-core native bundle.
 - Keep a thin GitHub trigger only where current bootstrap requires it.
 - Prove bundle-only publication performs no image build and no daemon build.
+- Prove the default Graph transfers the bounded closure to a separately
+  deployed bundle-source node; local staging is exercised only by an explicit
+  combined-node profile.
 
 ### Stage 6 — stable substrate deployment
 
@@ -575,6 +595,8 @@ activation contract are qualified.
 The first production cut is complete only when:
 
 - the deployed substrate image remains byte-identical across a bundle-only release;
+- the default release path uploads to a persistent bundle-source node and does
+  not require a shared CAS or local-stage capability;
 - bundle-only production does not build or publish an OCI image or compile
   `ryeosd`;
 - the new generation retains exact scoped evidence claims about source,

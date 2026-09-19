@@ -1,0 +1,21 @@
+# ryeos:signed:2026-09-19T03:51:21Z:ac8ba2adaee2d34dbc140f4e57768138a82f924d1292bfe8d0f25048b36920e7:vmoO8XLxu8Zy0gAr7QfCFxeaFcc9sbz9TbkXzvCZVAdcl6C6SN80bSzcqUouLACHt7mrUF+GOBpVwmLoQQ03Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: submit
+version: "1.0.0"
+description: Submit the canonical native release Graph from an admitted RyeOS development project.
+endpoint: bundle_release.submit
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/submit"]
+schema:
+  project_path: string
+  catalog_remote: string
+  source_snapshot_hash: string
+  bundle_name: string
+  target: object
+  build_profile: string
+  substrate_protocol: integer
+  predecessor_set_hash: string
+  predecessor_catalog_publication_attestation_hash: string?
+  expected_catalog_sequence: integer
+  catalog_namespace: string
+  channel: string

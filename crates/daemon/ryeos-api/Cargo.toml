@@ -35,9 +35,11 @@ ryeos-graph-definition = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
+ryeos-node = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-bundle = { workspace = true }
+ryeos-bundle-publication-contract = { workspace = true }
 ryeos-core-tools = { workspace = true }
 ryeos-directive-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }

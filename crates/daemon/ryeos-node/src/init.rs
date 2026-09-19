@@ -125,6 +125,10 @@ pub struct InitOptions {
     /// an exact bundle inventory and the first complete node-policy
     /// generation. It is create-once and never becomes live policy authority.
     pub node_profile: Option<String>,
+    /// Deployment-authorized identity of the immutable substrate carrying this
+    /// node. Required for a fresh initialization; an existing node reloads and
+    /// verifies the record and refuses contradictory replacement input.
+    pub substrate_identity: Option<SubstrateIdentity>,
     /// Explicitly replace one existing complete policy generation from the
     /// selected trusted profile as part of this same stopped-node init
     /// transaction. This is never inferred from a mismatch.
@@ -171,11 +175,13 @@ pub struct InitReport {
     pub bundles_installed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_profile: Option<String>,
+    pub substrate_identity: SubstrateIdentity,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
 
-const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v2";
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v3";
+const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v1";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
 const INIT_SEED_MAX_BYTES: u64 = ryeos_app::node_document::MAX_ITEM_BYTES;
 
@@ -187,7 +193,89 @@ struct InitCompletionBody {
     node_fingerprint: String,
     vault_fingerprint: String,
     policy_generation_digest: String,
+    substrate_identity_digest: String,
     registration_digests: BTreeMap<String, String>,
+}
+
+/// Immutable deployment identity used when admitting independently published
+/// bundle sets. The profile is required-nullable so absence is itself bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstrateIdentity {
+    pub schema: String,
+    pub image_digest: String,
+    pub protocol: u32,
+    pub node_profile: Option<String>,
+}
+
+impl SubstrateIdentity {
+    pub fn new(image_digest: String, protocol: u32, node_profile: Option<String>) -> Result<Self> {
+        let identity = Self {
+            schema: SUBSTRATE_IDENTITY_SCHEMA.to_owned(),
+            image_digest,
+            protocol,
+            node_profile,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema != SUBSTRATE_IDENTITY_SCHEMA {
+            bail!("unsupported substrate identity schema");
+        }
+        let digest = self
+            .image_digest
+            .strip_prefix("sha256:")
+            .context("substrate image digest must use sha256:<lowercase-hex>")?;
+        require_lower_hex_digest("substrate image digest", digest)?;
+        if self.protocol == 0 {
+            bail!("substrate protocol must be nonzero");
+        }
+        if let Some(profile) = &self.node_profile {
+            ryeos_app::node_policy::generation::validate_init_profile_name(profile)
+                .context("validate substrate node-profile binding")?;
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
+}
+
+fn substrate_identity_path(app_root: &Path) -> PathBuf {
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/substrate-identity.json")
+}
+
+fn publish_substrate_identity(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
+    identity.validate()?;
+    let path = substrate_identity_path(app_root);
+    if path.exists() {
+        let current = load_substrate_identity_record(app_root)?;
+        if current != *identity {
+            bail!("refusing to replace the initialized substrate identity");
+        }
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(identity)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("write substrate identity {}: {error}", path.display()))
+}
+
+fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> {
+    let path = substrate_identity_path(app_root);
+    let bytes = lillux::read_regular_file_bounded_no_follow(&path, 16 * 1024)
+        .with_context(|| format!("read substrate identity {}", path.display()))?;
+    let identity: SubstrateIdentity = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse substrate identity {}", path.display()))?;
+    identity.validate()?;
+    Ok(identity)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,12 +285,52 @@ struct InitCompletionDocument {
     signature: String,
 }
 
+/// Explicit offline inputs used to prepare the completion fence for a
+/// prospective stopped-node bundle-set transaction.  In particular, this API
+/// never discovers an operator key from the app root or from `AppState`.
+#[derive(Debug, Clone)]
+pub struct ProspectiveInitCompletionInput {
+    pub node_fingerprint: String,
+    pub vault_fingerprint: String,
+    pub policy_generation_digest: String,
+    pub registration_digests: BTreeMap<String, String>,
+    pub substrate_identity: Option<SubstrateIdentity>,
+}
+
+/// Operator authority supplied by the stopped-node caller.  Keeping the key
+/// behind this narrow type prevents prospective completion construction from
+/// silently falling back to an online node-owned key.
+pub struct OfflineInitCompletionSigner {
+    signing_key: SigningKey,
+}
+
+impl OfflineInitCompletionSigner {
+    pub fn from_pkcs8_pem(pem: &str) -> Result<Self> {
+        Ok(Self {
+            signing_key: SigningKey::from_pkcs8_pem(pem)
+                .context("decode explicit offline init-completion signer")?,
+        })
+    }
+
+    pub fn fingerprint(&self) -> String {
+        compute_fingerprint(&self.signing_key.verifying_key())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProspectiveInitCompletion {
+    pub bytes: Vec<u8>,
+    pub document_hash: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitCompletionReport {
     pub operator_fingerprint: String,
     pub node_fingerprint: String,
     pub vault_fingerprint: String,
     pub policy_generation_digest: String,
+    pub substrate_identity: SubstrateIdentity,
+    pub completion_digest: String,
     pub bundles_verified: usize,
 }
 
@@ -316,6 +444,20 @@ fn run_init_internal(
 
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
+    match &opts.substrate_identity {
+        Some(identity) => {
+            identity.validate()?;
+            if identity.node_profile != opts.node_profile {
+                bail!("substrate identity node-profile binding disagrees with initialization");
+            }
+            publish_substrate_identity(&opts.app_root, identity)?;
+        }
+        None => {
+            load_substrate_identity_record(&opts.app_root).context(
+                "fresh initialization requires explicit --substrate-image-digest and --substrate-protocol",
+            )?;
+        }
+    }
     ryeos_app::config::retire_pre_node_policy_config(&opts.app_root)
         .context("retire predecessor daemon policy fields")?;
     let bootstrap_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
@@ -888,6 +1030,7 @@ fn run_init_internal(
         vault_pubkey_fingerprint,
         bundles_installed,
         node_profile: opts.node_profile.clone(),
+        substrate_identity: load_substrate_identity_record(&opts.app_root)?,
         next_steps,
     })
 }
@@ -1009,12 +1152,14 @@ fn write_init_completion(
     vault_fingerprint: &str,
     policy_generation_digest: &str,
 ) -> Result<()> {
+    let substrate_identity = load_substrate_identity_record(app_root)?;
     let body = InitCompletionBody {
         schema: INIT_COMPLETION_SCHEMA.to_string(),
         operator_fingerprint: operator_fingerprint.to_string(),
         node_fingerprint: node_fingerprint.to_string(),
         vault_fingerprint: vault_fingerprint.to_string(),
         policy_generation_digest: policy_generation_digest.to_string(),
+        substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: registration_digests(app_root)?,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
@@ -1035,6 +1180,126 @@ fn write_init_completion(
         lillux::atomic_write(&path, &bytes)
             .map_err(|error| anyhow!("write init completion {}: {error}", path.display()))
     })
+}
+
+/// Construct, but do not publish, the exact signed completion bytes for a
+/// prospective bundle set.  The caller must derive `registration_digests`
+/// from the admitted future registration bytes, not from the live registry.
+pub fn prepare_prospective_init_completion(
+    signer: &OfflineInitCompletionSigner,
+    input: ProspectiveInitCompletionInput,
+) -> Result<ProspectiveInitCompletion> {
+    if input.registration_digests.is_empty() || input.registration_digests.len() > 256 {
+        bail!("prospective init completion requires a bounded nonempty registration set");
+    }
+    for (name, digest) in &input.registration_digests {
+        if !is_valid_bundle_name(name) {
+            bail!("prospective init completion has invalid bundle name {name}");
+        }
+        require_lower_hex_digest("prospective registration digest", digest)?;
+    }
+    for (label, digest) in [
+        ("node fingerprint", &input.node_fingerprint),
+        ("vault fingerprint", &input.vault_fingerprint),
+        ("policy generation digest", &input.policy_generation_digest),
+    ] {
+        require_lower_hex_digest(label, digest)?;
+    }
+    let substrate_identity = load_substrate_identity_record_from_input(&input)?;
+    let body = InitCompletionBody {
+        schema: INIT_COMPLETION_SCHEMA.to_owned(),
+        operator_fingerprint: signer.fingerprint(),
+        node_fingerprint: input.node_fingerprint,
+        vault_fingerprint: input.vault_fingerprint,
+        policy_generation_digest: input.policy_generation_digest,
+        substrate_identity_digest: substrate_identity.digest()?,
+        registration_digests: input.registration_digests,
+    };
+    let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
+    let signature = signer.signing_key.sign(canonical.as_bytes());
+    let document = InitCompletionDocument {
+        body,
+        signature: format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        ),
+    };
+    let bytes = serde_json::to_vec_pretty(&document)?;
+    if bytes.len() as u64 > INIT_COMPLETION_MAX_BYTES {
+        bail!("prospective init completion exceeds its size limit");
+    }
+    Ok(ProspectiveInitCompletion {
+        document_hash: lillux::sha256_hex(&bytes),
+        bytes,
+    })
+}
+
+fn load_substrate_identity_record_from_input(
+    input: &ProspectiveInitCompletionInput,
+) -> Result<SubstrateIdentity> {
+    input
+        .substrate_identity
+        .clone()
+        .context("prospective init completion requires the verified persisted substrate identity")
+}
+
+/// Derive the future whole-registry digest map from the exact action manifest
+/// and then sign it with explicit offline operator authority.
+pub fn prepare_bundle_set_init_completion(
+    app_root: &Path,
+    signer: &OfflineInitCompletionSigner,
+    node_fingerprint: String,
+    vault_fingerprint: String,
+    policy_generation_digest: String,
+    actions: &[ryeos_app::bundle_set_transaction::PreparedBundleSetAction],
+) -> Result<ProspectiveInitCompletion> {
+    if actions.is_empty() || actions.len() > 256 {
+        bail!("prospective init completion requires a bounded nonempty action set");
+    }
+    let mut future = registration_digests(app_root)?;
+    let mut names = BTreeSet::new();
+    for action in actions {
+        if !names.insert(action.bundle_name.as_str()) {
+            bail!("prospective bundle-set actions repeat a bundle name");
+        }
+        let incumbent = future.get(&action.bundle_name).map(String::as_str);
+        if incumbent != action.old_registration_digest.as_deref() {
+            bail!(
+                "prospective registration predecessor disagrees for {}",
+                action.bundle_name
+            );
+        }
+        match &action.new_registration_digest {
+            Some(digest) => {
+                require_lower_hex_digest("prospective registration digest", digest)?;
+                future.insert(action.bundle_name.clone(), digest.clone());
+            }
+            None => {
+                future.remove(&action.bundle_name);
+            }
+        }
+    }
+    prepare_prospective_init_completion(
+        signer,
+        ProspectiveInitCompletionInput {
+            node_fingerprint,
+            vault_fingerprint,
+            policy_generation_digest,
+            registration_digests: future,
+            substrate_identity: Some(load_verified_substrate_identity(app_root)?),
+        },
+    )
+}
+
+fn require_lower_hex_digest(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be a lowercase SHA-256 digest");
+    }
+    Ok(())
 }
 
 fn seal_current_init_completion(
@@ -1130,16 +1395,15 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if document.body.schema != INIT_COMPLETION_SCHEMA {
         bail!("unsupported init completion schema");
     }
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
-    let operator_pem = Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
-    )?);
-    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
-    let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
+    let trust_store = TrustStore::load(None, &operator_config_root)
+        .context("load pinned operator verification authority")?;
+    let operator_key = trust_store
+        .get(&document.body.operator_fingerprint)
+        .context("init completion operator is absent from pinned trust")?;
+    let operator_fingerprint = compute_fingerprint(operator_key);
     if operator_fingerprint != document.body.operator_fingerprint {
-        bail!("init completion operator fingerprint does not match the current key");
+        bail!("init completion operator fingerprint disagrees with pinned public key");
     }
     let signature = document
         .signature
@@ -1149,18 +1413,16 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(signature)?)?;
     let canonical = lillux::canonical_json(&serde_json::to_value(&document.body)?)?;
     operator_key
-        .verifying_key()
         .verify(canonical.as_bytes(), &signature)
         .context("verify init completion signature")?;
 
-    let node_key_path = app_root
+    let node_identity_path = app_root
         .join(ryeos_engine::AI_DIR)
-        .join("node/identity/private_key.pem");
-    let node_pem = Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&node_key_path, 32 * 1024)?,
-    )?);
-    let node_key = SigningKey::from_pkcs8_pem(node_pem.as_str())?;
-    if compute_fingerprint(&node_key.verifying_key()) != document.body.node_fingerprint {
+        .join("node/identity/public-identity.json");
+    let node_identity =
+        ryeos_app::identity::NodeIdentity::load_public_identity(&node_identity_path)
+            .context("load pinned public node identity for init-completion verification")?;
+    if node_identity.verified_fingerprint()? != document.body.node_fingerprint {
         bail!("init completion node fingerprint does not match the current key");
     }
     let vault_path = app_root
@@ -1174,7 +1436,6 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if registrations != document.body.registration_digests {
         bail!("bundle registrations differ from the signed init completion record");
     }
-    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
     let generation = ryeos_app::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
@@ -1183,13 +1444,27 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
     if generation.digest() != document.body.policy_generation_digest {
         bail!("node policy generation differs from the signed init completion record");
     }
+    let substrate_identity = load_substrate_identity_record(app_root)?;
+    if substrate_identity.digest()? != document.body.substrate_identity_digest {
+        bail!("substrate identity differs from the signed init completion record");
+    }
     Ok(Some(InitCompletionReport {
         operator_fingerprint,
         node_fingerprint: document.body.node_fingerprint,
         vault_fingerprint,
         policy_generation_digest: document.body.policy_generation_digest,
+        substrate_identity,
+        completion_digest: lillux::sha256_hex(&bytes),
         bundles_verified: registrations.len(),
     }))
+}
+
+/// Load substrate compatibility authority only after verifying the complete
+/// operator-signed initialization fence. This is safe for stopped-node tools.
+pub fn load_verified_substrate_identity(app_root: &Path) -> Result<SubstrateIdentity> {
+    let completion = verify_init_completion(app_root)?
+        .context("node has no verified initialization completion")?;
+    Ok(completion.substrate_identity)
 }
 
 fn prospective_bundle_records(
@@ -1852,6 +2127,14 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            substrate_identity: Some(
+                SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("full".to_owned()),
+                )
+                .unwrap(),
+            ),
             replace_node_policy_generation: false,
             skip_preflight: true,
         }
@@ -1970,6 +2253,14 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-node".to_owned()),
+            substrate_identity: Some(
+                SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("hosted-node".to_owned()),
+                )
+                .unwrap(),
+            ),
             replace_node_policy_generation: false,
             skip_preflight: true,
         };
@@ -2075,6 +2366,36 @@ mod tests {
             fs::read(genesis_path).expect("operator genesis #2"),
             "reinitialization must not rewrite operator genesis"
         );
+    }
+
+    #[test]
+    fn substrate_identity_survives_restart_and_is_completion_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("initialize substrate identity");
+
+        let first = load_verified_substrate_identity(&state).expect("offline verified load");
+        assert_eq!(first.image_digest, format!("sha256:{}", "1".repeat(64)));
+        assert_eq!(first.protocol, 1);
+        assert_eq!(first.node_profile.as_deref(), Some("full"));
+        assert!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .completion_digest
+                .len()
+                == 64
+        );
+
+        let path = substrate_identity_path(&state);
+        let mut tampered: SubstrateIdentity =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        tampered.protocol = 2;
+        fs::write(&path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let error = load_verified_substrate_identity(&state)
+            .expect_err("restart must reject substrate identity tampering");
+        assert!(format!("{error:#}").contains("signed init completion"));
     }
 
     #[test]
@@ -2242,6 +2563,7 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             node_profile: Some("hosted-workflow".to_owned()),
+            substrate_identity: None,
             replace_node_policy_generation: true,
             skip_preflight: true,
         };
@@ -2349,6 +2671,14 @@ mod tests {
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            substrate_identity: Some(
+                SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("full".to_owned()),
+                )
+                .unwrap(),
+            ),
             replace_node_policy_generation: false,
             skip_preflight: true,
         };
@@ -2372,6 +2702,14 @@ mod tests {
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
             node_profile: Some("full".to_owned()),
+            substrate_identity: Some(
+                SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("full".to_owned()),
+                )
+                .unwrap(),
+            ),
             replace_node_policy_generation: false,
             skip_preflight: true,
         };
@@ -2754,6 +3092,14 @@ typo_field: oops
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             node_profile: Some("full".to_owned()),
+            substrate_identity: Some(
+                SubstrateIdentity::new(
+                    format!("sha256:{}", "1".repeat(64)),
+                    1,
+                    Some("full".to_owned()),
+                )
+                .unwrap(),
+            ),
             replace_node_policy_generation: false,
             skip_preflight: true,
         };

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T03:43:10Z:58c5f46a2f1fe8462ff8eb1a737fc7f57da83bab841d0d95d82038c5c43e5262:BH+xPqANg+UrNRwkgRvq4Q2oEaWjqRXe7Gu5HzyOsqLAy73RWoIOIOhQIUiS4JyDbqV43LeE6UrS297SYJVdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:05:59Z:85364af5ba1d42b7b7facacb70803dc88f3fdfebe58b98732a10298ba1f35c02:9nnWMQ/Mf1rHJXvytIwkP4fxdXeXQ+OQUu9Uc5j0g98QKNgoYpDL/eGbIJkxOLnq8F9v49T5FXDHG8NJByZfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -8,6 +8,11 @@ exact_bundles:
   - opencode
   - standard
 policies:
+  bundle_publication:
+    schema: 1
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000

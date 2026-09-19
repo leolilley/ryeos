@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-19T03:43:17Z:11f1ff7ef4ae9fb66ead6aefbac37d22cd9559539f5d6696958294e692eab2c4:C5k68eHmmrgR/bMAv1WVWcHfCQfHUvFMy1uYXML5yoc25yP1KfZxvGLfBgS7hVPBnfqCkXbN5BH/PGv438ewDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle_catalog.resolve
+required_caps: ["ryeos.execute.service.bundle-catalog/resolve"]
+result_retention: digest_only
+schema:
+  catalog_namespace: string
+  set_name: string
+  channel: string
+description: "Resolve one channel to an immutable verified catalog and curated-set coordinate"
