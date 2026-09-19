@@ -576,6 +576,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: None,
+                    invocation_origin: None,
                     input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -987,6 +988,13 @@ impl RyeOsCore {
                 if target == source {
                     return Vec::new();
                 }
+                if self.tile_uses_view_set_selection(tile) {
+                    self.notice(
+                        "This view uses selection scoped to its current view set. It cannot be moved to another view set yet; open it there instead.",
+                        super::view_model::RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
                 let moved = if source < target {
                     let (before, after) = self.view_sets.split_at_mut(target);
                     before[source].move_tile_to_view_set(&mut after[0], tile)
@@ -1212,6 +1220,7 @@ impl RyeOsCore {
                         request_bounds,
                         intent: super::effect::InvokeIntent::Service,
                         success_notice: None,
+                        invocation_origin: None,
                         input_origin: None,
                         route_seq: None,
                         ratchet_on_thread_id: false,

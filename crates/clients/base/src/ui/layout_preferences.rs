@@ -184,12 +184,51 @@ impl RyeOsCore {
         id: String,
         name: String,
     ) -> Result<SavedViewSetTemplate, String> {
+        self.capture_view_set_template(id, name, None)
+    }
+
+    /// A composition-management view is not part of the composition it saves.
+    /// Remove only its exact mounted instance from a detached copy; never
+    /// close live views or identify management UI by a hardcoded product ref.
+    pub(crate) fn capture_view_set_template(
+        &self,
+        id: String,
+        name: String,
+        exclude: Option<&crate::ids::RyeOsViewInstanceKey>,
+    ) -> Result<SavedViewSetTemplate, String> {
         let view_set = self
             .view_sets
             .get(self.active_view_set)
             .ok_or("active view set is unavailable")?;
+        let mut captured = view_set.clone();
+        if let Some(instance) = exclude {
+            if let Some(tile) = captured
+                .tiles
+                .iter()
+                .find_map(|(id, tile)| (&tile.instance_key == instance).then_some(*id))
+            {
+                captured.close_tile(tile);
+            } else {
+                use super::model::{RyeOsDockEdge, dock_view_instance_key};
+                let edge = [
+                    RyeOsDockEdge::Top,
+                    RyeOsDockEdge::Bottom,
+                    RyeOsDockEdge::Left,
+                    RyeOsDockEdge::Right,
+                ]
+                .into_iter()
+                .find(|edge| dock_view_instance_key(captured.id, *edge) == *instance)
+                .ok_or("composition-management instance is not mounted in this view set")?;
+                match edge {
+                    RyeOsDockEdge::Top => captured.docks.top = None,
+                    RyeOsDockEdge::Bottom => captured.docks.bottom = None,
+                    RyeOsDockEdge::Left => captured.docks.left = None,
+                    RyeOsDockEdge::Right => captured.docks.right = None,
+                }
+            }
+        }
         let template = SavedViewSetTemplate {
-            composition: capture_view_set(view_set, id.clone())?,
+            composition: capture_view_set(&captured, id.clone())?,
             id,
             name,
         };
@@ -387,6 +426,21 @@ mod tests {
                 .iter()
                 .all(|id| !ids.contains(id))
         );
+    }
+
+    #[test]
+    fn management_capture_omits_only_its_mount_without_changing_live_layout() {
+        let source = core();
+        let original = source.export_layout_preferences().unwrap();
+        let ids = source.view_sets[0].tile_ids();
+        let instance = &source.view_sets[0].tiles[&ids[0]].instance_key;
+        let template = source
+            .capture_view_set_template("saved".into(), "Saved".into(), Some(instance))
+            .unwrap();
+        let encoded = serde_json::to_string(&template).unwrap();
+        assert!(!encoded.contains("view:test/one"));
+        assert!(encoded.contains("view:test/two"));
+        assert_eq!(source.export_layout_preferences().unwrap(), original);
     }
 
     #[test]

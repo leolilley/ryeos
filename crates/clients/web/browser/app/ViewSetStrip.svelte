@@ -17,12 +17,20 @@
     await tick();
     if (editingId === id) { renameInput?.focus(); renameInput?.select(); }
   }
-  function finishRename() {
+  async function leaveRename() {
+    const id = editingId;
+    editingId = null;
+    await tick();
+    if (id !== null) {
+      document.querySelector<HTMLElement>(`[data-focus-key="view-set:${id}:select"]`)?.focus();
+    }
+  }
+  async function finishRename() {
     const title = draft.trim();
     if (editingId !== null && title) {
       dispatch({ type: "activate", intent: { type: "rename_view_set", view_set_id: editingId, title } });
     }
-    editingId = null;
+    await leaveRename();
   }
   $effect(() => {
     if (editingId !== null && !model.tabs.some(tab => tab.view_set_id === editingId && tab.active)) editingId = null;
@@ -35,9 +43,9 @@
       <div class="view-set-tab" class:active={tab.active}>
         {#if editingId === tab.view_set_id}
           <form class="view-set-rename" onsubmit={(event) => { event.preventDefault(); finishRename(); }}>
-            <input bind:this={renameInput} data-focus-key={`view-set:${tab.view_set_id}:rename`} aria-label="View set name" bind:value={draft} onkeydown={(event) => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); editingId = null; } }} />
+            <input bind:this={renameInput} data-focus-key={`view-set:${tab.view_set_id}:rename`} aria-label="View set name" bind:value={draft} onkeydown={(event) => { event.stopPropagation(); if (event.key === "Escape") { event.preventDefault(); leaveRename(); } }} />
             <button type="submit" aria-label="Save view set name">✓</button>
-            <button type="button" aria-label="Cancel rename" onclick={() => editingId = null}>×</button>
+            <button type="button" aria-label="Cancel rename" onclick={leaveRename}>×</button>
           </form>
         {:else}
         <button

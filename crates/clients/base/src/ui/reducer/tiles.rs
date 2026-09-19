@@ -27,7 +27,70 @@ fn derived_group_title(view_ref: &str) -> String {
     }
 }
 
+fn is_selection_facet(path: &str) -> bool {
+    path == super::super::seat::KEY_SELECTION
+        || path.starts_with(&format!("{}.", super::super::seat::KEY_SELECTION))
+}
+
+fn value_reads_selection(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => value
+            .strip_prefix("@facet:")
+            .and_then(|path| path.split('|').next())
+            .is_some_and(is_selection_facet),
+        serde_json::Value::Array(values) => values.iter().any(value_reads_selection),
+        serde_json::Value::Object(values) => values.values().any(value_reads_selection),
+        _ => false,
+    }
+}
+
+fn refresh_reads_selection(refresh: &serde_json::Value) -> bool {
+    refresh
+        .get("on_facet")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_selection_facet)
+}
+
 impl RyeOsCore {
+    /// Until a mounted view can retain an explicit attachment owner across
+    /// view sets, moving a selection-dependent instance would silently change
+    /// which scoped fold it reads or writes. Keep that ambiguity out of the
+    /// layout operation instead of pretending the destination owns it.
+    pub(crate) fn tile_uses_view_set_selection(&self, tile: TileId) -> bool {
+        let Some(view_ref) = self.view_sets[self.active_view_set]
+            .tiles
+            .get(&tile)
+            .map(|tile| tile.view.view_ref.as_str())
+        else {
+            return false;
+        };
+        let Some(binding) = self.views.get(view_ref) else {
+            return false;
+        };
+
+        binding.facet.as_deref().is_some_and(is_selection_facet)
+            || value_reads_selection(&binding.body)
+            || refresh_reads_selection(&binding.refresh)
+            || binding.sources.values().any(|source| {
+                value_reads_selection(&source.params) || refresh_reads_selection(&source.refresh)
+            })
+            || binding.field_state.as_ref().is_some_and(|state| {
+                state.cursor_scope.subject.iter().any(|subject| {
+                    value_reads_selection(&serde_json::Value::String(subject.clone()))
+                })
+            })
+            || binding.affordances.iter().any(|affordance| {
+                let Some(invoke) = affordance.get("invoke") else {
+                    return false;
+                };
+                invoke.get("plane").and_then(serde_json::Value::as_str) == Some("ui")
+                    && invoke
+                        .get("facet")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_selection_facet)
+            })
+    }
+
     /// Presentation concurrency fence, not execution authority. Derive it from
     /// the canonical tree instead of maintaining a second mutable revision.
     pub fn layout_guard(&self) -> String {
@@ -652,6 +715,86 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> RyeOsSplitAxisVm {
 mod tests {
     use super::*;
     use crate::ui::reducer::test_support::*;
+
+    #[test]
+    fn cross_view_set_move_refuses_selection_readers_and_writers() {
+        for binding in [
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {"default": {
+                    "ref": "service:test/source",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }}
+            }),
+            serde_json::json!({
+                "widget": "rows",
+                "affordances": [{
+                    "id": "select",
+                    "invoke": {"plane": "ui", "facet": "selection.work", "value": {}}
+                }]
+            }),
+        ] {
+            let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+            seed_view_value(&mut core, "view:test/selection-dependent", binding);
+            core.add_center_tile(ViewSpec::bound("view:test/selection-dependent"));
+            let source = core.active_view_set;
+            let tile = core.view_sets[source].focused_tile;
+
+            core.new_view_set();
+            let target_id = core.view_sets[core.active_view_set].id;
+            core.switch_view_set_tab(source);
+            let guard = core.layout_guard();
+
+            let effects = core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::Activate {
+                    intent: RyeOsUiIntent::MoveTileToViewSet {
+                        layout_guard: guard,
+                        tile_id: tile.0.to_string(),
+                        view_set_id: target_id,
+                    },
+                },
+            });
+
+            assert!(effects.is_empty());
+            assert!(core.view_sets[source].tiles.contains_key(&tile));
+            assert!(!core.view_sets[1].tiles.contains_key(&tile));
+            assert_eq!(core.active_view_set, source);
+            assert!(core.ui.notices.iter().any(|notice| {
+                notice
+                    .message
+                    .contains("selection scoped to its current view set")
+            }));
+        }
+    }
+
+    #[test]
+    fn cross_view_set_move_still_allows_selection_independent_views() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/independent");
+        core.add_center_tile(ViewSpec::bound("view:test/independent"));
+        let source = core.active_view_set;
+        let tile = core.view_sets[source].focused_tile;
+
+        core.new_view_set();
+        let target = core.active_view_set;
+        let target_id = core.view_sets[target].id;
+        core.switch_view_set_tab(source);
+        let guard = core.layout_guard();
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::MoveTileToViewSet {
+                    layout_guard: guard,
+                    tile_id: tile.0.to_string(),
+                    view_set_id: target_id,
+                },
+            },
+        });
+
+        assert!(!core.view_sets[source].tiles.contains_key(&tile));
+        assert!(core.view_sets[target].tiles.contains_key(&tile));
+        assert_eq!(core.active_view_set, target);
+    }
 
     #[test]
     fn exact_view_pointer_state_addresses_dock_instances() {

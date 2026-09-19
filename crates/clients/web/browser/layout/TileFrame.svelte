@@ -7,6 +7,7 @@
   interface Props { model: Tile }
   let { model }: Props = $props();
   const dispatch = dispatchUi();
+  let actionSummary = $state<HTMLElement>();
 </script>
 
 <article class="tile-frame" class:focused={model.focused} class:transparent={model.background_transparent} data-instance={model.instance_key} data-scroll-key={`tile:${model.instance_key}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }}>
@@ -23,12 +24,13 @@
         >{model.maximized ? "↙" : "↗"}</button>
         {#if model.intents.length}
           <details class="tile-action-menu">
-            <summary aria-label={`Actions for ${model.title}`} title="View actions">⋮</summary>
+            <summary bind:this={actionSummary} aria-label={`Actions for ${model.title}`} title="View actions">⋮</summary>
             <div class="tile-action-list">
               {#each model.intents as action}
                 <button title={action.title} onclick={(event) => {
                   const menu = event.currentTarget.closest("details");
                   if (menu) menu.open = false;
+                  actionSummary?.focus();
                   dispatch({ type: "activate", intent: action.intent });
                 }}>{action.label}</button>
               {/each}

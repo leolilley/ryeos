@@ -123,6 +123,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
+                    invocation_origin: Some(instance_key.clone()),
                     input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,

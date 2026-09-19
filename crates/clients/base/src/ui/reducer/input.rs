@@ -165,7 +165,12 @@ impl RyeOsCore {
             if self.refuse_blocked_mutation() {
                 return Vec::new();
             }
-            return self.invoke_input_affordance(&view_ref, affordance_id, &text);
+            return self.invoke_input_affordance(
+                &key.view_instance_key,
+                &view_ref,
+                affordance_id,
+                &text,
+            );
         }
 
         // Mode 3: `submit: route` — the existing engine route-fold.
@@ -487,6 +492,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Launch,
                     success_notice: None,
+                    invocation_origin: Some(origin_key.view_instance_key.clone()),
                     input_origin: Some(input_origin),
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -531,6 +537,7 @@ impl RyeOsCore {
                             request_bounds,
                             intent: super::effect::InvokeIntent::Launch,
                             success_notice: None,
+                            invocation_origin: Some(origin_key.view_instance_key.clone()),
                             input_origin: Some(input_origin),
                             route_seq,
                             ratchet_on_thread_id,
@@ -552,6 +559,7 @@ impl RyeOsCore {
     /// text as the `{value}` payload (the input producer namespace).
     pub(crate) fn invoke_input_affordance(
         &mut self,
+        invocation_origin: &crate::ids::RyeOsViewInstanceKey,
         view_ref: &str,
         affordance_id: &str,
         value: &str,
@@ -612,6 +620,7 @@ impl RyeOsCore {
                     request_bounds,
                     intent: super::effect::InvokeIntent::Service,
                     success_notice: notice,
+                    invocation_origin: Some(invocation_origin.clone()),
                     input_origin: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,

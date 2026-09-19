@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T05:01:29Z:149916a3e7799cd7a1929f13a2878f0c71e4d4a482e26f824505b22e271126c9:RgFrZ76V+lwQpaH6V1+G056Zb2mu60lycBlxeMmT3gTSSLmZbr7bubMG3KEoludZX1SPY7BWzpJiF3noBew9AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T05:11:30Z:71cdce879966b16a84f994012add7e45b7469a2cfa355dffc6ed22dc8ed48160:cjhhvRYCrM1bYkXT6RROVPfMYBKPmYJp42r18qPo3AgjAyRgL2N/T78LifTDv77bGu4GNnTqbMqjwz7tkTjjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -29,6 +29,11 @@ Saving uses the active set's name. A duplicate name is refused, not overwritten:
 rename the open set to save another composition. Concurrent library changes
 produce a conflict; refresh re-observes current data without retrying the write.
 Updating/deleting a named saved composition is not implemented by this flow.
+Capture omits the exact invoking management view from a detached composition
+copy; the live layout and other instances of the same view are unchanged.
+The durable library size ceiling is not a transport allowance: saving checks
+the complete binding request against the current compiled session bounds before
+dispatch. Do not enlarge route limits or guess envelope overhead in the UI.
 
 `open_saved_view_set` is a local composition operation. It creates fresh mounted
 identities and revalidates against the current admitted surface. It does not
@@ -43,6 +48,14 @@ authored definitions. Availability presentation is not an authority check.
 View-level `refresh.after_invoke` is an explicit boolean. It re-observes mounted
 view sources after invocation settlement, including refusal. It is not a
 source-level trigger and must not retry mutations or recreate closed views.
+Settlement uses the retained invocation mount, not whichever view set is active
+when the response arrives. This coordinate is separate from an input origin.
+
+Selection-dependent views currently refuse cross-set placement moves. Their
+selection owner is still the containing set; allowing the move would silently
+retarget reads or writes. Full pin/follow needs explicit retained attachment
+ownership and rebind/lifetime semantics. Do not replace this boundary with a
+browser toggle or describe the current refusal as completed pinning.
 
 The browser is a renderer, not a second application model:
 

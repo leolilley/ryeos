@@ -29,6 +29,10 @@ pub enum RyeOsEffectKind {
         intent: InvokeIntent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         success_notice: Option<String>,
+        /// Exact mounted view that issued an affordance invocation. Delayed
+        /// observation refreshes target this retained mount, never whatever
+        /// view or view set happens to be active when the result arrives.
+        invocation_origin: Option<crate::ids::RyeOsViewInstanceKey>,
         /// Exact mounted input that issued this invocation. Delayed results
         /// may mutate only this coordinate; current focus is never authority.
         #[serde(default, skip_serializing_if = "Option::is_none")]

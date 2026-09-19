@@ -2,6 +2,7 @@
 /* Rust-owned browser wire contract. */
 import type { InvokeIntent } from "./InvokeIntent";
 import type { RyeOsInputAddress } from "./RyeOsInputAddress";
+import type { RyeOsViewInstanceKey } from "./RyeOsViewInstanceKey";
 import type { UiBindingRequest } from "./UiBindingRequest";
 import type { UiBindingRequestBounds } from "./UiBindingRequestBounds";
 
@@ -17,7 +18,7 @@ export type RyeOsEffectKind =
    * session binding. The signed view owns the target and substitution
    * template; the client sends only the producer payload.
    */
-  | { type: "invoke_binding"; request: UiBindingRequest; request_bounds: UiBindingRequestBounds; intent: InvokeIntent; success_notice?: string | null; input_origin?: RyeOsInputAddress | null; route_seq?: bigint | null; ratchet_on_thread_id: boolean }
+  | { type: "invoke_binding"; request: UiBindingRequest; request_bounds: UiBindingRequestBounds; intent: InvokeIntent; success_notice?: string | null; invocation_origin: RyeOsViewInstanceKey | null; input_origin?: RyeOsInputAddress | null; route_seq?: bigint | null; ratchet_on_thread_id: boolean }
   | { type: "set_location_hash"; hash: string }
   | { type: "copy_to_clipboard"; text: string }
   | { type: "open_url"; url: string }

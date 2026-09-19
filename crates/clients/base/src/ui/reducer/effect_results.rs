@@ -119,7 +119,12 @@ impl RyeOsCore {
     /// Refresh only the invoking signed view's mounted sources. This is an
     /// observation after settlement/refusal, never a mutation retry.
     fn refresh_after_invocation(&mut self, expected: &RyeOsEffectKind) -> Vec<RyeOsEffect> {
-        let RyeOsEffectKind::InvokeBinding { request, .. } = expected else {
+        let RyeOsEffectKind::InvokeBinding {
+            request,
+            invocation_origin: Some(invocation_origin),
+            ..
+        } = expected
+        else {
             return Vec::new();
         };
         let crate::ui::binding::UiBindingCoordinate::Affordance { view_ref, .. } =
@@ -142,22 +147,10 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
-        let mut instances = self.view_sets[self.active_view_set]
-            .tiles
-            .values()
-            .filter(|tile| tile.view.view_ref == *view_ref)
-            .map(|tile| tile.instance_key.clone())
-            .collect::<Vec<_>>();
-        instances.extend(
-            self.visible_dock_views()
-                .into_iter()
-                .filter(|(_, mounted_ref)| mounted_ref == view_ref)
-                .map(|(instance, _)| instance),
-        );
-        instances
-            .into_iter()
-            .flat_map(|instance| self.emit_fetch_source_for_instance(instance, view_ref))
-            .collect()
+        if self.mounted_view_ref(invocation_origin) != Some(view_ref) {
+            return Vec::new();
+        }
+        self.emit_fetch_source_for_instance(invocation_origin.clone(), view_ref)
     }
 
     fn finish_source_effect(
@@ -746,6 +739,78 @@ mod tests {
     }
 
     #[test]
+    fn delayed_after_invoke_refresh_targets_exact_origin_after_view_set_switch() {
+        let mut session = writable_session();
+        session.effective_surface = Some(serde_json::json!({
+            "name": "refresh-origin",
+            "view_sets": [
+                {"id":"one", "title":"One", "root":{"type":"group", "views":["view:test/library"], "active":0}},
+                {"id":"two", "title":"Two", "root":{"type":"group", "views":["view:test/library"], "active":0}}
+            ],
+            "views": {"view:test/library": {
+                "widget":"rows",
+                "sources":{"default":{"ref":"service:test/config", "collection":"rows"}},
+                "refresh":{"after_invoke":true}
+            }}
+        }));
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        let origin = core.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let unrelated = core.view_sets[1]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let invocation = core.emit(RyeOsEffectKind::InvokeBinding {
+            request: crate::ui::binding::UiBindingRequest {
+                binding_digest: "11".repeat(32),
+                coordinate: crate::ui::binding::UiBindingCoordinate::Affordance {
+                    view_ref: "view:test/library".into(),
+                    affordance_id: "persist".into(),
+                },
+                payload: crate::ui::binding::UiBindingPayload::Selection {
+                    record: serde_json::json!({}),
+                },
+            },
+            request_bounds: core.data.session.as_ref().unwrap().binding_request_bounds,
+            intent: crate::ui::effect::InvokeIntent::Service,
+            success_notice: None,
+            invocation_origin: Some(origin.clone()),
+            input_origin: None,
+            route_seq: None,
+            ratchet_on_thread_id: false,
+        });
+        core.active_view_set = 1;
+
+        let followups = core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: invocation.id,
+                ok: true,
+                kind: RyeOsEffectResultKind::BindingInvoked,
+                data: Some(serde_json::json!({"updated":true})),
+                error: None,
+            },
+        });
+        let origin_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(origin, "default").encode();
+        let unrelated_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(unrelated, "default").encode();
+        assert!(followups.iter().any(|effect| matches!(
+            &effect.kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &origin_key
+        )));
+        assert!(!followups.iter().any(|effect| matches!(
+            &effect.kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &unrelated_key
+        )));
+    }
+
+    #[test]
     fn signed_surface_source_role_projects_shell_data() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         core.surface_sources.insert(
@@ -805,6 +870,7 @@ mod tests {
             },
             intent: crate::ui::effect::InvokeIntent::Service,
             success_notice: None,
+            invocation_origin: None,
             input_origin: None,
             route_seq: None,
             ratchet_on_thread_id: false,

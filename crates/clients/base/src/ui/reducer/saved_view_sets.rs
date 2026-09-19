@@ -170,6 +170,80 @@ mod tests {
         }
         assert!(core.pending_effects.is_empty());
     }
+
+    #[test]
+    fn save_checks_compiled_envelope_limit_before_emitting_effect() {
+        let mut core = core();
+        let instance = core.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        core.data
+            .session
+            .as_mut()
+            .unwrap()
+            .binding_request_bounds
+            .max_request_bytes = 1;
+        assert!(
+            core.save_view_set_record(
+                &instance,
+                "view:test/library",
+                "persist",
+                json!({"expected_revision": 0, "saved_view_sets": []})
+            )
+            .is_empty()
+        );
+        assert!(core.pending_effects.is_empty());
+    }
+
+    #[test]
+    fn save_transport_budget_counts_the_complete_binding_envelope() {
+        let mut first = core();
+        let instance = first.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let effects = first.save_view_set_record(
+            &instance,
+            "view:test/library",
+            "persist",
+            json!({"expected_revision": 0, "saved_view_sets": []}),
+        );
+        let RyeOsEffectKind::InvokeBinding { request, .. } = &effects[0].kind else {
+            panic!("expected persistence request")
+        };
+        let exact_bytes = serde_json::to_vec(request).unwrap().len() as u64;
+        for (limit, expected_count) in [(exact_bytes, 1), (exact_bytes - 1, 0)] {
+            let mut candidate = core();
+            let instance = candidate.view_sets[0]
+                .tiles
+                .values()
+                .next()
+                .unwrap()
+                .instance_key
+                .clone();
+            candidate
+                .data
+                .session
+                .as_mut()
+                .unwrap()
+                .binding_request_bounds
+                .max_request_bytes = limit;
+            let effects = candidate.save_view_set_record(
+                &instance,
+                "view:test/library",
+                "persist",
+                json!({"expected_revision": 0, "saved_view_sets": []}),
+            );
+            assert_eq!(effects.len(), expected_count);
+        }
+    }
 }
 
 impl RyeOsCore {
@@ -231,16 +305,39 @@ impl RyeOsCore {
             {
                 return Err("that name is already saved; rename the open set before saving a new composition".into());
             }
-            context
-                .saved_view_sets
-                .push(self.export_active_view_set_template(id, title)?);
+            context.saved_view_sets.push(self.capture_view_set_template(
+                id,
+                title,
+                Some(instance),
+            )?);
             validate_saved_view_set_templates(&context.saved_view_sets)?;
             Ok(
                 json!({ "captured": true, "expected_revision": context.expected_revision, "saved_view_sets": context.saved_view_sets }),
             )
         })();
         match prepared {
-            Ok(record) => self.invoke_affordance(instance, view_ref, persist_id, &record),
+            Ok(record) => {
+                // The durable library ceiling is not the session's transport
+                // allowance. Check the complete envelope against compiled
+                // bounds, rather than hardcoding a guessed payload reserve.
+                let (request, bounds) = self.compiled_binding_operation(
+                    crate::ui::binding::UiBindingCoordinate::Affordance {
+                        view_ref: view_ref.into(),
+                        affordance_id: persist_id.into(),
+                    },
+                    crate::ui::binding::UiBindingPayload::Selection {
+                        record: record.clone(),
+                    },
+                );
+                if let Err(error) = request.validate_bounds(bounds) {
+                    self.notice(
+                        format!("Cannot save view set through this session: {error:?}"),
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
+                self.invoke_affordance(instance, view_ref, persist_id, &record)
+            }
             Err(error) => {
                 self.notice(format!("Cannot save view set: {error}"), RyeOsTone::Warn);
                 Vec::new()
