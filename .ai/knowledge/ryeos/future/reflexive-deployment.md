@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-08-06T03:37:11Z:8b31f3fbd244deafce10f9dbf879e943a1089ac49cca2067592e2006dff2fc0b:poyLVTEQgsW/Yh/QyMToODYEap3aHOWheRmy2C30IWdo1s673yvUd4K0nFXfGrb8mtHCJmbvwb/a0Dhs0ZtvBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-18T23:27:55Z:5477990fecaa79e0798cfd88d0952647f4fa7006d977ef47f7f92daef94733ab:YUsOPcYr4l3R97eTzDns2otJlMsMmpNSDgzgQKhWR/3F4xNfYmPQSwjFCSUpBgb/an8pukvtoiAoxxz4ej3xCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, deployment, activation, self-hosting, evidence]
-version: "0.1.0"
+version: "0.3.0"
 status: deferred
 description: >
   Activation sets as admitted programs: RyeOS sealing and evidencing its own
@@ -28,6 +28,26 @@ computation does not yet account for its own change.
 - **Review gates are observer hooks** on the deployment chain: the
   adversarial-review outcome is admitted evidence the deployment graph
   consumes, not a chat transcript.
+
+## Release input boundary
+
+Reflexive deployment begins with an already-published exact release coordinate.
+For the native bundle path that coordinate is the substrate image digest, an
+exact deployment-authorized node-bundle selection (referencing publisher-
+authorized generations and any curated set evidence), consuming bundle-
+publication policy-section digest, and whole node-policy generation described in
+[Native bundle publication and node composition](native-bundle-publication-and-node-composition.md).
+
+The deployment Graph may verify publisher and qualification evidence, fetch
+the closure, drain an epoch, stage it, activate it, and validate the new boot.
+It does not build the candidate, mint its publisher evidence, resolve a mutable
+channel during activation, or infer deployment permission from successful
+checks. Release production and activation remain separate admitted programs.
+
+A bundle-source node serving bytes is not deployment authority. A development node
+that built the candidate is not deployment authority. A publisher approving
+the bundle set is not permission to alter a particular running node. The
+deployment decision names the exact target node and exact release coordinate.
 
 ## Why deferred
 

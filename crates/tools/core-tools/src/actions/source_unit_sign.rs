@@ -14,7 +14,7 @@ use ryeos_engine::kind_registry::{
     KindSchema, SourceClosureLocationDecl, SourceClosureTestimonyDecl,
 };
 use ryeos_engine::source_closure::{
-    CapturedSourceCandidate, ExecutorSourceLocation, ExecutorSourcePolicy, SourceRootRequest,
+    CapturedSourceCandidate, ExecutorSourcePolicy, SourceRootRequest,
     SourceRootSelection,
 };
 
@@ -49,20 +49,14 @@ pub(super) fn sign_owner_signed_source_unit(
     let Some(executor_policy) = executor_policy else {
         return Ok(None);
     };
-    if !matches!(
-        executor_policy.location,
-        ExecutorSourceLocation::ItemNamespace
-    ) {
-        bail!("executor source policy exceeds the signed kind location ceiling");
-    }
-
     let source = ryeos_app::source_closure_admission::DirectorySourceContent::new(
         source_root,
         format!("source-unit-sign:{canonical_ref}:{expected_source_digest}"),
         configured_ignore,
     )?;
-    let (request, root_entry) = ryeos_app::source_closure_admission::item_namespace_source_request(
+    let (request, root_entry) = ryeos_app::source_closure_admission::executor_source_request(
         &source,
+        executor_policy.location,
         kind_name,
         kind_schema,
         canonical_ref,
@@ -128,8 +122,9 @@ pub(super) fn sign_owner_signed_source_unit(
         .map(|entry| entry.blob_hash.as_str())
         .ok_or_else(|| anyhow!("published source unit lost its canonical owner item"))?;
     let (selected_after, root_after) =
-        ryeos_app::source_closure_admission::item_namespace_source_request(
+        ryeos_app::source_closure_admission::executor_source_request(
             &source,
+            executor_policy.location,
             kind_name,
             kind_schema,
             canonical_ref,

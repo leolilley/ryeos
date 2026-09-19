@@ -183,6 +183,10 @@ enum ExternalRealizationBinding {
     /// born. This preserves realization identity without writing into a live
     /// project or exposing the shared materialization cache to the child.
     PrivateWorkspace,
+    /// A daemon-owned runtime view receives every logical mount root. The
+    /// trusted structured-session bridge resolves these copies through
+    /// retained descriptors rather than claiming a read-only namespace.
+    PrivateRuntimeView,
 }
 
 static PRIVATE_MATERIALIZATION_COPY_LIMIT: AtomicU64 = AtomicU64::new(0);
@@ -1045,19 +1049,34 @@ pub(crate) fn bind_external_realizations_in_private_workspace_with_budget(
     )
 }
 
+pub(crate) fn bind_external_realizations_in_private_runtime_view_with_budget(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    runtime_view: &Path,
+    budget: &PrivateMaterializationBudget,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        runtime_view,
+        ExternalRealizationBinding::PrivateRuntimeView,
+        Some(budget),
+    )
+}
+
 /// Fixed runtime roots have no private-project-copy interpretation. Use this
 /// same check at preflight and final binding before any materialization work.
 pub(crate) fn require_supported_mount_roots(
     roots: impl IntoIterator<Item = ryeos_state::objects::ExternalContentMountRoot>,
-    enforced: bool,
+    supports_execution_runtime: bool,
 ) -> anyhow::Result<()> {
-    if !enforced
+    if !supports_execution_runtime
         && roots
             .into_iter()
             .any(|root| root != ryeos_state::objects::ExternalContentMountRoot::Project)
     {
         anyhow::bail!(
-            "execution-runtime realizations require enforced isolation; no project-copy substitute is permitted"
+            "execution-runtime realizations require enforced isolation or an explicitly trusted private runtime view; no project-copy substitute is permitted"
         );
     }
     Ok(())
@@ -1083,7 +1102,7 @@ fn bind_external_realizations_with(
     }
     require_supported_mount_roots(
         realized.iter().map(|entry| entry.mount_root),
-        binding == ExternalRealizationBinding::IsolationMounts,
+        binding != ExternalRealizationBinding::PrivateWorkspace,
     )?;
     let sealed_set_env = lillux::cas::canonical_json(&realized.to_value()?)?;
     let authority = super::pinned_state_authority(state)?;
@@ -1094,7 +1113,8 @@ fn bind_external_realizations_with(
         ExternalMaterializationCache::from_runtime_state_root(&state.config.runtime_state_dir());
     let private_workspace = match binding {
         ExternalRealizationBinding::IsolationMounts => None,
-        ExternalRealizationBinding::PrivateWorkspace => {
+        ExternalRealizationBinding::PrivateWorkspace
+        | ExternalRealizationBinding::PrivateRuntimeView => {
             Some(lillux::PinnedDirectory::open(project_path)?.ok_or_else(|| {
                 anyhow::anyhow!(
                     "private external-realization workspace does not exist: {}",

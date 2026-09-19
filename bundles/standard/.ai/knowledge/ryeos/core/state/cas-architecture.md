@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-09-16T03:00:17Z:ab8979fa6f86044f6618fc197a5ab87a0b9ce01eb8ed92f0bd0f02b5aabd2e02:HMZruTCEZaCBfHj2tNcVzgZcr4h7108L0cU30AM2W1RzgOzD5pfdb1AlYp5x8y/Nwgc4Ot3c5SBoLzuqtG8VDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T00:12:54Z:581f8753bc4d84ba9bcc6bab7be63445f37603b14d13367987b6755a2bc0a107:UzhmGKr/WM+ccCQWxivHP7UD0tN3gXmdpW/Dt/rGUE8MaXZA1B1WNxxyOltZ4+nSUQwA+LcVjsWdQpiV0f7aAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
 tags: [architecture, cas, state, truth, projection, sqlite]
-version: "1.4.0"
+version: "1.4.1"
 description: >
   The three-tier truth model — CAS objects, signed refs, and the
   rebuildable SQLite projection. Content-addressed storage as the
@@ -312,7 +312,10 @@ exact project generation. Worker-environment product selections carry only the
 declaration id and witness hashes. Current policy, subject bytes and scope are
 checked before sealing the selected runtime. Reusing bytes does not reuse a
 consumer's binding authority. Existing literal pins and explicit local execution
-remain available; an execution-runtime mount still requires enforced isolation.
+remain available. Hard-contained execution-runtime mounts require enforced
+isolation. Explicitly trusted process-group sessions may consume the same exact
+CAS realizations through a bounded private descriptor root without claiming
+read-only namespace or hostile-worker containment.
 
 ### Recorded producer execution
 

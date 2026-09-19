@@ -364,6 +364,12 @@ class CodexContractTests(unittest.TestCase):
         trusted_worker = yaml.safe_load(
             TRUSTED_WORKER_PATH.read_text(encoding="utf-8")
         )
+        worker_kind = yaml.safe_load(
+            (
+                BUNDLE.parent
+                / "core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"
+            ).read_text(encoding="utf-8")
+        )
         hard_login = yaml.safe_load(
             (BUNDLE / ".ai/worker-executions/codex/login.yaml").read_text()
         )
@@ -387,6 +393,11 @@ class CodexContractTests(unittest.TestCase):
         self.assertNotEqual(
             hard_worker["execution_protocol"], trusted_worker["execution_protocol"]
         )
+        allowed_protocols = worker_kind["execution"]["terminator"]["protocol"][
+            "allowed"
+        ]
+        self.assertIn(hard_worker["execution_protocol"], allowed_protocols)
+        self.assertIn(trusted_worker["execution_protocol"], allowed_protocols)
 
         command = yaml.safe_load(
             (BUNDLE / ".ai/node/commands/login-open-trusted.yaml").read_text()

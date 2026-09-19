@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-18T04:59:34Z:465e09cbd3e408aa17956004a076f5dbaa501e4f5fde28746c6e1a4c9555302e:LQOmF473QZUFe5K5oikikmsI6Ct0g9zcLtjoCY31sP/YOr5D9FpPZRiXollYVl1K6aS2F/wAgU1F1pTvEVZcBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-18T23:05:06Z:f2a45fb08a17f9ec5bc921dd6c44990337ba10f9ecb7094ee9e526c7aff35a54:KjuGuAJiZfSmIfJnekAvTQu5emxbB1YOBB7R8X/kMCETkQIKJRUZJ7o+yC0etjUZZgm6uCxdWXergACJA4P4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
 title: Future RyeOS Design Notes
 description: Index and ownership rules for scheduled and deferred RyeOS design work
 entry_type: reference
-version: "1.5.0"
+version: "1.6.0"
 ```
 
 # Future RyeOS Design Notes
@@ -101,6 +101,10 @@ from the former top-level `docs/future` tree include:
   criteria for adding new resolution stages; and
 - [`ryeos-native-development-platform.md`](ryeos-native-development-platform.md)
   — RyeOS-native project hosting, checks, review, and release;
+- [`native-bundle-publication-and-node-composition.md`](native-bundle-publication-and-node-composition.md)
+  — the scheduled first release-system slice: independently published bundle
+  generations and sets, a verifying source node, exact consumer composition,
+  and the migration from GitHub-run releases to RyeOS-native release Graphs;
 - [`environment-build-system.md`](environment-build-system.md) — production,
   independent verification, publication, and simple reuse of portable
   execution environments through existing Tool, Graph, content, and retained-

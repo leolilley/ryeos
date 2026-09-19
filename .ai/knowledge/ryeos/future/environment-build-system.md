@@ -1,10 +1,11 @@
+<!-- ryeos:signed:2026-09-18T23:27:55Z:e52282c96d774a206476d1514b587dce2ff12ce5d303a2fd062d379481c7b800:O3SpqTXFAkESbIOFwlTkXWgGkWTZUIy8LukPHd0zmxMoEgI8tYAywzgvqzv38a7b9p+yN+58HYn24izqXxszDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: environment-build-system
 title: RyeOS Environment Build System
 description: A RyeOS-native model for producing, verifying, publishing, and consuming portable execution environments from exact admitted content.
 entry_type: design
-version: "0.1.0"
+version: "0.3.0"
 status: discussion
 ```
 
@@ -84,6 +85,7 @@ Related boundaries are described in:
 - [Large-content realization follow-ons](large-content-realization-follow-ons.md)
 - [Execution identity](execution-identity.md)
 - [RyeOS-native development platform](ryeos-native-development-platform.md)
+- [Native bundle publication and node composition](native-bundle-publication-and-node-composition.md)
 - [Reflexive deployment](reflexive-deployment.md)
 - [Determinism classes](determinism-classes.md)
 
@@ -117,6 +119,32 @@ The Graph supplies ordering, branching, failure behavior, and durable lineage.
 The content system supplies byte identity. Publication supplies the authority
 transition from a private result to a reusable input. None of these roles
 should be reimplemented by a recipe language or producer script.
+
+## Relationship to native software releases
+
+This build system supplies exact environments and reusable artifact-producing
+operations to the RyeOS-native development platform. It does not own project,
+bundle, or substrate release authority.
+
+In the bundle-publication path, an admitted build Graph consumes an exact
+published authoring environment and exact source closure, then retains bundle
+products. Because the current bundle format includes publisher-signed in-tree
+manifest/items, a constrained publisher transaction verifies and signs the
+final tree before that exact tree is captured and qualified. A later, separate
+publisher decision authorizes the finalized bundle generation and any curated
+set/catalog transition. The bundle-source node stores those publications, and
+consumers apply their own admission. Producing the environment does not
+authorize any of those later transitions.
+
+External CI may temporarily invoke the same native operations, but workflow
+YAML must not be the only owner of build inputs, bundle assembly, qualification,
+or publication behavior. The long-term producer is a RyeOS development node;
+GitHub becomes an optional trigger and projection as described by the native
+development-platform owner.
+
+The native authoring environment is therefore bootstrap infrastructure for the
+software factory, not the software factory itself. Ordinary bundle releases
+reuse a published environment and must not reproduce it for every build.
 
 ## Implementation languages are replaceable
 
