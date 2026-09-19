@@ -1,0 +1,73 @@
+name: Publish RyeOS substrate image
+
+# Temporary GitHub adapter for the same Docker target a RyeOS development node
+# can invoke directly. Normal bundle publication must not call this workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Immutable commit SHA containing a substrate change"
+        required: true
+        type: string
+      version:
+        description: "Substrate version used for build provenance"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ryeos-substrate-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require an immutable source coordinate
+        env:
+          EXPECTED_SHA: ${{ inputs.source_ref }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable substrate
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
+          SOURCE_SHA: ${{ inputs.source_ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          test -n "$PUBLISHER_KEY"
+          key_file="$RUNNER_TEMP/ryeos-publisher.pem"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$PUBLISHER_KEY" > "$key_file"
+          chmod 0600 "$key_file"
+          source_epoch="$(git show -s --format=%ct HEAD)"
+          build_date="$(date --utc --date="@$source_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          docker buildx build \
+            --file Dockerfile.release \
+            --target ryeos-substrate \
+            --secret "id=publisher-key,src=$key_file" \
+            --build-arg "VERSION=$VERSION" \
+            --build-arg "VCS_REF=$SOURCE_SHA" \
+            --build-arg "SOURCE_DATE_EPOCH=$source_epoch" \
+            --build-arg "BUILD_DATE=$build_date" \
+            --tag "ghcr.io/leolilley/ryeos-substrate:git-$SOURCE_SHA" \
+            --push \
+            .

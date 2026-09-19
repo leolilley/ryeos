@@ -15,6 +15,7 @@
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
+//!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
@@ -113,6 +114,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "bundle-set", "update"],
+        summary: "Install an exact published bundle set while the node is stopped",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "host", "setup"],
         summary: "Provision one administrator-owned local hosted-worker service",
         category: "lifecycle",
@@ -202,6 +208,12 @@ pub async fn try_dispatch(
         }
         ("node", Some("policy-apply")) => {
             run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("bundle-set")) if argv.get(2).map(String::as_str) == Some("update") => {
+            crate::bundle_set_update::run(&argv[3..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("host")) if argv.get(2).map(String::as_str) == Some("setup") => {
@@ -346,6 +358,7 @@ fn run_node_policy_generation_reset_command(
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: Some(args.node_profile.clone()),
+        substrate_identity: None,
         replace_node_policy_generation: true,
         skip_preflight: false,
     })
@@ -1000,6 +1013,14 @@ struct InitArgs {
     #[arg(long)]
     node_profile: Option<String>,
 
+    /// Immutable OCI digest of the substrate image executing this node.
+    #[arg(long, requires = "substrate_protocol")]
+    substrate_image_digest: Option<String>,
+
+    /// Nonzero bundle compatibility protocol implemented by that substrate.
+    #[arg(long, requires = "substrate_image_digest")]
+    substrate_protocol: Option<u32>,
+
     /// Replace an existing complete policy generation from --node-profile in
     /// this same stopped-node init transaction.
     #[arg(
@@ -1029,6 +1050,15 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
     };
     let app_root = args.app_root.unwrap_or_else(default_app_root);
 
+    let substrate_identity = match (args.substrate_image_digest, args.substrate_protocol) {
+        (Some(digest), Some(protocol)) => Some(ryeos_node::SubstrateIdentity::new(
+            digest,
+            protocol,
+            args.node_profile.clone(),
+        )?),
+        (None, None) => None,
+        _ => unreachable!("clap enforces paired substrate identity arguments"),
+    };
     let opts = ryeos_node::InitOptions {
         app_root,
         bind: args.bind,
@@ -1036,6 +1066,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         source_dir: args.source,
         trust_files: args.trust_files,
         node_profile: args.node_profile,
+        substrate_identity,
         replace_node_policy_generation: args.replace_node_policy_generation,
         skip_preflight: false,
     };

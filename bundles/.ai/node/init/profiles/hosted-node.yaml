@@ -1,10 +1,15 @@
-# ryeos:signed:2026-09-17T07:24:33Z:0b14948fa4f3c8fb378702c78751dff6a259c1ed9feca7e73d62dad29f1f68ac:jn6NzLenL8fRbMC5+j9rUC6d/qdFEHqAn3KlkHqOwIOk9dMhJStctVCTDt5/2++xOojkeEn+z9Zi5AcEmGCIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T04:05:59Z:217771f86fbe895544604d77362e12cd3d44150f2b88bfc08f3fa8befe1f1025:XU7Mh8Jr7Wuw2rhY3ZuFIgcXUPspBHyXg9AKQftfdufK4DkuCqEpNbO+33C4K3/gOwMCvEkQn9ZBNUWBeJ12CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
   - core
   - hosted-node
 policies:
+  bundle_publication:
+    schema: 1
+    # Publication is disabled until the operator installs measured release authority.
+    catalogs: []
+
   accounting:
     schema: 2
     issue_acceptance_window_ms: 60000

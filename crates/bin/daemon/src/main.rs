@@ -28,6 +28,48 @@ mod maintenance_schedule;
 mod startup;
 
 const STARTUP_FAILURE_REPORTING_GRACE: Duration = Duration::from_secs(30);
+const BUNDLE_PUBLISHER_URL_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_URL";
+const BUNDLE_PUBLISHER_BEARER_ENV: &str = "RYEOS_BUNDLE_PUBLISHER_BEARER";
+
+fn configured_bundle_publisher(
+    policy: &ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+) -> Result<Option<Arc<dyn ryeos_app::bundle_publication::producer::BundlePublisherAuthority>>> {
+    let endpoint = std::env::var_os(BUNDLE_PUBLISHER_URL_ENV);
+    let bearer = std::env::var_os(BUNDLE_PUBLISHER_BEARER_ENV);
+    let (endpoint, bearer) = match (endpoint, bearer) {
+        (None, None) => return Ok(None),
+        (Some(endpoint), Some(bearer)) => (endpoint, bearer),
+        _ => anyhow::bail!(
+            "{BUNDLE_PUBLISHER_URL_ENV} and {BUNDLE_PUBLISHER_BEARER_ENV} must be configured together"
+        ),
+    };
+    let endpoint = endpoint
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{BUNDLE_PUBLISHER_URL_ENV} is not valid UTF-8"))?
+        .parse::<url::Url>()
+        .context("parse explicit bundle publisher endpoint")?;
+    let bearer = bearer
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{BUNDLE_PUBLISHER_BEARER_ENV} is not valid UTF-8"))?;
+    let expected = policy
+        .catalogs
+        .first()
+        .context("bundle publisher configuration requires an authorized catalog")?
+        .publisher_fingerprint
+        .clone();
+    anyhow::ensure!(
+        policy
+            .catalogs
+            .iter()
+            .all(|catalog| catalog.publisher_fingerprint == expected),
+        "one configured bundle publisher cannot serve catalog policies with different publishers"
+    );
+    Ok(Some(Arc::new(
+        ryeos_app::bundle_publication::producer::AuthenticatedPublisherClient::new(
+            endpoint, bearer, expected,
+        )?,
+    )))
+}
 
 struct LifecycleExitGuard {
     state_dir: std::path::PathBuf,
@@ -387,8 +429,7 @@ fn main() -> Result<()> {
     let external_host_runtime =
         ryeos_node::host_runtime::ExternalHostRuntime::take_from_environment()
             .context("consume inherited external host-runtime authority")?;
-    ryeos_app::provider_object_contracts::install()
-        .context("install application object contracts")?;
+    ryeos_app::object_contracts::install().context("install application object contracts")?;
     // Recovery and launch reconstruction deserialize the complete retained
     // authority envelope on a runtime worker. Unoptimized builds can exceed
     // Tokio's 2 MiB default while doing that work (the real-process test
@@ -586,10 +627,33 @@ async fn run(
         .context("daemon state lock is absent")?
         .ensure_protects_app_root(&config.app_root)?;
 
-    // Recheck the signed whole-init fence after acquiring the same lock as
-    // initialization. The pre-lock check provides early guidance; this check
-    // prevents a daemon from crossing an in-flight or failed bundle/policy cut.
+    // Bundle-set recovery must observe the old/new completion fence before
+    // ordinary completion verification. The present v1 journal can safely
+    // discard pre-activation work and finalize an already signed exact-new
+    // completion; activated old-state restoration remains fail-closed until
+    // the journal owns exact backup coordinates.
+    let bundle_set_recovery = {
+        let registry_lock =
+            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&config.app_root)?;
+        ryeos_app::bundle_set_transaction::recover_for_bootstrap(
+            &config.app_root,
+            &registry_lock,
+            &ryeos_app::bundle_set_transaction::BootstrapBundleSetRecoveryExecutor::new(
+                &config.app_root,
+            ),
+        )?
+    };
+
+    // Recheck the signed whole-init fence after recovery while holding the
+    // same node state lock as initialization.
     bootstrap::verify_initialized(&config)?;
+    if bundle_set_recovery
+        == Some(ryeos_app::bundle_set_transaction::RecoveryDecision::CompleteExactNew)
+    {
+        // Preserve the journal until pinned-key verification has authenticated
+        // the exact-new whole-init completion and its registrations/policy.
+        ryeos_app::bundle_set_transaction::consume_journal(&config.app_root)?;
+    }
 
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
@@ -1176,6 +1240,31 @@ async fn run(
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
                     ext.insert(node_execution_identity);
+                    let publication_policy = node_policy_snapshot
+                        .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                        .clone();
+                    let publisher = configured_bundle_publisher(&publication_policy)?;
+                    let publication_authorities =
+                        ryeos_app::bundle_publication::producer::BundleReleaseAuthorityRouter {
+                            publisher,
+                            cas_composition: Some(Arc::new(
+                                ryeos_app::bundle_publication::producer::VerifiedLocalCasCompositionAuthority::new(
+                                    Arc::clone(&state_store),
+                                ),
+                            )),
+                            ..Default::default()
+                        };
+                    let publication_adapter = Arc::new(
+                        ryeos_app::bundle_publication::producer::PersistentBundleReleaseAdapter::new(
+                            config.app_root.clone(), publication_policy,
+                            publication_authorities,
+                        ),
+                    );
+                    ext.insert(Arc::new(
+                        ryeos_app::bundle_publication::producer::BundleReleaseAuthorities::new(
+                            publication_adapter,
+                        ),
+                    ));
                     #[cfg(feature = "handoff-test-support")]
                     if let Some(gate) = handoff_phase_gate.clone() {
                         ext.insert(gate);
@@ -3487,6 +3576,29 @@ async fn run_service_standalone(
             extensions.insert(Arc::clone(&standalone_state_lock));
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
+            let publication_policy = node_policy_snapshot
+                .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
+                .clone();
+            let publisher = configured_bundle_publisher(&publication_policy)?;
+            let publication_authorities =
+                ryeos_app::bundle_publication::producer::BundleReleaseAuthorityRouter {
+                    publisher,
+                    cas_composition: Some(Arc::new(
+                        ryeos_app::bundle_publication::producer::VerifiedLocalCasCompositionAuthority::new(
+                            Arc::clone(&state_store),
+                        ),
+                    )),
+                    ..Default::default()
+                };
+            let publication_adapter = Arc::new(
+                ryeos_app::bundle_publication::producer::PersistentBundleReleaseAdapter::new(
+                    config.app_root.clone(), publication_policy,
+                    publication_authorities,
+                ),
+            );
+            extensions.insert(Arc::new(
+                ryeos_app::bundle_publication::producer::BundleReleaseAuthorities::new(publication_adapter),
+            ));
             Arc::new(extensions)
         },
         write_barrier: Arc::new(write_barrier),

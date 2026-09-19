@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-19T03:43:17Z:e24a3dd3d57c384c11568890f21c7b0c9ddc9d61c3e05418b3ae38aeeced5072:zn4j8EIhEJYFnWH01q35RSZSFoTHeUwpg7LjuzvKqSJGxqbqAYIwAACj65FBSufkU2JGfruySzmc1p/JahffCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: restore-genesis
+version: "1.0.0"
+description: Restore an exact verified recovery export only when the native catalog head is absent.
+endpoint: bundle_catalog.restore_genesis
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-catalog/restore-genesis"]
+schema:
+  catalog_namespace: string
+  catalog_publication_attestation_hash: string
+  upload_session_id: string
+  bundle_publication_policy_section_digest: string
+  node_policy_generation_digest: string

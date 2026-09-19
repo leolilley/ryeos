@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-19T03:51:22Z:ffc8269c25e96e906913142677d421854444d024af88e414b73e32325c4b814d:Z9rmVBUYslRs/AjAw6t6pT2wdsOXYAVbgkUspqkI72f91LJS8Mvm+sZZfUp8fNx9MRviuhlNABM/BEjhpvPiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+schema: ryeos.bundle-set-update-request.v1
+operation: stopped_exact_set_update
+catalog_remote: production-bundle-source
+catalog_namespace: ryeos-official
+selection:
+  mode: channel
+  set_name: full
+  channel: stable
+  expected_catalog_publication_attestation_hash: null
+operator_signing_key: /run/ryeos-operator/signing-key.pem

@@ -2452,6 +2452,7 @@ dependencies = [
  "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-bundle-publication-contract",
  "ryeos-core-tools",
  "ryeos-directive-definition",
  "ryeos-effect-contract",
@@ -2459,6 +2460,7 @@ dependencies = [
  "ryeos-executor",
  "ryeos-graph-definition",
  "ryeos-handler-protocol",
+ "ryeos-node",
  "ryeos-provider-contract",
  "ryeos-runtime",
  "ryeos-scheduler",
@@ -2495,9 +2497,11 @@ dependencies = [
  "once_cell",
  "rand 0.8.6",
  "regex",
+ "reqwest",
  "rusqlite",
  "ryeos-accounting",
  "ryeos-bundle",
+ "ryeos-bundle-publication-contract",
  "ryeos-effect-contract",
  "ryeos-engine",
  "ryeos-graph-definition",
@@ -2554,6 +2558,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-bundle-publication-contract"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryeos-cli"
 version = "0.5.97"
 dependencies = [
@@ -2568,6 +2582,7 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-api",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-core-tools",
@@ -2945,6 +2960,7 @@ dependencies = [
  "rmp-serde",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-bundle-publication-contract",
  "ryeos-engine",
  "ryeos-state",
  "serde",

@@ -1,0 +1,10 @@
+name: bundle-release
+version: "0.1.0"
+description: "Source-bound bundle build, qualification, signing, composition, and remote publication"
+requires_kinds:
+  - config
+  - graph
+  - service
+  - tool
+uses_kinds:
+  - node

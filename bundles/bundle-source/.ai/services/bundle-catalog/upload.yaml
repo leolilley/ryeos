@@ -1,0 +1,16 @@
+# ryeos:signed:2026-09-19T03:43:17Z:30d93e37bbaa00153d120cbe0d9e8866cd553761d6bab7e339e60305c6e0c4b0:aVHc2jGATaOgFIZhB/2tnc0knSzzCUhESjRaTbYuEIE7QBiTuBwe2cOKGFHtTE5OHfMv8a1yyocphNRX3ekuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: upload
+version: "1.0.0"
+description: Receive bounded catalog closure batches from a remote release authority into a publisher-bound durable publication session.
+endpoint: bundle_catalog.upload
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-catalog/upload"]
+result_retention: digest_only
+schema:
+  upload_session_id: string?
+  catalog_namespace: string
+  expected_catalog_head: string?
+  objects: array
+  blobs_base64: array
+  blob_chunks: array

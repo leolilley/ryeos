@@ -1,0 +1,22 @@
+# ryeos:signed:2026-09-19T03:51:22Z:12d6dc53ed85539a34bba249f5942207e0f84583cfcb40f194617439e5994443:k/HC4x0FcE5swzX9wo9L3oiPUtM4FQwex7Tt9I0GSgbv3Xa2iIlUFwLvKMbwY43mS4UI/JPq+xbrkFkG1X6SCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: native-qualify
+version: "1.0.0"
+description: Verify the exact captured web bundle tree without mutating it.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_product_slots:
+  - id: subject
+    relationship_ref: config:bundle-release/native-build-products
+    relationship: native_bundle_to_release_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: native-bundle
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/native-qualify.py"]
+  input_data: "${params_json}"
+  timeout_secs: 300

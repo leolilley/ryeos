@@ -1,0 +1,19 @@
+# ryeos:signed:2026-09-19T04:10:25Z:fe10e71a505fbc85b6d0cf0a64b572c11da0f48029987cf99aa2dd2d70b5b251:PtOrapTbIBEZ+eg4AvA6ZPvcbqjygmXoAa8lYqpppYLV4A7xnKMD3+J48Tzvys4mqDtVzlrjsuiVS1EUu27MCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: input-inspect
+version: "1.0.0"
+description: Resolve one exact native bundle release input and its owned payloads without mutation.
+endpoint: bundle_release.input_inspect
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/input-inspect"]
+schema:
+  project_path: string
+  bundle_name: string
+  source_snapshot_hash: string
+  target: object
+  build_profile: string
+  predecessor_set_hash: string
+  catalog_namespace: string

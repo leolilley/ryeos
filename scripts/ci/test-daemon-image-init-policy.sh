@@ -281,21 +281,40 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
 
     # A fresh root receives the exact mapped first-publication seed.
     RYEOS_INIT_NODE_PROFILE=hosted-workflow
+    unset RYEOS_SUBSTRATE_IMAGE RYEOS_SUBSTRATE_PROTOCOL
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted absent substrate authority" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_IMAGE=ghcr.io/example/ryeos-substrate:latest
+    RYEOS_SUBSTRATE_PROTOCOL=1
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted mutable substrate authority" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_IMAGE="ghcr.io/example/ryeos-substrate@sha256:$(printf '1%.0s' {1..64})"
+    RYEOS_SUBSTRATE_PROTOCOL=0
+    if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
+        echo "entrypoint accepted zero substrate protocol" >&2
+        exit 1
+    fi
+    RYEOS_SUBSTRATE_PROTOCOL=1
+    substrate_args="--substrate-image-digest sha256:$(printf '1%.0s' {1..64}) --substrate-protocol 1"
     rm -rf "$policy_test_root/.ai"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081'
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow" ]]
 
     # A present generation is preserved. Even a malformed occupant takes this
     # path so real RyeOS rejects it instead of silently falling back to seed.
     mkdir -p "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
     # Replacement is an explicit one-boot opt-in and remains part of the same
     # locked init transaction as exact bundle reconciliation.
     RYEOS_RESET_NODE_POLICY_GENERATION=1
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args --node-profile hosted-workflow --replace-node-policy-generation --confirm-node-policy-generation-replacement" ]]
     RYEOS_RESET_NODE_POLICY_GENERATION=invalid
     if build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null 2>&1; then
         echo "entrypoint accepted an invalid policy replacement opt-in" >&2
@@ -305,7 +324,7 @@ assert_runtime_init_profile Dockerfile.release hosted-workflow ryeos-hosted-work
     rm -rf "$policy_test_root/.ai/node/policies"
     : > "$policy_test_root/.ai/node/policies"
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
-    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081" ]]
+    [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
     # Execution-history schema cuts carry their exact predecessor/current
     # epochs. Repeated boots are handled by the CLI's idempotent cut contract.

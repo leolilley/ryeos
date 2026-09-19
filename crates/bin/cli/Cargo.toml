@@ -34,6 +34,7 @@ zeroize     = { workspace = true }
 
 lillux         = { workspace = true }
 ryeos-app      = { workspace = true }
+ryeos-api      = { workspace = true }
 ryeos-bundle   = { workspace = true }
 ryeos-engine   = { workspace = true }
 ryeos-node     = { workspace = true }

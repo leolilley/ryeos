@@ -1,0 +1,28 @@
+# ryeos:signed:2026-09-19T03:51:20Z:316710d48306cd3473ef83def64c6f5521f002e367b79ca781cd45d1f34d81cb:Nx75e4t6f8a64MSJU3XvtUi3dWB/5TtmvC1t5oHUH+r9UpMuxBtfWq2/CB2Clhvs/RM7622aL9sU0JKwhdEhCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Build exactly one non-core bundle and all payloads selected by the ownership contract into a clean captured output.
+effects: live
+product_recipe: config:bundle-release/native-build-products
+config:
+  start: build
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [release_input]
+    properties:
+      release_input: {type: object}
+  state: {}
+  nodes:
+    build:
+      action:
+        item_id: tool:ryeos/bundle-release/native-build
+        params:
+          release_input: "${inputs.release_input}"
+      assign: {build: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.build}"

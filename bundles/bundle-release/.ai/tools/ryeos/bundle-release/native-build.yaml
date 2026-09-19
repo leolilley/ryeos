@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-19T03:51:22Z:f61f06e075947f9e433ccf87d469781f55a819bd0733e41bd0919ec32a9a05c7:8hmtmiaPtT4vRFVyB1WhCrpQc/7bueIifE9EwP1nViPY/xoBtiMcpAIRDbNYy5ksBOXRcXrqdYQGLTFCPQ84DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: native-build
+version: "1.0.0"
+description: Materialize one exact non-core bundle and all of its owned native payloads into a fresh captured product root.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory]
+  materialization: read_only
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/native-build.py"]
+  input_data: "${params_json}"
+  timeout_secs: 7200
+input_schema:
+  type: object
+  additionalProperties: false
+  required: [release_input]
+  properties:
+    release_input: {type: object}

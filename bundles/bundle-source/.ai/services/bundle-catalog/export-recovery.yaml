@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-19T03:43:17Z:44d354525e9dfeead87d91aa3c26e4bffea5d7a318b05f069fea99f744592abf:oBYjEhNG6bAHGK7NLPc3epUWznjGq1qmL9LTEiF6rabhRUpPuS0q6fmHmvqJnQMNx3lvLA9Lx/EiUslQ29bWCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: export-recovery
+version: "1.0.0"
+description: Export one exact catalog checkpoint and its explicitly retained immutable closures for disaster recovery.
+endpoint: bundle_catalog.export_recovery
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-catalog/export-recovery"]
+schema:
+  catalog_namespace: string

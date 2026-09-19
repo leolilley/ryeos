@@ -231,6 +231,17 @@ pub enum DurableCasPublicationKey {
     ExternalContentImport {
         request_digest: String,
     },
+    /// One bundle-catalog upload/admission decision. This is deliberately
+    /// distinct from project publication: a catalog never fabricates a project
+    /// path and stale policy authority cannot be replayed after reconfiguration.
+    BundleCatalog {
+        publisher_fingerprint: String,
+        catalog_namespace: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        observed_predecessor: Option<String>,
+        policy_section_digest: String,
+        node_policy_generation_digest: String,
+    },
 }
 
 impl DurableCasPublicationKey {
@@ -251,6 +262,24 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn bundle_catalog(
+        publisher_fingerprint: &str,
+        catalog_namespace: &str,
+        observed_predecessor: Option<&str>,
+        policy_section_digest: &str,
+        node_policy_generation_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::BundleCatalog {
+            publisher_fingerprint: publisher_fingerprint.to_owned(),
+            catalog_namespace: catalog_namespace.to_owned(),
+            observed_predecessor: observed_predecessor.map(str::to_owned),
+            policy_section_digest: policy_section_digest.to_owned(),
+            node_policy_generation_digest: node_policy_generation_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::ProjectHead {
@@ -263,8 +292,44 @@ impl DurableCasPublicationKey {
             Self::ExternalContentImport { request_digest } => {
                 validate_hash("external-content import request digest", request_digest)
             }
+            Self::BundleCatalog {
+                publisher_fingerprint,
+                catalog_namespace,
+                observed_predecessor,
+                policy_section_digest,
+                node_policy_generation_digest,
+            } => {
+                validate_hash(
+                    "bundle-catalog publisher fingerprint",
+                    publisher_fingerprint,
+                )?;
+                validate_catalog_namespace(catalog_namespace)?;
+                if let Some(predecessor) = observed_predecessor {
+                    validate_hash("bundle-catalog observed predecessor", predecessor)?;
+                }
+                validate_hash(
+                    "bundle-catalog policy-section digest",
+                    policy_section_digest,
+                )?;
+                validate_hash(
+                    "bundle-catalog node-policy generation digest",
+                    node_policy_generation_digest,
+                )
+            }
         }
     }
+}
+
+fn validate_catalog_namespace(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        anyhow::bail!("bundle-catalog namespace must be a bounded lowercase identifier");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

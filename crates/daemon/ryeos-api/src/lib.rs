@@ -12,6 +12,7 @@ pub mod handler_error;
 pub mod handlers;
 pub mod maintenance;
 pub mod project_deploy;
+pub mod publisher_server;
 pub(crate) mod project_namespace;
 pub mod registry;
 pub mod remote;

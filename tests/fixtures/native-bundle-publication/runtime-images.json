@@ -1,0 +1,12 @@
+{
+  "targets": {
+    "ryeos-central-host": {"class": "workflow", "dockerfile": "Dockerfile.release", "node": true, "pip": true, "python_venv": true, "security_boundary": false},
+    "ryeos-contained-workflow": {"class": "contained", "dockerfile": "Dockerfile.release", "node": false, "pip": false, "python_venv": false, "security_boundary": true},
+    "ryeos-full": {"class": "workflow", "dockerfile": "Dockerfile", "node": true, "pip": true, "python_venv": true, "security_boundary": false},
+    "ryeos-hosted-node": {"class": "hosted", "dockerfile": "Dockerfile.hosted-node", "node": false, "pip": false, "python_venv": false, "security_boundary": false},
+    "ryeos-hosted-workflow": {"class": "hosted", "dockerfile": "Dockerfile.release", "node": false, "pip": false, "python_venv": false, "security_boundary": false},
+    "ryeos-local-inference": {"class": "workflow", "dockerfile": "Dockerfile.release", "node": true, "pip": true, "python_venv": true, "security_boundary": false},
+    "ryeos-standard": {"class": "workflow", "dockerfile": "Dockerfile.release", "node": true, "pip": true, "python_venv": true, "security_boundary": false},
+    "ryeos-substrate": {"class": "hosted", "dockerfile": "Dockerfile.release", "node": false, "pip": false, "python_venv": false, "security_boundary": false}
+  }
+}

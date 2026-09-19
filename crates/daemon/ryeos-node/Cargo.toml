@@ -24,6 +24,7 @@ rand = { workspace = true }
 rmp-serde = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-bundle = { workspace = true }
+ryeos-bundle-publication-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }

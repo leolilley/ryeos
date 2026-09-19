@@ -33,6 +33,12 @@ pub enum BundlePlanMode {
     Replace,
     /// `bundle update-set`: installed bundles with candidates replacing same-name bundles.
     UpdateSet,
+    /// Reconcile to one exact complete candidate inventory.
+    ///
+    /// Unlike `UpdateSet`, omitted installed bundles are explicit removals and
+    /// previously absent candidates are installs. This mode only plans and
+    /// verifies; callers retain ownership of staging and activation.
+    ReconcileExactSet,
     /// `bundle remove`: installed bundles with candidate names marked for removal.
     ///
     /// Candidate paths are not consumed; installed inputs remain the authority
@@ -146,7 +152,7 @@ pub fn build_plan(
         }
         .with_context(|| format!("parse manifest for bundle '{}'", input.name))?;
 
-        let action = determine_action(mode, &input.name, candidates, installed);
+        let action = determine_action(mode, input, candidates, installed);
         bundles.insert(
             input.name.clone(),
             PlannedBundle {
@@ -220,6 +226,11 @@ fn validate_mode_policy(
                 }
             }
         }
+        BundlePlanMode::ReconcileExactSet => {
+            if candidates.is_empty() {
+                bail!("ReconcileExactSet planning requires a complete nonempty candidate set");
+            }
+        }
         BundlePlanMode::Remove => {
             if candidates.is_empty() {
                 bail!("Remove planning requires at least one installed bundle name");
@@ -266,6 +277,20 @@ fn build_effective_graph(
                 .cloned()
                 .collect();
             graph.extend_from_slice(candidates);
+            Ok(graph)
+        }
+        BundlePlanMode::ReconcileExactSet => {
+            let candidate_names: HashSet<&str> = candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect();
+            let mut graph = candidates.to_vec();
+            graph.extend(
+                installed
+                    .iter()
+                    .filter(|input| !candidate_names.contains(input.name.as_str()))
+                    .cloned(),
+            );
             Ok(graph)
         }
         BundlePlanMode::Remove => Ok(installed.to_vec()),
@@ -471,10 +496,11 @@ fn compute_install_order(bundles: &BTreeMap<BundleName, PlannedBundle>) -> Resul
 
 fn determine_action(
     mode: BundlePlanMode,
-    name: &str,
+    effective: &PlanInput,
     candidates: &[PlanInput],
     installed: &[PlanInput],
 ) -> BundleAction {
+    let name = effective.name.as_str();
     let is_candidate = candidates.iter().any(|candidate| candidate.name == name);
     let is_installed = installed.iter().any(|input| input.name == name);
 
@@ -494,6 +520,27 @@ fn determine_action(
                 BundleAction::Install
             } else {
                 BundleAction::Keep
+            }
+        }
+        BundlePlanMode::ReconcileExactSet => {
+            if is_candidate && is_installed {
+                let selected = candidates
+                    .iter()
+                    .find(|candidate| candidate.name == name)
+                    .expect("candidate membership was established");
+                let current = installed
+                    .iter()
+                    .find(|input| input.name == name)
+                    .expect("installed membership was established");
+                if selected.source.root_path() == current.source.root_path() {
+                    BundleAction::Keep
+                } else {
+                    BundleAction::Replace
+                }
+            } else if is_candidate {
+                BundleAction::Install
+            } else {
+                BundleAction::Remove
             }
         }
         BundlePlanMode::Remove => {
@@ -521,9 +568,10 @@ fn emit_verification_jobs(
         let bundle = bundles.get(name).context(format!("bundle {name}"))?;
         let should_verify = match mode {
             BundlePlanMode::InitSourceSet => true,
-            BundlePlanMode::Install | BundlePlanMode::Replace | BundlePlanMode::UpdateSet => {
-                candidate_names.contains(name.as_str())
-            }
+            BundlePlanMode::Install
+            | BundlePlanMode::Replace
+            | BundlePlanMode::UpdateSet
+            | BundlePlanMode::ReconcileExactSet => candidate_names.contains(name.as_str()),
             BundlePlanMode::Remove => true,
             BundlePlanMode::VerifyInstalled => true,
         };
@@ -693,5 +741,42 @@ mod tests {
 
         let err = build_plan(BundlePlanMode::Install, &[candidate], &[installed]).unwrap_err();
         assert!(err.to_string().contains("already installed"));
+    }
+
+    #[test]
+    fn exact_reconcile_does_not_implicitly_retain_omitted_bundles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed_root = tmp.path().join("installed");
+        let selected_root = tmp.path().join("selected");
+        let core_old = write_bundle(&installed_root, "core", &["config"], &[], &[]);
+        let changed_old = write_bundle(&installed_root, "changed", &["changed-kind"], &[], &[]);
+        let changed = write_bundle(&selected_root, "changed", &["changed-kind"], &[], &[]);
+        let old = write_bundle(&installed_root, "old", &["old-kind"], &[], &[]);
+        let added = write_bundle(&selected_root, "added", &["new-kind"], &["config"], &[]);
+        let core = input("core", core_old);
+
+        let plan = build_plan(
+            BundlePlanMode::ReconcileExactSet,
+            &[
+                core.clone(),
+                input("changed", changed),
+                input("added", added),
+            ],
+            &[core, input("changed", changed_old), input("old", old)],
+        )
+        .unwrap();
+
+        assert_eq!(plan.bundles["core"].action, BundleAction::Keep);
+        assert_eq!(plan.bundles["changed"].action, BundleAction::Replace);
+        assert_eq!(plan.bundles["added"].action, BundleAction::Install);
+        assert_eq!(plan.bundles["old"].action, BundleAction::Remove);
+        assert!(!plan.install_order.iter().any(|name| name == "old"));
+        assert!(!plan.provider_map.contains_key("old-kind"));
+    }
+
+    #[test]
+    fn exact_reconcile_requires_a_complete_nonempty_selection() {
+        let err = build_plan(BundlePlanMode::ReconcileExactSet, &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("complete nonempty candidate set"));
     }
 }

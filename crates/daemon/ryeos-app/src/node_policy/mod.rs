@@ -65,6 +65,7 @@ impl NodePolicyTable {
     pub fn new() -> Self {
         Self::from_sections(vec![
             Box::new(sections::accounting::NodeAccountingPolicySection),
+            Box::new(sections::bundle_publication::BundlePublicationPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
             Box::new(sections::external_content::ExternalContentImportPolicySection),

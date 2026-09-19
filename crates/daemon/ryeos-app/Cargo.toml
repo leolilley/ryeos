@@ -23,9 +23,11 @@ lillux = { workspace = true }
 once_cell = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rusqlite = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-bundle = { workspace = true }
+ryeos-bundle-publication-contract = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-graph-definition = { workspace = true }

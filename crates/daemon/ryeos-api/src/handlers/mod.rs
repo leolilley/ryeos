@@ -20,9 +20,12 @@ pub mod admission_submit;
 pub mod admission_token;
 pub mod authorize_client;
 pub mod authorize_key;
+pub mod bundle_catalog;
+pub mod bundle_catalog_publish;
 pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
+pub mod bundle_release;
 pub mod bundle_remove;
 pub mod bundle_smoke;
 pub mod bundle_verify;
@@ -221,6 +224,24 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
+    bundle_catalog_publish::DESCRIPTOR,
+    bundle_catalog::UPLOAD,
+    bundle_catalog::STAGE_LOCAL,
+    bundle_catalog::INSPECT,
+    bundle_catalog::RESOLVE,
+    bundle_catalog::EXPORT_RECOVERY,
+    bundle_catalog::RESTORE_GENESIS,
+    bundle_release::INPUT_INSPECT,
+    bundle_release::GENERATION_BUILD,
+    bundle_release::REQUEST_TREE_SIGNING,
+    bundle_release::GENERATION_CAPTURE,
+    bundle_release::GENERATION_QUALIFY,
+    bundle_release::GENERATION_FINALIZE,
+    bundle_release::REQUEST_AUTHORIZATION,
+    bundle_release::SET_COMPOSE,
+    bundle_release::CATALOG_REQUEST_PUBLICATION,
+    bundle_release::SUBMIT,
+    bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,

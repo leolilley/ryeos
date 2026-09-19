@@ -4,6 +4,7 @@
 //! communicating with remote ryEOS nodes. Used by the daemon's service
 //! handlers (`remote_configure`, `remote_list`, etc.).
 
+pub mod bundle_set_update;
 pub mod client;
 pub mod config;
 pub mod forward;

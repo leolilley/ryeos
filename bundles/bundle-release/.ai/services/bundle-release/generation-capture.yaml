@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-19T03:51:21Z:9e3b28d5a4bc8833c4d5d4392d36a590674e12cd1e4513ef977987510c827da3:aqzgNZfH3MprZKTSH0cosh2acOvoHIYEawTBB7osTnzw4R8L9sKyuBrfMXjDyuPohV6Dk0fHpFY4tXQ5EAUHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: generation-capture
+version: "1.0.0"
+description: Capture the exact signed output tree without authoring or authorizing a generation.
+endpoint: bundle_release.generation_capture
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/generation-capture"]
+schema:
+  materialization_result_hash: string
+  signed_tree_manifest_hash: string

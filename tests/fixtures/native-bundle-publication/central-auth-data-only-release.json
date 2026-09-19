@@ -1,0 +1,21 @@
+{
+  "schema": "ryeos.bundle_only_release_acceptance.v1",
+  "bundle": "central-auth",
+  "target": {"kind": "portable"},
+  "payloads": [],
+  "cargo_packages": [],
+  "requires_binary_build": false,
+  "substrate_image_before": "ghcr.io/leolilley/ryeos-substrate@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "substrate_image_after": "ghcr.io/leolilley/ryeos-substrate@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "catalog_operations": [
+    "service:bundle-release/catalog-request-publication",
+    "service:bundle-release/catalog-remote-publish"
+  ],
+  "qualification_checks": [
+    "captured-product-binding",
+    "bundle-name-binding",
+    "bundle-manifest-present",
+    "portable-data-only-plan",
+    "no-symbolic-links"
+  ]
+}

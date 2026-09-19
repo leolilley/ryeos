@@ -1,0 +1,13 @@
+# ryeos:signed:2026-09-19T03:51:20Z:a8561367c739208ae4bdf740b02a5c528a0805a8fe7e73a835f2eaf89f91aaac:ccG3Szgr58xDjMFZLqhos0bUWLgXsoBp5AT+GVpE+dVs70R1AlZIWWh7URQ1Ikx4eDNu3mxdiqR4cKXpDstRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: generation-finalize
+version: "1.0.0"
+description: Finalize a structurally and semantically verified immutable native generation.
+endpoint: bundle_release.generation_finalize
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/generation-finalize"]
+schema:
+  generation: object
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer

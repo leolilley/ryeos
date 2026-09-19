@@ -1145,13 +1145,31 @@ pub(super) fn load_current_qualification(
     owner_principal: &str,
     qualification_hash: &str,
 ) -> anyhow::Result<VerifiedQualificationWitness> {
+    load_current_qualification_with_key(
+        authority,
+        guard,
+        limits,
+        owner_principal,
+        qualification_hash,
+        state.identity.verifying_key(),
+    )
+}
+
+pub(crate) fn load_current_qualification_with_key(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_principal: &str,
+    qualification_hash: &str,
+    node_key: &lillux::crypto::VerifyingKey,
+) -> anyhow::Result<VerifiedQualificationWitness> {
     require_canonical_hash("qualification witness", qualification_hash)?;
     let value = load_product_attestation_value(authority, qualification_hash, limits, guard)?
         .context("qualification witness is absent")?;
     let attestation = Attestation::from_value(&value)?;
     let evidence = ProductQualificationEvidence::verify_attestation_for_owner(
         &attestation,
-        state.identity.verifying_key(),
+        node_key,
         owner_principal,
     )?;
     let coordinate = QualificationCoordinate::from_evidence(&evidence)?;
@@ -1159,7 +1177,7 @@ pub(super) fn load_current_qualification(
         authority,
         &coordinate,
         qualification_hash,
-        state.identity.verifying_key(),
+        node_key,
         limits,
         guard,
     )?
@@ -1173,6 +1191,62 @@ pub(super) fn load_current_qualification(
         bail!("qualification witness is expired");
     }
     Ok(witness)
+}
+
+/// Re-admit one published qualification against today's exact signed policy,
+/// verifier definition, runtime artifact and retained execution evidence.
+pub fn verify_current_qualification_for_release(
+    state: &AppState,
+    context: &HandlerContext,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_principal: &str,
+    qualification_hash: &str,
+    expected_subject_manifest: &str,
+    required_claims: &[String],
+) -> anyhow::Result<()> {
+    let proof = load_current_qualification(
+        state,
+        authority,
+        guard,
+        limits,
+        owner_principal,
+        qualification_hash,
+    )?;
+    if proof.evidence.result.subject_manifest_hash != expected_subject_manifest {
+        bail!("qualification attests a different release manifest");
+    }
+    let current_policy = resolve_current_bundle_qualification_policy(
+        state,
+        &proof.evidence.policy_source.canonical_ref,
+    )?;
+    let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
+        state,
+        authority,
+        guard,
+        limits,
+        context,
+        &current_policy.policy.verifier_ref,
+        &current_policy.policy.verifier_parameters,
+        &proof.evidence,
+    )?;
+    proof.evidence.validate_current_policy(
+        &current_policy,
+        &current_verifier.effective_definition_digest,
+        required_claims,
+    )?;
+    proof
+        .evidence
+        .validate_current_artifact(&current_verifier.artifact_identity)?;
+    execution_evidence::verify_current(
+        state,
+        authority,
+        guard,
+        context,
+        &proof.evidence,
+        &current_verifier,
+    )
 }
 
 /// Recovery authenticates the exact retained proof under its caller's CAS
