@@ -164,7 +164,8 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
 .tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
-.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; border-top: 1px solid var(--line); }
+.tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; overflow-x: auto; overflow-y: hidden; border-top: 1px solid var(--line); scrollbar-width: thin; }
+.tile-header.grouped .view-tabs button { flex: 0 0 auto; }
 .view-tabs button { padding: 0 13px; color: var(--muted); border-bottom: 1px solid transparent; text-transform: none; letter-spacing: 0; }
 .view-tabs button.active { color: var(--text); border-color: var(--yellow); }
 .content-heading { padding: 28px 34px 22px; border-bottom: 1px solid var(--line); }
@@ -179,6 +180,17 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
   .view-set-middle { gap: 8px; }
   .dock-slot[data-edge="left"], .dock-slot[data-edge="right"] { width: min(calc(var(--dock-size) * 1px), 28vw); }
 }
+@media (max-width: 760px) {
+  /* Preserve the authored tree while presenting only the focused leaf's
+     ancestry. Focus changes reveal another group; no split or mount is
+     rewritten in browser state. */
+  .split { display: block; }
+  .split > .split:not(:has(.tile-frame.focused)),
+  .split > .tile-frame:not(.focused),
+  .split > .split-divider { display: none; }
+  .split > .split:has(.tile-frame.focused),
+  .split > .tile-frame.focused { width: 100%; height: 100%; }
+}
 }
 @layer components{
 .composer { margin: auto 20px 18px; border: 1px solid var(--line-strong); background: var(--plane); }
@@ -188,6 +200,9 @@ button:focus-visible, textarea:focus-visible { outline: 1px solid var(--accent-b
 .composer textarea::placeholder { color: var(--faint); }
 .composer-actions { display: flex; align-items: center; min-height: 34px; padding: 0 10px 7px 14px; color: var(--faint); font-size: 10px; }
 .composer-actions button { margin-left: auto; width: 27px; height: 27px; text-align: center; background: var(--accent); color: var(--text); }
+.composer.live-filter { margin: 0; border-width: 0 0 1px; background: color-mix(in srgb, var(--plane) 97%, transparent); }
+.composer.live-filter textarea { min-height: 38px; height: 38px; padding: 10px 14px; font: 11px var(--font-data); }
+.composer.live-filter .composer-actions { min-height: 24px; padding: 0 14px 6px; }
 .empty-state { display: grid; place-content: center; flex: 1; min-height: 160px; text-align: center; color: var(--muted); }.empty-state span { color: var(--yellow); font-size: 24px; }.empty-state strong { margin-top: 12px; color: var(--text); }.empty-state p { max-width: 360px; }
 }
 @layer views{

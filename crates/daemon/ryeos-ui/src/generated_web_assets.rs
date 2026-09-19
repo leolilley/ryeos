@@ -16,7 +16,7 @@ pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[
         filename: "ryeos_ui.js",
         content_type: "application/javascript; charset=utf-8",
         cache_control: "no-cache",
-        sha256: "18dd99e35b36485e75cb65545124eb199018aabade508d047961c3b3ee577ec7",
+        sha256: "a06591e95d4546fd54d9e329fd5647681521a3999e5fa18e4c69aa2de5ceb45e",
         imports: &[
             "/ui/assets/ryeos_three.js",
             "/ui/assets/ryeos_web.js",
@@ -29,7 +29,7 @@ pub(super) static WEB_ASSETS: &[WebAssetEntry] = &[
         filename: "ryeos_ui.css",
         content_type: "text/css; charset=utf-8",
         cache_control: "no-cache",
-        sha256: "fd0b2fa18b607fa17b8da86c685f1c57c134381665980d2f1035d3fbc304e489",
+        sha256: "eb26a439e40e3ab54b5836df9253126e0222182efd9bdc1b0206590762bf1365",
         imports: &[],
         bytes: include_bytes!("../../../clients/web/pkg/ryeos_ui.css"),
     },

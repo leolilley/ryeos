@@ -5171,11 +5171,11 @@ function dispatchUi() {
 //#endregion
 //#region browser/app/Navigation.svelte
 var root$17 = /* @__PURE__ */ from_html(`<button><span class="navigation-glyph" aria-hidden="true">◇</span> <span class="navigation-copy"><strong> </strong></span></button>`);
-var root_1$9 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
+var root_1$10 = /* @__PURE__ */ from_html(`<aside class="navigation" aria-label="RyeOS navigation"><div class="navigation-heading">Explorer <span> </span></div> <nav></nav></aside>`);
 function Navigation($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
-	var aside = root_1$9();
+	var aside = root_1$10();
 	var div = child(aside);
 	var text = only_child(sibling(child(div)), true);
 	reset(div);
@@ -5207,14 +5207,14 @@ delegate(["click"]);
 //#endregion
 //#region browser/app/Notices.svelte
 var root$16 = /* @__PURE__ */ from_html(`<div class="notice"><span> </span> <button aria-label="Dismiss notice">×</button></div>`);
-var root_1$8 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
+var root_1$9 = /* @__PURE__ */ from_html(`<aside class="notice-stack" aria-label="RyeOS notices" aria-live="polite" aria-atomic="false"></aside>`);
 function Notices($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var aside = root_1$8();
+		var aside = root_1$9();
 		each(aside, 21, () => $$props.notices, (notice) => notice.id, ($$anchor, notice) => {
 			var div = root$16();
 			var span = child(div);
@@ -5246,8 +5246,8 @@ delegate(["click"]);
 //#endregion
 //#region browser/app/OverlayLayer.svelte
 var root$15 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$7 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
-var root_2$5 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
+var root_1$8 = /* @__PURE__ */ from_html(`<div class="overlay-columns"></div>`);
+var root_2$6 = /* @__PURE__ */ from_html(`<span class="overlay-secondary"> </span>`);
 var root_3$4 = /* @__PURE__ */ from_html(`<span class="overlay-secondary overlay-disabled-reason"> </span>`);
 var root_4$4 = /* @__PURE__ */ from_html(`<small> </small>`);
 var root_5$4 = /* @__PURE__ */ from_html(`<button class="overlay-secondary-action">↗</button>`);
@@ -5316,7 +5316,7 @@ function OverlayLayer($$anchor, $$props) {
 	bind_this(input, ($$value) => queryInput = $$value, () => queryInput);
 	var node = sibling(input, 2);
 	var consequent = ($$anchor) => {
-		var div_3 = root_1$7();
+		var div_3 = root_1$8();
 		each(div_3, 21, () => $$props.model.columns, index, ($$anchor, column) => {
 			var span = root$15();
 			var text_2 = only_child(span, true);
@@ -5349,7 +5349,7 @@ function OverlayLayer($$anchor, $$props) {
 		reset(span_1);
 		var node_2 = sibling(span_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var span_2 = root_2$5();
+			var span_2 = root_2$6();
 			var text_5 = only_child(span_2, true);
 			template_effect(() => set_text(text_5, get(item).secondary));
 			append($$anchor, span_2);
@@ -7129,13 +7129,13 @@ function AmbientLayer($$anchor, $$props) {
 //#endregion
 //#region browser/app/StatusBar.svelte
 var root$13 = /* @__PURE__ */ from_html(`<span> </span>`);
-var root_1$6 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
+var root_1$7 = /* @__PURE__ */ from_html(`<footer class="status-bar"><!> <span class="key-hint"> </span></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var footer = root_1$6();
+		var footer = root_1$7();
 		var node_1 = child(footer);
 		each(node_1, 17, () => $$props.model.segments, index, ($$anchor, segment) => {
 			var span = root$13();
@@ -7196,18 +7196,18 @@ function SystemBar($$anchor, $$props) {
 //#endregion
 //#region browser/app/ViewSetStrip.svelte
 var root$11 = /* @__PURE__ */ from_html(`<span class="view-set-actions" role="group"><button title="Duplicate view set">⧉</button> <button title="Close view set">×</button></span>`);
-var root_1$5 = /* @__PURE__ */ from_html(`<div><button class="view-set-select"><span class="ordinal"> </span> <span> </span></button> <!></div>`);
-var root_2$4 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button></nav>`);
+var root_1$6 = /* @__PURE__ */ from_html(`<div><button class="view-set-select"><span class="ordinal"> </span> <span> </span></button> <!></div>`);
+var root_2$5 = /* @__PURE__ */ from_html(`<nav class="view-set-strip" aria-label="View sets"><!> <button class="new-view-set" aria-label="New view set">＋</button></nav>`);
 function ViewSetStrip($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent_1 = ($$anchor) => {
-		var nav = root_2$4();
+		var nav = root_2$5();
 		var node_1 = child(nav);
 		each(node_1, 17, () => $$props.model.tabs, (tab) => tab.view_set_id, ($$anchor, tab) => {
-			var div = root_1$5();
+			var div = root_1$6();
 			let classes;
 			var button = child(div);
 			var span = child(button);
@@ -7277,7 +7277,9 @@ function ViewSetStrip($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/components/InputComposer.svelte
-var root$10 = /* @__PURE__ */ from_html(`<section class="composer"><div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div> <textarea></textarea> <div class="composer-actions"><span> </span><button>↑</button></div></section>`);
+var root$10 = /* @__PURE__ */ from_html(`<div class="composer-route"><span class="route-state">●</span><span> </span><span class="draft-state">DRAFT</span></div>`);
+var root_1$5 = /* @__PURE__ */ from_html(`<button>↑</button>`);
+var root_2$4 = /* @__PURE__ */ from_html(`<section><!> <textarea></textarea> <div class="composer-actions"><span> </span><!></div></section>`);
 function InputComposer($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -7297,28 +7299,52 @@ function InputComposer($$anchor, $$props) {
 			}
 		});
 	}
-	var section = root$10();
-	var div = child(section);
-	var text_1 = only_child(sibling(child(div)), true);
-	next();
-	reset(div);
-	var textarea = sibling(div, 2);
+	var section = root_2$4();
+	let classes;
+	var node = child(section);
+	var consequent = ($$anchor) => {
+		var div = root$10();
+		var text_1 = only_child(sibling(child(div)), true);
+		next();
+		reset(div);
+		template_effect(() => set_text(text_1, $$props.model.route_label));
+		append($$anchor, div);
+	};
+	if_block(node, ($$render) => {
+		if (!$$props.model.live_filter) $$render(consequent);
+	});
+	var textarea = sibling(node, 2);
 	remove_textarea_child(textarea);
 	var div_1 = sibling(textarea, 2);
 	var span_1 = child(div_1);
 	var text_2 = only_child(span_1, true);
-	var button = sibling(span_1);
+	var node_1 = sibling(span_1);
+	var consequent_1 = ($$anchor) => {
+		var button = root_1$5();
+		template_effect(() => button.disabled = !$$props.model.submit_enabled);
+		delegated("click", button, () => dispatch({
+			type: "input_at",
+			address: $$props.model.address,
+			action: {
+				type: "submit",
+				interrupt: false
+			}
+		}));
+		append($$anchor, button);
+	};
+	if_block(node_1, ($$render) => {
+		if (!$$props.model.live_filter) $$render(consequent_1);
+	});
 	reset(div_1);
 	reset(section);
 	template_effect(() => {
+		classes = set_class(section, 1, "composer", null, classes, { "live-filter": $$props.model.live_filter });
 		set_attribute(section, "aria-label", $$props.model.route_label);
-		set_text(text_1, $$props.model.route_label);
 		set_attribute(textarea, "data-focus-key", `input:${$$props.model.address.buffer.view_instance_key}:${$$props.model.address.buffer.input_id}`);
 		set_value(textarea, $$props.model.text);
 		set_attribute(textarea, "placeholder", $$props.model.placeholder);
 		set_attribute(textarea, "aria-label", $$props.model.route_label);
 		set_text(text_2, $$props.model.hint);
-		button.disabled = !$$props.model.submit_enabled;
 	});
 	event("focus", textarea, () => dispatch({
 		type: "input_at",
@@ -7332,7 +7358,10 @@ function InputComposer($$anchor, $$props) {
 	});
 	delegated("input", textarea, (event) => emitInput(event.currentTarget));
 	delegated("keydown", textarea, (event) => {
-		if (event.key === "Enter" && !event.shiftKey && !composing && $$props.model.submit_enabled) {
+		if (event.key === "Enter" && $$props.model.live_filter && !composing) {
+			event.preventDefault();
+			dispatch({ type: "activate_focused" });
+		} else if (event.key === "Enter" && !event.shiftKey && !composing && $$props.model.submit_enabled) {
 			event.preventDefault();
 			dispatch({
 				type: "input_at",
@@ -7344,14 +7373,6 @@ function InputComposer($$anchor, $$props) {
 			});
 		}
 	});
-	delegated("click", button, () => dispatch({
-		type: "input_at",
-		address: $$props.model.address,
-		action: {
-			type: "submit",
-			interrupt: false
-		}
-	}));
 	append($$anchor, section);
 	pop();
 }
@@ -9141,7 +9162,7 @@ function ViewRenderer($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region browser/layout/DockSlot.svelte
-var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!></aside>`);
+var root$4 = /* @__PURE__ */ from_html(`<aside><header><span> </span><span> </span></header> <!> <!> <!></aside>`);
 function DockSlot($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -9153,9 +9174,18 @@ function DockSlot($$anchor, $$props) {
 	var text_1 = only_child(sibling(span), true);
 	reset(header);
 	var node = sibling(header, 2);
+	var consequent = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent);
+	});
+	var node_1 = sibling(node, 2);
 	{
 		let $0 = /* @__PURE__ */ user_derived(() => String($$props.model.instance_key));
-		ViewRenderer(node, {
+		ViewRenderer(node_1, {
 			get model() {
 				return $$props.model.view;
 			},
@@ -9167,14 +9197,14 @@ function DockSlot($$anchor, $$props) {
 			}
 		});
 	}
-	var node_1 = sibling(node, 2);
-	var consequent = ($$anchor) => {
+	var node_2 = sibling(node_1, 2);
+	var consequent_1 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_1, ($$render) => {
-		if ($$props.model.input) $$render(consequent);
+	if_block(node_2, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_1);
 	});
 	reset(aside);
 	template_effect(() => {
@@ -9208,7 +9238,7 @@ var root_2 = /* @__PURE__ */ from_html(`<header><div class="tile-title-row"><div
 var root_3 = /* @__PURE__ */ from_html(`<p> </p>`);
 var root_4 = /* @__PURE__ */ from_html(`<div class="heading-meta"> </div>`);
 var root_5 = /* @__PURE__ */ from_html(`<div class="content-heading"><small> </small><h1> </h1><!><!></div>`);
-var root_6 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!></article>`);
+var root_6 = /* @__PURE__ */ from_html(`<article><!> <!> <!> <!> <!></article>`);
 function TileFrame($$anchor, $$props) {
 	push($$props, true);
 	const dispatch = dispatchUi();
@@ -9309,7 +9339,16 @@ function TileFrame($$anchor, $$props) {
 		if ($$props.model.heading) $$render(consequent_4);
 	});
 	var node_5 = sibling(node_2, 2);
-	ViewRenderer(node_5, {
+	var consequent_5 = ($$anchor) => {
+		InputComposer($$anchor, { get model() {
+			return $$props.model.input;
+		} });
+	};
+	if_block(node_5, ($$render) => {
+		if ($$props.model.input?.live_filter) $$render(consequent_5);
+	});
+	var node_6 = sibling(node_5, 2);
+	ViewRenderer(node_6, {
 		get model() {
 			return $$props.model.view;
 		},
@@ -9320,14 +9359,14 @@ function TileFrame($$anchor, $$props) {
 			return $$props.model.instance_key;
 		}
 	});
-	var node_6 = sibling(node_5, 2);
-	var consequent_5 = ($$anchor) => {
+	var node_7 = sibling(node_6, 2);
+	var consequent_6 = ($$anchor) => {
 		InputComposer($$anchor, { get model() {
 			return $$props.model.input;
 		} });
 	};
-	if_block(node_6, ($$render) => {
-		if ($$props.model.input) $$render(consequent_5);
+	if_block(node_7, ($$render) => {
+		if ($$props.model.input && !$$props.model.input.live_filter) $$render(consequent_6);
 	});
 	reset(article);
 	template_effect(() => {
