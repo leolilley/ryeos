@@ -11,6 +11,7 @@ use lillux::crypto::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 pub mod export;
+pub mod transcript;
 
 pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;

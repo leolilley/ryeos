@@ -1,5 +1,6 @@
 //! Subordinate channel/transcript state, never a second worker scheduler.
 use super::*;
+use ryeos_state::external_execution::transcript::{ChannelPhase, FrameFrontier, urgent_control};
 use ryeos_state::external_execution::{
     ChannelDirection, ExecutionChannelBinding, ExecutionChannelBudget, ExecutionChannelPayload,
     SignedExecutionFrame,
@@ -232,18 +233,15 @@ impl RuntimeDb {
             None => (0, None, 0),
             Some((sequence, digest, ack)) => (sequence, Some(digest), ack),
         };
-        if frame.sequence != u64::try_from(sequence + 1)?
-            || frame.previous_frame_digest != predecessor
-            || frame.acknowledged_peer_sequence < u64::try_from(last_ack)?
-        {
-            bail!("external transcript has a gap, fork or regressed acknowledgement");
-        }
         let peer_sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2",
             params![frame.binding_digest, frame.direction.opposite().as_str()], |row|row.get(0))?;
-        if frame.acknowledged_peer_sequence > u64::try_from(peer_sequence)? {
-            bail!("external acknowledgement refers to an unauthored peer frame");
-        }
+        FrameFrontier::from_retained(
+            u64::try_from(sequence)?,
+            predecessor,
+            u64::try_from(last_ack)?,
+        )?
+        .require_successor(frame, u64::try_from(peer_sequence)?)?;
         let mut budget = retained_budget(&tx, &frame.binding_digest, direction)?;
         budget.retain(&binding, &frame.payload, wire.len() as u64)?;
         let (state, completion): (String, Option<String>) = tx.query_row(
@@ -259,8 +257,7 @@ impl RuntimeDb {
         {
             bail!("quarantined allocation cannot execute or author a candidate export");
         }
-        let next = transition(
-            &state,
+        let next = ChannelPhase::parse(&state)?.advance(
             completion.as_deref(),
             &frame.payload,
             now < binding.execution_deadline_ms,
@@ -283,7 +280,7 @@ impl RuntimeDb {
         )?;
         tx.execute(
             "UPDATE external_execution_channel SET state=?2 WHERE placement_thread_id=?1",
-            params![placement, next],
+            params![placement, next.as_str()],
         )?;
         if revoked(&tx, &frame.binding_digest)? {
             tx.execute("UPDATE external_execution_frame SET application='revoked'
@@ -382,7 +379,7 @@ impl RuntimeDb {
         if matches!(
             verified.frame().payload,
             ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
-        ) && !matches!(state.as_str(), "running" | "quiescing" | "exported")
+        ) && !ChannelPhase::parse(&state)?.permits_pending_input()
         {
             bail!("external execution was revoked before pending application");
         }
@@ -568,15 +565,13 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
         )?;
         let mut rows = frames.query([&binding_digest])?;
         let mut ordinal = 0_i64;
-        let mut sequence = [0_u64; 2];
-        let mut digests: [Option<String>; 2] = [None, None];
-        let mut acks = [0_u64; 2];
+        let mut frontiers = [FrameFrontier::default(), FrameFrontier::default()];
         let mut budgets = [
             ExecutionChannelBudget::default(),
             ExecutionChannelBudget::default(),
         ];
         let mut unsettled = [false; 2];
-        let mut state = "prepared".to_owned();
+        let mut state = ChannelPhase::Prepared;
         let mut completion: Option<String> = None;
         let mut snapshot: Option<String> = None;
         let mut evidence: Option<String> = None;
@@ -613,16 +608,13 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
                 || row.get::<_, String>(3)? != verified.digest()
                 || row.get::<_, i64>(5)? != i64::try_from(wire.len())?
                 || row.get::<_, i64>(6)? != i64::try_from(frame.acknowledged_peer_sequence)?
-                || frame.sequence != sequence[index] + 1
-                || frame.previous_frame_digest != digests[index]
-                || frame.acknowledged_peer_sequence < acks[index]
-                || frame.acknowledged_peer_sequence > sequence[1 - index]
                 || (unsettled[index]
                     && !matches!(application.as_str(), "pending" | "revoked")
                     && !urgent_control(&frame.payload))
             {
                 bail!("retained external transcript ordering, application or identity mismatch");
             }
+            frontiers[index].require_successor(frame, frontiers[1 - index].sequence())?;
             if !matches!(
                 application.as_str(),
                 "pending" | "claimed" | "applied" | "revoked"
@@ -639,11 +631,13 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
                 bail!("external control observation was incorrectly revoked");
             }
             unsettled[index] |= !matches!(application.as_str(), "applied" | "revoked");
-            sequence[index] = frame.sequence;
-            digests[index] = Some(verified.digest().to_owned());
-            acks[index] = frame.acknowledged_peer_sequence;
+            frontiers[index] = FrameFrontier::from_retained(
+                frame.sequence,
+                Some(verified.digest().to_owned()),
+                frame.acknowledged_peer_sequence,
+            )?;
             budgets[index].retain(&binding, &frame.payload, wire.len() as u64)?;
-            state = transition(&state, completion.as_deref(), &frame.payload, true)?.to_owned();
+            state = state.advance(completion.as_deref(), &frame.payload, true)?;
             match &frame.payload {
                 ExecutionChannelPayload::Quiesce {
                     completion_request_digest,
@@ -659,7 +653,7 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
                 _ => {}
             }
         }
-        if state != stored_state
+        if state != ChannelPhase::parse(&stored_state)?
             || completion != stored_completion
             || snapshot != stored_snapshot
             || evidence != stored_evidence
@@ -688,15 +682,6 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn urgent_control(payload: &ExecutionChannelPayload) -> bool {
-    matches!(
-        payload,
-        ExecutionChannelPayload::Cancel
-            | ExecutionChannelPayload::Stopped { .. }
-            | ExecutionChannelPayload::Acknowledge
-    )
-}
-
 fn retained_budget(
     conn: &Connection,
     digest: &str,
@@ -722,32 +707,6 @@ fn retained_budget(
         }
     }
     Ok(budget)
-}
-
-fn transition<'a>(
-    state: &'a str,
-    completion: Option<&str>,
-    payload: &ExecutionChannelPayload,
-    before_deadline: bool,
-) -> Result<&'a str> {
-    use ExecutionChannelPayload::*;
-    Ok(match payload {
-        Ready { .. } if state == "prepared" && before_deadline => "ready",
-        Release if state == "ready" && before_deadline => "running",
-        ProtocolBytes { .. } if state == "running" && before_deadline => "running",
-        Quiesce { .. } if state == "running" => "quiescing",
-        ExportObjectChunk { .. } if state == "quiescing" => "quiescing",
-        ExportSealed {
-            completion_request_digest,
-            ..
-        } if state == "quiescing" && completion == Some(completion_request_digest.as_str()) => {
-            "exported"
-        }
-        Cancel if !matches!(state, "stopped" | "stopping") => "stopping",
-        Stopped { .. } if state != "stopped" => "stopped",
-        Acknowledge => state,
-        _ => bail!("external channel payload contradicts lifecycle state {state}"),
-    })
 }
 
 #[cfg(test)]

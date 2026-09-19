@@ -293,3 +293,15 @@ with event-stream egress and durable acknowledgements, or add a generic register
 duplex mode. Neither permits an ad hoc route, general guest grant or command
 backlog replay ahead of sticky cancellation. These source-review decisions are
 not transport or installed-activation evidence.
+
+### Shared transcript extraction
+
+`ryeos-state::external_execution::transcript` now owns the exact phase projection,
+directional sequence/predecessor/acknowledgement checks and urgent-control
+classification. Both append and reopen in the node journal use these rules.
+Persisted spellings, wire records and SQLite schema are unchanged; these values
+grant no dispatch, cleanup or session authority. Independent architecture and
+security source reviews found no semantic regression in the extraction. The
+21 SQLite regressions and Rust formatting checks pass; the three new Rust
+projection/frontier tests await the affected Cargo rerun after space is available.
+This is not yet the shared transaction-level guest journal or supervisor loop.
