@@ -975,6 +975,7 @@ mod tests {
     use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
     use crate::ui::event::RyeOsEvent;
     use crate::ui::model::{BrowserSession, BrowserViewport};
+    use crate::ui::reducer::test_support::active_selection;
 
     fn source_request(
         effect: &crate::ui::effect::RyeOsEffect,

@@ -22,7 +22,7 @@ mod effect_results;
 mod field_interaction;
 mod input;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod tiles;
 
 use super::effect::{RyeOsEffect, RyeOsEffectKind};

@@ -656,7 +656,10 @@ mod tests {
     #[test]
     fn exact_view_pointer_state_addresses_dock_instances() {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
-        let instance_key = crate::ids::RyeOsViewInstanceKey::surface_slot("right");
+        let instance_key = crate::ids::RyeOsViewInstanceKey::view_set_slot(
+            core.view_sets[core.active_view_set].id,
+            "right",
+        );
         core.view_sets[core.active_view_set].dock_local.insert(
             instance_key.clone(),
             ViewSpec::bound("view:test/dock").initial_local_state(),
@@ -682,7 +685,7 @@ mod tests {
         else {
             panic!("dock should retain generic list state");
         };
-        assert_eq!(*cursor, 7);
+        assert_eq!(cursor, 7);
         assert_eq!(collapsed.iter().copied().collect::<Vec<_>>(), vec![2]);
     }
 
@@ -1528,13 +1531,7 @@ mod tests {
         let duplicate = &core.view_sets[core.active_view_set];
         assert_ne!(duplicate.id, source_id);
         assert_eq!(duplicate.title, "Development copy");
-        assert_eq!(
-            duplicate
-                .root
-                .as_ref()
-                .map(crate::layout::LayoutTree::tile_count),
-            Some(2)
-        );
+        assert_eq!(duplicate.tile_ids().len(), 2);
         assert!(duplicate.input_buffers.is_empty());
         assert!(duplicate.lens_stack.is_empty());
         let duplicate_instances: std::collections::BTreeSet<_> = duplicate
