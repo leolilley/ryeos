@@ -9,6 +9,7 @@
 </script>
 <aside class="dock-slot" class:focused={model.focused} data-edge={model.edge} style={`--dock-size:${model.size}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }}>
   <header><span>{model.title}</span><span>{model.edge}</span></header>
+  {#if model.input?.live_filter}<InputComposer model={model.input} />{/if}
   <ViewRenderer model={model.view} tileId={String(model.instance_key)} instanceKey={model.instance_key} />
-  {#if model.input}<InputComposer model={model.input} />{/if}
+  {#if model.input && !model.input.live_filter}<InputComposer model={model.input} />{/if}
 </aside>
