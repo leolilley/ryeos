@@ -163,8 +163,10 @@ fn main() {
     populate(&mut core, &data);
     let overview = core.envelope(vec![]);
     dispatch(&mut core, RyeOsUiIntent::SwitchTab { index: 1 });
+    let active_view_set_id = core.view_sets[core.active_view_set].id;
     core.view_sets[core.active_view_set].dock_local.insert(
         ryeos_client_base::ui::model::dock_view_instance_key(
+            active_view_set_id,
             ryeos_client_base::ui::model::RyeOsDockEdge::Left,
         ),
         ryeos_client_base::view_set::ViewSpec::bound("view:fixture/projects").initial_local_state(),

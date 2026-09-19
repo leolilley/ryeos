@@ -28,6 +28,26 @@ async fn verified_operator_passes_projects_read_gate() {
 }
 
 #[tokio::test]
+async fn request_project_path_does_not_create_project_authority() {
+    let (_tmp, state) = build_test_state();
+    let requested = tempfile::TempDir::new().expect("request project");
+    let operator_ctx = local_operator_context(&state, vec!["*".into()]);
+
+    let listed = ryeos_ui::handlers::ui_projects::handle_projects_list(
+        json!({"project_path": requested.path()}),
+        operator_ctx,
+        Arc::new(state),
+    )
+    .await
+    .expect("verified operator should pass the projects read gate");
+
+    assert!(
+        listed["projects"].as_array().unwrap().is_empty(),
+        "request parameters cannot synthesize a current project"
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires populated handler binaries via scripts/populate-bundles.sh"]
 async fn opening_another_project_mints_an_immutable_successor_session() {
     let (_tmp, state) = build_test_state_with_live_bundles();

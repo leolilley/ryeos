@@ -188,6 +188,9 @@ impl RyeOsCore {
         &mut self,
         template: &SavedViewSetTemplate,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
+            return Err("view set limit reached".into());
+        }
         validate_saved_view_set_templates(std::slice::from_ref(template))?;
         let tiling = self
             .view_sets
@@ -474,6 +477,21 @@ mod tests {
         });
         let mut target = core();
         let before = target.view_sets.len();
+        assert!(target.open_saved_view_set_template(&template).is_err());
+        assert_eq!(target.view_sets.len(), before);
+    }
+
+    #[test]
+    fn reusable_template_cannot_exceed_the_open_view_set_limit() {
+        let mut target = core();
+        let template = target
+            .export_active_view_set_template("development".into(), "Development".into())
+            .unwrap();
+        while target.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS {
+            target.new_view_set();
+        }
+        let before = target.view_sets.len();
+
         assert!(target.open_saved_view_set_template(&template).is_err());
         assert_eq!(target.view_sets.len(), before);
     }

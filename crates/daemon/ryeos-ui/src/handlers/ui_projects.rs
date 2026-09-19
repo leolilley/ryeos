@@ -157,16 +157,15 @@ pub struct ViewSetLibraryUpdate {
 }
 
 pub async fn handle_projects_list(
-    params: Value,
+    _params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = require_seat_caller(&ctx, &state)?;
-    let project_path = string_param(&params, "project_path");
     let retained_project = caller
         .project_query_identity()?
         .map(|path| path.to_string_lossy().into_owned());
-    let current_project = retained_project.as_deref().or(project_path.as_deref());
+    let current_project = retained_project.as_deref();
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let mut rows = projects.projects;

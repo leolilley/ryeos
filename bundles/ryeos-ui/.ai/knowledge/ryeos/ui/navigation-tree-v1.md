@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-15T01:39:00Z:67dced6f77e5b433f14a9f2d4c23cd7474332442600c69534972d2abe7b6d43a:Y8RFP9RhybOzU3w7L6YybYE9WoeAVSH7TP94wpEJR+RWr0ZSZXpZrGVnCM2G1QNR5+ajk7oKFsimotquzQ+IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T00:51:08Z:5df3dbda60996663709e3e8dd7a333cdaa4d8e5a00f08b174e375ca01a6049bf:091K2p3MMZ2j/JU7fYfuPQ9dsjFo0DxyBaMbOVZ/vjIGJF7kwJ0/Ayvqe5O0Y7JcnbczD97LkMwC87ka52ZOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -18,7 +18,7 @@ against this tree.
 The core rule is:
 
 ```text
-RyeOS UI is an assistant workspace over durable logical work.
+RyeOS UI is a surface of independently composable view sets over durable logical work.
 A chain root is the stable work address; placement threads are execution bodies.
 Conversation, activity, evidence, files, and inspectors are lenses.
 Project and node are scopes.
@@ -401,22 +401,22 @@ same work route and preserve a path to exact activity/evidence.
 
 ```text
 surface:ryeos/ui/assistant
-`-- assistant workspace
-    |-- navigation: signed destination-to-view bindings
-    |-- center: selected lens
-    |-- bottom: view:ryeos/input
-    `-- top: node/project status
+`-- operator surface
+    |-- view-set strip: independently retained compositions
+    |-- active view set: one authored layout of mounted views
+    |-- optional top/left/right/bottom slots: ordinary supporting views
+    `-- navigation: signed destination-to-view bindings
 
 surface:ryeos/ui/thread
 `-- focused thread surface
-    |-- center: view:ryeos/thread/transcript
-    `-- bottom: routed input
+    `-- initial view set
+        |-- center: view:ryeos/thread/transcript
+        `-- optional conversation input view
 
 surface:ryeos/ui/thread-crystal
 `-- focused thread surface over the prism backdrop
-    |-- center: view:ryeos/thread/transcript
-    |-- bottom: routed input
-    `-- background: view:ryeos/backdrop/prism
+    |-- initial view set: view:ryeos/thread/transcript
+    `-- backdrop: view:ryeos/backdrop/prism
 
 surface:ryeos/ui/workbench
 `-- project work surface

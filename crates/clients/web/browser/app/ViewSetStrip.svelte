@@ -20,7 +20,7 @@
           <span>{tab.title}</span>
         </button>
         {#if tab.active}
-          <span class="view-set-actions" aria-label={`${tab.title} view-set actions`}>
+          <span class="view-set-actions" role="group" aria-label={`${tab.title} view-set actions`}>
             <button
               aria-label={`Duplicate ${tab.title}`}
               title="Duplicate view set"

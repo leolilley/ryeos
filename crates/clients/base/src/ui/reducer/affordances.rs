@@ -52,7 +52,12 @@ impl RyeOsCore {
         // Browser events carry the mounted instance that projected the row.
         // Revalidate it against retained composition so a delayed or forged
         // event cannot apply a valid affordance to another view set.
-        if self.mounted_view_ref(instance_key) != Some(view_ref) {
+        let Some(origin_view_set) = self.view_set_index_for_instance(instance_key) else {
+            return Vec::new();
+        };
+        if origin_view_set != self.active_view_set
+            || self.mounted_view_ref(instance_key) != Some(view_ref)
+        {
             return Vec::new();
         }
         let Some(binding) = self.views.get(view_ref) else {
@@ -594,6 +599,49 @@ mod tests {
             Some((fetched_tile, "view:test/inspector", "default", params))
                 if fetched_tile == source_key && params["canonical_ref"] == "tool:demo/run"
         ));
+    }
+
+    #[test]
+    fn delayed_affordance_from_inactive_view_set_is_rejected() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/list",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": { "default": { "ref": "service:test/list", "params": {}, "collection": "rows" } },
+                "affordances": [{
+                    "id": "select-item",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "selection",
+                        "value": { "item": "{record.canonical_ref}" }
+                    }
+                }]
+            }),
+        );
+        let origin = mount_affordance_view(&mut core, "view:test/list");
+        core.new_view_set();
+
+        let effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: origin,
+                    view_ref: "view:test/list".to_string(),
+                    affordance_id: "select-item".to_string(),
+                    record: serde_json::json!({ "canonical_ref": "tool:delayed/run" }),
+                },
+            },
+        });
+
+        assert!(effects.is_empty());
+        assert!(
+            core.seat
+                .fold()
+                .get(super::super::seat::KEY_SELECTION)
+                .is_none()
+        );
+        assert!(active_selection(&core).is_null());
     }
 
     #[test]

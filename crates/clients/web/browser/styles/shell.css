@@ -9,8 +9,8 @@
 .system-state { justify-self: end; text-transform: uppercase; }
 .presence { color: var(--green); font-size: 8px; }
 .separator { color: var(--faint); }
-.view-set-strip { display: flex; align-items: end; gap: 8px; padding: 0 18px; border-bottom: 1px solid var(--line); }
-.view-set-tab { align-self: stretch; display: flex; align-items: stretch; min-width: 140px; border-bottom: 2px solid transparent; color: var(--muted); }
+.view-set-strip { display: flex; align-items: end; gap: 8px; padding: 0 18px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); }
+.view-set-tab { flex: 0 0 auto; align-self: stretch; display: flex; align-items: stretch; min-width: 140px; border-bottom: 2px solid transparent; color: var(--muted); }
 .view-set-tab.active { border-color: var(--accent-bright); color: var(--text); }
 .view-set-select { display: flex; flex: 1 1 auto; align-items: center; gap: 17px; min-width: 0; padding: 4px 12px 0 18px; color: inherit; }
 .view-set-strip .ordinal { color: var(--faint); font: 9px var(--font-data); }
@@ -18,7 +18,7 @@
 .view-set-actions { display: flex; align-items: center; padding-top: 4px; }
 .view-set-actions button { width: 25px; height: 25px; color: var(--faint); font: 12px var(--font-data); }
 .view-set-actions button:hover, .view-set-actions button:focus-visible { color: var(--text); background: var(--plane-selected); }
-.view-set-strip .new-view-set { min-width: 44px; color: var(--muted); font-size: 20px; }
+.view-set-strip .new-view-set { flex: 0 0 auto; min-width: 44px; color: var(--muted); font-size: 20px; }
 .shell-body { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; padding: 14px 18px; gap: 12px; }
 .shell-body.with-navigation { grid-template-columns: var(--nav-width) minmax(0, 1fr); }
 .navigation { display: grid; grid-template-rows: 40px 1fr; min-height: 0; border: 1px solid var(--line); background: var(--plane); }
