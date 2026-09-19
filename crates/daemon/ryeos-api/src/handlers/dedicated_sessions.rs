@@ -6747,9 +6747,8 @@ async fn resolve_approval(
                 .map_err(internal)?;
             let cleanup_state = state
                 .persistent_sessions
-                .take_exclusive_failure_cleanup_state(&placement_thread_id)
-                .map_err(internal)?
-                .ok_or_else(|| internal("approval contact failure lost its cleanup proof"))?;
+                .take_exclusive_failure_cleanup_state_or_unproved(&placement_thread_id)
+                .map_err(internal)?;
             let worker_instance_id = session
                 .worker_instance_id
                 .as_deref()
