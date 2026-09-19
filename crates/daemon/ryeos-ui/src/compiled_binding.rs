@@ -35,6 +35,7 @@ pub enum CompiledUiDispatchClass {
 #[serde(rename_all = "snake_case")]
 pub enum CompiledUiResultEffect {
     AdmitBindingAttachment,
+    ResumeParticularViewSet,
 }
 
 /// Exact execution target resolved from a signed source or affordance.

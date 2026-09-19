@@ -89,6 +89,15 @@ impl RyeOsCore {
                 context,
                 persist_affordance,
             }) => self.save_view_set_record(instance_key, view_ref, &persist_affordance, context),
+            Some(super::content::AffordanceInvoke::SaveParticularViewSet {
+                context,
+                persist_affordance,
+            }) => self.save_particular_view_set_record(
+                instance_key,
+                view_ref,
+                &persist_affordance,
+                context,
+            ),
             Some(super::content::AffordanceInvoke::Ui {
                 facet,
                 value,

@@ -15,7 +15,8 @@ use ryeos_app::principal::{
 };
 use ryeos_app::state::AppState;
 use ryeos_client_base::surface::view_sets::{
-    SavedViewSetTemplate, validate_saved_view_set_templates,
+    ParticularViewSetResume, SavedViewSetTemplate, validate_particular_view_set_resumes,
+    validate_saved_view_set_templates,
 };
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -23,7 +24,7 @@ use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
-const RYEOS_UI_CONFIG_VERSION: u32 = 3;
+const RYEOS_UI_CONFIG_VERSION: u32 = 4;
 const RECENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +64,9 @@ pub struct RyeOsConfigFile {
     pub view_set_library_revision: u64,
     #[serde(default)]
     pub saved_view_sets: Vec<SavedViewSetTemplate>,
+    pub particular_view_set_library_revision: u64,
+    #[serde(default)]
+    pub particular_view_sets: Vec<ParticularViewSetResume>,
 }
 
 impl Default for RyeOsConfigFile {
@@ -73,6 +77,8 @@ impl Default for RyeOsConfigFile {
             landing_view: "projects".into(),
             view_set_library_revision: 0,
             saved_view_sets: Vec::new(),
+            particular_view_set_library_revision: 0,
+            particular_view_sets: Vec::new(),
         }
     }
 }
@@ -147,6 +153,8 @@ pub struct UpdateConfigRequest {
     pub landing_view: Option<String>,
     #[serde(default)]
     pub view_set_library: Option<ViewSetLibraryUpdate>,
+    #[serde(default)]
+    pub particular_view_set_library: Option<ParticularViewSetLibraryUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +162,19 @@ pub struct UpdateConfigRequest {
 pub struct ViewSetLibraryUpdate {
     pub expected_revision: u64,
     pub saved_view_sets: Vec<SavedViewSetTemplate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticularViewSetLibraryUpdate {
+    pub expected_revision: u64,
+    pub particular_view_sets: Vec<ParticularViewSetResume>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeParticularViewSetRequest {
+    pub id: String,
 }
 
 pub async fn handle_projects_list(
@@ -419,6 +440,213 @@ pub async fn handle_projects_open(
     }))
 }
 
+/// Resume one durable particular view set without reviving any prior session
+/// authority. Stable project/work identities are resolved again; a project
+/// context receives a freshly compiled retained attachment, while projectless
+/// work remains on the exact invoking attachment.
+pub async fn handle_particular_view_set_resume(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = require_seat_caller(&ctx, &state)?;
+    let req: ResumeParticularViewSetRequest = parse_request(params)?;
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let origin = crate::seat_auth::compiled_ui_attachment()
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
+
+    let (resume, project) = {
+        let store = locked_principal_store(&ctx, &state).await?;
+        let config = store.load_ui_config()?;
+        let resume = config
+            .particular_view_sets
+            .into_iter()
+            .find(|candidate| candidate.id == req.id)
+            .ok_or(HandlerError::NotFound)?;
+        let projects = store.load_projects()?;
+        let project = resume
+            .context
+            .project
+            .as_ref()
+            .map(|project_ref| {
+                projects
+                    .projects
+                    .into_iter()
+                    .find(|candidate| candidate.local_id == project_ref.local_id)
+                    .ok_or(HandlerError::NotFound)
+            })
+            .transpose()?;
+        (resume, project)
+    };
+
+    let canonical_project = project
+        .as_ref()
+        .map(|project| canonical_project_root(&project.root))
+        .transpose()?;
+    if canonical_project.is_none()
+        && (origin.project_query_identity.is_some()
+            || origin.project_authority.is_some()
+            || origin.registered_project_id.is_some())
+    {
+        return Err(HandlerError::Forbidden(
+            "projectless particular view sets require a projectless invoking attachment".into(),
+        )
+        .into());
+    }
+    let resolved_work = resume
+        .context
+        .work
+        .as_ref()
+        .map(|work| {
+            resolve_particular_work(
+                &state,
+                caller.principal_id(),
+                canonical_project.as_deref(),
+                &work.chain_root_id,
+            )
+        })
+        .transpose()?;
+
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+
+    let (attachment, insertion_attachment_id) = if let (Some(project), Some(canonical)) =
+        (project.as_ref(), canonical_project.as_ref())
+    {
+        let root = canonical.display().to_string();
+        let project_authority = Arc::new(
+            lillux::PinnedDirectory::open(canonical)?
+                .context("selected UI project root disappeared")?,
+        );
+        let compile_context = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        let compile_request = super::ui_launch_mint::Request {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
+            surface_ref: origin.surface_ref.clone(),
+            project_path: Some(root),
+            user_principal_id: None,
+        };
+        let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+            &compile_request,
+            &compile_context,
+            &state,
+            Some(project_authority.as_ref()),
+        )?;
+
+        // Compilation happens outside the principal-store gate. Reacquire and
+        // revalidate both durable records before publishing the new authority.
+        let store = locked_principal_store(&ctx, &state).await?;
+        let config_unchanged = store
+            .load_ui_config()?
+            .particular_view_sets
+            .into_iter()
+            .any(|candidate| candidate == resume);
+        let project_unchanged = store
+            .load_projects()?
+            .projects
+            .into_iter()
+            .any(|candidate| {
+                candidate.local_id == project.local_id && candidate.root == project.root
+            });
+        if !config_unchanged || !project_unchanged {
+            return Err(HandlerError::Conflict(
+                "particular view-set context changed during resume".into(),
+            )
+            .into());
+        }
+        let policy = state
+            .node_policy
+            .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+            )?;
+        let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+        let retained = ui.browser_sessions.publish_attachment(
+            session_id,
+            &origin.coordinate(),
+            crate::browser_session::BindingAttachmentCandidate {
+                registered_project_id: Some(project.local_id.clone()),
+                compiled_binding: Arc::new(compiled_binding),
+                effective_surface,
+                project_authority: Some(project_authority),
+            },
+            usize::try_from(policy.max_live_binding_attachments_per_session)?,
+            state.node_policy.generation_digest(),
+        )?;
+        let descriptor = retained.public_descriptor(request_bounds);
+        let insertion = descriptor.binding_attachment_id.clone();
+        (Some(descriptor), insertion)
+    } else {
+        // A projectless particular set cannot mint new authority. Its current
+        // compiled origin is the only valid insertion context.
+        let store = locked_principal_store(&ctx, &state).await?;
+        if !store
+            .load_ui_config()?
+            .particular_view_sets
+            .into_iter()
+            .any(|candidate| candidate == resume)
+        {
+            return Err(HandlerError::Conflict(
+                "particular view-set context changed during resume".into(),
+            )
+            .into());
+        }
+        (None, origin.binding_attachment_id.clone())
+    };
+
+    Ok(json!({
+        "particular_view_set": {
+            "id": resume.id,
+            "name": resume.name,
+            "composition": resume.composition,
+            "relationships": resume.relationships,
+            "resolved_selection_work": resolved_work,
+        },
+        "ui_transition": {
+            "kind": "resume_particular_view_set",
+            "attachment": attachment,
+            "insertion_attachment_id": insertion_attachment_id,
+        }
+    }))
+}
+
+fn resolve_particular_work(
+    state: &AppState,
+    principal_id: &str,
+    project_root: Option<&Path>,
+    chain_root_id: &str,
+) -> Result<Value> {
+    let lineage = state.threads.continuation_lineage(chain_root_id)?;
+    let root = lineage.first().ok_or(HandlerError::NotFound)?;
+    let head = lineage.last().ok_or(HandlerError::NotFound)?;
+    if root.thread.thread_id != chain_root_id {
+        return Err(HandlerError::NotFound.into());
+    }
+    for placement in &lineage {
+        if placement.thread.chain_root_id != chain_root_id
+            || placement.thread.requested_by.as_deref() != Some(principal_id)
+        {
+            return Err(HandlerError::NotFound.into());
+        }
+        match (project_root, placement.thread.project_root.as_deref()) {
+            (Some(expected), Some(actual))
+                if same_existing_dir(expected.to_string_lossy().as_ref(), actual) => {}
+            (None, None) => {}
+            _ => return Err(HandlerError::NotFound.into()),
+        }
+    }
+    Ok(json!({
+        "thread": head.thread.thread_id,
+        "chain_root": chain_root_id,
+    }))
+}
+
 pub async fn handle_recent_touch(
     params: Value,
     ctx: HandlerContext,
@@ -455,6 +683,8 @@ pub async fn handle_config_get(
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_ui_config()?;
+    let registered_project_id = crate::seat_auth::compiled_ui_attachment()
+        .and_then(|attachment| attachment.registered_project_id.clone());
     let mut response = json!(config);
     // Response-only row for the ordinary sections renderer. The durable file
     // remains the bounded config contract, with no duplicated library state.
@@ -464,6 +694,15 @@ pub async fn handle_config_get(
         "context": {
             "expected_revision": config.view_set_library_revision,
             "saved_view_sets": config.saved_view_sets
+        }
+    }]);
+    response["particular_view_set_save_context"] = json!([{
+        "label": "Retain this particular view set",
+        "description": "Stores stable project and logical-work references; authority and live placement are resolved again on resume",
+        "context": {
+            "expected_revision": config.particular_view_set_library_revision,
+            "particular_view_sets": config.particular_view_sets,
+            "project_local_id": registered_project_id
         }
     }]);
     Ok(response)
@@ -501,6 +740,17 @@ fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -
             .into());
         }
     }
+    if let Some(update) = &req.particular_view_set_library {
+        validate_particular_view_set_resumes(&update.particular_view_sets)
+            .map_err(HandlerError::BadRequest)?;
+        if update.expected_revision != config.particular_view_set_library_revision {
+            return Err(HandlerError::Conflict(format!(
+                "particular-view-set library revision advanced: expected {}, current {}",
+                update.expected_revision, config.particular_view_set_library_revision
+            ))
+            .into());
+        }
+    }
     if let Some(theme) = req.theme {
         config.theme = theme;
     }
@@ -513,6 +763,15 @@ fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -
             .checked_add(1)
             .ok_or_else(|| HandlerError::Conflict("view-set library revision exhausted".into()))?;
         config.saved_view_sets = update.saved_view_sets;
+    }
+    if let Some(update) = req.particular_view_set_library {
+        config.particular_view_set_library_revision = config
+            .particular_view_set_library_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                HandlerError::Conflict("particular-view-set library revision exhausted".into())
+            })?;
+        config.particular_view_sets = update.particular_view_sets;
     }
     validate_ui_config(config)
 }
@@ -675,7 +934,8 @@ fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
     ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
     validate_choice("theme", &config.theme, &["system", "light", "dark"])?;
     validate_choice("landing_view", &config.landing_view, &["projects"])?;
-    validate_saved_view_set_templates(&config.saved_view_sets)
+    validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
+    validate_particular_view_set_resumes(&config.particular_view_sets)
         .map_err(|error| HandlerError::BadRequest(error).into())
 }
 
@@ -923,6 +1183,12 @@ descriptor!(
     "ui.ryeos.config.update",
     handle_config_update
 );
+descriptor!(
+    PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+    "service:ui/ryeos-ui/view-sets/resume",
+    "ui.ryeos.view-sets.resume",
+    handle_particular_view_set_resume
+);
 
 #[cfg(test)]
 mod tests {
@@ -938,9 +1204,11 @@ mod tests {
     #[test]
     fn ui_config_defaults_to_empty_revisioned_view_set_library() {
         let config = RyeOsConfigFile::default();
-        assert_eq!(config.version, 3);
+        assert_eq!(config.version, 4);
         assert_eq!(config.view_set_library_revision, 0);
         assert!(config.saved_view_sets.is_empty());
+        assert_eq!(config.particular_view_set_library_revision, 0);
+        assert!(config.particular_view_sets.is_empty());
         validate_ui_config(&config).unwrap();
     }
 
@@ -960,7 +1228,11 @@ mod tests {
                             "active": 0
                         },
                         "slots": {}
-                    }
+                    },
+                    "relationships": [{
+                        "mount": {"kind": "tile", "index": 0},
+                        "source": {"mode": "follow_own_set"}
+                    }]
                 }]
             }
         }))
@@ -976,6 +1248,51 @@ mod tests {
 
         let before = config.clone();
         let error = apply_config_update(&mut config, saved_view_set_update(0)).unwrap_err();
+        assert!(error.to_string().contains("revision advanced"));
+        assert_eq!(config, before);
+    }
+
+    fn particular_view_set_update(expected_revision: u64) -> UpdateConfigRequest {
+        serde_json::from_value(json!({
+            "particular_view_set_library": {
+                "expected_revision": expected_revision,
+                "particular_view_sets": [{
+                    "id": "development-current",
+                    "name": "Development current",
+                    "composition": {
+                        "id": "development-current",
+                        "title": "Development current",
+                        "root": {
+                            "type": "group",
+                            "views": ["view:ryeos/development"],
+                            "active": 0
+                        },
+                        "slots": {}
+                    },
+                    "relationships": [{
+                        "mount": {"kind": "tile", "index": 0},
+                        "source": {"mode": "follow_own_set"}
+                    }],
+                    "context": {
+                        "project": {"local_id": "prj_example"},
+                        "work": {"chain_root_id": "T-root"}
+                    }
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn particular_view_set_library_has_independent_revision_fence() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, particular_view_set_update(0)).unwrap();
+        assert_eq!(config.particular_view_set_library_revision, 1);
+        assert_eq!(config.particular_view_sets.len(), 1);
+        assert_eq!(config.view_set_library_revision, 0);
+
+        let before = config.clone();
+        let error = apply_config_update(&mut config, particular_view_set_update(0)).unwrap_err();
         assert!(error.to_string().contains("revision advanced"));
         assert_eq!(config, before);
     }

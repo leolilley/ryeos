@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T04:02:47Z:e5c9c49d5fe8b15b3603041c353c5133139222fc9a23ffdd4aad64d26cd1d480:CLgjlQ7et5DMTFzaDJQ21A49AlZXws6S719L/QbUF6Ir4aDUXh8IKOU8HH6HUbuoy56n+680RQjU/5dZWeayBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T07:22:30Z:17fd2825446ad9c2cd246d79dbde5682dde632d0666530d3cb3be7743e5f5e93:oyP+oqlj3wLJZSRGQq7i3KfkJ5YqzvVTrDTFyE0zU4WnVGXt8JOr3HGoyw10t4BqPYQNLBTRoC/0uFFzMIq7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -60,6 +60,12 @@ state, and until work is explicitly selected the inspector views remain
 honestly unselected. Candidate changes come from the retained candidate owner
 and the execution diagram comes from
 `service:ui/ryeos-ui/field/execution`; neither is synthetic renderer content.
+Candidate inspection distinguishes a retained candidate from one not yet
+captured and from work without a dedicated candidate session. Child-tree
+projections expose bounded coverage and truncation instead of presenting a
+partial closure as complete. Execution evidence reports whether durable launch
+posture is retained, missing, unreadable, or corrupt; an empty posture section
+is not evidence of complete coverage.
 The explorer, conversation, changes and execution regions are ordinary view
 groups in the signed nested layout tree. They are not fixed Svelte product
 panes, and the four supporting slots remain free for independently authored

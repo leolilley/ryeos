@@ -68,6 +68,7 @@ producers of the same intents, not a second command vocabulary.
 | [x] `CloseTile` | shared | shared | exact tile close |
 | [x] `ToggleTileMaximized` | shared | shared | render-only focused tile projection |
 | [x] `ToggleFocusedMaster` | shared | shared | layout edit |
+| [x] `PromoteTileToMaster` | native | gap | exact guarded pointer promotion; TUI uses focused master promotion |
 | [x] `MoveFocusedTile` | shared | shared | layout edit |
 | [x] `MoveTileBeside` | shared | shared | guarded layout edit |
 | [x] `CycleTab` | shared | shared | group tab command |
@@ -159,6 +160,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SetTileCursor` | native | shared | pointer/key selection |
 | [x] `SetViewCursor` | native | gap | exact tile-or-dock instance pointer selection |
 | [x] `ChooseViewItem` | native | gap | atomic semantic-identity selection and current-intent activation |
+| [x] `ToggleViewItemExpansion` | native | gap | exact mounted instance and semantic item identity disclosure |
 | [x] `DismissNotice` | native | gap | exact idempotent browser notice dismissal |
 | [x] `ToggleViewSection` | native | gap | semantic section identity resolved atomically in current projection |
 | [x] `SetFold` | native | native | click/point fold |

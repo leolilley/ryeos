@@ -11,7 +11,7 @@
   let actionSummary = $state<HTMLElement>();
 </script>
 
-<article class="tile-frame" class:focused={model.focused} class:transparent={model.background_transparent} data-instance={model.instance_key} data-scroll-key={`tile:${model.instance_key}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }}>
+<article class="tile-frame" class:focused={model.focused} class:transparent={model.background_transparent} data-instance={model.instance_key} data-keyboard-focus={model.focused ? "current" : undefined} data-scroll-key={`tile:${model.instance_key}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_changed", target: model.tile_id }); }}>
   {#if !model.chrome_hidden}
     <header class="tile-header" class:grouped={model.group_label}>
       <div class="tile-title-row">

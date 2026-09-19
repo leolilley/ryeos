@@ -5,11 +5,14 @@
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockSlotState};
 use crate::layout::LayoutTree;
 use crate::surface::view_sets::{
-    LayoutSeedSpec, SavedViewSetTemplate, ViewSetSeedSpec, validate_saved_view_set_templates,
+    LayoutSeedSpec, SavedViewMountRef, SavedViewSelectionRelationship, SavedViewSelectionSource,
+    SavedViewSetTemplate, SavedViewSlotEdge, ViewSetSeedSpec, validate_saved_view_set_templates,
     validate_seeds,
 };
 use crate::surface::{SlotContentSpec, SlotSpec, SlotsSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
 const SCHEMA: &str = "ryeos.ui.layout-preferences.v4";
@@ -119,7 +122,82 @@ fn capture_view_set(
     })
 }
 
+fn center_mounts(
+    view_set: &crate::view_set::ViewSet,
+) -> Result<Vec<crate::ids::RyeOsViewInstanceKey>, String> {
+    fn collect(
+        tree: &LayoutTree,
+        view_set: &crate::view_set::ViewSet,
+        mounts: &mut Vec<crate::ids::RyeOsViewInstanceKey>,
+    ) -> Result<(), String> {
+        match tree {
+            LayoutTree::Group { tabs, .. } => {
+                for tile_id in tabs {
+                    mounts.push(
+                        view_set
+                            .tiles
+                            .get(tile_id)
+                            .ok_or("layout references an unmounted view")?
+                            .instance_key
+                            .clone(),
+                    );
+                }
+            }
+            LayoutTree::Split { first, second, .. } => {
+                collect(first, view_set, mounts)?;
+                collect(second, view_set, mounts)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut mounts = Vec::new();
+    if let Some(root) = &view_set.root {
+        collect(root, view_set, &mut mounts)?;
+    }
+    Ok(mounts)
+}
+
+fn relationship_mounts(
+    view_set: &crate::view_set::ViewSet,
+) -> Result<Vec<(SavedViewMountRef, crate::ids::RyeOsViewInstanceKey)>, String> {
+    use super::model::{RyeOsDockEdge, dock_view_instance_key};
+    let mut mounts = center_mounts(view_set)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, instance)| (SavedViewMountRef::Tile { index }, instance))
+        .collect::<Vec<_>>();
+    for (edge, saved_edge) in [
+        (RyeOsDockEdge::Top, SavedViewSlotEdge::Top),
+        (RyeOsDockEdge::Bottom, SavedViewSlotEdge::Bottom),
+        (RyeOsDockEdge::Left, SavedViewSlotEdge::Left),
+        (RyeOsDockEdge::Right, SavedViewSlotEdge::Right),
+    ] {
+        if view_set.docks.slot(edge).is_some() {
+            mounts.push((
+                SavedViewMountRef::Slot { edge: saved_edge },
+                dock_view_instance_key(view_set.id, edge),
+            ));
+        }
+    }
+    Ok(mounts)
+}
+
 impl RyeOsCore {
+    pub(crate) fn live_saved_set_resolutions(
+        &self,
+    ) -> Result<BTreeMap<String, crate::ids::ViewSetId>, String> {
+        let mut resolved = BTreeMap::new();
+        for (view_set_id, saved_id) in &self.view_set_template_ids {
+            if resolved.insert(saved_id.clone(), *view_set_id).is_some() {
+                return Err(format!(
+                    "saved view set has multiple live instances and cannot be linked unambiguously: {saved_id}"
+                ));
+            }
+        }
+        Ok(resolved)
+    }
+
     fn preference_scope(&self) -> Result<Scope, String> {
         let session = self
             .data
@@ -254,6 +332,19 @@ impl RyeOsCore {
         name: String,
         exclude: Option<&crate::ids::RyeOsViewInstanceKey>,
     ) -> Result<SavedViewSetTemplate, String> {
+        self.capture_view_set_template_with_relationships(id, name, exclude, &BTreeMap::new())
+    }
+
+    /// Capture portable selection relationships. Cross-set followers require
+    /// an explicit runtime-set to saved-template mapping; runtime ids are never
+    /// guessed or persisted as if they were stable library identities.
+    pub(crate) fn capture_view_set_template_with_relationships(
+        &self,
+        id: String,
+        name: String,
+        exclude: Option<&crate::ids::RyeOsViewInstanceKey>,
+        saved_set_ids: &BTreeMap<crate::ids::ViewSetId, String>,
+    ) -> Result<SavedViewSetTemplate, String> {
         let view_set = self
             .view_sets
             .get(self.active_view_set)
@@ -292,28 +383,14 @@ impl RyeOsCore {
                 }
             }
         }
-        // The current template grammar names view refs and layout, not runtime
-        // context relationships. Never silently flatten a pin, external link,
-        // or mixed project composition into follow-own-set on reopening.
+        // Project bindings remain one insertion context. Subject relationships
+        // are captured separately below without persisting runtime authority.
         let insertion = self
             .insertion_attachment_id(captured.id)
             .ok_or("the view set's insertion context is unavailable")?;
-        let instances = captured
-            .tiles
-            .values()
-            .map(|tile| tile.instance_key.clone())
-            .chain(
-                [
-                    super::model::RyeOsDockEdge::Top,
-                    super::model::RyeOsDockEdge::Bottom,
-                    super::model::RyeOsDockEdge::Left,
-                    super::model::RyeOsDockEdge::Right,
-                ]
-                .into_iter()
-                .filter(|edge| captured.docks.slot(*edge).is_some())
-                .map(|edge| super::model::dock_view_instance_key(captured.id, edge)),
-            );
-        for instance in instances {
+        let mounts = relationship_mounts(&captured)?;
+        let mut relationships = Vec::with_capacity(mounts.len());
+        for (mount, instance) in mounts {
             if self
                 .instance_binding_attachments
                 .get(&instance)
@@ -322,22 +399,48 @@ impl RyeOsCore {
             {
                 return Err("this composition has mixed or unresolved project contexts; the reusable template cannot preserve them".into());
             }
-            match self.selection_attachment_for_instance(&instance) {
+            let source = match self.selection_attachment_for_instance(&instance) {
                 Some(super::attachment::SelectionAttachment::Pinned { .. }) => {
-                    return Err("this composition contains a pinned subject; reusable pin inputs are not yet supported".into());
+                    let view_ref = self
+                        .mounted_view_ref(&instance)
+                        .ok_or("saved relationship references an unmounted view")?;
+                    let binding = self
+                        .binding_for_instance(&instance, view_ref)
+                        .ok_or("saved relationship binding is unavailable")?;
+                    let facets = super::attachment::selection_dependencies(binding)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    if facets.is_empty() {
+                        return Err("pinned subject has no portable selection facets".into());
+                    }
+                    let input = match &mount {
+                        SavedViewMountRef::Tile { index } => format!("subject_tile_{index}"),
+                        SavedViewMountRef::Slot { edge } => {
+                            format!("subject_slot_{}", format!("{edge:?}").to_lowercase())
+                        }
+                    };
+                    SavedViewSelectionSource::RequiredSubject { input, facets }
                 }
                 Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id })
-                    if view_set_id != captured.id =>
+                    if view_set_id == captured.id =>
                 {
-                    return Err("this composition follows another open set; the reusable template cannot preserve that relationship".into());
+                    SavedViewSelectionSource::FollowOwnSet
                 }
-                _ => {}
-            }
+                Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id }) => {
+                    let saved_view_set_id = saved_set_ids.get(&view_set_id).cloned().ok_or(
+                        "this composition follows another open set without an explicit saved-set identity",
+                    )?;
+                    SavedViewSelectionSource::FollowSet { saved_view_set_id }
+                }
+                None => return Err("saved relationship has no selection owner".into()),
+            };
+            relationships.push(SavedViewSelectionRelationship { mount, source });
         }
         let template = SavedViewSetTemplate {
             composition: capture_view_set(&captured, id.clone())?,
             id,
             name,
+            relationships,
         };
         validate_saved_view_set_templates(std::slice::from_ref(&template))?;
         Ok(template)
@@ -351,6 +454,53 @@ impl RyeOsCore {
         template: &SavedViewSetTemplate,
         insertion_attachment_id: &str,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        let saved_sets = if template.relationships.iter().any(|relationship| {
+            matches!(
+                &relationship.source,
+                SavedViewSelectionSource::FollowSet { .. }
+            )
+        }) {
+            self.live_saved_set_resolutions()?
+        } else {
+            BTreeMap::new()
+        };
+        self.open_saved_view_set_template_with_relationships(
+            template,
+            insertion_attachment_id,
+            &BTreeMap::new(),
+            &saved_sets,
+        )
+    }
+
+    /// Open with explicit fresh subjects and explicit saved-set resolutions.
+    /// Neither input can grant authority: the insertion attachment and every
+    /// view are still revalidated before the fresh mounts are committed.
+    pub fn open_saved_view_set_template_with_relationships(
+        &mut self,
+        template: &SavedViewSetTemplate,
+        insertion_attachment_id: &str,
+        fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
+        saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        self.mount_saved_view_set_template_with_relationships(
+            template,
+            insertion_attachment_id,
+            fresh_subjects,
+            saved_sets,
+        )?;
+        Ok(self.refresh_view_set_sources())
+    }
+
+    /// Commit a validated composition and its subject relationships without
+    /// emitting source work. Particular-set resume uses this boundary so its
+    /// freshly resolved logical subject is installed before the first fetch.
+    pub(crate) fn mount_saved_view_set_template_with_relationships(
+        &mut self,
+        template: &SavedViewSetTemplate,
+        insertion_attachment_id: &str,
+        fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
+        saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
+    ) -> Result<(), String> {
         if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
             return Err("view set limit reached".into());
         }
@@ -388,6 +538,94 @@ impl RyeOsCore {
                 return Err(format!("saved slot is not admitted: {view_ref}"));
             }
         }
+        let relationship_mounts = relationship_mounts(&view_set)?;
+        let relationship_instances = relationship_mounts.into_iter().collect::<BTreeMap<_, _>>();
+        let mut instance_view_refs = view_set
+            .tiles
+            .values()
+            .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (edge, slot) in [
+            (super::model::RyeOsDockEdge::Top, &view_set.docks.top),
+            (super::model::RyeOsDockEdge::Bottom, &view_set.docks.bottom),
+            (super::model::RyeOsDockEdge::Left, &view_set.docks.left),
+            (super::model::RyeOsDockEdge::Right, &view_set.docks.right),
+        ] {
+            if let Some(slot) = slot {
+                let RyeOsDockContent::View { view_ref } = &slot.content;
+                instance_view_refs.insert(
+                    super::model::dock_view_instance_key(view_set.id, edge),
+                    view_ref.clone(),
+                );
+            }
+        }
+        let mut resolved_relationships = Vec::with_capacity(template.relationships.len());
+        for relationship in &template.relationships {
+            let instance = relationship_instances
+                .get(&relationship.mount)
+                .cloned()
+                .ok_or("saved relationship mount is unavailable")?;
+            let attachment = match &relationship.source {
+                SavedViewSelectionSource::FollowOwnSet => {
+                    super::attachment::SelectionAttachment::FollowViewSet {
+                        view_set_id: view_set.id,
+                    }
+                }
+                SavedViewSelectionSource::FollowSet { saved_view_set_id } => {
+                    let view_set_id =
+                        saved_sets.get(saved_view_set_id).copied().ok_or_else(|| {
+                            format!("required saved view set is not open: {saved_view_set_id}")
+                        })?;
+                    if !self.view_sets.iter().any(|set| set.id == view_set_id) {
+                        return Err(format!(
+                            "required saved view set is unavailable: {saved_view_set_id}"
+                        ));
+                    }
+                    super::attachment::SelectionAttachment::FollowViewSet { view_set_id }
+                }
+                SavedViewSelectionSource::RequiredSubject { input, facets } => {
+                    let view_ref = instance_view_refs
+                        .get(&instance)
+                        .ok_or("saved relationship view is unavailable")?;
+                    let binding = insertion_context
+                        .views
+                        .get(view_ref)
+                        .ok_or("saved relationship binding is unavailable")?;
+                    let declared = super::attachment::selection_dependencies(binding);
+                    if facets.iter().any(|facet| !declared.contains(facet)) {
+                        return Err(format!(
+                            "required fresh subject has facets not read by the current view: {input}"
+                        ));
+                    }
+                    let supplied = fresh_subjects
+                        .get(input)
+                        .ok_or_else(|| format!("required fresh subject is missing: {input}"))?;
+                    if supplied.len() != facets.len()
+                        || facets.iter().any(|facet| !supplied.contains_key(facet))
+                    {
+                        return Err(format!(
+                            "fresh subject does not exactly satisfy required facets: {input}"
+                        ));
+                    }
+                    let encoded =
+                        serde_json::to_vec(supplied).map_err(|error| error.to_string())?;
+                    let byte_limit =
+                        usize::try_from(insertion_context.binding_request_bounds.max_request_bytes)
+                            .map_err(|_| "binding request byte bound exceeds this platform")?;
+                    if byte_limit == 0 || encoded.len() > byte_limit {
+                        return Err(format!(
+                            "fresh subject exceeds binding request bounds: {input}"
+                        ));
+                    }
+                    use sha2::{Digest, Sha256};
+                    super::attachment::SelectionAttachment::Pinned {
+                        values: supplied.clone(),
+                        fingerprint: format!("{:x}", Sha256::digest(&encoded)),
+                    }
+                }
+            };
+            resolved_relationships.push((instance, attachment));
+        }
         self.view_sets.push(view_set);
         self.active_view_set = self.view_sets.len() - 1;
         if !self.stamp_view_set_mounts(self.active_view_set, insertion_attachment_id) {
@@ -395,7 +633,12 @@ impl RyeOsCore {
             self.active_view_set = self.active_view_set.saturating_sub(1);
             return Err("saved view set lost its admitted insertion context".into());
         }
-        Ok(self.refresh_view_set_sources())
+        for (instance, attachment) in resolved_relationships {
+            self.selection_attachments.insert(instance, attachment);
+        }
+        self.view_set_template_ids
+            .insert(self.view_sets[self.active_view_set].id, template.id.clone());
+        Ok(())
     }
 
     pub fn restore_layout_preferences(
@@ -481,6 +724,7 @@ impl RyeOsCore {
         self.selection_attachments.clear();
         self.instance_binding_attachments.clear();
         self.view_set_insertion_attachments.clear();
+        self.view_set_template_ids.clear();
         self.view_sets = restored;
         self.active_view_set = snapshot.active_view_set;
         for index in 0..self.view_sets.len() {
@@ -514,7 +758,13 @@ mod tests {
                     effective_surface: json!({
                         "name": "Work", "tiles": ["view:test/one", "view:test/two"],
                         "views": {
-                            "view:test/one": { "widget": "text" },
+                            "view:test/one": {
+                                "widget": "text",
+                                "sources": {"default": {
+                                    "ref": "service:test/one",
+                                    "params": {"subject": "@facet:selection.work.id"}
+                                }}
+                            },
                             "view:test/two": { "widget": "text" }
                         }
                     }),
@@ -715,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_template_does_not_silently_flatten_a_pinned_subject() {
+    fn reusable_template_requires_a_fresh_subject_instead_of_serializing_a_pin() {
         let mut target = core();
         let instance = target.view_sets[0]
             .tiles
@@ -731,10 +981,43 @@ mod tests {
                 fingerprint: "fixture-pin".into(),
             },
         );
-        let error = target
+        let template = target
             .export_active_view_set_template("saved".into(), "Saved".into())
+            .unwrap();
+        let encoded = serde_json::to_string(&template).unwrap();
+        assert!(encoded.contains("required_subject"));
+        assert!(encoded.contains("selection.work.id"));
+        assert!(!encoded.contains("fixture-pin"));
+        assert!(!encoded.contains("fingerprint"));
+
+        let mut reopened = core();
+        let before = reopened.view_sets.len();
+        let error = reopened
+            .open_saved_view_set_template(&template, "attachment:test")
             .unwrap_err();
-        assert!(error.contains("pinned subject"));
+        assert!(error.contains("required fresh subject is missing"));
+        assert_eq!(reopened.view_sets.len(), before);
+
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            "subject_tile_0".into(),
+            BTreeMap::from([("selection.work.id".into(), json!("fresh-work"))]),
+        );
+        reopened
+            .open_saved_view_set_template_with_relationships(
+                &template,
+                "attachment:test",
+                &inputs,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let reopened_instance = center_mounts(&reopened.view_sets[1]).unwrap()[0].clone();
+        let Some(super::super::attachment::SelectionAttachment::Pinned { values, .. }) =
+            reopened.selection_attachments.get(&reopened_instance)
+        else {
+            panic!("fresh subject must reopen as an explicit pin")
+        };
+        assert_eq!(values["selection.work.id"], "fresh-work");
         assert!(target.export_layout_preferences().is_err());
     }
 
@@ -802,6 +1085,65 @@ mod tests {
             effect.kind,
             super::super::effect::RyeOsEffectKind::InvokeBinding { .. }
         )));
+    }
+
+    #[test]
+    fn reusable_cross_set_follow_requires_explicit_saved_set_resolution() {
+        let mut source = core();
+        let captured_set = source.view_sets[0].id;
+        let instance = center_mounts(&source.view_sets[0]).unwrap()[0].clone();
+        source.new_view_set();
+        let followed_set = source.view_sets[1].id;
+        source.selection_attachments.insert(
+            instance,
+            super::super::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: followed_set,
+            },
+        );
+        source.switch_view_set_tab(0);
+
+        let template = source
+            .capture_view_set_template_with_relationships(
+                "development".into(),
+                "Development".into(),
+                None,
+                &BTreeMap::from([(followed_set, "support".into())]),
+            )
+            .unwrap();
+        assert!(matches!(
+            template.relationships[0].source,
+            SavedViewSelectionSource::FollowSet { ref saved_view_set_id }
+                if saved_view_set_id == "support"
+        ));
+        assert_ne!(captured_set, followed_set);
+
+        let mut target = core();
+        let target_followed = target.view_sets[0].id;
+        let before = target.view_sets.len();
+        assert!(
+            target
+                .open_saved_view_set_template(&template, "attachment:test")
+                .unwrap_err()
+                .contains("required saved view set is not open")
+        );
+        assert_eq!(target.view_sets.len(), before);
+        target
+            .open_saved_view_set_template_with_relationships(
+                &template,
+                "attachment:test",
+                &BTreeMap::new(),
+                &BTreeMap::from([("support".into(), target_followed)]),
+            )
+            .unwrap();
+        let reopened_instance = center_mounts(&target.view_sets[1]).unwrap()[0].clone();
+        assert_eq!(
+            target.selection_attachments.get(&reopened_instance),
+            Some(
+                &super::super::attachment::SelectionAttachment::FollowViewSet {
+                    view_set_id: target_followed,
+                }
+            )
+        );
     }
 
     #[test]

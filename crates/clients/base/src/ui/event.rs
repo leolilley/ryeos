@@ -50,6 +50,12 @@ pub enum RyeOsUiIntent {
         tile_id: String,
     },
     ToggleFocusedMaster,
+    /// Promote one exact mounted tile in an authored master-and-stack set.
+    /// Pointer clients must not rely on focus changing before this arrives.
+    PromoteTileToMaster {
+        layout_guard: String,
+        tile_id: String,
+    },
     MoveFocusedTile {
         direction: RyeOsStackMoveDirection,
     },
@@ -392,6 +398,14 @@ pub enum RyeOsUiEvent {
         instance_key: RyeOsViewInstanceKey,
         item_id: String,
         activate: bool,
+    },
+    /// Expand or collapse one exact projected item in one mounted view.
+    /// The reducer resolves the current cursor and expansion key from the
+    /// semantic item id, so a stale renderer cannot affect a replacement row.
+    ToggleViewItemExpansion {
+        instance_key: RyeOsViewInstanceKey,
+        item_id: String,
+        expand: bool,
     },
     /// Dismiss one exact transient notice. Unknown/already-dismissed ids are
     /// idempotent no-ops so stale renderer frames cannot remove another one.

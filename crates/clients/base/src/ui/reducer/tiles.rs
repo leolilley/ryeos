@@ -214,6 +214,7 @@ impl RyeOsCore {
             self.instance_binding_attachments.remove(instance);
         }
         self.view_set_insertion_attachments.remove(&id);
+        self.view_set_template_ids.remove(&id);
         let previous_active = self.view_sets[self.active_view_set].id;
         self.view_sets.remove(index);
         self.active_view_set = self
@@ -489,6 +490,39 @@ impl RyeOsCore {
             ViewLocalState::GenericList { .. }
             | ViewLocalState::None
             | ViewLocalState::Field(_) => false,
+        }
+    }
+
+    pub(crate) fn set_view_row_expanded_key(
+        &mut self,
+        instance_key: &crate::ids::RyeOsViewInstanceKey,
+        key: String,
+        expand: bool,
+    ) -> bool {
+        let local = if let Some(tile_id) = instance_key.view_set_tile_id() {
+            let Some(tile) = self.view_sets[self.active_view_set].tiles.get_mut(&tile_id) else {
+                return false;
+            };
+            if tile.instance_key != *instance_key {
+                return false;
+            }
+            &mut tile.local
+        } else {
+            let Some(local) = self.view_sets[self.active_view_set]
+                .dock_local
+                .get_mut(instance_key)
+            else {
+                return false;
+            };
+            local
+        };
+        let ViewLocalState::GenericList { expanded_rows, .. } = local else {
+            return false;
+        };
+        if expand {
+            expanded_rows.insert(key)
+        } else {
+            expanded_rows.remove(&key)
         }
     }
 

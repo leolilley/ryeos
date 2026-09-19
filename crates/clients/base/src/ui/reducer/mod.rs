@@ -729,6 +729,24 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiEvent::ToggleViewItemExpansion {
+                instance_key,
+                item_id,
+                expand,
+            } => {
+                let Some((cursor, expanded, row_key)) =
+                    super::view_model::view_pointer_expansion(self, &instance_key, &item_id)
+                else {
+                    return Vec::new();
+                };
+                let cursor_changed = self.set_view_cursor(&instance_key, cursor);
+                let expansion_changed = expanded != expand
+                    && self.set_view_row_expanded_key(&instance_key, row_key, expand);
+                if cursor_changed || expansion_changed {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             RyeOsUiEvent::DismissNotice { id } => {
                 let before = self.ui.notices.len();
                 self.ui.notices.retain(|notice| notice.id != id);
@@ -870,12 +888,48 @@ impl RyeOsCore {
                 Vec::new()
             }
             RyeOsUiIntent::ToggleFocusedMaster => {
-                if self.view_sets[self.active_view_set].zoom_focused() {
+                if self.view_sets[self.active_view_set].tiling.mode
+                    == crate::surface::TilingModeSpec::MasterStack
+                    && self.view_sets[self.active_view_set].zoom_focused()
+                {
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
                         tile_id: self.view_sets[self.active_view_set]
                             .focused_tile
                             .0
                             .to_string(),
+                    });
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            RyeOsUiIntent::PromoteTileToMaster {
+                layout_guard,
+                tile_id,
+            } => {
+                if layout_guard != self.layout_guard()
+                    || self.view_sets[self.active_view_set].tiling.mode
+                        != crate::surface::TilingModeSpec::MasterStack
+                {
+                    return Vec::new();
+                }
+                let Some(tile_id) = parse_tile_id(&tile_id) else {
+                    return Vec::new();
+                };
+                if self.view_sets[self.active_view_set]
+                    .tile_ids()
+                    .first()
+                    .copied()
+                    == Some(tile_id)
+                {
+                    return Vec::new();
+                }
+                if self.view_sets[self.active_view_set].zoom_tile(tile_id) {
+                    self.view_sets[self.active_view_set].focus_target =
+                        Some(super::model::RyeOsFocusTarget::ViewSetTile {
+                            tile_id: tile_id.0.to_string(),
+                        });
+                    self.push_motion(RyeOsMotionEventVm::FocusChanged {
+                        tile_id: tile_id.0.to_string(),
                     });
                     self.bump_generation();
                 }
@@ -2673,7 +2727,7 @@ mod tests {
                         "ref": "service:test/rows",
                         "collection": "rows"
                     } },
-                    "projections": { "primary": "id" },
+                    "projections": { "primary": "id", "expand": { "fields": ["detail"] } },
                     "selection": { "activate": "choose" },
                     "affordances": [{
                         "id": "choose",
@@ -2696,7 +2750,7 @@ mod tests {
                 .encode();
         core.data.sources.insert(
             source_key.clone(),
-            serde_json::json!({ "rows": [{"id": "a"}, {"id": "b"}] }),
+            serde_json::json!({ "rows": [{"id": "a", "detail": "A"}, {"id": "b", "detail": "B"}] }),
         );
         let b_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
             .expect("mounted rows view")
@@ -2710,7 +2764,7 @@ mod tests {
         // current projection and invoke B's current intent atomically.
         core.data.sources.insert(
             source_key.clone(),
-            serde_json::json!({ "rows": [{"id": "b"}, {"id": "a"}] }),
+            serde_json::json!({ "rows": [{"id": "b", "detail": "B"}, {"id": "a", "detail": "A"}] }),
         );
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::ChooseViewItem {
@@ -2727,12 +2781,29 @@ mod tests {
         assert_eq!(*cursor, 0, "selection follows B, not its stale index");
         assert_eq!(core.seat.fold().get("active.thread").unwrap(), "b");
 
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ToggleViewItemExpansion {
+                instance_key: instance_key.clone(),
+                item_id: format!("view:test/exact#id:b"),
+                expand: true,
+            },
+        });
+        let rows = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
+            .expect("mounted rows view")
+        {
+            crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows,
+            other => panic!("expected rows, got {other:?}"),
+        };
+        assert!(rows[0].expanded);
+        assert_eq!(rows[0].detail[0].value, "B");
+
         // A removed stale target is an exact no-op; it cannot fall through to
         // whichever row remains at the old position.
         let a_id = format!("view:test/exact#id:a");
-        core.data
-            .sources
-            .insert(source_key, serde_json::json!({ "rows": [{"id": "b"}] }));
+        core.data.sources.insert(
+            source_key,
+            serde_json::json!({ "rows": [{"id": "b", "detail": "B"}] }),
+        );
         let generation = core.generation;
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::ChooseViewItem {
@@ -2743,6 +2814,61 @@ mod tests {
         });
         assert_eq!(core.generation, generation);
         assert_eq!(core.seat.fold().get("active.thread").unwrap(), "b");
+    }
+
+    #[test]
+    fn exact_dock_disclosure_mutates_the_named_mounted_record() {
+        let browser = session_with_surface(serde_json::json!({
+            "name": "dock-disclosure",
+            "slots": {
+                "right": {"content": "view:test/dock", "open": true, "size": 32}
+            },
+            "views": {
+                "view:test/dock": {
+                    "widget": "rows",
+                    "sources": {"default": {
+                        "ref": "service:test/dock-rows",
+                        "collection": "rows"
+                    }},
+                    "projections": {"primary": "id", "expand": {"fields": ["detail"]}}
+                }
+            }
+        }));
+        let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
+        let instance_key = crate::ids::RyeOsViewInstanceKey::view_set_slot(
+            core.view_sets[core.active_view_set].id,
+            "right",
+        );
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "default")
+                .encode();
+        core.data.sources.insert(
+            source_key,
+            serde_json::json!({"rows": [{"id": "dock-a", "detail": "exact"}]}),
+        );
+        let item_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
+            .expect("mounted dock rows")
+        {
+            crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows[0].id.clone(),
+            other => panic!("expected dock rows, got {other:?}"),
+        };
+
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::ToggleViewItemExpansion {
+                instance_key: instance_key.clone(),
+                item_id,
+                expand: true,
+            },
+        });
+
+        let rows = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
+            .expect("mounted dock rows")
+        {
+            crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows,
+            other => panic!("expected dock rows, got {other:?}"),
+        };
+        assert!(rows[0].expanded);
+        assert_eq!(rows[0].detail[0].value, "exact");
     }
 
     #[test]

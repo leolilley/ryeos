@@ -80,6 +80,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_projects::RECENT_LIST_DESCRIPTOR,
     ui_projects::CONFIG_GET_DESCRIPTOR,
     ui_projects::CONFIG_UPDATE_DESCRIPTOR,
+    ui_projects::PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
     ui_remotes::REMOTES_LIST_DESCRIPTOR,
     ui_remotes::REMOTES_PROBE_DESCRIPTOR,
 ];

@@ -58,3 +58,41 @@ test("scene and field views retain the shared projection boundary", async () => 
   assert.doesNotMatch(field, /canCompareEntity/);
   assert.doesNotMatch(field, /mountField|replaceChildren|innerHTML/);
 });
+
+test("bounded row evidence is rendered through the shared detail primitive", async () => {
+  const details = await readFile(new URL("browser/components/RowDetails.svelte", root), "utf8");
+  const renderer = await readFile(new URL("browser/views/ViewRenderer.svelte", root), "utf8");
+  const field = await readFile(new URL("browser/views/FieldView.svelte", root), "utf8");
+
+  assert.match(details, /<dl class="row-details"/);
+  assert.doesNotMatch(details, /innerHTML|{@html/);
+  assert.match(renderer, /type: "toggle_view_item_expansion"/);
+  assert.match(renderer, /model\.entry_details\?\.\[index\]/);
+  assert.match(renderer, /details=\{row\.detail \?\? \[\]\}/);
+  assert.match(renderer, /class="table-record-line" role="row"/);
+  assert.match(renderer, /class="table-action-cell" role="cell"/);
+  assert.doesNotMatch(renderer, /<button[^>]*role="row"/);
+  assert.match(field, /details=\{selected\.detail\}/);
+});
+
+test("shell keeps semantic context in Rust while narrow navigation stays reachable", async () => {
+  const shell = await readFile(new URL("browser/app/RyeOs.svelte", root), "utf8");
+  const system = await readFile(new URL("browser/app/SystemBar.svelte", root), "utf8");
+  const navigation = await readFile(new URL("browser/app/Navigation.svelte", root), "utf8");
+  const status = await readFile(new URL("browser/app/StatusBar.svelte", root), "utf8");
+  const tile = await readFile(new URL("browser/layout/TileFrame.svelte", root), "utf8");
+
+  assert.match(shell, /navigationOpen/);
+  assert.match(shell, /navigationOpener/);
+  assert.match(shell, /panel\?\.contains\(active\)/);
+  assert.match(system, /aria-controls="ryeos-navigation"/);
+  assert.doesNotMatch(system, /session\.project_path/);
+  assert.match(navigation, /querySelector<HTMLElement>\("button:not\(\[disabled\]\)"\)/);
+  assert.match(navigation, /event\.key === "Escape"/);
+  assert.match(navigation, /event\.key !== "Tab"/);
+  assert.match(status, /model\.segments/);
+  assert.doesNotMatch(status, /project_path|thread_count|input_tokens/);
+  assert.match(tile, /data-keyboard-focus=\{model\.focused/);
+  const dock = await readFile(new URL("browser/layout/DockSlot.svelte", root), "utf8");
+  assert.match(dock, /data-keyboard-focus=\{model\.focused/);
+});

@@ -1624,6 +1624,10 @@ pub enum AffordanceInvoke {
         context: Value,
         persist_affordance: String,
     },
+    SaveParticularViewSet {
+        context: Value,
+        persist_affordance: String,
+    },
     Ui {
         facet: String,
         value: Option<Value>,
@@ -1701,6 +1705,19 @@ pub fn resolve_affordance_invoke(
                             return None;
                         }
                         Some(AffordanceInvoke::SaveActiveViewSet {
+                            context: value,
+                            persist_affordance: companion.to_owned(),
+                        })
+                    }
+                    "save_particular_view_set" => {
+                        let companion = invoke.get("persist_affordance")?.as_str()?;
+                        if companion.is_empty()
+                            || companion.trim() != companion
+                            || companion.chars().any(char::is_control)
+                        {
+                            return None;
+                        }
+                        Some(AffordanceInvoke::SaveParticularViewSet {
                             context: value,
                             persist_affordance: companion.to_owned(),
                         })

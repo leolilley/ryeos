@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T06:23:37Z:adbe7d6bd9d7ffc03972eb2bb8b8f25d3c071f8ba9e46605e3dffa4c6c7d33a0:GIfTbvURPGLpy8Gth+owB1aR4e5BSD3c9LTBYdWN1YzY1ca+WYhVIJ41zKHC6G2Fl7ltTGSx+r4FOrti86vZBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T07:22:30Z:5887d9040c35b6a318eb997e2bc417090df80a40472cf256d003a184692b01c2:02dYL931hNr6KiJ5T//4Nb38TGAVVeQjSTydeXPMcidEWKwsxjF6JciBcwyITCFixulVR2Wlsuf0sGjm9fa7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -49,9 +49,10 @@ the binding; it does not terminate project executions. The original surface
 attachment is retained until the session itself ends. A failed release remains
 visible and requires an explicit retry, not a background mutation loop.
 Reusable arrangements carry no live binding triples. Multi-context resume must
-re-admit owner-specific references before restoring mounts; until that workflow
-is implemented, preference export refuses such contexts rather than silently
-restoring them under the surface attachment.
+re-admit owner-specific references before restoring mounts. Particular-set
+resume does this through stable project-registry and logical-work identities;
+ordinary layout-preference export still refuses mixed attachment contexts
+rather than silently restoring them under the surface attachment.
 
 ### Saved view-set library
 
@@ -77,6 +78,33 @@ identities and revalidates against the invoking view's admitted attachment. It d
 restore credentials, grants, execution state or input drafts. A saved template
 and a resumed UI session are different contracts.
 
+Reusable templates encode selection relationships by stable mount address.
+Own-set followers remain own-set followers. Cross-set followers name another
+saved template and reopen only when that template has an explicit live set
+resolution. Pins become named required fresh-subject inputs containing only
+logical facet names: neither captured values nor fingerprints are durable.
+Every mounted tile and slot must have exactly one relationship; omission is not
+an implicit follow-own-set default. Missing inputs and missing linked sets
+refuse before the composition mutates. The library's open action supplies a
+required subject from the invoking mount's current explicit selection at that
+moment; it never recovers the value that existed when the template was saved.
+
+Particular view sets have a separate revisioned principal-config collection.
+They retain reusable composition plus only a registered project `local_id` and
+logical work `chain_root_id`. Resume reopens current project authority, compiles
+a fresh binding attachment, verifies every continuation placement against the
+same chain root, principal and project, resolves the current head, and then
+mounts the composition. The logical-work coordinate can freshly supply only
+`selection.work`, `selection.work.thread`, and `selection.work.chain_root`;
+other pinned subjects require a future stable locator and must not be retained
+as a particular set. It never restores
+paths, placement thread ids, grants, drafts, observations, credentials or
+execution state, and it never starts or restarts work. Missing, denied or
+changed references are explicit failures. Projectless records can resume only
+from the exact projectless invoking attachment. A newly published project
+attachment that cannot be mounted must be released through its exact retained
+coordinate; removing only browser-local state leaks daemon authority.
+
 The library remains useful in observation-only sessions, but persistence can
 refuse when its companion coordinate is not admitted. Never broaden grants to
 make a visible control work, and never infer per-coordinate admission from
@@ -96,12 +124,11 @@ following a different set is an explicit operation, never a placement side effec
 Pinned views refuse selection writes. A followed set cannot close while external
 mounted followers still depend on it. Accepted closes retire owned sources and
 attachments; explicit reattachment fences earlier responses before refetching.
-Reusable templates exclude pinned values and runtime follow identities. The
-current composition-only schema therefore refuses captures with pins, external
-follow links or mixed project contexts instead of silently flattening them.
-Ordinary layout-preference export likewise refuses unrepresentable relationships.
-The full reusable-context grammar and particular-set resume remain separate
-implementation gates; these refusals must not be reported as completing them.
+Reusable templates exclude pinned values and runtime view-set identities while
+preserving their portable relationship grammar as described above. Ordinary
+layout-preference export remains presentation-local and refuses relationships
+or mixed project contexts it cannot represent. Do not weaken that refusal just
+because the named saved-set library has a richer durable contract.
 Open alongside allocates a fresh mounted viewer, captures its origin's current
 selection, and installs that pin before resolving source requests. It does not
 copy drafts, pending effects or execution authority. Selection-independent views
@@ -133,6 +160,37 @@ Svelte owns component lifecycle and presentation. Rust remains the sole owner
 of work, authority, navigation, layout and effect semantics. Browser-local
 state is limited to mechanical focus, selection, scroll restoration, pending
 transport handles and opaque Rust-issued layout preference bytes.
+
+System chrome shows the authenticated principal and signed surface/session
+context, not the launch project's path as if every mounted view shared it.
+Project exceptions belong on the exact mounted view attachment. The bottom
+status line is quiet interaction chrome: relevant shortcuts and exceptional or
+transient connection/save feedback are appropriate; permanent tile, item,
+thread, token, principal, surface, project and debug inventories are not.
+
+Pointer layout controls consume exact guarded Rust intents. Master promotion is
+available only for a non-master tile in an authored master-and-stack set and
+names that mounted tile; it is not maximise/restore or a misleading swap action
+on the current master. Group-tab ordering uses the same canonical layout tree
+and cannot be inferred from DOM order. Keyboard focus has a non-colour
+structural cue even when tile chrome is hidden or the mount occupies an edge
+slot, and remains distinct from selected content or running state.
+
+At narrow widths the authored navigation remains reachable through a
+renderer-local drawer. Open/closed state, focus trapping and Escape dismissal
+are browser mechanics only; destinations and activation intents remain the
+Rust projection. Dismissal restores the opener only while the drawer still owns
+focus; an activated destination that took focus keeps it. Never hide an authored
+navigation region with no accessible replacement or introduce a browser route
+model to solve responsive layout.
+
+Execution views must project coverage as data. Bounded child trees declare
+complete versus truncated closure, candidate views distinguish not applicable,
+not yet captured and retained, and durable execution posture distinguishes an
+available audit record from missing, unreadable or corrupt evidence. An empty
+section must not silently stand for all of these states. A retained node-signed
+audit document is available only after exact current-node signer, content hash
+and signature verification; parsing an envelope-stripped body is not evidence.
 
 ## Focused source loop
 
@@ -203,6 +261,15 @@ details, accessibility tree and preview composition. The retained canvas
 controller owns only bounded drawing, hit testing and pointer mechanics. Never
 restore a hidden DOM renderer, compatibility mount function or browser-side
 application model behind the Svelte component.
+
+Rows, tables, sections, timelines and field selections must render the bounded
+detail records already projected by Rust. Pointer disclosure names the exact
+mounted instance and stable item id; it must not synthesize a select-then-expand
+sequence against whichever row later has focus. Detail rendering is semantic
+text (`dl`/`dt`/`dd`) and never interprets evidence into browser-owned status.
+Dock mounts use the same exact disclosure event and Rust-owned expansion state
+as center mounts. Tables retain native button semantics inside explicit ARIA
+rows and cells rather than assigning row semantics to a button.
 
 ## Rebuild boundaries
 

@@ -8,7 +8,7 @@
   let { model }: Props = $props();
   const dispatch = dispatchUi();
 </script>
-<aside class="dock-slot" class:focused={model.focused} data-edge={model.edge} style={`--dock-size:${model.size}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }}>
+<aside class="dock-slot" class:focused={model.focused} data-keyboard-focus={model.focused ? "current" : undefined} data-edge={model.edge} style={`--dock-size:${model.size}`} onpointerdown={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }} onfocusin={() => { if (!model.focused) dispatch({ type: "focus_dock", edge: model.edge }); }}>
   <header><span>{model.supplement?.frame_label || model.title}</span><span>{model.attachment_label || model.supplement?.frame_detail || model.edge}</span></header>
   {#if model.heading}<div class="content-heading"><small>{model.heading.eyebrow}</small><h1>{model.heading.title}</h1>{#if model.heading.summary}<p>{model.heading.summary}</p>{/if}{#if model.heading.metadata.length}<div class="heading-meta">{model.heading.metadata.join("  /  ")}</div>{/if}</div>{/if}
   {#if model.input?.live_filter}<InputComposer model={model.input} />{/if}

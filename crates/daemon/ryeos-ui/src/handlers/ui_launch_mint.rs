@@ -367,6 +367,9 @@ pub(crate) fn compile_target(
         ryeos_app::service_registry::UiResultEffect::AdmitBindingAttachment => {
             crate::compiled_binding::CompiledUiResultEffect::AdmitBindingAttachment
         }
+        ryeos_app::service_registry::UiResultEffect::ResumeParticularViewSet => {
+            crate::compiled_binding::CompiledUiResultEffect::ResumeParticularViewSet
+        }
     });
     let declared_source_safe = extract_ui_read_only(metadata)?;
     let source_safe = match dispatch_class {

@@ -707,6 +707,12 @@ pub struct RyeOsCore {
     /// Context used only when inserting a new mount into a view set.
     #[serde(default)]
     pub view_set_insertion_attachments: BTreeMap<crate::ids::ViewSetId, String>,
+    /// Runtime provenance for compositions opened from the personal library.
+    /// This maps fresh set identities back to stable template identities so a
+    /// later saved set can name cross-set follow relationships without ever
+    /// serializing runtime ids.
+    #[serde(default)]
+    pub view_set_template_ids: BTreeMap<crate::ids::ViewSetId, String>,
     /// Immutable launch-composition provenance.
     #[serde(default)]
     pub surface_attachment_id: String,
@@ -2676,9 +2682,30 @@ impl RyeOsCore {
 
     pub(crate) fn set_focused_row_expanded(&mut self, expand: bool) -> bool {
         let tile_id = self.view_sets[self.active_view_set].focused_tile;
+        let Some(instance) = self.view_sets[self.active_view_set]
+            .tiles
+            .get(&tile_id)
+            .map(|tile| tile.instance_key.clone())
+        else {
+            return false;
+        };
+        self.set_view_row_expanded(&instance, expand)
+    }
+
+    pub(crate) fn set_view_row_expanded(
+        &mut self,
+        instance: &RyeOsViewInstanceKey,
+        expand: bool,
+    ) -> bool {
+        let Some(tile_id) = instance.view_set_tile_id() else {
+            return false;
+        };
         let Some(tile) = self.view_sets[self.active_view_set].tiles.get(&tile_id) else {
             return false;
         };
+        if &tile.instance_key != instance {
+            return false;
+        }
         let Some(binding) = self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
         else {
             return false;
@@ -3138,6 +3165,7 @@ impl Default for RyeOsCore {
             binding_attachments: BTreeMap::new(),
             instance_binding_attachments: BTreeMap::new(),
             view_set_insertion_attachments: BTreeMap::new(),
+            view_set_template_ids: BTreeMap::new(),
             surface_attachment_id: String::new(),
             ui: RyeOsUiState::default(),
             seat: super::seat::SeatLog::default(),

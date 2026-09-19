@@ -210,7 +210,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             .recheck_attachment_after_read(&session_id, &attachment_coordinate)
             .map_err(|error| binding_stale(&error.to_string()))?;
     }
-    retain_declared_result_effect(&bound.target, &mut result)?;
+    retain_declared_result_effect(
+        &bound.target,
+        &attachment_coordinate.binding_attachment_id,
+        &mut result,
+    )?;
 
     ui.session_bus.publish(
         &session_id,
@@ -233,7 +237,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     }))
 }
 
-fn retain_declared_result_effect(target: &CompiledUiTarget, result: &mut Value) -> Result<()> {
+fn retain_declared_result_effect(
+    target: &CompiledUiTarget,
+    invoking_attachment_id: &str,
+    result: &mut Value,
+) -> Result<()> {
     let Some(fields) = result.as_object_mut() else {
         if target.result_effect.is_some() {
             return Err(HandlerError::Internal(
@@ -274,6 +282,62 @@ fn retain_declared_result_effect(target: &CompiledUiTarget, result: &mut Value) 
             fields.insert(
                 "ui_transition".to_string(),
                 json!({"kind":"admit_binding_attachment","attachment":transition.attachment}),
+            );
+            Ok(())
+        }
+        Some(CompiledUiResultEffect::ResumeParticularViewSet) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ResumeTransition {
+                kind: String,
+                #[serde(default)]
+                attachment: Option<ryeos_client_base::ui::UiBindingAttachment>,
+                insertion_attachment_id: String,
+            }
+            let transition: ResumeTransition =
+                serde_json::from_value(authored.ok_or_else(|| {
+                    HandlerError::Internal(
+                        "particular-set resume returned no typed UI transition".into(),
+                    )
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "particular-set resume returned an invalid typed UI transition".into(),
+                    )
+                })?;
+            let resolved: ryeos_client_base::surface::view_sets::ResolvedParticularViewSet =
+                serde_json::from_value(fields.remove("particular_view_set").ok_or_else(|| {
+                    HandlerError::Internal("particular-set resume returned no resolved set".into())
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "particular-set resume returned an invalid resolved set".into(),
+                    )
+                })?;
+            if transition.kind != "resume_particular_view_set"
+                || transition.insertion_attachment_id.is_empty()
+                || transition.attachment.as_ref().is_some_and(|attachment| {
+                    attachment.binding_attachment_id != transition.insertion_attachment_id
+                })
+                || (transition.attachment.is_none()
+                    && transition.insertion_attachment_id != invoking_attachment_id)
+            {
+                return Err(HandlerError::Internal(
+                    "particular-set resume returned an invalid typed UI transition".into(),
+                )
+                .into());
+            }
+            fields.insert(
+                "particular_view_set".to_string(),
+                serde_json::to_value(resolved)?,
+            );
+            fields.insert(
+                "ui_transition".to_string(),
+                json!({
+                    "kind": "resume_particular_view_set",
+                    "attachment": transition.attachment,
+                    "insertion_attachment_id": transition.insertion_attachment_id,
+                }),
             );
             Ok(())
         }
@@ -1058,7 +1122,8 @@ mod tests {
             }
         });
 
-        retain_declared_result_effect(&target(None), &mut result).expect("sanitize result");
+        retain_declared_result_effect(&target(None), "attachment-1", &mut result)
+            .expect("sanitize result");
 
         assert_eq!(result, json!({"value": 7}));
     }
@@ -1083,6 +1148,7 @@ mod tests {
 
         retain_declared_result_effect(
             &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+            "attachment-1",
             &mut result,
         )
         .expect("retain signed result effect");
@@ -1100,6 +1166,7 @@ mod tests {
 
         let error = retain_declared_result_effect(
             &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+            "attachment-1",
             &mut result,
         )
         .expect_err("missing descriptor must fail closed");
@@ -1120,6 +1187,78 @@ mod tests {
         assert!(
             retain_declared_result_effect(
                 &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+                "attachment-1",
+                &mut result,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn particular_resume_effect_requires_typed_resolution_and_exact_insertion() {
+        let mut result = json!({
+            "particular_view_set": {
+                "id": "current",
+                "name": "Current",
+                "composition": {
+                    "id": "current",
+                    "title": "Current",
+                    "root": null,
+                    "slots": {}
+                },
+                "relationships": [],
+                "resolved_selection_work": {
+                    "thread": "T-head",
+                    "chain_root": "T-root"
+                }
+            },
+            "ui_transition": {
+                "kind": "resume_particular_view_set",
+                "attachment": null,
+                "insertion_attachment_id": "attachment-1"
+            }
+        });
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+            "attachment-1",
+            &mut result,
+        )
+        .expect("retain typed particular-set resolution");
+        assert_eq!(
+            result["ui_transition"]["insertion_attachment_id"],
+            "attachment-1"
+        );
+        assert_eq!(
+            result["particular_view_set"]["resolved_selection_work"]["thread"],
+            "T-head"
+        );
+
+        let mut wrong_origin = result.clone();
+        wrong_origin["ui_transition"]["insertion_attachment_id"] = json!("attachment-9");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+                "attachment-1",
+                &mut wrong_origin,
+            )
+            .is_err()
+        );
+
+        result["ui_transition"]["attachment"] = json!({
+            "binding_attachment_id": "attachment-2",
+            "binding_generation": 2,
+            "binding_digest": "11",
+            "surface_ref": "surface:test/base",
+            "surface_generation": "22",
+            "effective_surface": {},
+            "project_path": null,
+            "posture": "observation_only",
+            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512}
+        });
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+                "attachment-1",
                 &mut result,
             )
             .is_err()

@@ -29,6 +29,11 @@ export type RyeOsUiIntent =
   | { type: "close_tile"; tile_id: string }
   | { type: "toggle_tile_maximized"; tile_id: string }
   | { type: "toggle_focused_master" }
+  /**
+   * Promote one exact mounted tile in an authored master-and-stack set.
+   * Pointer clients must not rely on focus changing before this arrives.
+   */
+  | { type: "promote_tile_to_master"; layout_guard: string; tile_id: string }
   | { type: "move_focused_tile"; direction: RyeOsStackMoveDirection }
   /**
    * Pure placement edit between already mounted instances. No view ref,

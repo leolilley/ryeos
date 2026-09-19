@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:02:47Z:2ace4cfa0831ff6ae76d72930ef8afd0265bf37def0265f84b34be294f198261:M2Or43TPcK6emIF9tpUKOrDtkbB5MOsK4of/W2jYZDVqnLzyXp29lc5rmw5rzSQIUZW7GbtvqqyzqgrCFUlOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T07:22:30Z:300c94fd7e8092f66b85863c4b4f7acaef902b27c99871ec7a7496cb6258b0e7:Sirfp3GvgXj3smHsYGpuxIe58aMnr+8FBMbmPS2KBxBurjQWVUB05kIMj1E4M1+4UXEGDTendyEu83tkSvm1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: development-changes
 title: Changes
 version: "1.0.0"
@@ -12,6 +12,16 @@ sources:
       thread_id: "@facet:selection.work.thread"
 
 sections:
+  - title: Availability
+    source_channel: detail
+    collection: availability
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map: { available: good, pending: accent, unavailable: warn }
+        default: neutral
   - title: Working changes
     source_channel: detail
     collection: change_summary

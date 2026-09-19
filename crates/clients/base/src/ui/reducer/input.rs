@@ -584,7 +584,8 @@ impl RyeOsCore {
             &payload,
         ) {
             Some(super::content::AffordanceInvoke::OpenSavedViewSet { .. })
-            | Some(super::content::AffordanceInvoke::SaveActiveViewSet { .. }) => {
+            | Some(super::content::AffordanceInvoke::SaveActiveViewSet { .. })
+            | Some(super::content::AffordanceInvoke::SaveParticularViewSet { .. }) => {
                 self.notice(
                     "View-set library actions require a selected library record.",
                     RyeOsTone::Warn,

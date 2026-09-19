@@ -716,7 +716,7 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_thread_id: route.thread,
         tail_chain_root_id: route.chain_root,
         tail_url,
-        presentation: presentation_vm(core, &session, &chrome, &view_set),
+        presentation: presentation_vm(core, &chrome, &view_set),
         session,
         navigation: navigation_vm(core),
         chrome,
@@ -790,7 +790,6 @@ fn effect_failures_vm(core: &RyeOsCore) -> Vec<RyeOsEffectFailureVm> {
 
 fn presentation_vm(
     core: &RyeOsCore,
-    session: &RyeOsSessionVm,
     chrome: &RyeOsChromeVm,
     view_set: &RyeOsViewSetVm,
 ) -> RyeOsPresentationVm {
@@ -806,7 +805,7 @@ fn presentation_vm(
             version_label: format!("RYE OS - {version}"),
             border: core.style.border.name().to_string(),
             top_bar: top_bar_vm(core),
-            status_bar: status_bar_vm(session, chrome, view_set, core, &version),
+            status_bar: status_bar_vm(chrome, core),
         },
         metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
@@ -966,160 +965,29 @@ fn presentation_activity_level(
         .clamp(0.0, 1.0)
 }
 
-/// Cumulative token usage for the loaded conversation, read from the
-/// chain-replay source's `summary` block — the daemon's continuation-aware
-/// chain totals. Summing the braid's `thread_usage` events instead would
-/// over-count: each event carries the thread's cumulative-so-far totals
-/// (reseeded across continuations), not a per-turn delta. `(0, 0)` when no
-/// fetched source carries a usage summary.
-fn conversation_usage(core: &RyeOsCore) -> (u64, u64) {
-    let mut input = 0u64;
-    let mut output = 0u64;
-    for source in core.data.sources.values() {
-        let Some(summary) = source.get("summary") else {
-            continue;
-        };
-        input += summary
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        output += summary
-            .get("output_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-    }
-    (input, output)
-}
-
-/// Compact a token count for the status strip (`1234` → `1.2k`).
-fn compact_count(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-fn status_bar_vm(
-    session: &RyeOsSessionVm,
-    chrome: &RyeOsChromeVm,
-    view_set: &RyeOsViewSetVm,
-    core: &RyeOsCore,
-    version: &str,
-) -> RyeOsStatusBarVm {
-    let item_count = core
-        .data
-        .items
-        .as_ref()
-        .map(|items| items.items.len())
-        .unwrap_or_default();
-    let thread_count = core
-        .data
-        .threads
-        .as_ref()
-        .map(|threads| threads.threads.len())
-        .unwrap_or_default();
-    let (usage_in, usage_out) = conversation_usage(core);
+fn status_bar_vm(chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm {
     let key_hint = if core.view_sets[core.active_view_set].lens_stack.is_empty() {
         "ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
     } else {
         "⌫ back · alt+← back · ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
             .to_string()
     };
+    // This is quiet interaction chrome, not a second diagnostics dashboard.
+    // Root-session project and execution counters become actively misleading
+    // once exact mounted attachments span projects.
+    let segments = (chrome.health_label != "healthy")
+        .then(|| RyeOsStatusSegmentVm {
+            id: "connection".to_string(),
+            label: Some("node".to_string()),
+            value: chrome.health_label.clone(),
+            tone: chrome.health_tone,
+            grow: true,
+        })
+        .into_iter()
+        .collect();
     RyeOsStatusBarVm {
         visible: core.ui.bottom_status_visible,
-        segments: vec![
-            RyeOsStatusSegmentVm {
-                id: "brand".to_string(),
-                label: None,
-                value: "rye os".to_string(),
-                tone: RyeOsTone::Accent,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "version".to_string(),
-                label: None,
-                value: format!("v{version}"),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "health".to_string(),
-                label: None,
-                value: chrome.health_label.clone(),
-                tone: chrome.health_tone,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "mode".to_string(),
-                label: None,
-                value: match session.posture {
-                    crate::ui::binding::UiEffectivePosture::ObservationOnly => "observe",
-                    crate::ui::binding::UiEffectivePosture::Interactive => "operate",
-                }
-                .to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "tiles".to_string(),
-                label: Some("tiles".to_string()),
-                value: view_set.tile_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "items".to_string(),
-                label: Some("items".to_string()),
-                value: item_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "threads".to_string(),
-                label: Some("threads".to_string()),
-                value: thread_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            // Always-visible budget: the conversation's cumulative tokens
-            // (input/output) summed from the braid's thread_usage events.
-            RyeOsStatusSegmentVm {
-                id: "usage".to_string(),
-                label: Some("tokens".to_string()),
-                value: format!("{}/{}", compact_count(usage_in), compact_count(usage_out)),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "principal".to_string(),
-                label: Some("principal".to_string()),
-                value: session
-                    .user_principal_id
-                    .as_deref()
-                    .map(short_principal)
-                    .unwrap_or_else(|| "local".to_string()),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "surface".to_string(),
-                label: Some("surface".to_string()),
-                value: short_surface_ref(&session.surface_ref),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "project".to_string(),
-                label: None,
-                value: session
-                    .project_path
-                    .clone()
-                    .unwrap_or_else(|| "home".to_string()),
-                tone: RyeOsTone::Neutral,
-                grow: true,
-            },
-        ],
+        segments,
         key_hint,
         energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
@@ -2262,6 +2130,61 @@ pub(crate) fn view_pointer_item(
     }
 }
 
+/// Resolve an expandable semantic pointer target to its current cursor and
+/// disclosure state. Non-expandable replacements fail closed even when they
+/// reuse an old item id.
+pub(crate) fn view_pointer_expansion(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    item_id: &str,
+) -> Option<(usize, bool, String)> {
+    match view_vm_for_instance(core, instance_key)? {
+        RyeOsViewVm::Rows { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Table { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Sections { sections, .. } => sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Timeline {
+            entry_ids,
+            entry_cursors,
+            entry_expandable,
+            entry_expanded,
+            ..
+        } => entry_ids
+            .iter()
+            .position(|id| id == item_id)
+            .filter(|index| entry_expandable.get(*index).copied().unwrap_or(false))
+            .and_then(|index| {
+                Some((
+                    *entry_cursors.get(index)?,
+                    entry_expanded.get(index).copied().unwrap_or(false),
+                    entry_ids
+                        .get(index)?
+                        .strip_prefix("timeline-entry:")?
+                        .to_owned(),
+                ))
+            }),
+        _ => None,
+    }
+}
+
 /// The affordance a row's activation invokes, shared by the rows and table
 /// widgets. Activation is explicit — the view names it via `selection.activate`
 /// (no implicit "first affordance") — and the named affordance must be
@@ -3290,36 +3213,6 @@ fn focused_selection_hint(core: &RyeOsCore) -> Option<String> {
     focused_selected_table_row(core).and_then(|row| row.cells.into_iter().next())
 }
 
-fn short_principal(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix("fp:") {
-        let prefix = rest.chars().take(8).collect::<String>();
-        return format!("fp:{prefix}…");
-    }
-    truncate_middle(value, 14)
-}
-
-fn short_surface_ref(value: &str) -> String {
-    value.strip_prefix("surface:").unwrap_or(value).to_string()
-}
-
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    let keep = max_chars.saturating_sub(1) / 2;
-    let start = value.chars().take(keep).collect::<String>();
-    let end = value
-        .chars()
-        .rev()
-        .take(keep)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("{start}…{end}")
-}
-
 fn overlays(core: &RyeOsCore) -> Vec<RyeOsOverlayVm> {
     let Some(active) = core.ui.overlay.active.as_deref() else {
         return Vec::new();
@@ -3725,6 +3618,52 @@ fn placement_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm
     }
     let guard = core.layout_guard();
     let mut actions = Vec::new();
+    if view_set.tiling.mode == crate::surface::TilingModeSpec::MasterStack
+        && view_set.tile_ids().len() > 1
+        && view_set.tile_ids().first().copied() != Some(tile_id)
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Promote to master".into(),
+            title: "Promote this exact mounted view without changing its subject".into(),
+            intent: RyeOsUiIntent::PromoteTileToMaster {
+                layout_guard: guard.clone(),
+                tile_id: tile_id_text(tile_id),
+            },
+        });
+    }
+    if let Some(tabs) = view_set
+        .root
+        .as_ref()
+        .and_then(|root| root.group_tabs(tile_id))
+        && let Some(index) = tabs.iter().position(|candidate| *candidate == tile_id)
+    {
+        if index > 0 {
+            actions.push(RyeOsTileIntentVm {
+                label: "Move tab left".into(),
+                title: "Move this view one place earlier in its current group".into(),
+                intent: RyeOsUiIntent::MoveTileToGroup {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(tabs[index - 1]),
+                    index: index - 1,
+                },
+            });
+        }
+        if index + 1 < tabs.len() {
+            actions.push(RyeOsTileIntentVm {
+                label: "Move tab right".into(),
+                title: "Move this view one place later in its current group".into(),
+                intent: RyeOsUiIntent::MoveTileToGroup {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(tabs[index + 1]),
+                    // The source is removed before insertion, so the position
+                    // after its next sibling is the original index + 1.
+                    index: index + 1,
+                },
+            });
+        }
+    }
     for target_id in view_set.tile_ids() {
         if target_id == tile_id {
             continue;
@@ -4198,6 +4137,84 @@ mod tests {
             },
         });
         assert_eq!(core.export_layout_preferences().unwrap(), before);
+    }
+
+    #[test]
+    fn master_promotion_is_projected_for_and_applied_to_the_exact_tile() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let tiles = core.view_sets[core.active_view_set].tile_ids();
+        assert!(
+            placement_intents(&core, tiles[0])
+                .into_iter()
+                .all(|action| !matches!(action.intent, RyeOsUiIntent::PromoteTileToMaster { .. })),
+            "the current master must not advertise an action that demotes it"
+        );
+        let promoted = tiles[1];
+        let action = placement_intents(&core, promoted)
+            .into_iter()
+            .find(|action| matches!(&action.intent, RyeOsUiIntent::PromoteTileToMaster { .. }))
+            .expect("master promotion action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        assert_eq!(core.view_sets[core.active_view_set].tile_ids()[0], promoted);
+    }
+
+    #[test]
+    fn grouped_tab_reorder_is_an_exact_projected_placement_action() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let tiles = core.view_sets[core.active_view_set].tile_ids();
+        assert!(core.view_sets[core.active_view_set].move_tile_to_group(tiles[1], tiles[0], 1,));
+        let action = placement_intents(&core, tiles[1])
+            .into_iter()
+            .find(|action| action.label == "Move tab left")
+            .expect("tab reorder action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        let tabs = core.view_sets[core.active_view_set]
+            .root
+            .as_ref()
+            .and_then(|root| root.group_tabs(tiles[1]))
+            .expect("grouped tabs");
+        assert_eq!(tabs, [tiles[1], tiles[0]]);
+    }
+
+    #[test]
+    fn quiet_status_line_does_not_repeat_root_context_or_execution_counters() {
+        let core = RyeOsCore::default();
+        let healthy = RyeOsChromeVm {
+            title: "RyeOS".into(),
+            subtitle: String::new(),
+            health_label: "healthy".into(),
+            health_tone: RyeOsTone::Good,
+        };
+        assert!(status_bar_vm(&healthy, &core).segments.is_empty());
+
+        let interrupted = RyeOsChromeVm {
+            health_label: "connection interrupted".into(),
+            health_tone: RyeOsTone::Warn,
+            ..healthy
+        };
+        let status = status_bar_vm(&interrupted, &core);
+        assert_eq!(status.segments.len(), 1);
+        assert_eq!(status.segments[0].id, "connection");
     }
 
     #[test]
@@ -5089,38 +5106,6 @@ mod tests {
         let mut entries = Vec::new();
         append_live_delta(&core, &mut entries);
         assert!(entries.is_empty(), "settled head → no working indicator");
-    }
-
-    #[test]
-    fn conversation_usage_reads_chain_summary_not_event_sums() {
-        // `thread_usage` payloads are cumulative-so-far (100 → 105), so the
-        // conversation total is the daemon's continuation-aware `summary`
-        // block, never the events summed (that would read 205).
-        let mut core = RyeOsCore::default();
-        core.data.sources.insert(
-            "timeline".to_string(),
-            json!({
-                "events": [
-                    { "event_type": "thread_usage", "payload": { "input_tokens": 100, "output_tokens": 20 } },
-                    { "event_type": "cognition_out", "payload": { "content": "hi" } },
-                    { "event_type": "thread_usage", "payload": { "input_tokens": 105, "output_tokens": 23 } },
-                ],
-                "summary": { "status": "completed", "input_tokens": 105, "output_tokens": 23 },
-            }),
-        );
-        assert_eq!(conversation_usage(&core), (105, 23));
-    }
-
-    #[test]
-    fn conversation_usage_is_zero_without_usage_summary() {
-        assert_eq!(conversation_usage(&RyeOsCore::default()), (0, 0));
-    }
-
-    #[test]
-    fn compact_count_abbreviates_thousands() {
-        assert_eq!(compact_count(0), "0");
-        assert_eq!(compact_count(999), "999");
-        assert_eq!(compact_count(1234), "1.2k");
     }
 
     #[test]
