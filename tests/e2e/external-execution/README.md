@@ -264,3 +264,32 @@ evidence. This thread's single-job target occupied approximately 1 GiB; other
 artifacts were not deleted. Moving only this worktree's target to a separate
 filesystem is awaiting the operator's choice. Existing binaries remain usable
 for non-building diagnostics. No Cargo process from this run remains active.
+
+## Next integration boundaries (reviewed, not implemented)
+
+Retain a pre-allocation command/workspace contract in `PersistentSessionAuthority`
+and the persistent-session capsule. Do not embed `ExecutionChannelBinding`: it
+already names the capsule, which would create a content-address cycle. Admission
+derives exact runtime/product, connector and policy requirements before session
+birth; occurrence registration checks them afterward. Provider PID, profile lock
+and local cleanup stay with the existing dedicated-session owner.
+
+The guest needs a protected single-binding channel journal, not a miniature
+RuntimeDb or enrolled node. Share transcript/application/revocation rules and
+transaction-level storage mechanics in `ryeos-state`. Node wrappers retain
+session/allocation ownership and import/cleanup responsibilities. Guest restart
+without the original live launcher cannot recreate it or replay claimed input;
+reconnection to that same live owner is different.
+
+Reuse Lillux inherited duplex/deadline and descriptor-transfer primitives between
+supervisor and dedicated launcher. A thin generic supervisor executable belongs
+under `crates/tools`, with execution mechanics in executor; the isolation adapter
+must not acquire session, CAS or cloud lifecycle ownership. The network supervisor
+retains occurrence keys outside candidate namespaces.
+
+Use the signed route registry and an occurrence-only verifier. Existing response
+modes provide JSON/SSE, not a duplex WebSocket upgrade. Compose bounded ingress
+with event-stream egress and durable acknowledgements, or add a generic registered
+duplex mode. Neither permits an ad hoc route, general guest grant or command
+backlog replay ahead of sticky cancellation. These source-review decisions are
+not transport or installed-activation evidence.
