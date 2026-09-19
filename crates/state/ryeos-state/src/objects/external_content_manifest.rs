@@ -265,6 +265,19 @@ pub enum ExternalContentMountRoot {
 
 pub const EXECUTION_RUNTIME_REALIZATIONS_ROOT: &str = "/ryeos/realizations";
 
+/// Operational delivery selected by the launch owner after admission. This
+/// does not alter the retained realization set or its logical mount roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalRealizationDelivery {
+    /// `execution_runtime` entries occupy the fixed read-only namespace while
+    /// `project` entries occupy the admitted workspace.
+    FixedNamespace,
+    /// Every entry occupies one daemon-owned private runtime root and is
+    /// handed to the trusted workload through retained descriptors.
+    PrivateDescriptorRoot,
+}
+
 impl ExternalContentMountRoot {
     /// Resolve the existing logical mount namespace inside the admitted process.
     /// This selects a location, not permission to expose or populate that location.

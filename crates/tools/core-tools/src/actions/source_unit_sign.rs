@@ -14,7 +14,7 @@ use ryeos_engine::kind_registry::{
     KindSchema, SourceClosureLocationDecl, SourceClosureTestimonyDecl,
 };
 use ryeos_engine::source_closure::{
-    CapturedSourceCandidate, ExecutorSourceLocation, ExecutorSourcePolicy, SourceRootRequest,
+    CapturedSourceCandidate, ExecutorSourcePolicy, SourceRootRequest,
     SourceRootSelection,
 };
 

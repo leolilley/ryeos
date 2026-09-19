@@ -922,27 +922,35 @@ fn run() -> Result<()> {
         .join(baseline_name);
     let external_root = required_env("RYEOS_EXTERNAL_ROOT")?;
     let external_realizations = required_env("RYEOS_EXTERNAL_REALIZATIONS")?;
+    let external_delivery: ryeos_state::objects::ExternalRealizationDelivery =
+        serde_json::from_str(&required_env("RYEOS_EXTERNAL_DELIVERY")?)
+            .context("decode external realization delivery")?;
     require_absolute_normalized("external realization root", &external_root)?;
-    let (executable, workload_argv0, mut workload_handles) = resolve_pinned_executable(
-        std::path::Path::new(&external_root),
-        &external_realizations,
-        &profile.workload_realization_id,
-        executable_name,
-    )?;
+    let (executable, workload_argv0, mut workload_handles) =
+        resolve_pinned_executable_with_delivery(
+            std::path::Path::new(&external_root),
+            &external_realizations,
+            &profile.workload_realization_id,
+            executable_name,
+            external_delivery,
+        )?;
     let executable_search = optional_env("RYEOS_EXECUTABLE_SEARCH")?;
-    let (executable_path, mut inherited_descriptors) = resolve_pinned_executable_search(
-        std::path::Path::new(&external_root),
-        &external_realizations,
-        executable_search.as_deref(),
-    )?;
+    let (executable_path, mut inherited_descriptors) =
+        resolve_pinned_executable_search_with_delivery(
+            std::path::Path::new(&external_root),
+            &external_realizations,
+            executable_search.as_deref(),
+            external_delivery,
+        )?;
     let session_process_environment =
         optional_env(ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV)?;
     let (mut session_process_environment, mut environment_descriptors) =
-        resolve_session_process_environment(
+        resolve_session_process_environment_with_delivery(
             std::path::Path::new(&workspace),
             std::path::Path::new(&external_root),
             &external_realizations,
             session_process_environment.as_deref(),
+            external_delivery,
         )?;
     inherited_descriptors.append(&mut environment_descriptors);
     inherited_descriptors.append(&mut workload_handles);
@@ -1439,11 +1447,55 @@ fn verify_compatibility_baseline_config(
     Ok(())
 }
 
+fn external_realization_root<'a>(
+    external_root: &'a std::path::Path,
+    mount_root: ryeos_state::objects::ExternalContentMountRoot,
+    delivery: ryeos_state::objects::ExternalRealizationDelivery,
+) -> Result<&'a std::path::Path> {
+    match delivery {
+        ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace => {
+            Ok(mount_root.root(Some(external_root))?)
+        }
+        ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot => {
+            Ok(external_root)
+        }
+    }
+}
+
+fn realization_uses_read_only_namespace(
+    mount_root: ryeos_state::objects::ExternalContentMountRoot,
+    delivery: ryeos_state::objects::ExternalRealizationDelivery,
+) -> bool {
+    delivery == ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace
+        && mount_root == ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime
+}
+
+#[cfg(test)]
 fn resolve_pinned_executable(
     external_root: &std::path::Path,
     sealed_realizations: &str,
     realization_id: &str,
     executable_name: &std::path::Path,
+) -> Result<(
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Vec<lillux::InheritedDescriptorAuthority>,
+)> {
+    resolve_pinned_executable_with_delivery(
+        external_root,
+        sealed_realizations,
+        realization_id,
+        executable_name,
+        ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+    )
+}
+
+fn resolve_pinned_executable_with_delivery(
+    external_root: &std::path::Path,
+    sealed_realizations: &str,
+    realization_id: &str,
+    executable_name: &std::path::Path,
+    delivery: ryeos_state::objects::ExternalRealizationDelivery,
 ) -> Result<(
     std::path::PathBuf,
     std::path::PathBuf,
@@ -1490,7 +1542,7 @@ fn resolve_pinned_executable(
     {
         bail!("workload realization mount is not a safe relative path");
     }
-    let external_root = realization.mount_root.root(Some(external_root))?;
+    let external_root = external_realization_root(external_root, realization.mount_root, delivery)?;
     // The executable and its argv[0] resource path must share one pinned root,
     // even if the pathname is renamed while the workload is being prepared.
     let root = lillux::PinnedDirectory::open(external_root)?
@@ -1515,12 +1567,9 @@ fn resolve_pinned_executable(
     // Execution-runtime names are usable by ordinary descendants only after
     // Lillux proves the entire namespace spelling immutable. A readonly leaf
     // mount alone is insufficient: a writable ancestor could be rebound.
-    let runtime_argv0 = match realization.mount_root {
-        ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime => {
-            Some(pinned.verified_read_only_namespace_path()?)
-        }
-        ryeos_state::objects::ExternalContentMountRoot::Project => None,
-    };
+    let runtime_argv0 = realization_uses_read_only_namespace(realization.mount_root, delivery)
+        .then(|| pinned.verified_read_only_namespace_path())
+        .transpose()?;
     let executable_handle = pinned.into_inherited_descriptor_path()?;
     let executable = executable_handle.path().to_path_buf();
     if let Some(argv0) = runtime_argv0 {
@@ -1537,10 +1586,25 @@ fn resolve_pinned_executable(
     Ok((executable, argv0, vec![executable_handle, root_handle]))
 }
 
+#[cfg(test)]
 fn resolve_pinned_executable_search(
     external_root: &std::path::Path,
     sealed_realizations: &str,
     encoded: Option<&str>,
+) -> Result<(Option<String>, Vec<lillux::InheritedDescriptorAuthority>)> {
+    resolve_pinned_executable_search_with_delivery(
+        external_root,
+        sealed_realizations,
+        encoded,
+        ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+    )
+}
+
+fn resolve_pinned_executable_search_with_delivery(
+    external_root: &std::path::Path,
+    sealed_realizations: &str,
+    encoded: Option<&str>,
+    delivery: ryeos_state::objects::ExternalRealizationDelivery,
 ) -> Result<(Option<String>, Vec<lillux::InheritedDescriptorAuthority>)> {
     let Some(encoded) = encoded else {
         return Ok((None, Vec::new()));
@@ -1579,18 +1643,17 @@ fn resolve_pinned_executable_search(
         if entry.relative_directory != "." {
             relative.push(&entry.relative_directory);
         }
-        let directory =
-            open_pinned_directory(realization.mount_root.root(Some(external_root))?, &relative)?;
-        let path = match realization.mount_root {
-            ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime => {
-                directory.verified_read_only_namespace_path()?
-            }
-            ryeos_state::objects::ExternalContentMountRoot::Project => {
-                let handle = directory.into_inherited_descriptor_path()?;
-                let path = handle.path().to_path_buf();
-                handles.push(handle);
-                path
-            }
+        let directory = open_pinned_directory(
+            external_realization_root(external_root, realization.mount_root, delivery)?,
+            &relative,
+        )?;
+        let path = if realization_uses_read_only_namespace(realization.mount_root, delivery) {
+            directory.verified_read_only_namespace_path()?
+        } else {
+            let handle = directory.into_inherited_descriptor_path()?;
+            let path = handle.path().to_path_buf();
+            handles.push(handle);
+            path
         };
         let path = path
             .to_str()
@@ -1603,11 +1666,31 @@ fn resolve_pinned_executable_search(
     Ok((Some(paths.join(":")), handles))
 }
 
+#[cfg(test)]
 fn resolve_session_process_environment(
     workspace: &std::path::Path,
     external_root: &std::path::Path,
     sealed_realizations: &str,
     encoded: Option<&str>,
+) -> Result<(
+    BTreeMap<String, String>,
+    Vec<lillux::InheritedDescriptorAuthority>,
+)> {
+    resolve_session_process_environment_with_delivery(
+        workspace,
+        external_root,
+        sealed_realizations,
+        encoded,
+        ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+    )
+}
+
+fn resolve_session_process_environment_with_delivery(
+    workspace: &std::path::Path,
+    external_root: &std::path::Path,
+    sealed_realizations: &str,
+    encoded: Option<&str>,
+    external_delivery: ryeos_state::objects::ExternalRealizationDelivery,
 ) -> Result<(
     BTreeMap<String, String>,
     Vec<lillux::InheritedDescriptorAuthority>,
@@ -1725,30 +1808,34 @@ fn resolve_session_process_environment(
                 if relative_path != "." {
                     relative.push(&relative_path);
                 }
-                let external_root = realization.mount_root.root(Some(external_root))?;
+                let external_root = external_realization_root(
+                    external_root,
+                    realization.mount_root,
+                    external_delivery,
+                )?;
                 let (path, handle) = match path_kind {
                     ryeos_state::objects::SessionProcessEnvironmentPathKind::Directory => {
                         let directory = open_pinned_directory(external_root, &relative)?;
-                        match realization.mount_root {
-                            ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime => {
-                                (directory.verified_read_only_namespace_path()?, None)
-                            }
-                            ryeos_state::objects::ExternalContentMountRoot::Project => {
-                                let handle = directory.into_inherited_descriptor_path()?;
-                                (handle.path().to_path_buf(), Some(handle))
-                            }
+                        if realization_uses_read_only_namespace(
+                            realization.mount_root,
+                            external_delivery,
+                        ) {
+                            (directory.verified_read_only_namespace_path()?, None)
+                        } else {
+                            let handle = directory.into_inherited_descriptor_path()?;
+                            (handle.path().to_path_buf(), Some(handle))
                         }
                     }
                     ryeos_state::objects::SessionProcessEnvironmentPathKind::File => {
                         let file = open_pinned_regular_file(external_root, &relative)?;
-                        match realization.mount_root {
-                            ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime => {
-                                (file.verified_read_only_namespace_path()?, None)
-                            }
-                            ryeos_state::objects::ExternalContentMountRoot::Project => {
-                                let handle = file.into_inherited_descriptor_path()?;
-                                (handle.path().to_path_buf(), Some(handle))
-                            }
+                        if realization_uses_read_only_namespace(
+                            realization.mount_root,
+                            external_delivery,
+                        ) {
+                            (file.verified_read_only_namespace_path()?, None)
+                        } else {
+                            let handle = file.into_inherited_descriptor_path()?;
+                            (handle.path().to_path_buf(), Some(handle))
                         }
                     }
                 };
@@ -5258,6 +5345,64 @@ server.serve_forever()
                 Some(&bindings)
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn private_descriptor_delivery_resolves_runtime_mounts_only_from_its_exact_root() {
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(runtime.path().join("runtime/bin")).unwrap();
+        std::fs::write(runtime.path().join("runtime/worker"), b"worker").unwrap();
+        std::fs::set_permissions(
+            runtime.path().join("runtime/worker"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        let sealed = pinned_content_fixture("runtime", "execution_runtime").to_string();
+        let delivery = ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot;
+        let (executable, argv0, executable_handles) = resolve_pinned_executable_with_delivery(
+            runtime.path(),
+            &sealed,
+            "fixture",
+            std::path::Path::new("worker"),
+            delivery,
+        )
+        .unwrap();
+        let search = json!([{"realization_id":"fixture", "relative_directory":"bin"}]).to_string();
+        let (path, search_handles) = resolve_pinned_executable_search_with_delivery(
+            runtime.path(),
+            &sealed,
+            Some(&search),
+            delivery,
+        )
+        .unwrap();
+        let bindings = descriptor_environment_fixture(json!({"FIXTURE_RESOURCE":{
+            "kind":"realization_path", "realization_id":"fixture",
+            "relative_path":"worker", "path_kind":"file"
+        }}));
+        let (environment, environment_handles) = resolve_session_process_environment_with_delivery(
+            runtime.path(),
+            runtime.path(),
+            &sealed,
+            Some(&bindings),
+            delivery,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(executable).unwrap(), b"worker");
+        assert!(argv0.starts_with("/proc/self/fd"));
+        assert!(path.unwrap().starts_with("/proc/self/fd"));
+        assert_eq!(
+            std::fs::read(&environment["FIXTURE_RESOURCE"]).unwrap(),
+            b"worker"
+        );
+        assert_eq!(
+            (
+                executable_handles.len(),
+                search_handles.len(),
+                environment_handles.len()
+            ),
+            (2, 1, 1)
         );
     }
 

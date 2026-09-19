@@ -810,12 +810,15 @@ impl PreparedItemPlan {
         &mut self,
         external_realizations: Option<&str>,
         external_root: Option<&Path>,
+        external_delivery: Option<ryeos_state::objects::ExternalRealizationDelivery>,
         admitted_source: Option<&str>,
         admitted_source_entry: Option<&Path>,
         executable_search: Option<&str>,
     ) -> Result<()> {
-        if external_realizations.is_some() != external_root.is_some() {
-            bail!("persistent-session external identity and root must be bound together");
+        if external_realizations.is_some() != external_root.is_some()
+            || external_realizations.is_some() != external_delivery.is_some()
+        {
+            bail!("persistent-session external identity, root and delivery must be bound together");
         }
         if admitted_source.is_some() != admitted_source_entry.is_some() {
             bail!("persistent-session source identity and entry must be bound together");
@@ -839,6 +842,16 @@ impl PreparedItemPlan {
                 .insert("RYEOS_EXTERNAL_ROOT".to_owned(), root.to_owned());
             spec.env_sources.insert(
                 "RYEOS_EXTERNAL_ROOT".to_owned(),
+                RuntimeEnvSource::EnginePlan,
+            );
+        }
+        if let Some(delivery) = external_delivery {
+            spec.env.insert(
+                "RYEOS_EXTERNAL_DELIVERY".to_owned(),
+                serde_json::to_string(&delivery)?,
+            );
+            spec.env_sources.insert(
+                "RYEOS_EXTERNAL_DELIVERY".to_owned(),
                 RuntimeEnvSource::EnginePlan,
             );
         }
@@ -3271,6 +3284,7 @@ mod tests {
             .bind_persistent_session_spawn_environment(
                 None,
                 None,
+                None,
                 Some("{\"binding_hash\":\"fixture\"}"),
                 Some(entry),
                 None,
@@ -3294,6 +3308,39 @@ mod tests {
     }
 
     #[test]
+    fn persistent_session_binds_external_identity_root_and_delivery_together() {
+        let root = Path::new("/ryeos/private-runtime-view");
+        let mut prepared = prepared_plan(portable_direct_plan(root));
+        prepared
+            .bind_persistent_session_spawn_environment(
+                Some("[]"),
+                Some(root),
+                Some(ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+            &prepared.plan.nodes[0]
+        else {
+            panic!("fixture must dispatch");
+        };
+        assert_eq!(
+            spec.env.get("RYEOS_EXTERNAL_DELIVERY").map(String::as_str),
+            Some("\"private_descriptor_root\"")
+        );
+        assert_eq!(
+            spec.env.get("RYEOS_EXTERNAL_ROOT").map(String::as_str),
+            Some("/ryeos/private-runtime-view")
+        );
+        assert_eq!(
+            spec.env_sources.get("RYEOS_EXTERNAL_DELIVERY"),
+            Some(&RuntimeEnvSource::EnginePlan)
+        );
+    }
+
+    #[test]
     fn persistent_session_refuses_incoherent_or_authored_source_bindings() {
         let project_root = Path::new("/ryeos/persistent-session-workspace");
         let mut plan = portable_direct_plan(project_root);
@@ -3308,6 +3355,7 @@ mod tests {
         assert!(
             prepared
                 .bind_persistent_session_spawn_environment(
+                    None,
                     None,
                     None,
                     Some("sealed"),
@@ -3328,7 +3376,14 @@ mod tests {
         let mut prepared = prepared_plan(plan);
         assert!(
             prepared
-                .bind_persistent_session_spawn_environment(None, None, Some("sealed"), None, None)
+                .bind_persistent_session_spawn_environment(
+                    None,
+                    None,
+                    None,
+                    Some("sealed"),
+                    None,
+                    None,
+                )
                 .unwrap_err()
                 .to_string()
                 .contains("must be bound together")

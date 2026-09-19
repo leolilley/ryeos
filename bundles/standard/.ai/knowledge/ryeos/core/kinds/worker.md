@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-09T20:42:50Z:cbe2c9c58540bd1241d47b9861f23451d8b24473bc3564b72b268045da7c9bad:JjGPOTHVu3emdSN8kwCYU3CcLB1dVWR6q/1pKa1DGEkrZdg6sIFnbkdB/b0g2P+odf7w/rCeczfzPFX5EohoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T00:12:54Z:b619c53c6b0de15e6526cb34d1efab6a7f35fc45591b5244e6179adcdb04caa9:GrKyg3SNgliPFBsLpHeMJmT6tt9qNxUUIgbEfUcU0jYF9qp1gwK+iOoO7kUq867Vbf8rZMu7aVD6q+pqyYWbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, worker, persistent-session, source]
-version: "1.0.2"
+version: "1.0.3"
 description: Worker kind and adjacent-source reference.
 ---
 
@@ -47,10 +47,14 @@ explicit clean cut. Predecessor capsules cannot resume under the new placement
 semantics; source-binding identity and schema are unchanged.
 
 Worker content and selected environment content can use either `project` or
-`execution_runtime` mounts. The latter uses the existing fixed
-`/ryeos/realizations/<mount>` namespace and requires enforced isolation; it is
-never copied into the project as a substitute. Project-root execution remains
-available with disabled isolation under its admitted private-workspace policy.
+`execution_runtime` mounts. Enforced execution delivers the latter through the
+fixed read-only `/ryeos/realizations/<mount>` namespace. An explicitly trusted
+process-group session may instead receive the same sealed realization set in a
+bounded daemon-owned private runtime root through descriptor-backed paths. That
+mode makes no read-only namespace or hostile-containment claim. It never copies
+runtime inputs into the retained candidate or exposes the shared materialization
+cache. Ordinary disabled-isolation project-copy binding continues to reject
+`execution_runtime` mounts.
 
 For structured-session profiles, `workload_executable` is an exact canonical
 relative member of the selected workload realization, such as `bin/program`

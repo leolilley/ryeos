@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-09-05T00:45:27Z:959b1a258f85dea09bfb42aa67b999c60d6ee6f7b2d49756d40aa072c9f66480:IN8HTiyA4hlIHz+jyqHPKljJGPAWlAeB+Y1t/kMe3JIujJ3yHRgG2pz6Ud2BpmjitP3V3TKDq/LTPh717PghBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-19T00:12:54Z:498f4c9aa9be3815a7a89174341a770326793f0f29fd196ebd57973586357f15:zWtmtFP89aUFrrUkcF1bY/qmzm3dBCc0D+XBxk/dG13N1qUKFrbPT4yvgKoPUBWXIgDa/u7p794f18rpmIPRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "2.5.0"
+version: "2.5.1"
 description: >
   Hermetic execution and optional OS isolation — env_clear, explicit env
   injection, node-owned policy, signed backend bundles, per-route semaphores,
@@ -43,12 +43,15 @@ restrictions require enforced isolation; disabled mode refuses them.
 
 External realizations have an explicit logical `mount_root` plus relative
 `mount`. The signed kind/runtime contract owns `allowed_mount_roots`.
-`project` targets the admitted workspace; `execution_runtime` targets a strict
-child of `/ryeos/realizations` inside the private root. Runtime realizations
-are exact descriptor-pinned read-only content, never arbitrary host mounts.
-They reject workspace/mount overlaps, require enforced isolation, and do not
-enter project candidate capture. Realization-member command recovery retains
-the same mount root, relative member and content identity.
+`project` targets the admitted workspace. Under enforced isolation,
+`execution_runtime` targets a strict child of `/ryeos/realizations` inside the
+private root and is exact descriptor-pinned read-only content. An explicitly
+trusted process-group session can instead bind both logical roots into a
+bounded daemon-owned private runtime view and resolve them through retained
+descriptors. That delivery does not claim read-only namespace enforcement or
+hostile-worker containment. Both modes reject overlapping destinations, keep
+runtime content out of project candidate capture, and retain the same logical
+mount root, relative member, and content identity through recovery.
 
 Persistent-session execution testimony uses the retained plan's effective
 ceilings, including restrictions from its signed session protocol. Recovery
