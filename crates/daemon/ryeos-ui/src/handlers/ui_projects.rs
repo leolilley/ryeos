@@ -678,15 +678,6 @@ fn project_view(project: ProjectEntry, current_project: Option<&str>, registered
     })
 }
 
-fn string_param(params: &Value, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 pub(crate) fn authorize_launch_project(
     ctx: &HandlerContext,
     state: &AppState,
