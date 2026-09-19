@@ -7,6 +7,7 @@
 //! distinct publishers or execution policies into one identity.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -301,6 +302,11 @@ pub enum SourceLogicalBinding {
         loader_roots: Vec<SourceLoaderRoot>,
         root_entry: String,
     },
+    ToolDirectory {
+        loader_roots: Vec<SourceLoaderRoot>,
+        root: String,
+        root_entry: String,
+    },
     Worker {
         root: String,
         entry: String,
@@ -415,6 +421,7 @@ impl EffectiveSourceBinding {
         }
         let entry = match &self.logical_binding {
             SourceLogicalBinding::Tool { root_entry, .. } => root_entry,
+            SourceLogicalBinding::ToolDirectory { root_entry, .. } => root_entry,
             SourceLogicalBinding::Worker { entry, .. } => entry,
         };
         if !manifest
@@ -617,6 +624,29 @@ impl EffectiveSourceBinding {
                 }
                 super::validate_canonical_project_relative_path(root_entry)?;
             }
+            SourceLogicalBinding::ToolDirectory {
+                loader_roots,
+                root,
+                root_entry,
+            } => {
+                if loader_roots.as_slice() != [SourceLoaderRoot::ItemDirectory] {
+                    anyhow::bail!(
+                        "directory tool source requires exactly the item-directory loader root"
+                    );
+                }
+                super::validate_canonical_project_relative_path(root)?;
+                super::validate_canonical_project_relative_path(root_entry)?;
+                let expected_root = Path::new(&self.owner.logical_item_key)
+                    .parent()
+                    .and_then(Path::to_str)
+                    .filter(|root| !root.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("directory tool source owner has no containing directory")
+                    })?;
+                if root != expected_root {
+                    anyhow::bail!("directory tool source root contradicts its owner");
+                }
+            }
             SourceLogicalBinding::Worker { root, entry } => {
                 super::validate_canonical_project_relative_path(root)?;
                 super::validate_canonical_project_relative_path(entry)?;
@@ -654,6 +684,12 @@ impl EffectiveSourceBinding {
                 SourceTestimonyProof::OwnerSignedFiles { .. },
                 SourceExecutionPolicyIdentity::Executor { .. },
                 SourceLogicalBinding::Tool { .. },
+            ) | (
+                "item_namespace",
+                "owner_signed_files",
+                SourceTestimonyProof::OwnerSignedFiles { .. },
+                SourceExecutionPolicyIdentity::Executor { .. },
+                SourceLogicalBinding::ToolDirectory { .. },
             ) | (
                 "owner_relative_source",
                 "owner_signed_digest",
@@ -848,5 +884,30 @@ mod tests {
         other.validate().unwrap();
         assert_ne!(first, other.digest().unwrap());
         assert_eq!(binding.content_manifest_hash, other.content_manifest_hash);
+
+        let old_value = binding.to_value().unwrap();
+        assert_eq!(
+            EffectiveSourceBinding::from_value(&old_value).unwrap(),
+            binding
+        );
+
+        let mut directory = binding.clone();
+        directory.logical_binding = SourceLogicalBinding::ToolDirectory {
+            loader_roots: vec![SourceLoaderRoot::ItemDirectory],
+            root: "test".to_owned(),
+            root_entry: "run.py".to_owned(),
+        };
+        directory.validate().unwrap();
+        assert_eq!(
+            EffectiveSourceBinding::from_value(&directory.to_value().unwrap()).unwrap(),
+            directory
+        );
+        let mut wrong_root = directory.clone();
+        let SourceLogicalBinding::ToolDirectory { root, .. } = &mut wrong_root.logical_binding
+        else {
+            unreachable!()
+        };
+        *root = "other".to_owned();
+        assert!(wrong_root.validate().is_err());
     }
 }

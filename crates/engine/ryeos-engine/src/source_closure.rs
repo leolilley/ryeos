@@ -158,6 +158,13 @@ impl ExecutorSourcePolicy {
                 anyhow::bail!("source_scope load_roots contains a duplicate");
             }
         }
+        if self.location == ExecutorSourceLocation::ItemDirectory
+            && self.load_roots.as_slice() != [SourceLoaderRoot::ItemDirectory]
+        {
+            anyhow::bail!(
+                "source_scope item_directory location requires exactly the item_directory load root"
+            );
+        }
         Ok(())
     }
 
@@ -648,5 +655,30 @@ mod tests {
                 .root,
             "lib/session"
         );
+    }
+
+    #[test]
+    fn item_directory_policy_is_closed_to_its_captured_loader_root() {
+        let policy = ExecutorSourcePolicy::from_value(&serde_json::json!({
+            "location": "item_directory",
+            "load_roots": ["item_directory"],
+            "materialization": "read_only",
+        }))
+        .unwrap();
+        assert_eq!(policy.location, ExecutorSourceLocation::ItemDirectory);
+
+        for load_roots in [
+            serde_json::json!(["namespace_root"]),
+            serde_json::json!(["item_directory", "namespace_lib"]),
+        ] {
+            assert!(
+                ExecutorSourcePolicy::from_value(&serde_json::json!({
+                    "location": "item_directory",
+                    "load_roots": load_roots,
+                    "materialization": "read_only",
+                }))
+                .is_err()
+            );
+        }
     }
 }
