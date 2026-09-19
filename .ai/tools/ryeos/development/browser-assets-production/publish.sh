@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-19T01:25:15Z:62521d3b44f21dee9da9e34c738721d06d8aaa1af9deb2255e835421c223b79b:wyoo9pusy/IyaE5C36hLvBMjuSSHPhAj1M0x7oPFKIGV4blr4kMu7WcZhX/zw7MU5ftHyRCNeqvxBZ5QQQlfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T01:31:04Z:ba1d2160a7ed75b7ffd95c326bef24f497ed825cd594a695f76f6d4e0b843296:sRVHWotKEkua3XfU65zykqC8HSO0RUYaZ7xBRMJbIR7yxhNISwZ+Fc9Nhm04Q52u/HMj1AovgWZPbmQq1MqFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -51,7 +51,7 @@ expected=(
   ryeos_web.js
   ryeos_web_bg.wasm
 )
-mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | sort)
+mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then
   echo "assembled browser asset inventory is not the closed generation" >&2
   printf 'expected: %s\n' "${expected[*]}" >&2
