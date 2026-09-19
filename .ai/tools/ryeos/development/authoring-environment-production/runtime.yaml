@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T06:33:50Z:46bd70ffbe79bfda85868c50b6507ee6edf1f94e05745266cf3e887529448534:qhoZ/bLlsakKMry/VZa1O62so313iLbkKh2yufweSXiaprlJqYvqBrLd8Pv5hVGf82PsPeGSpNqdzO0N8eJoBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-19T00:00:48Z:53f411816edfc139c3bd6f2e7934024dde88a489e3d1d84c85ff3e29a23fb5c7:wRx1GFnE742z3Qvd0mafELfkzYRlIF5oveOEDJptQ5PN4QyqhyEe/QPapb+ChknKPDqYOohWRTEadqlbtcDLBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: ryeos/development/authoring-environment-production
 name: runtime
 version: "1.0.0"
@@ -9,7 +9,7 @@ effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
 source_scope:
-  location: item_namespace
+  location: item_directory
   load_roots: [item_directory]
   materialization: read_only
 env_config:
