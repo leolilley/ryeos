@@ -21,6 +21,20 @@
           title={model.maximized ? "Restore view" : "Maximize view"}
           onclick={() => dispatch({ type: "activate", intent: { type: "toggle_tile_maximized", tile_id: model.tile_id } })}
         >{model.maximized ? "↙" : "↗"}</button>
+        {#if model.intents.length}
+          <details class="tile-action-menu">
+            <summary aria-label={`Actions for ${model.title}`} title="View actions">⋮</summary>
+            <div class="tile-action-list">
+              {#each model.intents as action}
+                <button title={action.title} onclick={(event) => {
+                  const menu = event.currentTarget.closest("details");
+                  if (menu) menu.open = false;
+                  dispatch({ type: "activate", intent: action.intent });
+                }}>{action.label}</button>
+              {/each}
+            </div>
+          </details>
+        {/if}
         </div>
       </div>
       {#if model.tabs.length > 1}<div class="view-tabs" role="tablist">{#each model.tabs as tab (tab.tile_id)}<button role="tab" aria-selected={tab.active} class:active={tab.active} onclick={() => dispatch({ type: "focus_changed", target: tab.tile_id })}>{tab.title}</button>{/each}</div>{/if}

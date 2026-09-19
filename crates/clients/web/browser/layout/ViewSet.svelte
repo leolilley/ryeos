@@ -14,7 +14,7 @@
     {#if !maximized && model.docks.left}<DockSlot model={model.docks.left} />{/if}
     <section class="view-set-center">
       {#if model.root}
-        <LayoutNode model={model.root} />
+        <LayoutNode model={model.root} guard={model.layout_guard} minRatio={model.split_min_ratio} maxRatio={model.split_max_ratio} />
       {:else if model.backdrop}
         <SceneView scene={model.backdrop} />
       {:else}

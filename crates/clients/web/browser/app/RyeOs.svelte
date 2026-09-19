@@ -26,7 +26,7 @@
   }
 </script>
 
-<div class="ryeos-shell" data-generation={String(envelope.generation)} data-theme={envelope.view_model.presentation.theme.id}>
+<div class="ryeos-shell" class:without-set-strip={!envelope.view_model.presentation.chrome.top_bar.visible} class:without-status-bar={!envelope.view_model.presentation.chrome.status_bar.visible} data-generation={String(envelope.generation)} data-theme={envelope.view_model.presentation.theme.id}>
   {#if envelope.view_model.session.ambient.show_background}
     <AmbientLayer ambient={envelope.view_model.session.ambient} scene={envelope.scene_model} />
   {/if}

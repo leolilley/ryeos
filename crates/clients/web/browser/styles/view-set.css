@@ -4,9 +4,13 @@
 .view-set-center { flex: 1; min-width: 0; min-height: 0; }
 .view-set-center > .tile-frame, .view-set-center > .split { width: 100%; height: 100%; }
 .split { display: grid; width: 100%; height: 100%; min-width: 0; min-height: 0; gap: 8px; }
-.split[data-axis="horizontal"] { grid-template-columns: minmax(0, calc(var(--split) * 100%)) 1px minmax(0, 1fr); }
-.split[data-axis="vertical"] { grid-template-rows: minmax(0, calc(var(--split) * 100%)) 1px minmax(0, 1fr); }
-.split-divider { background: var(--line); }
+.split[data-axis="horizontal"] { grid-template-columns: minmax(0, var(--split)) 1px minmax(0, var(--split-rest)); }
+.split[data-axis="vertical"] { grid-template-rows: minmax(0, var(--split)) 1px minmax(0, var(--split-rest)); }
+.split-divider { position: relative; background: var(--line); touch-action: none; }
+.split-divider::after { content: ""; position: absolute; inset: -5px; }
+.split[data-axis="horizontal"] > .split-divider { cursor: col-resize; }
+.split[data-axis="vertical"] > .split-divider { cursor: row-resize; }
+.split-divider:hover, .split-divider:focus-visible { background: var(--accent-bright); outline: 1px solid var(--accent); }
 .tile-frame, .dock-slot { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); background: color-mix(in srgb, var(--plane) 94%, transparent); }
 .tile-frame { container-type: inline-size; }
 .tile-frame.focused { border-color: var(--accent); }
@@ -19,6 +23,12 @@
 .tile-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--muted); }
 .tile-tool { padding: 2px; color: inherit; line-height: 1; }
 .tile-tool:hover, .tile-tool:focus-visible { color: var(--accent-bright); }
+.tile-action-menu { position: relative; letter-spacing: 0; text-transform: none; }
+.tile-action-menu summary { cursor: pointer; list-style: none; padding: 5px; font-size: 15px; }
+.tile-action-menu summary::-webkit-details-marker { display: none; }
+.tile-action-list { position: absolute; right: 0; top: 100%; z-index: 10; display: grid; min-width: 180px; padding: 4px; border: 1px solid var(--line-strong); background: var(--plane-raised); }
+.tile-action-list button { padding: 9px 10px; text-align: left; color: var(--text); font: 12px var(--font-ui); }
+.tile-action-list button:hover, .tile-action-list button:focus-visible { background: var(--plane-selected); }
 .view-tabs { display: flex; align-self: stretch; margin-left: 18px; }
 .tile-header.grouped .view-tabs { min-height: 40px; margin: 0; padding: 0 6px; overflow-x: auto; overflow-y: hidden; border-top: 1px solid var(--line); scrollbar-width: thin; }
 .tile-header.grouped .view-tabs button { flex: 0 0 auto; }
