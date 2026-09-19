@@ -149,12 +149,7 @@ pub fn admit_source_closure_in_publication(
             let policy = executor_policy.ok_or_else(|| {
                 anyhow::anyhow!("direct source-owning item has no verified executor source policy")
             })?;
-            if !matches!(
-                policy.policy.location,
-                ryeos_engine::source_closure::ExecutorSourceLocation::ItemNamespace
-            ) {
-                anyhow::bail!("executor source policy exceeds the signed kind location ceiling");
-            }
+            let source_location = policy.policy.location;
             let source: Box<dyn AuthoritativeSourceContent> =
                 match (resolution.root.source_space, project) {
                     (ItemSpace::Project, Some((project_root, content, identity))) => {
@@ -180,8 +175,9 @@ pub fn admit_source_closure_in_publication(
                         state.ignore_matcher.as_ref(),
                     )?),
                 };
-            let (request, entry) = item_namespace_source_request(
+            let (request, entry) = executor_source_request(
                 source.as_ref(),
+                source_location,
                 kind,
                 kind_schema,
                 &resolution.root.resolved_ref,
@@ -811,6 +807,64 @@ pub fn item_namespace_source_request(
     ))
 }
 
+/// Select a source unit no broader than the signed kind's item-namespace
+/// ceiling. `item_directory` is the closed narrow form: it captures only the
+/// canonical item's containing directory while retaining the same exact root
+/// item and owner-signed-files testimony.
+pub fn executor_source_request(
+    source: &dyn AuthoritativeSourceContent,
+    location: ryeos_engine::source_closure::ExecutorSourceLocation,
+    expected_kind: &str,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    canonical_ref: &str,
+    expected_source_digest: &str,
+    max_file_bytes: u64,
+) -> anyhow::Result<(SourceRootRequest, String)> {
+    match location {
+        ryeos_engine::source_closure::ExecutorSourceLocation::ItemNamespace => {
+            item_namespace_source_request(
+                source,
+                expected_kind,
+                kind_schema,
+                canonical_ref,
+                expected_source_digest,
+                max_file_bytes,
+            )
+        }
+        ryeos_engine::source_closure::ExecutorSourceLocation::ItemDirectory => {
+            let selected = canonical_item_source_path(
+                source,
+                expected_kind,
+                kind_schema,
+                canonical_ref,
+                expected_source_digest,
+                max_file_bytes,
+            )?;
+            let (prefix, entry) = item_directory_selection(&selected)?;
+            Ok((
+                SourceRootRequest {
+                    id: "source".to_owned(),
+                    selection: SourceRootSelection::Tree { prefix },
+                },
+                entry,
+            ))
+        }
+    }
+}
+
+fn item_directory_selection(selected: &Path) -> anyhow::Result<(PathBuf, String)> {
+    let prefix = selected
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("source item has no containing directory"))?
+        .to_path_buf();
+    let entry = selected
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("source item path is not UTF-8"))?
+        .to_owned();
+    Ok((prefix, entry))
+}
+
 fn canonical_item_source_path(
     source: &dyn AuthoritativeSourceContent,
     expected_kind: &str,
@@ -1062,6 +1116,15 @@ fn engine_internal(error: anyhow::Error) -> ryeos_engine::error::EngineError {
 #[cfg(test)]
 mod directory_source_tests {
     use super::*;
+
+    #[test]
+    fn item_directory_selection_is_exactly_the_owner_directory() {
+        let selected = Path::new(".ai/tools/ryeos/development/runtime/runtime.yaml");
+        let (prefix, entry) = item_directory_selection(selected).unwrap();
+        assert_eq!(prefix, Path::new(".ai/tools/ryeos/development/runtime"));
+        assert_eq!(entry, "runtime.yaml");
+        assert!(!Path::new(".ai/tools/ryeos/development/sibling/tool.py").starts_with(prefix));
+    }
 
     #[test]
     fn absent_extension_candidate_is_not_a_read_failure() {

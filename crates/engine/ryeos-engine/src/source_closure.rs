@@ -132,6 +132,7 @@ pub struct ExecutorSourcePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutorSourceLocation {
     ItemNamespace,
+    ItemDirectory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
