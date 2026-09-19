@@ -367,10 +367,29 @@ corruption refusal, actual CAS sweep/reopen and shared transcript tests pass.
 The source closures for all four Codex workers and the OpenCode worker were
 recomputed, and changed signed items were re-signed with the existing development
 publisher. This is not a full binary/bundle-manifest refresh or installed
-admission. Application journal reruns and composed runtime acceptance remain
-outstanding; no installation, node lifecycle, cloud or model contact occurred.
+admission. The application allocation/channel group subsequently passed all 14
+tests; composed runtime acceptance remains outstanding. No installation, node
+lifecycle, cloud or model contact occurred.
 
 Architecture, security and testing reviewers rechecked this configuration slice.
 Their concrete `/tmp` pathname-rebinding and fixture-construction findings are
 corrected. Runtime inventories remain empty until composed provider-policy
 qualification; these reviews do not enable external workers.
+
+### Application-owner precondition before shared journal extraction
+
+Node-side claim and finish now check the exact dedicated-session/profile/workspace
+owner inside the same transaction, before even idempotent early returns. Existing
+SQL triggers already prevent supported owner replacement; this closes a local
+validation asymmetry, not a demonstrated normal-path ownership bypass. The
+regression first proves ordinary replacement is refused, then removes only that
+guard in a disposable fixture to inject corruption and prove pending/claimed/
+applied rows cannot advance under a changed owner.
+
+A separate regression proves an already-claimed delivery can still finish after
+revocation/quarantine. Pending input stays revoked and the allocation remains
+unsettled. Finish does not require a live execution window or `bound` allocation:
+historical delivery acknowledgement is not new dispatch or cleanup proof.
+Architecture and security reviews accepted this distinction. All 14 rebuilt
+application journal tests and 21 independent SQLite regressions pass. Keep this
+node ownership check outside the future shared guest transcript implementation.

@@ -131,9 +131,8 @@ Cargo is now authorized. Rebuilt state framing/export/transcript (8) and capsule
 (10) groups pass. The native terminal-export group (3), absolute-configuration
 exec qualification (1), and ordinary Lillux suite (235 passed, 18 ignored) pass.
 Engine/executor/structured-session test targets pass `cargo check --tests`;
-type checking is not test execution. The earlier allocation/channel group (12)
-still needs its affected rebuilt rerun. Rebuilt engine profile (14) and isolation
-(41) tests also pass. A prior build was explicitly interrupted
+type checking is not test execution. Rebuilt allocation/channel (14), engine
+profile (14) and isolation (41) tests also pass. A prior build was explicitly interrupted
 for disk space; targeted builds have resumed without relocating or deleting
 other work. Full bundle refresh and installed admission remain required. See
 [external execution qualification](../external-execution/README.md) for the

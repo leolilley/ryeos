@@ -331,6 +331,8 @@ impl RuntimeDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let binding = load_binding(&tx, placement)?;
         let binding_digest = binding.digest()?;
+        let allocation = read(&tx, placement)?.context("external allocation absent")?;
+        require_session_owner(&tx, &allocation.reservation)?;
         let sequence = i64::try_from(sequence)?;
         let (stored_digest, application, wire): (String, String, String) = tx.query_row(
             "SELECT frame_digest,application,frame_json FROM external_execution_frame
@@ -349,7 +351,6 @@ impl RuntimeDb {
             &binding,
             lillux::time::timestamp_millis(),
         )?;
-        let allocation = read(&tx, placement)?.context("external allocation absent")?;
         if allocation.phase != ExternalAllocationPhase::Bound
             && !matches!(
                 verified.frame().payload,
@@ -428,6 +429,8 @@ impl RuntimeDb {
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let binding = load_binding(&tx, placement)?;
+        let allocation = read(&tx, placement)?.context("external allocation absent")?;
+        require_session_owner(&tx, &allocation.reservation)?;
         let stored: (String, String) = tx.query_row(
             "SELECT frame_digest,application FROM external_execution_frame
             WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
@@ -814,6 +817,149 @@ mod tests {
                 .unwrap()
         );
         digest
+    }
+
+    #[test]
+    fn application_transitions_recheck_exact_session_owner_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        let direction = ChannelDirection::OwnerToSupervisor;
+        let (release, digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        db.record_external_execution_frame(placement, &release)
+            .unwrap();
+        let application = || {
+            db.conn
+                .query_row(
+                    "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction=?2 AND sequence=1",
+                    params![binding.digest().unwrap(), direction.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let set_epoch = |epoch: i64| {
+            // Deliberately invalidate retained authority between operations.
+            // This is test corruption, not an authorized ownership transition.
+            db.conn.execute(
+                "UPDATE dedicated_session SET worker_boot_epoch=?2 WHERE placement_thread_id=?1",
+                params![placement, epoch],
+            )
+        };
+        // Supported writes already fence ownership replacement. Remove only
+        // that trigger in this disposable fixture to test corrupted-state
+        // defense at the application API, not claim a normal-path bypass.
+        assert!(set_epoch(2).is_err());
+        db.conn
+            .execute_batch("DROP TRIGGER external_execution_session_identity_guard")
+            .unwrap();
+        set_epoch(2).unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, direction, 1, &digest)
+                .is_err()
+        );
+        assert_eq!(application(), "pending");
+        set_epoch(1).unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, direction, 1, &digest)
+                .unwrap()
+        );
+        set_epoch(2).unwrap();
+        assert!(
+            db.finish_external_frame_application(placement, direction, 1, &digest)
+                .is_err()
+        );
+        assert_eq!(application(), "claimed");
+        set_epoch(1).unwrap();
+        db.finish_external_frame_application(placement, direction, 1, &digest)
+            .unwrap();
+        assert_eq!(application(), "applied");
+        set_epoch(2).unwrap();
+        // Idempotency is not an alternate stale-owner admission path either.
+        assert!(
+            db.claim_external_frame_application(placement, direction, 1, &digest)
+                .is_err()
+        );
+        assert!(
+            db.finish_external_frame_application(placement, direction, 1, &digest)
+                .is_err()
+        );
+        assert_eq!(application(), "applied");
+    }
+
+    #[test]
+    fn claimed_delivery_can_finish_after_revocation_without_reopening_input() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        let direction = ChannelDirection::OwnerToSupervisor;
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        db.record_external_execution_frame(placement, &release)
+            .unwrap();
+        assert!(
+            db.claim_external_frame_application(placement, direction, 1, &release_digest)
+                .unwrap()
+        );
+        let (input, input_digest) = wire(
+            &binding,
+            &owner,
+            direction,
+            2,
+            Some(release_digest.clone()),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"never-deliver"),
+            },
+        );
+        db.record_external_execution_frame(placement, &input)
+            .unwrap();
+        let (cancel, _) = wire(
+            &binding,
+            &owner,
+            direction,
+            3,
+            Some(input_digest.clone()),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        db.record_external_execution_frame(placement, &cancel)
+            .unwrap();
+        db.cancel_external_allocation(placement).unwrap();
+        // This records an exact already-claimed application, not another
+        // dispatch, worker completion, allocation settlement or cleanup.
+        db.finish_external_frame_application(placement, direction, 1, &release_digest)
+            .unwrap();
+        db.finish_external_frame_application(placement, direction, 1, &release_digest)
+            .unwrap();
+        assert!(
+            !db.claim_external_frame_application(placement, direction, 2, &input_digest)
+                .unwrap()
+        );
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Quarantined
+        );
+        assert_eq!(read_guard(&db.conn).unwrap(), 1);
     }
 
     #[test]
