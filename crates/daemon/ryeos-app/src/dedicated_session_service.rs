@@ -3147,8 +3147,7 @@ pub async fn execute_command(
         Err(error) => {
             let cleanup_state = state
                 .persistent_sessions
-                .take_exclusive_failure_cleanup_state(placement_thread_id)?
-                .ok_or_else(|| anyhow!("exclusive worker failure lost its cleanup proof"))?;
+                .take_exclusive_failure_cleanup_state_or_unproved(placement_thread_id)?;
             let worker_instance_id = session
                 .worker_instance_id
                 .as_deref()

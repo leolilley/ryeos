@@ -3,7 +3,8 @@
 //! The item descriptor remains the authority root. This module only signs the
 //! exact file set that ordinary source-closure admission would capture for an
 //! `item_namespace` / `owner_signed_files` contract after the independently
-//! signed executor chain has selected that policy. Auxiliary files are not
+//! signed executor chain has selected its namespace- or directory-scoped
+//! policy. Auxiliary files are not
 //! parsed as runnable items and gain no canonical references of their own.
 
 use std::collections::BTreeMap;
@@ -14,8 +15,7 @@ use ryeos_engine::kind_registry::{
     KindSchema, SourceClosureLocationDecl, SourceClosureTestimonyDecl,
 };
 use ryeos_engine::source_closure::{
-    CapturedSourceCandidate, ExecutorSourcePolicy, SourceRootRequest,
-    SourceRootSelection,
+    CapturedSourceCandidate, ExecutorSourcePolicy, SourceRootRequest, SourceRootSelection,
 };
 
 /// Sign the exact currently selected source unit when both signed contracts

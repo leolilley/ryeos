@@ -358,9 +358,20 @@ pub fn admit_source_closure_in_publication(
         }
     };
     let logical_binding = if let Some(policy) = executor_policy {
-        ryeos_state::objects::SourceLogicalBinding::Tool {
-            loader_roots: policy.policy.load_roots.clone(),
-            root_entry: root_entry.clone(),
+        match policy.policy.location {
+            ryeos_engine::source_closure::ExecutorSourceLocation::ItemNamespace => {
+                ryeos_state::objects::SourceLogicalBinding::Tool {
+                    loader_roots: policy.policy.load_roots.clone(),
+                    root_entry: root_entry.clone(),
+                }
+            }
+            ryeos_engine::source_closure::ExecutorSourceLocation::ItemDirectory => {
+                ryeos_state::objects::SourceLogicalBinding::ToolDirectory {
+                    loader_roots: policy.policy.load_roots.clone(),
+                    root: item_directory_binding_root(&resolution.root.resolved_ref)?,
+                    root_entry: root_entry.clone(),
+                }
+            }
         }
     } else {
         ryeos_state::objects::SourceLogicalBinding::Worker {
@@ -832,6 +843,7 @@ pub fn executor_source_request(
             )
         }
         ryeos_engine::source_closure::ExecutorSourceLocation::ItemDirectory => {
+            item_directory_binding_root(canonical_ref)?;
             let selected = canonical_item_source_path(
                 source,
                 expected_kind,
@@ -850,6 +862,20 @@ pub fn executor_source_request(
             ))
         }
     }
+}
+
+fn item_directory_binding_root(canonical_ref: &str) -> anyhow::Result<String> {
+    let bare_id = canonical_ref
+        .split_once(':')
+        .map(|(_, bare_id)| bare_id)
+        .ok_or_else(|| anyhow::anyhow!("source owner ref is not canonical"))?;
+    ryeos_state::objects::validate_canonical_project_relative_path(bare_id)?;
+    Path::new(bare_id)
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|root| !root.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("item_directory source owner has no containing directory"))
 }
 
 fn item_directory_selection(selected: &Path) -> anyhow::Result<(PathBuf, String)> {
@@ -1124,6 +1150,14 @@ mod directory_source_tests {
         assert_eq!(prefix, Path::new(".ai/tools/ryeos/development/runtime"));
         assert_eq!(entry, "runtime.yaml");
         assert!(!Path::new(".ai/tools/ryeos/development/sibling/tool.py").starts_with(prefix));
+        assert_eq!(
+            item_directory_binding_root(
+                "tool:ryeos/development/authoring-environment-production/runtime"
+            )
+            .unwrap(),
+            "ryeos/development/authoring-environment-production"
+        );
+        assert!(item_directory_binding_root("tool:runtime").is_err());
     }
 
     #[test]
