@@ -32,7 +32,8 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[]});
+    let contract =
+        json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[]});
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);
@@ -107,6 +108,7 @@ fn store_structured_session_capsule_with_schema(
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
             auxiliary_configs: Vec::new(),
+            runtime_configs: Vec::new(),
         }),
         executable_search: Vec::new(),
         process_environment: std::collections::BTreeMap::new(),

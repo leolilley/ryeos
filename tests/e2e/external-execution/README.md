@@ -315,12 +315,23 @@ The actual managed system file suppresses a configured subprocess canary in the
 isolated fixture. See the authoring-environment ledger for the exact scope and
 the corrected six-tool and optional selected-skill routing evidence.
 
-The next configuration implementation is generic, not a Codex path in executor:
-an admitted, bounded source-file inventory with canonical absolute **namespace**
-file destinations; exact capsule identities; pinned descriptors; enforced
-read-only isolation; bridge verification before workload start; and collision
-refusal against workspace, profile/state, executable/source/runtime mounts,
-network inputs, writable views, `/proc`, `/dev` and protected control paths.
+The source configuration implementation is generic, not a Codex path in executor:
+profile schema 8 and capsule schema 13 require an admitted, bounded source-file
+inventory with canonical absolute **namespace** file destinations. It uses exact
+capsule identities, pinned and sealed descriptors, enforced read-only isolation,
+bridge verification before workload start, and collision refusal against
+workspace, profile/state, executable/source/runtime mounts, network inputs,
+writable views, `/proc`, `/dev`, `/sys`, `/tmp` and protected control paths.
+Private `/tmp` is refused because a read-only file beneath a writable parent
+could otherwise be replaced by renaming that parent. Source tests cover bounds,
+missing sources, retained-contract drift, disabled isolation, sealed bytes,
+executable-authority refusal, mount planning, and read-only bridge verification.
+Rebuilt native Lillux execution now verifies the sealed absolute configuration,
+its read-only ancestors, and write/unlink/parent-rename refusal across realized,
+sealed and nested-sandbox executables, including ordinary descendant exec.
+The bridge independently uses that existing namespace-path verifier before
+provider startup. This is native mechanism evidence, not installed bridge or
+complete external-worker qualification.
 Existing flat profile-home auxiliary files keep their semantics. The new scope
 must not authorize executable lookup or writes to the host's `/etc`. Node-policy
 network runtime files are not the owner of signed provider configuration.
@@ -329,5 +340,37 @@ Higher-priority cloud-managed requirements can still change the effective MCP
 allowlist. Qualification must resolve/control those inputs before any relevant
 startup contact; a later status check is insufficient. Provider contact needed
 to discover policy cannot be described as zero provider contact. No such
-effective-policy admission or production runtime-config mount is implemented
-by the diagnostic, and no external worker profile is enabled.
+effective-policy admission is implemented by the diagnostic. Runtime configuration
+delivery is implemented separately in source, with empty inventories in existing
+profiles; no external worker profile is enabled.
+
+### Configuration qualification checkpoint
+
+Bounded offline Cargo builds in the feature target now establish:
+
+- `cargo check --tests` for engine, executor and structured-session passes.
+- State capsule tests: 10 passed; external framing/export/transcript: 8 passed.
+- Engine structured-profile tests: 14 passed; isolation tests: 41 passed.
+- Lillux ordinary suite: 235 passed, 18 ignored.
+- Explicit native terminal-export group: 3 passed.
+- Explicit native realized/sealed/nested exec configuration test: 1 passed.
+- Focused Python/SQLite and bundle checks: 209 passed (151 + 21 + 32 + 5).
+
+The native exec run exposed a fixture collision: two descendant commands shared
+a fixed private `/tmp` proc mountpoint. Each now uses a unique disposable
+mountpoint; namespace and readonly checks are unchanged. Rebuilt export tests
+also exposed foreign-store initialization beneath an active CAS guard. The
+fixture now initializes that store before acquiring the import guard; production
+guard rules and cross-store retention refusal are unchanged. Reused-blob
+corruption refusal, actual CAS sweep/reopen and shared transcript tests pass.
+
+The source closures for all four Codex workers and the OpenCode worker were
+recomputed, and changed signed items were re-signed with the existing development
+publisher. This is not a full binary/bundle-manifest refresh or installed
+admission. Application journal reruns and composed runtime acceptance remain
+outstanding; no installation, node lifecycle, cloud or model contact occurred.
+
+Architecture, security and testing reviewers rechecked this configuration slice.
+Their concrete `/tmp` pathname-rebinding and fixture-construction findings are
+corrected. Runtime inventories remain empty until composed provider-policy
+qualification; these reviews do not enable external workers.

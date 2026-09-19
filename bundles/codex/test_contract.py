@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T06:52:09Z:1472822a635873532cc8fc8cdf17d95091a91386d268c409dd616c73e54780ed:Uis8wp5+VO/WcivmHLuXFnyt1JxVMe3rV4KMW2exWqmUeJEijCeUTyqlPfnowsI7DcRBLU6K48/8/CyQuLiIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T07:19:59Z:76da28b6abf8f4173767d3e7657edccdf0e1c013913ec461fe6585c745968531:hgUbFIcGZ2Mx08Byle2iND3WYWvXUl7/goHrP65SDXg2cfElFeayfWy/772hx+5rfgpEgQE4/aNBvWuhO29CBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
@@ -354,8 +354,9 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 7)
+        self.assertEqual(self.profile["schema_version"], 8)
         self.assertEqual(self.profile["auxiliary_configs"], [])
+        self.assertEqual(self.profile["runtime_configs"], [])
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["workload_client"])
         immutable_args = "\n".join(self.profile["workload_args"])

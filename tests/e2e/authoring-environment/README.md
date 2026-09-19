@@ -85,8 +85,8 @@ ordinary configuration but is not launched during the completed turn. No host
 system file is changed. This proves that pinned mechanism only in the fixture's
 empty enterprise/cloud-policy context—not an unconditional production denial.
 
-Production still requires an admitted runtime-configuration mount and control
-of higher-priority managed policy before MCP startup. A profile-home
+Production still requires qualification of the admitted runtime-configuration
+mount and control of higher-priority managed policy before MCP startup. A profile-home
 `requirements.toml` would not be read as system requirements. Do not repurpose
 node networking files or enable the external profile to bypass this gate.
 
@@ -99,8 +99,8 @@ post-retention request limit, and pre-handler header timeout gap.
 
 ### Production configuration work in progress
 
-The implementation branch adds required `auxiliary_configs` to structured
-session profile v7 and retained persistent-session capsule v12. Each entry names
+The implementation branch retains required `auxiliary_configs` in structured
+session profile v8 and retained persistent-session capsule v13. Each entry names
 one signed source file and one flat destination in the existing locked profile
 home. Destinations are sorted/unique, cannot replace the primary baseline, and
 are limited to 16 files of at most 64 KiB each. Primary baseline admission now
@@ -114,14 +114,28 @@ potential portable-session overlap is rejected. Empty inventories remain
 explicit in every current bundle profile; no external authoring profile is
 activated by these changes.
 
-Cargo is now authorized. Initial state framing/export (5), capsule (9), and
-allocation/channel (12) tests passed. Three focused native terminal-export tests
-also passed, including descendant writer exclusion. Subsequent state/app
-integrity corrections and shared transcript extraction still await rebuilt
-checks: the affected rerun was explicitly interrupted for disk space. No Cargo
-process from that run remains active. Python/source checks do not establish
-Rust type correctness, bundle binary coherence or installed admission. Affected
-builds and the full bundle refresh remain required before qualification. See
+The same profile/capsule now also requires `runtime_configs`: at most 16 exact
+source files (nonempty, at most 64 KiB each), with sorted, unique absolute
+namespace destinations. The executor seals captured source bytes in descriptors;
+the isolation planner mounts them read-only and refuses collisions with existing
+authority, writable views and reserved roots (including private `/tmp`). These
+mounts cannot supply executable authority, and preparation never writes their
+destinations on the host. The bridge checks exact mounted bytes and read-only
+ancestors before provider startup. This is generic configuration delivery, not
+an executor-owned Codex path. Current bundle inventories are empty. Native Lillux
+mount/ancestor checks pass across realized/sealed executables and nested-sandbox
+mode, including descendant exec. Installed bridge admission and effective
+provider-policy qualification remain gates before enabling a profile.
+
+Cargo is now authorized. Rebuilt state framing/export/transcript (8) and capsule
+(10) groups pass. The native terminal-export group (3), absolute-configuration
+exec qualification (1), and ordinary Lillux suite (235 passed, 18 ignored) pass.
+Engine/executor/structured-session test targets pass `cargo check --tests`;
+type checking is not test execution. The earlier allocation/channel group (12)
+still needs its affected rebuilt rerun. Rebuilt engine profile (14) and isolation
+(41) tests also pass. A prior build was explicitly interrupted
+for disk space; targeted builds have resumed without relocating or deleting
+other work. Full bundle refresh and installed admission remain required. See
 [external execution qualification](../external-execution/README.md) for the
 exact checkpoint, operator tests and missing lifecycle/channel/export work.
 

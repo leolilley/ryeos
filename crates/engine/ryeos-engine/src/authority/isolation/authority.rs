@@ -336,9 +336,37 @@ pub(crate) enum IsolationReadOnlyMountScope {
     ProjectRealization,
     ExecutionRuntimeRealization,
     StateOverlay,
+    RuntimeConfiguration,
 }
 
 impl IsolationReadOnlyMountAuthority {
+    /// Configuration data only: seal the exact bounded regular-file bytes so
+    /// even a later host-side mutation cannot alter this admitted delivery.
+    pub fn new_runtime_configuration(
+        source_path: PathBuf,
+        destination: PathBuf,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        ryeos_state::objects::validate_session_runtime_configuration_destination(
+            destination
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("runtime configuration path is not UTF-8"))?,
+        )?;
+        let (bytes, _) = source.read_regular_file_stable_bounded(
+            ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES as u64,
+        )?;
+        if bytes.is_empty() {
+            anyhow::bail!("runtime configuration is empty");
+        }
+        Ok(Self {
+            source_path,
+            destination,
+            source: lillux::sealed_memfd(c"ryeos-runtime-configuration", &bytes)
+                .map_err(anyhow::Error::msg)?,
+            scope: IsolationReadOnlyMountScope::RuntimeConfiguration,
+        })
+    }
+
     pub fn new_execution_runtime(
         source_path: PathBuf,
         destination: PathBuf,

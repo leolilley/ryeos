@@ -3480,6 +3480,44 @@ impl IsolationRuntime {
             let destination = external.destination();
             validate_namespace_destination("external realization mount", destination)?;
             match external.scope() {
+                IsolationReadOnlyMountScope::RuntimeConfiguration => {
+                    ryeos_state::objects::validate_session_runtime_configuration_destination(
+                        destination.to_str().ok_or_else(|| {
+                            refused("runtime configuration destination is not UTF-8".into())
+                        })?,
+                    )
+                    .map_err(|error| refused(error.to_string()))?;
+                    if paths_overlap(destination, &project_destination)
+                        || paths_overlap(destination, &command_path)
+                        || context
+                            .state_root
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || context
+                            .checkpoint_dir
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || self
+                            .app_root
+                            .as_deref()
+                            .is_some_and(|root| paths_overlap(destination, root))
+                        || readable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || writable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || self
+                            .network_runtime_files
+                            .iter()
+                            .any(|file| paths_overlap(destination, &file.destination))
+                        || ["/usr", "/bin", "/sbin", "/lib", "/lib64"]
+                            .iter()
+                            .any(|root| paths_overlap(destination, Path::new(root)))
+                    {
+                        return Err(refused(
+                            "runtime configuration overlaps another launch authority".into(),
+                        ));
+                    }
+                }
                 IsolationReadOnlyMountScope::ExecutionRuntimeRealization => {
                     let root = Path::new(ryeos_state::objects::EXECUTION_RUNTIME_REALIZATIONS_ROOT);
                     if destination == root || !destination.starts_with(root) {
@@ -4646,9 +4684,13 @@ impl IsolationRuntime {
             }
         };
         validate_namespace_destination("verified-code admitted mount", mount.destination())?;
-        if mount.scope() == IsolationReadOnlyMountScope::StateOverlay {
+        if matches!(
+            mount.scope(),
+            IsolationReadOnlyMountScope::StateOverlay
+                | IsolationReadOnlyMountScope::RuntimeConfiguration
+        ) {
             return Err(refused(format!(
-                "verified code {} is covered by an ineligible state-overlay mount",
+                "verified code {} is covered by an ineligible configuration mount",
                 verified.source_path.display()
             )));
         }
@@ -7187,7 +7229,41 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("covered by an ineligible state-overlay mount"),
+                .contains("covered by an ineligible configuration mount"),
+            "{error}"
+        );
+
+        let configuration_source = tempfile::tempdir().unwrap();
+        let configuration_path = configuration_source.path().join("policy");
+        std::fs::write(&configuration_path, b"closed=true\n").unwrap();
+        let configuration_file =
+            lillux::open_pinned_regular_file_no_follow(&configuration_path).unwrap();
+        let configuration = IsolationReadOnlyMountAuthority::new_runtime_configuration(
+            configuration_path.clone(),
+            PathBuf::from("/etc/qualification/runtime.conf"),
+            configuration_file.inherited_descriptor_authority().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&configuration_path, b"closed=false\n").unwrap();
+        assert_eq!(
+            configuration
+                .source()
+                .read_regular_file_stable_bounded(64)
+                .unwrap()
+                .0,
+            b"closed=true\n"
+        );
+        let error = runtime
+            .prepare_verified_code_from_admitted_mount(
+                &IsolationVerifiedCode {
+                    source_path: configuration.destination().to_path_buf(),
+                    content_hash: lillux::sha256_hex(b"closed=true\n"),
+                },
+                std::slice::from_ref(&configuration),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ineligible configuration mount"),
             "{error}"
         );
 
@@ -7472,6 +7548,15 @@ mod tests {
             ),
         ] {
             let mut external_mounts = vec![runtime_mount.clone(), project_mount.clone()];
+            let configuration_destination = Path::new("/etc/qualification-runtime-policy");
+            external_mounts.push(
+                IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                    baseline.path().to_path_buf(),
+                    configuration_destination.to_path_buf(),
+                    baseline.inherited_descriptor_authority().unwrap(),
+                )
+                .unwrap(),
+            );
             if let Some(state_root) = exact_state {
                 external_mounts.push(IsolationReadOnlyMountAuthority::new_state_overlay(
                     baseline.path().to_path_buf(),
@@ -7502,6 +7587,46 @@ mod tests {
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
             };
+            // These host fixture paths are below /tmp, which is refused by
+            // configuration admission before the planner can consider overlap.
+            for forbidden in [project.path(), private_state.as_path()] {
+                assert!(
+                    IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                        baseline.path().to_path_buf(),
+                        forbidden.to_path_buf(),
+                        baseline.inherited_descriptor_authority().unwrap(),
+                    )
+                    .is_err()
+                );
+            }
+            for forbidden in [
+                network_destination,
+                configuration_destination,
+                Path::new("/usr/share/qualification-policy"),
+            ] {
+                let mut conflicting_mounts = external_mounts.clone();
+                conflicting_mounts.push(
+                    IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                        baseline.path().to_path_buf(),
+                        forbidden.to_path_buf(),
+                        baseline.inherited_descriptor_authority().unwrap(),
+                    )
+                    .unwrap(),
+                );
+                assert!(
+                    runtime
+                        .apply_with_provenance(
+                            request(),
+                            IsolationLaunchContext {
+                                external_read_only_mounts: &conflicting_mounts,
+                                ..context
+                            }
+                        )
+                        .is_err(),
+                    "{}",
+                    forbidden.display()
+                );
+            }
             if exact_state.is_some() {
                 for invalid_root in [node_state.as_path(), content.path()] {
                     let error = runtime
@@ -7587,6 +7712,11 @@ mod tests {
                 if host_network { "host" } else { "isolated" }
             );
             let mounts = request["plan"]["mounts"].as_array().unwrap();
+            assert!(mounts.iter().any(|mount| {
+                mount["destination"].as_str() == configuration_destination.to_str()
+                    && mount["access"] == "read_only"
+                    && mount["layer"] == 30
+            }));
             assert_eq!(
                 mounts.iter().any(|mount| {
                     mount["destination"].as_str() == network_destination.to_str()
@@ -7626,6 +7756,9 @@ mod tests {
             }
             for mount in mounts {
                 let destination = mount["destination"].as_str().unwrap();
+                if Some(destination) == configuration_destination.to_str() {
+                    continue;
+                }
                 if host_network && Some(destination) == network_destination.to_str() {
                     continue;
                 }

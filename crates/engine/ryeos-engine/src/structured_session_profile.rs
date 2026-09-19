@@ -13,16 +13,16 @@ use serde_json::Value;
 
 use ryeos_state::objects::{
     AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
-    SessionConfigurationFile, validate_session_auxiliary_configs,
+    SessionConfigurationFile, SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
+    validate_session_runtime_configs,
 };
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v7 requires an explicit auxiliary configuration inventory, including an
-/// empty list when none is admitted. Earlier profiles cannot supply it from
-/// ambient profile-home state.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 7;
+/// v8 requires explicit immutable namespace configuration inventory. An
+/// omitted inventory cannot be reconstructed from ambient runtime files.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 8;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -74,6 +74,7 @@ pub fn compile(
         "baseline_config",
         "baseline_destination",
         "auxiliary_configs",
+        "runtime_configs",
         "portable_state",
         "credential_subject",
         "initialization",
@@ -995,6 +996,18 @@ pub fn compile(
         serde_json::from_value(object["auxiliary_configs"].clone())
             .context("decode signed auxiliary configuration inventory")?;
     validate_session_auxiliary_configs(&baseline_destination, &auxiliary_configs)?;
+    let runtime_configs: Vec<SessionRuntimeConfigurationFile> =
+        serde_json::from_value(object["runtime_configs"].clone())
+            .context("decode signed runtime configuration inventory")?;
+    validate_session_runtime_configs(&runtime_configs)?;
+    for config in &runtime_configs {
+        let bytes = source_files
+            .get(&config.source)
+            .ok_or_else(|| anyhow!("runtime configuration is absent from captured source"))?;
+        if bytes.is_empty() || bytes.len() > MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            bail!("runtime configuration exceeds its byte bound");
+        }
+    }
     for config in &auxiliary_configs {
         let bytes = source_files.get(&config.source).ok_or_else(|| {
             anyhow!("structured-session auxiliary configuration is absent from captured source")
@@ -1016,6 +1029,7 @@ pub fn compile(
         baseline_source,
         baseline_destination,
         auxiliary_configs,
+        runtime_configs,
     };
     admitted.validate()?;
     Ok(admitted)
@@ -1941,6 +1955,7 @@ mod tests {
             "baseline_config":"baseline.conf",
             "baseline_destination":"runtime.conf",
             "auxiliary_configs":[],
+            "runtime_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "configuration_authority":"immutable_argv",
@@ -2009,6 +2024,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_configuration_requires_exact_source_and_retained_inventory() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let mut files = schemas();
+        profile["runtime_configs"] = json!([{
+            "source":"policy/requirements.toml", "destination":"/etc/qualification/requirements.toml"
+        }]);
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        files.insert(
+            "policy/requirements.toml".into(),
+            b"permitted=[]\n".to_vec(),
+        );
+        let admitted = compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
+        admitted.validate().unwrap();
+        assert_eq!(admitted.runtime_configs.len(), 1);
+        let mut changed = admitted.clone();
+        changed.runtime_configs[0].destination = "/etc/qualification/changed".into();
+        assert!(changed.validate().is_err());
+        for length in [0, MAX_SESSION_CONFIGURATION_FILE_BYTES + 1] {
+            files.insert("policy/requirements.toml".into(), vec![b'x'; length]);
+            assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        }
+        files.insert(
+            "policy/requirements.toml".into(),
+            b"permitted=[]\n".to_vec(),
+        );
+        profile["runtime_configs"][0]["destination"] = json!("/tmp/replaceable/policy");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+        profile.as_object_mut().unwrap().remove("runtime_configs");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
+    }
+
+    #[test]
     fn auxiliary_configuration_requires_exact_bounded_source_and_current_shape() {
         let mut profile: Value =
             serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
@@ -2052,9 +2100,15 @@ mod tests {
             files.insert("environment.conf".into(), vec![b'x'; length]);
             assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
         }
-        files.insert("environment.conf".into(), vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES]);
+        files.insert(
+            "environment.conf".into(),
+            vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES],
+        );
         compile(&serde_json::to_vec(&profile).unwrap(), &files).unwrap();
-        files.insert("baseline.conf".into(), vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES + 1]);
+        files.insert(
+            "baseline.conf".into(),
+            vec![b'x'; MAX_SESSION_CONFIGURATION_FILE_BYTES + 1],
+        );
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &files).is_err());
     }
 

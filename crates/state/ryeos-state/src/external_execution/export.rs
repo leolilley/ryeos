@@ -146,6 +146,12 @@ mod tests {
     fn external_export_imports_existing_project_contract_without_publication() {
         let root = tempfile::tempdir().unwrap();
         let db = crate::StateDb::open(root.path(), Arc::new(crate::TrustStore::new())).unwrap();
+        // Store initialization acquires a CAS mutation guard internally.
+        // Prepare the independent store before holding the importing guard;
+        // never relax the non-reentrant production ownership rule for a test.
+        let foreign_root = tempfile::tempdir().unwrap();
+        let foreign_db =
+            crate::StateDb::open(foreign_root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
         let cas = authority.cas_store().unwrap();
@@ -225,9 +231,6 @@ mod tests {
                 .snapshot_hash(),
             candidate_hash
         );
-        let foreign_root = tempfile::tempdir().unwrap();
-        let foreign_db =
-            crate::StateDb::open(foreign_root.path(), Arc::new(crate::TrustStore::new())).unwrap();
         assert!(
             retained
                 .content_for_store(&foreign_db.pinned_authority().unwrap())

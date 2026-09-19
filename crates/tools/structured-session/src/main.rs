@@ -194,6 +194,7 @@ struct StructuredSessionProfile {
     baseline_config: String,
     baseline_destination: String,
     auxiliary_configs: Vec<ryeos_state::objects::SessionConfigurationFile>,
+    runtime_configs: Vec<ryeos_state::objects::SessionRuntimeConfigurationFile>,
     portable_state: Option<ryeos_state::objects::PortableSessionStateContract>,
     credential_subject: Option<ryeos_state::objects::CredentialSubjectProjectionContract>,
     initialization: Vec<InitializationStep>,
@@ -607,6 +608,7 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         &profile.baseline_destination,
         &profile.auxiliary_configs,
     )?;
+    ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
     if profile.workload_args.len() > 64
         || profile
             .workload_args
@@ -1016,6 +1018,13 @@ fn run() -> Result<()> {
                 .join(&config.source),
             &config.destination,
         )?;
+    }
+    for config in &profile.runtime_configs {
+        let source = profile_path
+            .parent()
+            .ok_or_else(|| anyhow!("structured-session profile has no parent"))?
+            .join(&config.source);
+        verify_runtime_configuration(&source, std::path::Path::new(&config.destination))?;
     }
     let schemas = load_profile_schemas(
         profile_path
@@ -1446,7 +1455,7 @@ fn verify_compatibility_baseline_config(
     destination_name: &str,
 ) -> Result<()> {
     let byte_limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
-    let admitted = lillux::read_regular_file_bounded_no_follow(source, byte_limit)
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, byte_limit as u64)
         .context("read admitted structured-session baseline config through Lillux")?;
     if admitted.is_empty() || admitted.len() > byte_limit {
         bail!("admitted structured-session baseline config is empty or exceeds its bound");
@@ -1458,9 +1467,25 @@ fn verify_compatibility_baseline_config(
         .open_pinned_regular(destination_name, false)
         .context("open daemon-prepared compatibility seed through Lillux")?
         .ok_or_else(|| anyhow!("daemon-prepared compatibility seed is missing"))?;
-    if incumbent.read_bounded(byte_limit)? != admitted {
+    if incumbent.read_bounded(byte_limit as u64)? != admitted {
         bail!("daemon-prepared compatibility seed differs from the admitted baseline");
     }
+    Ok(())
+}
+
+fn verify_runtime_configuration(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let limit = ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES;
+    let admitted = lillux::read_regular_file_bounded_no_follow(source, limit as u64)?;
+    let mounted = lillux::open_pinned_regular_file_no_follow(destination)?;
+    if admitted.is_empty() || mounted.read_bounded(limit as u64)? != admitted {
+        bail!("mounted runtime configuration differs from admitted source");
+    }
+    // Byte equality alone cannot prove that a provider will subsequently open
+    // the same configuration: every ancestor must also be non-replaceable.
+    mounted.verified_read_only_namespace_path()?;
     Ok(())
 }
 
@@ -4438,6 +4463,7 @@ mod tests {
             "baseline_config":"baseline.conf",
             "baseline_destination":"config.toml",
             "auxiliary_configs":[],
+            "runtime_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
@@ -4895,16 +4921,17 @@ server.serve_forever()
 "#;
 
     fn http_sse_profile() -> StructuredSessionProfile {
-        serde_json::from_value(json!({
-            "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
-            "transport":"http_sse",
-            "http_sse":{
-                "username_env":"FX_HTTP_USER","password_env":"FX_HTTP_PASSWORD",
-                "listener_stdout_prefix":"listening on http://127.0.0.1:",
-                "readiness_path":"/health","readiness_schema":"health.json",
+        let http_sse = json!({
+            "username_env":"FX_HTTP_USER","password_env":"FX_HTTP_PASSWORD",
+            "listener_stdout_prefix":"listening on http://127.0.0.1:",
+            "readiness_path":"/health","readiness_schema":"health.json",
             "event_path":"/event","event_type_pointer":"/type","event_properties_pointer":"/properties",
             "ignored_notification_projection":"properties"
-            },
+        });
+        let mut profile = json!({
+            "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
+            "transport":"http_sse",
+            "http_sse":http_sse,
             "configuration_authority":"immutable_argv",
             "workload_realization_id":"fixture-http",
             "workload_executable":"python3",
@@ -4915,73 +4942,74 @@ server.serve_forever()
             "baseline_config":"baseline.conf",
             "baseline_destination":"fixture.conf",
             "auxiliary_configs":[],
+            "runtime_configs":[],
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
             "recovery":null,
             "route_sets":{"session":["session.read","session.start"]},
-            "routes":[{
-                "id":"session.start",
-                "method":"session.start",
-                "effect_class":"session_mutation",
-                "http_method":"POST",
-                "http_path":"/session",
-                "http_body_schema":"empty.json",
-                "http_path_parameters":{},
-                "request_schema":"empty.json",
-                "response_schema":"start.json",
-                "fixed_params":{},
-                "workspace_fields":[],
-                "forbidden_non_null_fields":[],
-                "response_predicates":[],
-                "observations":[],
-                "result_retention":"ephemeral",
-                "ceremony":null,
-                "session_binding":{
-                    "action":"bind_new",
-                    "request_field":null,
-                    "response_pointer":"/result/session_id"
-                }
-            },{
-                "id":"session.read",
-                "method":"session.read",
-                "audience":"runtime",
-                "effect_class":"pure_read",
-                "http_method":"GET",
-                "http_path":"/session/{session_id}",
-                "http_body_schema":"empty.json",
-                "http_path_parameters":{"session_id":{"source":"bound_session"}},
-                "request_schema":"empty.json",
-                "response_schema":"read.json",
-                "fixed_params":{},
-                "workspace_fields":[],
-                "forbidden_non_null_fields":[],
-                "response_predicates":[],
-                "observations":[],
-                "result_retention":"ephemeral",
-                "ceremony":null,
-                "session_binding":{
-                    "action":"require",
-                    "request_field":"session_id",
-                    "response_pointer":null
-                }
-            }],
-            "notifications":[{
-                "method":"session.created",
-                "schema":"event.json",
-                "upstream_session_pointer":null,
-                "event_type":"session.created",
-                "durable":true,
-                "payload":{"op":"object","fields":{
-                    "session_id":{"op":"pointer","pointer":"/message/params/sessionID"}
-                }},
-                "observations":[],
-                "ceremony_clear":false
-            }],
             "ignored_notifications":{},
             "server_requests":[]
-        }))
-        .unwrap()
+        });
+        profile["routes"] = json!([{
+            "id":"session.start",
+            "method":"session.start",
+            "effect_class":"session_mutation",
+            "http_method":"POST",
+            "http_path":"/session",
+            "http_body_schema":"empty.json",
+            "http_path_parameters":{},
+            "request_schema":"empty.json",
+            "response_schema":"start.json",
+            "fixed_params":{},
+            "workspace_fields":[],
+            "forbidden_non_null_fields":[],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null,
+            "session_binding":{
+                "action":"bind_new",
+                "request_field":null,
+                "response_pointer":"/result/session_id"
+            }
+        },{
+            "id":"session.read",
+            "method":"session.read",
+            "audience":"runtime",
+            "effect_class":"pure_read",
+            "http_method":"GET",
+            "http_path":"/session/{session_id}",
+            "http_body_schema":"empty.json",
+            "http_path_parameters":{"session_id":{"source":"bound_session"}},
+            "request_schema":"empty.json",
+            "response_schema":"read.json",
+            "fixed_params":{},
+            "workspace_fields":[],
+            "forbidden_non_null_fields":[],
+            "response_predicates":[],
+            "observations":[],
+            "result_retention":"ephemeral",
+            "ceremony":null,
+            "session_binding":{
+                "action":"require",
+                "request_field":"session_id",
+                "response_pointer":null
+            }
+        }]);
+        profile["notifications"] = json!([{
+            "method":"session.created",
+            "schema":"event.json",
+            "upstream_session_pointer":null,
+            "event_type":"session.created",
+            "durable":true,
+            "payload":{"op":"object","fields":{
+                "session_id":{"op":"pointer","pointer":"/message/params/sessionID"}
+            }},
+            "observations":[],
+            "ceremony_clear":false
+        }]);
+        serde_json::from_value(profile).unwrap()
     }
 
     #[test]
@@ -5516,6 +5544,40 @@ server.serve_forever()
         .unwrap();
         assert_eq!(output, json!({"id":"one","kind":"fixture"}));
         assert!(!output.to_string().contains("not-copied"));
+    }
+
+    #[test]
+    fn runtime_configuration_verification_is_read_only_and_refuses_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("mounted");
+        std::fs::write(&source, b"policy=[]\n").unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        assert!(!destination.exists());
+        std::fs::write(&destination, b"policy=[]\n").unwrap();
+        // Even exact bytes on an ordinary writable filesystem are not an
+        // admitted namespace configuration. Native coverage exercises success.
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        std::fs::write(&destination, b"policy=[1]\n").unwrap();
+        assert!(
+            verify_runtime_configuration(&source, &destination)
+                .unwrap_err()
+                .to_string()
+                .contains("differs from admitted source")
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"policy=[1]\n");
+        std::fs::write(&destination, b"policy=[]\n").unwrap();
+        let link = root.path().join("symlink");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        assert!(verify_runtime_configuration(&link, &destination).is_err());
+        assert!(verify_runtime_configuration(&source, &link).is_err());
+        std::fs::write(&source, b"").unwrap();
+        std::fs::write(&destination, b"").unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
+        let oversized = vec![b'x'; ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES + 1];
+        std::fs::write(&source, &oversized).unwrap();
+        std::fs::write(&destination, &oversized).unwrap();
+        assert!(verify_runtime_configuration(&source, &destination).is_err());
     }
 
     #[test]

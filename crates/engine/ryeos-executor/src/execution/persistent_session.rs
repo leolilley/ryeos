@@ -2215,8 +2215,10 @@ fn admit_session_capsule(
         })?;
         let profile =
             ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)?;
-        if !profile.auxiliary_configs.is_empty() && !state.isolation.is_enforced() {
-            bail!("signed auxiliary session configuration requires enforced read-only isolation");
+        if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty())
+            && !state.isolation.is_enforced()
+        {
+            bail!("signed session configuration inventory requires enforced read-only isolation");
         }
         validate_required_session_environment(&profile, environment)?;
         Some(profile)
@@ -3037,7 +3039,7 @@ fn prepare_structured_session_configuration_file(
     let source_file = source_directory
         .open_pinned_regular_descendant(Path::new(source), false)?
         .ok_or_else(|| anyhow!("admitted structured-session configuration is missing"))?;
-    let bytes = source_file.read_bounded(byte_limit)?;
+    let bytes = source_file.read_bounded(byte_limit as u64)?;
     if bytes.is_empty() {
         bail!("admitted structured-session configuration is empty");
     }
@@ -3052,7 +3054,8 @@ fn prepare_structured_session_configuration_file(
         .as_ref()
         .map(|entry| {
             Ok::<bool, anyhow::Error>(
-                entry.permission_mode()? == 0o400 && entry.read_bounded(byte_limit)? == bytes,
+                entry.permission_mode()? == 0o400
+                    && entry.read_bounded(byte_limit as u64)? == bytes,
             )
         })
         .transpose()?
@@ -3087,16 +3090,17 @@ fn prepare_structured_session_configurations(
         &profile.baseline_destination,
         &profile.auxiliary_configs,
     )?;
+    ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
     // Mode bits are not a same-UID write boundary. Refuse both fresh launch
     // and recovery before modifying the profile home unless the backend will
-    // mount every auxiliary config from admitted source read-only.
-    if !profile.auxiliary_configs.is_empty() && !enforced {
-        bail!("signed auxiliary session configuration requires enforced read-only isolation");
+    // mount every additional config from admitted source read-only.
+    if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty()) && !enforced {
+        bail!("signed session configuration inventory requires enforced read-only isolation");
     }
     let mut mounts = Vec::new();
-    if let Some(mount) = prepare_structured_session_baseline(
-        profile, source_directory, state_root, enforced,
-    )? {
+    if let Some(mount) =
+        prepare_structured_session_baseline(profile, source_directory, state_root, enforced)?
+    {
         mounts.push(mount);
     }
     for config in &profile.auxiliary_configs {
@@ -3106,8 +3110,21 @@ fn prepare_structured_session_configurations(
             source_directory,
             state_root,
             enforced,
-        )?.ok_or_else(|| anyhow!("auxiliary session configuration has no read-only authority"))?;
+        )?
+        .ok_or_else(|| anyhow!("auxiliary session configuration has no read-only authority"))?;
         mounts.push(mount);
+    }
+    for config in &profile.runtime_configs {
+        let file = source_directory
+            .open_pinned_regular_descendant(Path::new(&config.source), false)?
+            .ok_or_else(|| anyhow!("admitted runtime configuration is missing"))?;
+        mounts.push(
+            ryeos_engine::isolation::IsolationReadOnlyMountAuthority::new_runtime_configuration(
+                file.path().to_path_buf(),
+                PathBuf::from(&config.destination),
+                file.inherited_descriptor_authority()?,
+            )?,
+        );
     }
     Ok(mounts)
 }
@@ -5063,6 +5080,7 @@ session:
             baseline_source: "baseline.toml".to_owned(),
             baseline_destination: "config.toml".to_owned(),
             auxiliary_configs: Vec::new(),
+            runtime_configs: Vec::new(),
         };
 
         let overlay = prepare_structured_session_baseline(
@@ -5138,13 +5156,54 @@ session:
     }
 
     #[test]
+    fn runtime_configuration_preparation_never_writes_a_host_destination() {
+        use ryeos_state::objects::{
+            AdmittedStructuredSessionProfile, SessionRuntimeConfigurationFile,
+        };
+        let source = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("baseline.conf"), b"baseline=true\n").unwrap();
+        std::fs::write(source.path().join("policy.conf"), b"closed=true\n").unwrap();
+        let directory = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let destination = "/etc/qualification-runtime-policy";
+        let before = std::fs::read(destination).ok();
+        let profile = AdmittedStructuredSessionProfile {
+            profile_hash: "a".repeat(64),
+            contract: json!({"fixture":true}),
+            schema_hashes: BTreeMap::new(),
+            baseline_source: "baseline.conf".into(),
+            baseline_destination: "baseline.conf".into(),
+            auxiliary_configs: Vec::new(),
+            runtime_configs: vec![SessionRuntimeConfigurationFile {
+                source: "policy.conf".into(),
+                destination: destination.into(),
+            }],
+        };
+        assert!(
+            prepare_structured_session_configurations(&profile, &directory, state.path(), false)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+        let mounts =
+            prepare_structured_session_configurations(&profile, &directory, state.path(), true)
+                .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(destination).ok(), before);
+    }
+
+    #[test]
     fn auxiliary_configuration_preparation_requires_read_only_authority() {
         use ryeos_state::objects::{AdmittedStructuredSessionProfile, SessionConfigurationFile};
         let source = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("baseline.conf"), b"baseline=true\n").unwrap();
         std::fs::write(source.path().join("environment.conf"), b"local=false\n").unwrap();
-        let source_directory = lillux::PinnedDirectory::open(source.path()).unwrap().unwrap();
+        let source_directory = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
         let profile = AdmittedStructuredSessionProfile {
             profile_hash: "a".repeat(64),
             contract: json!({"fixture":true}),
@@ -5152,18 +5211,33 @@ session:
             baseline_source: "baseline.conf".into(),
             baseline_destination: "runtime.conf".into(),
             auxiliary_configs: vec![SessionConfigurationFile {
-                source: "environment.conf".into(), destination: "environment.conf".into(),
+                source: "environment.conf".into(),
+                destination: "environment.conf".into(),
             }],
+            runtime_configs: Vec::new(),
         };
-        assert!(prepare_structured_session_configurations(
-            &profile, &source_directory, state.path(), false,
-        ).is_err());
+        assert!(
+            prepare_structured_session_configurations(
+                &profile,
+                &source_directory,
+                state.path(),
+                false,
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
         let mounts = prepare_structured_session_configurations(
-            &profile, &source_directory, state.path(), true,
-        ).unwrap();
+            &profile,
+            &source_directory,
+            state.path(),
+            true,
+        )
+        .unwrap();
         assert_eq!(mounts.len(), 2);
-        assert_eq!(std::fs::read(state.path().join("environment.conf")).unwrap(), b"local=false\n");
+        assert_eq!(
+            std::fs::read(state.path().join("environment.conf")).unwrap(),
+            b"local=false\n"
+        );
     }
 
     #[test]

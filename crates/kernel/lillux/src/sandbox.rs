@@ -4665,6 +4665,26 @@ mod imp {
             ] {
                 assert_eq!(outcome.unwrap_err().raw_os_error(), Some(libc::EROFS));
             }
+            // Absolute policy files require an immutable namespace spelling,
+            // not just a read-only leaf or matching bytes at verification time.
+            let configuration_path = PathBuf::from("/etc/qualification-runtime/policy");
+            let configuration =
+                crate::secure_fs::open_pinned_regular_file_no_follow(&configuration_path).unwrap();
+            assert_eq!(
+                configuration.verified_read_only_namespace_path().unwrap(),
+                configuration_path
+            );
+            assert_eq!(configuration.read_bounded(64).unwrap(), b"policy=[]\n");
+            assert!(std::fs::write(&configuration_path, b"policy=[1]\n").is_err());
+            assert!(std::fs::remove_file(&configuration_path).is_err());
+            assert_eq!(
+                std::fs::rename("/etc/qualification-runtime", "/etc/replaced-runtime")
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EROFS)
+            );
+            assert_eq!(std::fs::read(&configuration_path).unwrap(), b"policy=[]\n");
+
             // A read-only leaf below a writable ancestor is insufficient.
             let unsafe_leaf = crate::secure_fs::open_pinned_regular_file_no_follow(
                 std::path::Path::new("/tmp/readonly-probe"),
@@ -4939,7 +4959,9 @@ mod imp {
                     .raw_os_error(),
                 Some(libc::EPERM)
             );
-            std::fs::create_dir("/tmp/nested-proc").unwrap();
+            // The absolute-path and PATH-search descendants share private
+            // /tmp. Give each probe a fresh mountpoint, not a stale fixed name.
+            let nested_proc = tempfile::tempdir_in("/tmp").unwrap();
             let pid = unsafe { libc::fork() };
             assert!(pid >= 0);
             if pid == 0 {
@@ -4947,18 +4969,18 @@ mod imp {
                     assert_eq!(unsafe { libc::getpid() }, 1);
                     mount_raw(
                         Some("proc"),
-                        "/tmp/nested-proc",
+                        nested_proc.path().to_str().unwrap(),
                         Some("proc"),
                         libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
                         Some("subset=pid"),
                     )
                     .unwrap();
                     assert_eq!(
-                        std::fs::read_link("/tmp/nested-proc/self").unwrap(),
+                        std::fs::read_link(nested_proc.path().join("self")).unwrap(),
                         PathBuf::from("1")
                     );
-                    assert!(!std::path::Path::new("/tmp/nested-proc/sys").exists());
-                    assert!(!std::path::Path::new("/tmp/nested-proc/meminfo").exists());
+                    assert!(!nested_proc.path().join("sys").exists());
+                    assert!(!nested_proc.path().join("meminfo").exists());
                     mount_raw(
                         Some("tmpfs"),
                         "/tmp",
@@ -5054,6 +5076,8 @@ mod imp {
                 let sentinel = unsafe { File::from_raw_fd(high) };
                 let channel =
                     crate::sealed_memfd(c"native-channel-probe", b"native-target-channel").unwrap();
+                let configuration =
+                    crate::sealed_memfd(c"native-configuration-probe", b"policy=[]\n").unwrap();
                 // A test coordinate above the unrelated sentinel, not a
                 // production workload-client descriptor allocation rule.
                 let channel_target = u32::try_from(high + 1).unwrap();
@@ -5150,6 +5174,12 @@ mod imp {
                     );
                 }
                 request.mounts.extend([
+                    LinuxSandboxMount {
+                        source_fd: configuration.inherited_descriptor().unwrap(),
+                        destination: PathBuf::from("/etc/qualification-runtime/policy"),
+                        access: LinuxSandboxMountAccess::ReadOnly,
+                        layer: 30,
+                    },
                     LinuxSandboxMount {
                         source_fd: writable_parent.inherited_descriptor().unwrap(),
                         destination: PathBuf::from("/mutable"),

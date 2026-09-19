@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "transport": "http_sse",
   "http_sse": {
     "username_env": "OPENCODE_SERVER_USERNAME",
@@ -32,6 +32,7 @@
   "baseline_config": "opencode.baseline.json",
   "baseline_destination": "opencode.json",
   "auxiliary_configs": [],
+  "runtime_configs": [],
   "portable_state": null,
   "credential_subject": null,
   "initialization": [],

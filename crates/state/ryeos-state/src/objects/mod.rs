@@ -139,6 +139,8 @@ pub use live_input::{LiveInput, LiveInputIntent};
 pub use persistent_session_capsule::{
     AdmittedPersistentSessionCapsule, AdmittedStructuredSessionProfile,
     CredentialSubjectProjectionContract, ExecutableSearchPathEntry, SessionConfigurationFile,
+    SessionRuntimeConfigurationFile, validate_session_runtime_configs,
+    validate_session_runtime_configuration_destination,
     MAX_SESSION_CONFIGURATION_FILE_BYTES, MAX_SESSION_AUXILIARY_CONFIGS,
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES,
     MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES,
