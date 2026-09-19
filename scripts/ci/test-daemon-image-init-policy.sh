@@ -123,6 +123,7 @@ for path in "$root"/Dockerfile*; do
 done
 
 required_entrypoint='ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]'
+required_healthcheck='HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('\''http://127.0.0.1:'\''+os.environ.get('\''PORT'\'','\''8000'\'')+'\''/_ryeos/ready'\'',timeout=3).read()"]'
 for image in "${daemon_images[@]}"; do
     path="$root/$image"
     instructions="$(dockerfile_instructions "$path")"
@@ -142,6 +143,10 @@ for image in "${daemon_images[@]}"; do
     fi
     if [[ "$(grep -Fxc "$required_entrypoint" <<<"$final_stage")" -ne 1 ]]; then
         echo "$image must declare the exact tini-wrapped entrypoint once" >&2
+        exit 1
+    fi
+    if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
+        echo "$image must probe exact daemon admission readiness once" >&2
         exit 1
     fi
 done
@@ -166,7 +171,16 @@ for stage in ryeos-standard ryeos-central-host ryeos-local-inference ryeos-hoste
         echo "Dockerfile.release target $stage must declare the exact tini-wrapped entrypoint once" >&2
         exit 1
     fi
+    if [[ "$(grep -Fxc "$required_healthcheck" <<<"$final_stage")" -ne 1 ]]; then
+        echo "Dockerfile.release target $stage must probe exact daemon admission readiness once" >&2
+        exit 1
+    fi
 done
+contained_stage="$(dockerfile_stage_instructions "$root/Dockerfile.release" ryeos-contained-workflow)"
+if [[ "$(grep -Fxc "$required_healthcheck" <<<"$contained_stage")" -ne 1 ]]; then
+    echo "Dockerfile.release target ryeos-contained-workflow must probe exact daemon admission readiness once" >&2
+    exit 1
+fi
 
 # Images that promise an exact source bundle set must copy that same set into
 # their final stage. Publishing a bundle in the builder but omitting it from
