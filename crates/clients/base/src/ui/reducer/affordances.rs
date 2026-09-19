@@ -475,6 +475,34 @@ mod tests {
         ))
     }
 
+    /// Mount the view that actually originated a synthetic affordance event.
+    ///
+    /// Production events carry a mounted instance identity and the reducer
+    /// rejects a view ref borrowed from any other tile. Tests must preserve
+    /// that same boundary instead of borrowing whichever fixture tile happens
+    /// to be focused.
+    fn mount_affordance_view(
+        core: &mut RyeOsCore,
+        view_ref: &str,
+    ) -> crate::ids::RyeOsViewInstanceKey {
+        if let Some(instance_key) = core.view_sets[core.active_view_set]
+            .tiles
+            .values()
+            .find(|tile| tile.view.view_ref == view_ref)
+            .map(|tile| tile.instance_key.clone())
+        {
+            return instance_key;
+        }
+        let tile_id = core.view_sets[core.active_view_set]
+            .add_tile(ViewSpec {
+                view_ref: view_ref.to_string(),
+            })
+            .expect("fixture layout accepts affordance source");
+        core.view_sets[core.active_view_set].tiles[&tile_id]
+            .instance_key
+            .clone()
+    }
+
     #[test]
     fn explicit_empty_source_refresh_disables_inherited_facet_liveness() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
@@ -548,10 +576,11 @@ mod tests {
         )
         .encode();
 
+        let source_instance = mount_affordance_view(&mut core, "view:test/list");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:test/list".to_string(),
                     affordance_id: "select-item".to_string(),
                     record: serde_json::json!({ "canonical_ref": "tool:demo/run" }),
@@ -602,10 +631,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:ryeos/threads/list");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -659,10 +689,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:ryeos/threads/list");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-7" }),
@@ -710,10 +741,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:test/projects");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:test/projects".to_string(),
                     affordance_id: "open".to_string(),
                     record: serde_json::json!({ "local_id": "project-7" }),
@@ -769,10 +801,11 @@ mod tests {
         }))
         .unwrap();
 
+        let source_instance = mount_affordance_view(&mut core, "view:ryeos/threads/list");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -825,10 +858,11 @@ mod tests {
             })
             .expect("fixture layout accepts view");
 
+        let source_instance = mount_affordance_view(&mut core, "view:ryeos/threads/history");
         let left_effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance.clone(),
                     view_ref: "view:ryeos/threads/history".to_string(),
                     affordance_id: "compare-left".to_string(),
                     record: serde_json::json!({ "thread_id": "T-left" }),
@@ -850,7 +884,7 @@ mod tests {
         let right_effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:ryeos/threads/history".to_string(),
                     affordance_id: "compare-right".to_string(),
                     record: serde_json::json!({ "thread_id": "T-right" }),
@@ -1104,10 +1138,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:test/threads");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-demo" }),
@@ -1158,10 +1193,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:test/threads");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "aim-input".to_string(),
                     record: serde_json::json!({ "thread_id": "T-route" }),
@@ -1196,10 +1232,11 @@ mod tests {
             }),
         );
 
+        let source_instance = mount_affordance_view(&mut core, "view:test/work");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::InvokeAffordance {
-                    instance_key: core.focused_view_instance_key().unwrap(),
+                    instance_key: source_instance,
                     view_ref: "view:test/work".to_string(),
                     affordance_id: "inspect".to_string(),
                     record: serde_json::json!({ "thread_id": "T-inspected" }),
