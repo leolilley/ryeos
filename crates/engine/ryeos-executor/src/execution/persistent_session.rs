@@ -941,7 +941,7 @@ pub(crate) fn admit_or_verify_prepared_sessions(
         handler_context,
         roots,
     )?;
-    validate_prepared_content_targets(state, prepared)?;
+    validate_prepared_content_targets(state, engine, prepared)?;
     let mut expected_names = BTreeSet::new();
     let (content_by_target, search_by_target, realizations_by_dependency, mut publications) =
         admit_or_verify_content_dependencies(
@@ -1101,7 +1101,7 @@ pub(crate) fn preview_prepared_dependencies(
         resolution_roots,
     )?;
     let prepared = &selected_prepared;
-    validate_prepared_content_targets(state, prepared)?;
+    validate_prepared_content_targets(state, engine, prepared)?;
     // Execution dependencies are admitted bundle programs. This projectless
     // lookup must not be copied into the content-dependency pass below: a
     // project-bound contributor keeps the outer root's definition generation.
@@ -1123,6 +1123,14 @@ pub(crate) fn preview_prepared_dependencies(
             .with_context(|| format!("validate prepared execution dependency `{name}`"))?;
         let verified = dependency.captured_verified_subject()?;
         let kind = verified.resolved.kind.as_str();
+        let session_definition = session_contract(engine, dependency)?;
+        let supports_execution_runtime = if state.isolation.is_enforced() {
+            true
+        } else if let Some((_, protocol)) = session_definition.as_ref() {
+            protocol_supports_private_descriptor_realizations(&protocol.descriptor)?
+        } else {
+            false
+        };
         if let Some(declarations) = ryeos_engine::external_content::declarations_from_composed(
             &dependency.resolution.composed.composed,
             engine
@@ -1133,7 +1141,7 @@ pub(crate) fn preview_prepared_dependencies(
         )? {
             super::external_content::require_supported_mount_roots(
                 declarations.iter().map(|entry| entry.mount_root),
-                state.isolation.is_enforced(),
+                supports_execution_runtime,
             )?;
         }
         let source = ryeos_app::source_closure_admission::preview_source_closure(
@@ -1154,7 +1162,7 @@ pub(crate) fn preview_prepared_dependencies(
                 &roots,
                 &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             )?;
-        let session = if let Some((declaration, protocol)) = session_contract(engine, dependency)? {
+        let session = if let Some((declaration, protocol)) = session_definition {
             let lifecycle = lifecycle_contract(&declaration)?;
             let wire = wire_contract(&protocol)?;
             let eligibility = state
@@ -1277,6 +1285,7 @@ pub(crate) fn preview_prepared_dependencies(
 /// no rebinding to the target, live item lookup, or evidence-policy substitution.
 fn validate_prepared_content_targets(
     state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
     prepared: &PreparedRuntimeLaunch,
 ) -> Result<()> {
     use ryeos_engine::external_content::{
@@ -1307,9 +1316,27 @@ fn validate_prepared_content_targets(
         {
             bail!("content dependency `{name}` is not locator-free pinned content");
         }
+        let mut supports_execution_runtime = state.isolation.is_enforced();
+        if !supports_execution_runtime {
+            supports_execution_runtime = !dependency.target_content_contracts.is_empty();
+            for target in dependency.target_content_contracts.keys() {
+                let Some(target_dependency) = prepared.execution_dependencies.get(target) else {
+                    supports_execution_runtime = false;
+                    break;
+                };
+                let Some((_, protocol)) = session_contract(engine, target_dependency)? else {
+                    supports_execution_runtime = false;
+                    break;
+                };
+                if !protocol_supports_private_descriptor_realizations(&protocol.descriptor)? {
+                    supports_execution_runtime = false;
+                    break;
+                }
+            }
+        }
         super::external_content::require_supported_mount_roots(
             declarations.iter().map(|entry| entry.mount_root),
-            state.isolation.is_enforced(),
+            supports_execution_runtime,
         )?;
         ryeos_app::external_content_admission::validate_retained_declaration_totals(
             state,
@@ -2052,7 +2079,7 @@ fn admit_session_capsule(
         let realized = ryeos_state::objects::ExternalContentRealizationSet::from_value(value)?;
         super::external_content::require_supported_mount_roots(
             realized.iter().map(|entry| entry.mount_root),
-            state.isolation.is_enforced(),
+            state.isolation.is_enforced() || supports_private_descriptor_realizations(session),
         )?;
     }
     if let Some(contract) = content_target_contract {
@@ -2584,6 +2611,21 @@ fn validate_session_process_control(
     Ok(())
 }
 
+fn supports_private_descriptor_realizations(
+    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+) -> bool {
+    session.process_mode == PersistentSessionProcessMode::ExclusiveSession
+        && session.cleanup_authority == PersistentSessionCleanupAuthority::TrustedProcessGroup
+}
+
+fn protocol_supports_private_descriptor_realizations(
+    descriptor: &ryeos_engine::protocols::descriptor::ProtocolDescriptor,
+) -> Result<bool> {
+    let session =
+        validate_persistent_session_protocol(descriptor).map_err(|error| anyhow!(error))?;
+    Ok(supports_private_descriptor_realizations(session))
+}
+
 fn retained_session_protocol(
     engine: &ryeos_engine::engine::Engine,
     capsule: &AdmittedPersistentSessionCapsule,
@@ -3062,6 +3104,15 @@ fn spawn_capsule_process_held(
     };
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, &workspace)?
+    } else if supports_private_descriptor_realizations(session_protocol) {
+        super::external_content::bind_external_realizations_in_private_runtime_view_with_budget(
+            state,
+            &resolution,
+            realization_workspace,
+            private_budget
+                .as_ref()
+                .expect("disabled isolation has a private copy budget"),
+        )?
     } else {
         super::external_content::bind_external_realizations_in_private_workspace_with_budget(
             state,
@@ -3209,6 +3260,13 @@ fn spawn_capsule_process_held(
     plan.bind_persistent_session_spawn_environment(
         external_env.as_deref(),
         external_env.as_ref().map(|_| realization_workspace),
+        external_env.as_ref().map(|_| {
+            if state.isolation.is_enforced() {
+                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace
+            } else {
+                ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
+            }
+        }),
         source_env,
         source_entry,
         executable_search_env.as_deref(),
@@ -3945,6 +4003,52 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn realization_delivery_session(
+        process_mode: PersistentSessionProcessMode,
+        cleanup_authority: PersistentSessionCleanupAuthority,
+    ) -> ryeos_engine::protocols::descriptor::PersistentSessionProtocol {
+        use ryeos_engine::protocols::descriptor::{
+            PersistentSessionChannel, PersistentSessionFraming, PersistentSessionNetworkAuthority,
+            PersistentSessionWorkspaceAuthority,
+        };
+        ryeos_engine::protocols::descriptor::PersistentSessionProtocol {
+            process_mode,
+            cleanup_authority,
+            workspace_authority: PersistentSessionWorkspaceAuthority::RuntimeWorkspace,
+            network_authority: PersistentSessionNetworkAuthority::NodePolicy,
+            runtime_env_allowlist: Vec::new(),
+            readiness_identity_env: Some("RYEOS_SESSION_BOOT_IDENTITY".to_owned()),
+            channel: PersistentSessionChannel::InheritedUnixSocket,
+            channel_env: "RYEOS_SESSION_FD".to_owned(),
+            framing: PersistentSessionFraming::U32BeJson,
+            wire_protocol: "fixture.session".to_owned(),
+            wire_version: 1,
+            max_frame_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn private_descriptor_realizations_require_the_exact_trusted_session_class() {
+        assert!(supports_private_descriptor_realizations(
+            &realization_delivery_session(
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            )
+        ));
+        assert!(!supports_private_descriptor_realizations(
+            &realization_delivery_session(
+                PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::LocalProcessScope,
+            )
+        ));
+        assert!(!supports_private_descriptor_realizations(
+            &realization_delivery_session(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::NotRequired,
+            )
+        ));
+    }
 
     #[test]
     fn retained_predecessor_protocol_gets_only_its_historical_cleanup_meaning() {

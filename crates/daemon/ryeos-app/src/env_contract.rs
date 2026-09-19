@@ -46,6 +46,8 @@ const ENGINE_PLAN_NAMES: &[&str] = &[
     "RYEOS_EXECUTION_CONTEXT",
     "RYEOS_THREAD_ID",
     "RYEOS_CHAIN_ROOT_ID",
+    "RYEOS_EXTERNAL_ROOT",
+    "RYEOS_EXTERNAL_DELIVERY",
 ];
 
 const DAEMON_CALLBACK_NAMES: &[&str] = &[
@@ -635,6 +637,14 @@ mod tests {
                     ("RYEOS_ITEM_REF".to_string(), "tool:x".to_string()),
                     ("RYEOS_THREAD_ID".to_string(), "thread:x".to_string()),
                     ("RYEOS_CHAIN_ROOT_ID".to_string(), "chain:x".to_string()),
+                    (
+                        "RYEOS_EXTERNAL_ROOT".to_string(),
+                        "/private/root".to_string(),
+                    ),
+                    (
+                        "RYEOS_EXTERNAL_DELIVERY".to_string(),
+                        "\"private_descriptor_root\"".to_string(),
+                    ),
                 ],
             )
             .unwrap();
