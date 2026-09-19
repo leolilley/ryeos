@@ -50,9 +50,11 @@ try {
           },
           metrics: {}, frame: {}, motion: [],
         },
-        workspace: {
+        view_set: {
+          view_set_id: 1n,
           layout_guard: "test", split_min_ratio: .1, split_max_ratio: .9,
           root: null, focused_tile: "", center_is_empty: true, tile_count: 0n,
+          backdrop: null,
           docks: { top: null, bottom: null, left: null, right: null }, lens_trail: [], lens_label: null,
         },
         overlays: [], notices: [], transport: { freshness: "live", last_observed_at_ms: null, channels: [] },
