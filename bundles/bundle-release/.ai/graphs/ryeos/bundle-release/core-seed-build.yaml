@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:83ff49f4804b58b323467749ad739bb470b529d60152cc63b2b8da85601ef2e2:k0mzEmBfy9+My1Exh1Z3w3Nzy8alU690Q7K7JBYNWf0sVE8M/eldPV1cSsYfv6JNQfQn69t+0IWznCJ/17PAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:7e72f31e2a14ce7c78071f8190e41e918e95041cd966b7faa59ccef2564d8918:aRq+AgPyvDJvVjRtkBhW6LS3+Qn074DmBK6vjpfcliJ+sv2CL7i4n6ihc2g+ekD14nStkTB6RlAUHDnB9oKRBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build the exact unsigned Core generation that will seed a measured RyeOS substrate.
@@ -19,6 +19,7 @@ config:
     build:
       action:
         item_id: tool:ryeos/bundle-release/core-seed-build
+        ref_bindings: {}
         params: {release_input: "${inputs.release_input}"}
       assign: {build: "${result}"}
       next: {type: unconditional, to: done}

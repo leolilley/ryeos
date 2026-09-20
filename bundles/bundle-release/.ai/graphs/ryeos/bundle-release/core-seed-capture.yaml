@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:0a0f39138735aa84988e3ab5fc696a4e7af609ee3af2f86e5a823c0f6bc24680:qSNx5048W7+Ls0ltjzFkEVaiJKNSeCQDkRaJ7UwXyMzYCwp4so9Xc8lBhcF82FHu8de/AODy4AWQsRXjIoUjBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:2e5d57eebe8d7140f9899d5c298a792e01324705959b8f77295256e5fc88cab5:Y5qgzitXaSKRlk8ielGoLLHrO+Hs7dJJog/OWe4sDlaj+1/0ke5AzTO39UZuKpJWKH5ujmT6+FYTDBaWg/9pCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Capture the admitted unsigned Core seed with only its exact publisher-signed manifest changed.
@@ -30,6 +30,7 @@ config:
     capture:
       action:
         item_id: tool:ryeos/bundle-release/core-seed-capture
+        ref_bindings: {}
         params:
           release_input: "${inputs.release_input}"
           materialization_result_hash: "${inputs.materialization_result_hash}"

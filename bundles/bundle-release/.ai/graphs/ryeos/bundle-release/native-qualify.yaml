@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T01:14:46Z:3a2a8d508cce9fc861c969fe3c57abb0b56f1608a00f6e874b00b9c5f84ff825:43e8gDWok9CpzOlyCpXjMKy34Ro/Ekn5dfkw3Es9voqhu01s2V4IW8kx0coOnP1JyIUrtt8UOzFznUudwTJdAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:0eea661d0cf7ec636e9b1e2e3248c3efa97e3cd2ff906d32ff776e5b24a6303b:EtbySXL9wEZFp60lF/dvGBl5C8rl4z4iAO7yIWAQlPCVpk8/IzudehS2ggYZY81YOIcXwwnwct4ljggyrdDnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Run the exact native bundle verifier against the admitted captured producer product.
@@ -28,6 +28,7 @@ config:
     qualify:
       action:
         item_id: tool:ryeos/bundle-release/native-qualify
+        ref_bindings: {}
         params:
           release_input: "${inputs.release_input}"
           release_input_digest: "${inputs.release_input_digest}"

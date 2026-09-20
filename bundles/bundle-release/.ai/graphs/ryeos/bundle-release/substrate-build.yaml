@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:b0250f26c7d924027a21c5f50857311c9bf786c61519abceaf060fdca1588dd7:N0mO4Xg773FZ4XVYTcJ97aQ2WwXaM5/3I2xsA87ePF66vhjdfaG2IReWcGxpWO3iPAn1IKYoKPWrBh/xmWnhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:58Z:04f4913f4c290e5aee7c30267e156dcb13d9739fdfb369aaf9774654376fb064:DFXp0aG8L8rivQRtlKcw0CIfdu0sn+K5O5yvbitJLPDzkc7DHML3y6l1786cP9lIGgW13cPvF13sl9Rm/hf9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Produce one captured receipt binding a measured host image to its qualified Core generation.
@@ -19,6 +19,7 @@ config:
     build:
       action:
         item_id: tool:ryeos/bundle-release/substrate-build
+        ref_bindings: {}
         params:
           receipt: "${inputs.receipt}"
       assign: {build: "${result}"}

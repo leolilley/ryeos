@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T01:14:46Z:83d5ff7ed5e2beb6186caa5dc76dcabf7a3359aa54c019379f2b69870c9192c8:XtEdsSUT8HnTXVhlWj7lKsy+lzIhzNG02CNAezYXTbMf8nwaNuFck9CIj6YfdIqvfwU1if+TpLPvTdBgpHx9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:bad3bf445deae93977315faf88adf4141e22d30738a0c94ba0101568e1a97a5c:DELJO+T+L7pPyUdhSbtj6ZsFVIiXhTyNYGOj951Jzgc9PEPmn2g39Mco+SHJccajSjKySMq8pEt8nDloAjJPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Materialize the publisher-signed bundle tree as a second admitted product.
@@ -30,6 +30,7 @@ config:
     capture:
       action:
         item_id: tool:ryeos/bundle-release/signed-capture
+        ref_bindings: {}
         params:
           release_input: "${inputs.release_input}"
           materialization_result_hash: "${inputs.materialization_result_hash}"

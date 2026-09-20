@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:fcade51274ec39b55f1fbb1fd0abe8865713ced4984d7fc13771ff4540002bdf:fOd9YHdI037mqsS+3Ya3qabLVIPu4tipa/bnxsruYaw94kFgR1Zn2lp2IShgtE8CR2nNaSsWOlTcg1+zc4UYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:58Z:32d685a2295f990dc440287728b9361a75b720521cb51d92a96f70056c74c451:j+svYPF/ou4M4Hp40ciQvIwdCmXT2GYfB2qOOxQMccshrGBf9Pt6+gFs73xIxQMEuKFHa4w6de4FgYNmXUi1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Run the exact substrate release verifier against the admitted receipt-only captured product.
@@ -23,6 +23,7 @@ config:
     qualify:
       action:
         item_id: tool:ryeos/bundle-release/substrate-qualify
+        ref_bindings: {}
         params: {}
       assign: {qualification: "${result}"}
       next: {type: unconditional, to: done}

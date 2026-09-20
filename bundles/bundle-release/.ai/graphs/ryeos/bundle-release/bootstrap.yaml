@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:18190da541e9fcef4da2bebbc99e931dd4c5ef80e2150f9ee727ca23c1707ecd:FFdMNjhWB1IArKQuoUuQfT3j0kWivdsyQTGB09lV90wE530WhPfSb+5UrNnYJE2ij4juX6HWfaktpYoByfDECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:48278cc7b2b9fe6ff1d2b91c175c2ae8adc94a5ed8b5ee4d8fdc4bad9c94b341:FCHUxyjAhK38J1qA8hLligG/XbSSlQHHT2NgFF9cCtaWEVxAclgn6r+bCkThoRoeaqf/thiGgbQFwJOds8e/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
@@ -41,6 +41,7 @@ config:
     inspect_core:
       action:
         item_id: service:bundle-release/core-seed-inspect
+        ref_bindings: {}
         params:
           project_path: "${inputs.project_path}"
           bundle_name: core
@@ -53,6 +54,7 @@ config:
     build_core:
       action:
         item_id: service:bundle-release/core-seed-build
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -63,6 +65,7 @@ config:
     sign_core_tree:
       action:
         item_id: service:bundle-release/request-tree-signing
+        ref_bindings: {}
         params:
           accepted_product_result_hash: "${state.core_build.accepted_product_result_hash}"
           selected_product_identity: "${state.core_build.selected_product_identity}"
@@ -73,6 +76,7 @@ config:
     capture_core:
       action:
         item_id: service:bundle-release/core-seed-capture
+        ref_bindings: {}
         params:
           build:
             catalog_namespace: "${inputs.catalog_namespace}"
@@ -89,6 +93,7 @@ config:
     qualify_core:
       action:
         item_id: service:bundle-release/core-seed-qualify
+        ref_bindings: {}
         params:
           build:
             catalog_namespace: "${inputs.catalog_namespace}"
@@ -104,6 +109,7 @@ config:
     finalize_core:
       action:
         item_id: service:bundle-release/generation-finalize
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -135,6 +141,7 @@ config:
     authorize_core:
       action:
         item_id: service:bundle-release/request-authorization
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -147,6 +154,7 @@ config:
     build_substrate_receipt:
       action:
         item_id: service:bundle-release/substrate-build
+        ref_bindings: {}
         params:
           project_path: "${inputs.project_path}"
           source_snapshot_hash: "${inputs.source_snapshot_hash}"
@@ -160,6 +168,7 @@ config:
     qualify_substrate:
       action:
         item_id: service:bundle-release/substrate-qualify
+        ref_bindings: {}
         params:
           project_path: "${inputs.project_path}"
           source_snapshot_hash: "${inputs.source_snapshot_hash}"
@@ -171,6 +180,7 @@ config:
     finalize_substrate:
       action:
         item_id: service:bundle-release/substrate-release-finalize
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -190,6 +200,7 @@ config:
     authorize_substrate:
       action:
         item_id: service:bundle-release/substrate-release-authorization
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -201,6 +212,7 @@ config:
     compose_genesis:
       action:
         item_id: service:bundle-release/genesis-set-compose
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -222,6 +234,7 @@ config:
     authorize_catalog_genesis:
       action:
         item_id: service:bundle-release/catalog-request-publication
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
@@ -237,6 +250,7 @@ config:
     publish_catalog_genesis:
       action:
         item_id: service:bundle-release/catalog-remote-publish
+        ref_bindings: {}
         params:
           remote: "${inputs.catalog_remote}"
           catalog_namespace: "${inputs.catalog_namespace}"

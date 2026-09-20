@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:b811dcf580a71da8d652c251bd63f756cc3307a3ce93a824ed96ca7e24da7216:ovuauDGys+KmNt9PqtVzekGkW34zhEw1+GzOy6yo6tKaKIAwxhJ/+MuopTFDKefCFLhgi6ArBtlI9sfJscFNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:05:57Z:809bbf53453c914535338e36f3a7a901ec1b6724ecbdee08ba1ab94512206753:El5d9OvNaMtHHB/wPd1FMrrk+OH5NhfXAYp9KZSZGyhjCu1AOx+5H/bpMVkfcq4K9Y81teS9Zv6JXkaQ8xpLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -56,6 +56,7 @@ config:
     inspect:
       action:
         item_id: service:bundle-release/input-inspect
+        ref_bindings: {}
         params:
           project_path: "${inputs.project_path}"
           bundle_name: "${inputs.bundle_name}"
@@ -71,6 +72,7 @@ config:
     build:
       action:
         item_id: service:bundle-release/generation-build
+        ref_bindings: {}
         params:
           release_input: "${state.release_input}"
           catalog_namespace: "${inputs.catalog_namespace}"
@@ -82,6 +84,7 @@ config:
     request_tree_signing:
       action:
         item_id: service:bundle-release/request-tree-signing
+        ref_bindings: {}
         params:
           accepted_product_result_hash: "${state.accepted_product.accepted_product_result_hash}"
           selected_product_identity: "${state.accepted_product.selected_product_identity}"
@@ -93,6 +96,7 @@ config:
     capture:
       action:
         item_id: service:bundle-release/generation-capture
+        ref_bindings: {}
         params:
           release_input: "${state.release_input}"
           catalog_namespace: "${inputs.catalog_namespace}"
@@ -109,6 +113,7 @@ config:
     qualify:
       action:
         item_id: service:bundle-release/generation-qualify
+        ref_bindings: {}
         params:
           release_input: "${state.release_input}"
           captured_tree_manifest_hash: "${state.captured.content_manifest_hash}"
@@ -123,6 +128,7 @@ config:
     finalize:
       action:
         item_id: service:bundle-release/generation-finalize
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
@@ -155,6 +161,7 @@ config:
     request_generation_authorization:
       action:
         item_id: service:bundle-release/request-authorization
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
@@ -168,6 +175,7 @@ config:
     compose_set:
       action:
         item_id: service:bundle-release/set-compose
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
@@ -184,6 +192,7 @@ config:
     publish_catalog:
       action:
         item_id: service:bundle-release/catalog-request-publication
+        ref_bindings: {}
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
           bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
@@ -200,6 +209,7 @@ config:
     commit_catalog:
       action:
         item_id: service:bundle-release/catalog-remote-publish
+        ref_bindings: {}
         params:
           remote: "${inputs.catalog_remote}"
           catalog_namespace: "${inputs.catalog_namespace}"
