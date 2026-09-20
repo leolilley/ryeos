@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::RngCore as _;
 use subtle::ConstantTimeEq as _;
 
@@ -234,6 +235,57 @@ pub enum ExternalCandidateStartCleanup {
 pub struct ExternalCandidateStartFailure {
     source: anyhow::Error,
     cleanup: ExternalCandidateStartCleanup,
+}
+
+/// Exact result of polling remote exec-server stdout for the protected local
+/// connector. `Uncertain` is terminal for connector recovery: the bytes may
+/// already have crossed the prior local transport and must never be replayed.
+pub enum ExternalProtocolOutput {
+    Idle,
+    Claimed(ExternalProtocolOutputPermit),
+    Uncertain { sequence: u64, frame_digest: String },
+}
+
+/// Non-cloneable application authority for one exact remote stdout frame.
+/// Dropping it leaves the durable claim uncertain. Only a successful complete
+/// write to the connector's local byte stream may call `finish`.
+pub struct ExternalProtocolOutputPermit {
+    state_store: Arc<crate::state_store::StateStore>,
+    // A claimed frame may remain in a local socket write after the async
+    // controller starts shutting down. Keep the exact controller generation's
+    // OS-backed exclusion live until that write is either finished or dropped.
+    _controller_lifetime: Arc<StateLockLease>,
+    placement: String,
+    sequence: u64,
+    frame_digest: String,
+    bytes: Vec<u8>,
+    eof: bool,
+}
+
+impl ExternalProtocolOutputPermit {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn frame_digest(&self) -> &str {
+        &self.frame_digest
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.eof
+    }
+
+    pub fn finish(self) -> Result<()> {
+        self.state_store.finish_external_protocol_output(
+            &self.placement,
+            self.sequence,
+            &self.frame_digest,
+        )
+    }
 }
 
 impl ExternalCandidateStartFailure {
@@ -1115,6 +1167,84 @@ pub fn advance_external_candidate_start(
         .map_err(|error| classify_external_start_failure(state, placement, error))
 }
 
+/// Claim at most one exact remote stdout frame for the protected connector.
+/// The caller must retain the returned permit across the complete local write.
+pub fn claim_external_protocol_output(
+    state: &AppState,
+    placement: &str,
+) -> Result<ExternalProtocolOutput> {
+    let controller_lifetime = state
+        .extensions
+        .get::<StateLockLease>()
+        .context("external connector has no retained state-lock lifetime")?;
+    controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)
+        .context("external connector controller lease has the wrong app root")?;
+    match state
+        .state_store
+        .claim_next_external_protocol_output(placement)?
+    {
+        crate::runtime_db::external_execution::ExternalProtocolOutputClaim::Idle => {
+            Ok(ExternalProtocolOutput::Idle)
+        }
+        crate::runtime_db::external_execution::ExternalProtocolOutputClaim::Uncertain {
+            sequence,
+            frame_digest,
+        } => Ok(ExternalProtocolOutput::Uncertain {
+            sequence,
+            frame_digest,
+        }),
+        crate::runtime_db::external_execution::ExternalProtocolOutputClaim::Claimed(frame) => {
+            let (bytes, eof) = match &frame.frame().payload {
+                ryeos_state::external_execution::ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: _,
+                } => (frame.protocol_bytes()?.to_vec(), false),
+                ryeos_state::external_execution::ExecutionChannelPayload::ProtocolEof => {
+                    (Vec::new(), true)
+                }
+                _ => bail!("external protocol output claim returned a non-protocol frame"),
+            };
+            Ok(ExternalProtocolOutput::Claimed(
+                ExternalProtocolOutputPermit {
+                    state_store: Arc::clone(&state.state_store),
+                    _controller_lifetime: controller_lifetime,
+                    placement: placement.to_owned(),
+                    sequence: frame.frame().sequence,
+                    frame_digest: frame.digest().to_owned(),
+                    bytes,
+                    eof,
+                },
+            ))
+        }
+    }
+}
+
+/// Retain one bounded local-provider stdin chunk for exact transport to the
+/// remote exec-server. A local commit error is terminal ambiguity; callers
+/// must not retry reconstructed bytes or fall back to local execution.
+pub fn author_external_protocol_input(
+    state: &AppState,
+    placement: &str,
+    bytes: &[u8],
+) -> Result<ExternalChannelOutboundFrame> {
+    let payload = external_protocol_input_payload(bytes)?;
+    author_external_channel_command(state, placement, payload)
+}
+
+fn external_protocol_input_payload(
+    bytes: &[u8],
+) -> Result<ryeos_state::external_execution::ExecutionChannelPayload> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= ryeos_state::external_execution::MAX_CHUNK_BYTES,
+        "external connector input chunk is empty or exceeds its bound"
+    );
+    Ok(
+        ryeos_state::external_execution::ExecutionChannelPayload::ProtocolBytes {
+            bytes_base64: STANDARD.encode(bytes),
+        },
+    )
+}
+
 fn advance_prepared_external_start(
     prepared: PreparedExternalPlacement,
 ) -> Result<ExternalCandidateStartProgress> {
@@ -1775,6 +1905,28 @@ fn apply_reconciliation_resolution(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn protocol_input_payload_enforces_the_exact_transport_bound() {
+        assert!(external_protocol_input_payload(&[]).is_err());
+        let exact = vec![0x5a; ryeos_state::external_execution::MAX_CHUNK_BYTES];
+        let payload = external_protocol_input_payload(&exact).unwrap();
+        let ryeos_state::external_execution::ExecutionChannelPayload::ProtocolBytes {
+            bytes_base64,
+        } = payload
+        else {
+            panic!("protocol input validation produced the wrong payload kind");
+        };
+        assert_eq!(STANDARD.decode(bytes_base64).unwrap(), exact);
+        assert!(
+            external_protocol_input_payload(&vec![
+                0x5a;
+                ryeos_state::external_execution::MAX_CHUNK_BYTES
+                    + 1
+            ])
+            .is_err()
+        );
+    }
 
     #[derive(Debug)]
     struct FixtureBackend {

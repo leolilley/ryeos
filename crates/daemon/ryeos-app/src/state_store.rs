@@ -13876,6 +13876,29 @@ impl StateStore {
             .admit_external_ready_and_author_release(placement, signing_key)
     }
 
+    pub(crate) fn claim_next_external_protocol_output(
+        &self,
+        placement: &str,
+    ) -> Result<runtime_db::external_execution::ExternalProtocolOutputClaim> {
+        self.lock()?
+            .runtime_db
+            .claim_next_external_protocol_output(placement)
+    }
+
+    pub(crate) fn finish_external_protocol_output(
+        &self,
+        placement: &str,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<()> {
+        self.lock()?.runtime_db.finish_external_frame_application(
+            placement,
+            ryeos_state::external_execution::ChannelDirection::SupervisorToOwner,
+            sequence,
+            digest,
+        )
+    }
+
     pub fn external_execution_channel(
         &self,
         placement: &str,

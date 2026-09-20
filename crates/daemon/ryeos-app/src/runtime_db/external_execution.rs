@@ -11,7 +11,8 @@ use anyhow::ensure;
 
 mod channel;
 pub(crate) use channel::{
-    ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalSupervisorExchange,
+    ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
+    ExternalSupervisorExchange,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;

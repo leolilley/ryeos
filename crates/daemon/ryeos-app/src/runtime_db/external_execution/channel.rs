@@ -47,7 +47,91 @@ pub(crate) enum ExternalCandidateImportClaim {
     AlreadyApplied(RetainedExternalCandidateImport),
 }
 
+pub(crate) enum ExternalProtocolOutputClaim {
+    Idle,
+    Claimed(AuthenticatedExecutionFrame),
+    Uncertain { sequence: u64, frame_digest: String },
+}
+
 impl RuntimeDb {
+    /// Claim the next exact remote protocol-output frame for the protected
+    /// controller connector.  A prior claimed frame is durable uncertainty:
+    /// callers must fail the session rather than replay its bytes to a new
+    /// local transport.
+    pub(crate) fn claim_next_external_protocol_output(
+        &self,
+        placement: &str,
+    ) -> Result<ExternalProtocolOutputClaim> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&tx, placement)?;
+        NodeJournalOwner.require_owner(&tx, &binding)?;
+        let row: Option<(i64, String, String, String)> = tx
+            .query_row(
+                "SELECT sequence,frame_digest,application,frame_json
+                   FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                    AND application IN ('pending','claimed')
+                    AND json_extract(frame_json,'$.frame.payload.kind')
+                        IN ('protocol_bytes','protocol_eof')
+                  ORDER BY sequence LIMIT 1",
+                [binding.digest()?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((sequence, frame_digest, application, wire)) = row else {
+            tx.commit()?;
+            return Ok(ExternalProtocolOutputClaim::Idle);
+        };
+        let sequence = u64::try_from(sequence)?;
+        let retained = SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            retained.frame().sequence == sequence
+                && retained.digest() == frame_digest
+                && matches!(
+                    retained.frame().payload,
+                    ExecutionChannelPayload::ProtocolBytes { .. }
+                        | ExecutionChannelPayload::ProtocolEof
+                ),
+            "external protocol output changed after retention"
+        );
+        if application == "claimed" {
+            tx.commit()?;
+            return Ok(ExternalProtocolOutputClaim::Uncertain {
+                sequence,
+                frame_digest,
+            });
+        }
+        ensure!(
+            application == "pending",
+            "external protocol output retained an unknown application state"
+        );
+        let claimed = journal::claim_application(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            sequence,
+            &frame_digest,
+        )?;
+        let journal::ApplicationClaim::New(frame) = claimed else {
+            bail!("external protocol output claim changed during its transaction")
+        };
+        ensure!(
+            matches!(
+                frame.frame().payload,
+                ExecutionChannelPayload::ProtocolBytes { .. }
+                    | ExecutionChannelPayload::ProtocolEof
+            ),
+            "external protocol output selection changed after claim"
+        );
+        tx.commit()?;
+        Ok(ExternalProtocolOutputClaim::Claimed(frame))
+    }
+
     /// Return complete sealed exports whose exact Quiesce prerequisite is
     /// already Applied. This is recovery work discovery, not a claim: the
     /// reconciler repeats every authority check while holding its CAS guard.
@@ -1813,6 +1897,265 @@ mod tests {
             )
             .unwrap();
         assert_eq!(releases, 0);
+    }
+
+    #[test]
+    fn protocol_output_claim_is_ordered_and_eof_finishes_only_after_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let ready_digest = ready(&db, &binding, &supervisor);
+        let release = db
+            .admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        let bytes = b"{\"jsonrpc\":\"2.0\"}\n";
+        let (output_wire, output_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(bytes),
+            },
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &output_wire)
+                .unwrap()
+        );
+        let (second_wire, second_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(output_digest.clone()),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"second"),
+            },
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &second_wire)
+                .unwrap()
+        );
+        let (eof_wire, eof_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(second_digest.clone()),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolEof,
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &eof_wire)
+                .unwrap()
+        );
+
+        let claimed = db.claim_next_external_protocol_output(placement).unwrap();
+        let ExternalProtocolOutputClaim::Claimed(frame) = claimed else {
+            panic!("pending protocol output was not claimed");
+        };
+        assert_eq!(frame.frame().sequence, 2);
+        assert_eq!(frame.digest(), output_digest);
+        assert_eq!(frame.protocol_bytes().unwrap(), bytes);
+        assert!(matches!(
+            db.claim_next_external_protocol_output(placement).unwrap(),
+            ExternalProtocolOutputClaim::Uncertain {
+                sequence: 2,
+                frame_digest
+            } if frame_digest == output_digest
+        ));
+
+        db.finish_external_frame_application(
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            &output_digest,
+        )
+        .unwrap();
+        let ExternalProtocolOutputClaim::Claimed(second) =
+            db.claim_next_external_protocol_output(placement).unwrap()
+        else {
+            panic!("second protocol frame was not claimed after its predecessor");
+        };
+        assert_eq!(second.frame().sequence, 3);
+        assert_eq!(second.digest(), second_digest);
+        assert_eq!(second.protocol_bytes().unwrap(), b"second");
+        db.finish_external_frame_application(
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            &second_digest,
+        )
+        .unwrap();
+        let ExternalProtocolOutputClaim::Claimed(eof) =
+            db.claim_next_external_protocol_output(placement).unwrap()
+        else {
+            panic!("protocol EOF was confused with an idle channel");
+        };
+        assert_eq!(eof.frame().sequence, 4);
+        assert_eq!(eof.digest(), eof_digest);
+        assert!(matches!(
+            eof.frame().payload,
+            ExecutionChannelPayload::ProtocolEof
+        ));
+        db.finish_external_frame_application(
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            &eof_digest,
+        )
+        .unwrap();
+        assert!(matches!(
+            db.claim_next_external_protocol_output(placement).unwrap(),
+            ExternalProtocolOutputClaim::Idle
+        ));
+    }
+
+    #[test]
+    fn claimed_protocol_output_reopens_as_uncertain_without_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let (placement, output_digest) = {
+            let db = RuntimeDb::open(&path).unwrap();
+            let (binding, owner, supervisor) = setup(&db);
+            let placement = binding.placement_thread_id.clone();
+            let ready_digest = ready(&db, &binding, &supervisor);
+            let release = db
+                .admit_external_ready_and_author_release(&placement, &owner)
+                .unwrap()
+                .unwrap();
+            let (output_wire, output_digest) = wire(
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                2,
+                Some(ready_digest),
+                release.frame().sequence,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"durable-output"),
+                },
+            );
+            db.record_external_execution_frame(&placement, &output_wire)
+                .unwrap();
+            assert!(matches!(
+                db.claim_next_external_protocol_output(&placement).unwrap(),
+                ExternalProtocolOutputClaim::Claimed(_)
+            ));
+            (placement, output_digest)
+        };
+
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(matches!(
+            db.claim_next_external_protocol_output(&placement).unwrap(),
+            ExternalProtocolOutputClaim::Uncertain {
+                sequence: 2,
+                frame_digest
+            } if frame_digest == output_digest
+        ));
+    }
+
+    #[test]
+    fn cancellation_refuses_new_output_but_allows_exact_claimed_finish() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let ready_digest = ready(&db, &binding, &supervisor);
+        let release = db
+            .admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        let (first_wire, first_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"possibly-delivered"),
+            },
+        );
+        db.record_external_execution_frame(placement, &first_wire)
+            .unwrap();
+        assert!(matches!(
+            db.claim_next_external_protocol_output(placement).unwrap(),
+            ExternalProtocolOutputClaim::Claimed(_)
+        ));
+        let (second_wire, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(first_digest.clone()),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"must-not-deliver"),
+            },
+        );
+        db.record_external_execution_frame(placement, &second_wire)
+            .unwrap();
+        db.cancel_external_allocation(placement).unwrap();
+
+        assert!(matches!(
+            db.claim_next_external_protocol_output(placement).unwrap(),
+            ExternalProtocolOutputClaim::Uncertain {
+                sequence: 2,
+                frame_digest
+            } if frame_digest == first_digest
+        ));
+        db.finish_external_frame_application(
+            placement,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            &first_digest,
+        )
+        .unwrap();
+        assert!(db.claim_next_external_protocol_output(placement).is_err());
+    }
+
+    #[test]
+    fn expired_output_cannot_be_newly_claimed() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (_, _, _, mut binding, owner, supervisor) =
+            pending_channel(&db, "short-output", "short-output", 100, 1024 * 1024);
+        binding.execution_deadline_ms = binding.issued_at_ms + 500;
+        binding.expires_at_ms = binding.issued_at_ms + 1_500;
+        db.register_external_execution_channel(&binding).unwrap();
+        let placement = &binding.placement_thread_id;
+        let ready_digest = ready(&db, &binding, &supervisor);
+        let release = db
+            .admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        let (wire, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            release.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"expired"),
+            },
+        );
+        db.record_external_execution_frame(placement, &wire)
+            .unwrap();
+        let remaining = binding
+            .execution_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        if remaining >= 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                u64::try_from(remaining).unwrap() + 2,
+            ));
+        }
+        assert!(db.claim_next_external_protocol_output(placement).is_err());
     }
 
     #[test]
