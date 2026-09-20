@@ -2722,7 +2722,14 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/authority-calibrate",
     endpoint: "bundle_release.authority_calibrate",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.bundle-release/authority-calibrate"],
+    required_caps: &[
+        "ryeos.execute.config.bundle-release/core-seed-build-products",
+        "ryeos.execute.config.bundle-release/core-seed-capture-products",
+        "ryeos.execute.config.bundle-release/native-build-products",
+        "ryeos.execute.config.bundle-release/signed-capture-products",
+        "ryeos.execute.config.bundle-release/substrate-build-products",
+        "ryeos.execute.service.bundle-release/authority-calibrate",
+    ],
     handler: authority_calibrate_handler,
 };
 pub const GENERATION_BUILD: ServiceDescriptor = ServiceDescriptor {
