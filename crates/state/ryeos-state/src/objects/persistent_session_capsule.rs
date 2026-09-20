@@ -28,7 +28,8 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // v12 retains the complete signed auxiliary configuration inventory. A prior
 // capsule cannot authorize preparing these additional profile-home files.
 // v13 additionally retains the exact immutable namespace configuration inventory.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 13;
+// v14 retains external candidate program requirements separately from placement authority.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 14;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -355,6 +356,8 @@ impl PersistentSessionWireContract {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistentSessionAuthority {
+    pub external_candidate:
+        Option<crate::external_execution::admission::AdmittedExternalCandidateProgram>,
     pub exact_program_hash: String,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
@@ -577,6 +580,9 @@ pub fn validate_session_process_environment_relative_path(path: &str) -> anyhow:
 
 impl PersistentSessionAuthority {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(program) = &self.external_candidate {
+            program.validate()?;
+        }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session exact program hash",
             &self.exact_program_hash,
@@ -636,6 +642,9 @@ impl PersistentSessionAuthority {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedPersistentSessionCapsule {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub external_candidate:
+        Option<crate::external_execution::admission::AdmittedExternalCandidateProgram>,
     pub schema: u32,
     pub kind: String,
     pub exact_program: Value,
@@ -709,6 +718,7 @@ impl AdmittedPersistentSessionCapsule {
 
     pub fn authority(&self) -> PersistentSessionAuthority {
         PersistentSessionAuthority {
+            external_candidate: self.external_candidate.clone(),
             exact_program_hash: self.exact_program_hash.clone(),
             lifecycle: self.lifecycle.clone(),
             wire: self.wire.clone(),
@@ -770,6 +780,21 @@ impl AdmittedPersistentSessionCapsule {
             }
         } else if self.wire.wire_protocol == "ryeos.structured-session" {
             anyhow::bail!("structured-session capsule has no admitted profile identity");
+        }
+        let requirement = self
+            .structured_session_profile
+            .as_ref()
+            .map(AdmittedStructuredSessionProfile::external_candidate_requirement)
+            .transpose()?
+            .flatten();
+        let expected = requirement
+            .as_ref()
+            .map(|requirement| requirement.resolve(self.retained_product_selections.as_ref()))
+            .transpose()?;
+        if self.external_candidate != expected {
+            anyhow::bail!(
+                "external candidate program contradicts its signed profile or retained products"
+            );
         }
         if self.executable_search.len() > MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
             anyhow::bail!("persistent-session executable search exceeds its entry bound");
@@ -1006,7 +1031,24 @@ pub struct AdmittedStructuredSessionProfile {
 }
 
 impl AdmittedStructuredSessionProfile {
+    pub fn external_candidate_requirement(
+        &self,
+    ) -> anyhow::Result<Option<crate::external_execution::admission::ExternalCandidateRequirement>>
+    {
+        let value = self.contract.get("external_candidate").ok_or_else(|| {
+            anyhow::anyhow!("structured-session external candidate requirement is missing")
+        })?;
+        let requirement: Option<
+            crate::external_execution::admission::ExternalCandidateRequirement,
+        > = serde_json::from_value(value.clone())?;
+        if let Some(requirement) = &requirement {
+            requirement.validate()?;
+        }
+        Ok(requirement)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.external_candidate_requirement()?;
         super::thread_snapshot::validate_canonical_hash(
             "structured-session profile hash",
             &self.profile_hash,
@@ -1436,7 +1478,7 @@ mod tests {
 
     #[test]
     fn predecessor_capsule_schema_is_refused_without_translation() {
-        for schema in [1, 9, 10] {
+        for schema in [1, 9, 10, 13] {
             let value = serde_json::json!({
                 "schema": schema,
                 "kind": PERSISTENT_SESSION_CAPSULE_KIND

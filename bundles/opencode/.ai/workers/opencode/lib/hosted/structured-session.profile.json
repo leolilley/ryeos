@@ -1,5 +1,6 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
+  "external_candidate": null,
   "transport": "http_sse",
   "http_sse": {
     "username_env": "OPENCODE_SERVER_USERNAME",

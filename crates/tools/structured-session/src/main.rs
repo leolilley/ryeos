@@ -179,6 +179,9 @@ type WorkloadCommandResult = (String, std::result::Result<WorkloadCommandOutput,
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StructuredSessionProfile {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    external_candidate:
+        Option<ryeos_state::external_execution::admission::ExternalCandidateRequirement>,
     schema_version: u32,
     transport: ProfileTransport,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -609,6 +612,9 @@ fn validate_structured_session_profile(profile: &StructuredSessionProfile) -> Re
         &profile.auxiliary_configs,
     )?;
     ryeos_state::objects::validate_session_runtime_configs(&profile.runtime_configs)?;
+    if profile.external_candidate.is_some() {
+        bail!("external candidate profile requires a protected execution connector");
+    }
     if profile.workload_args.len() > 64
         || profile
             .workload_args
@@ -4445,6 +4451,20 @@ mod tests {
         assert_eq!(queue.events.len(), 8 - usize::try_from(count).unwrap());
     }
 
+    #[test]
+    fn external_candidate_profile_cannot_start_without_a_protected_connector() {
+        let mut profile = gating_approval_profile();
+        profile.external_candidate = Some(
+            ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+                schema: 1,
+                protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                runtime_product_declaration_id: "candidate_runtime".into(),
+            },
+        );
+        let error = validate_structured_session_profile(&profile).unwrap_err();
+        assert!(error.to_string().contains("protected execution connector"));
+    }
+
     fn gating_approval_profile() -> StructuredSessionProfile {
         serde_json::from_value(json!({
             "schema_version":ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION,
@@ -4464,6 +4484,7 @@ mod tests {
             "baseline_destination":"config.toml",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],
@@ -4943,6 +4964,7 @@ server.serve_forever()
             "baseline_destination":"fixture.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "initialization":[],

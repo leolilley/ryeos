@@ -4,6 +4,59 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Current program admission slice
+
+Profile schema 9 requires `external_candidate`: either explicit `null` for local
+execution or a closed `ryeos.external-candidate.stdio.v1` requirement naming one
+runtime product declaration. Capsule schema 14 retains the resolved program in
+its authority projection and recomputes it from the signed profile and exact
+retained product selections. Omission cannot select local execution. The selected
+runtime requires an admitted qualification and the protocol's fixed claims in
+the signed product relationship; bare manifest hashes are insufficient.
+
+This is program identity only. It does not grant cloud lifecycle authority.
+`reservation.binding_hash` and `channel.execution_binding_hash` retain their
+meaning as the protected operator binding generation, separate from the program
+digest. The next integration needs a node-owned binding provider and a retained
+placement admission joining that generation to the capsule, selected runtime,
+and narrowed capacity/deadline limits. Existing host-runtime process-scope
+bindings do not supply cloud account or credential authority. Fresh admission,
+recovered execution, pooled execution, exclusive launch and the bridge must
+refuse external profiles until that owner and protected connector are supplied.
+Historical capsule inspection remains distinct from permission to execute it.
+
+The supervisor/launcher implementation through `f08547e9f` retains native capture
+under a durable occurrence receipt and reconciles exact quiesce/export replay.
+At the start of this slice, 33 state external-execution tests and the composed
+supervisor capture-replay test passed. The composed test uses a recording launcher;
+it proves one capture and one release across duplicate quiesce, not a complete
+native or remote worker. Current focused checks pass: program resolution and
+state-level external capsule roundtrip/tampering (3), profile compiler (15),
+executor persistent sessions (25), Codex/OpenCode bundle checks (32 + 5), and
+allocation SQLite regressions (22). The capsule fixture is structurally valid;
+it is not installed signed-source admission. Launcher regressions (5) and the
+bridge's protected-connector refusal test (1) also pass. The bridge check is a
+profile refusal test, not a running external connector qualification.
+
+Architecture, security/recovery and test reviews found no remaining defect in
+the program identity slice. Review added executor refusal on recovered/pool/
+exclusive launch, capsule/profile/proof cross-checks, immediately preceding
+schema refusal, and exact-size launcher regression cases. Still required before
+activation: valid external fixtures through the real admission/recovery entry
+points with provider/allocator contact counters; installed full qualification
+closure; and the complete execution lifecycle. A helper-only refusal test does
+not establish those entry-point guarantees. Changed source closures and worker
+definitions were refreshed and development-signed; full binary/bundle manifest
+refresh remains part of final qualification.
+
+Launcher bootstrap validation now rejects path spelling aliases, process-string
+NULs and aggregate canonical JSON exceeding the receiver's 256 KiB limit before
+preparing a launch. This closes a sender/receiver admission mismatch; it does not
+establish placement, runtime integrity or native execution qualification.
+
+The sections below retain earlier checkpoint evidence. References there to
+missing guest implementation or older schema versions describe those checkpoints.
+
 ## Allocation journal
 
 `test_allocation_journal.py` executes the exact production SQLite DDL extracted

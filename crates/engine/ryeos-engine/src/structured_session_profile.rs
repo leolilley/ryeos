@@ -20,9 +20,9 @@ use ryeos_state::objects::{
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v8 requires explicit immutable namespace configuration inventory. An
-/// omitted inventory cannot be reconstructed from ambient runtime files.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 8;
+/// v9 requires explicit external candidate requirements. Omission cannot
+/// select a local execution fallback during admission or recovery.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 9;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -75,6 +75,7 @@ pub fn compile(
         "baseline_destination",
         "auxiliary_configs",
         "runtime_configs",
+        "external_candidate",
         "portable_state",
         "credential_subject",
         "initialization",
@@ -1956,6 +1957,7 @@ mod tests {
             "baseline_destination":"runtime.conf",
             "auxiliary_configs":[],
             "runtime_configs":[],
+            "external_candidate":null,
             "portable_state":null,
             "credential_subject":null,
             "configuration_authority":"immutable_argv",
@@ -2427,6 +2429,36 @@ mod tests {
                 .to_string()
                 .contains("notification count exceeds its aggregate bound")
         );
+    }
+
+    #[test]
+    fn external_candidate_requirement_is_explicit_closed_and_identity_bearing() {
+        let mut profile: Value =
+            serde_json::from_slice(&fixture_profile("job.status", "job/status")).unwrap();
+        let local = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        assert!(local.external_candidate_requirement().unwrap().is_none());
+        profile
+            .as_object_mut()
+            .unwrap()
+            .remove("external_candidate");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
+        profile["external_candidate"] = json!({"schema":1,
+            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+            "runtime_product_declaration_id":"candidate_runtime"});
+        let external = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
+        assert!(external.external_candidate_requirement().unwrap().is_some());
+        assert_ne!(local.profile_hash, external.profile_hash);
+        let valid = profile.clone();
+        for field in ["schema", "protocol", "runtime_product_declaration_id"] {
+            let mut invalid = valid.clone();
+            invalid["external_candidate"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        }
+        profile["external_candidate"]["url"] = json!("https://arbitrary.invalid");
+        assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
     }
 
     #[test]

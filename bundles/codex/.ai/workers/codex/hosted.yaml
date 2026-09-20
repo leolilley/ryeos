@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T07:19:59Z:e873860aa4e81aa9af5efcac1ba27f4c042b2d28891f3d03dc4513744d13c9bf:2s9jNi5qojCmkxjxQYcJHZhYTyEamJxpamWoFgvvdGFsncCO1DBa4K8OjXFy54AGt3w5nGxgdp0RxTACYPwAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T07:51:50Z:3790d9f4e3ad2f0cb94009b821beeb6549f08b2880e6f8574fd2017370183243:s+kqXZER2qyRXZgjby/p66gA0YifZRdmcFigKauSZIftL322kRL+LYYKhdfjlVz5S91o+1xw8FvTcS8WUg2KDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.4"
 executor_id: "@subprocess"
@@ -18,7 +18,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "25431731d1e46b9a93dd8ef11c2222cd62eb68e01e9884e04c3520d7f25556ba"
+  digest: "ae3130ec566a27c15d0106bc912b26e442464440b71ff2fea7c3357718c416ef"
 
 external_content:
   # Runtime dependencies must never create mountpoints in the project CoW.
