@@ -664,9 +664,13 @@ impl RyeOsCore {
                     }
                     let encoded =
                         serde_json::to_vec(supplied).map_err(|error| error.to_string())?;
-                    let byte_limit =
-                        usize::try_from(insertion_context.binding_request_bounds.max_request_bytes)
-                            .map_err(|_| "binding request byte bound exceeds this platform")?;
+                    let byte_limit = usize::try_from(
+                        insertion_context
+                            .descriptor
+                            .binding_request_bounds
+                            .max_request_bytes,
+                    )
+                    .map_err(|_| "binding request byte bound exceeds this platform")?;
                     if byte_limit == 0 || encoded.len() > byte_limit {
                         return Err(format!(
                             "fresh subject exceeds binding request bounds: {input}"

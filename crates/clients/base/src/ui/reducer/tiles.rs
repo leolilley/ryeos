@@ -1167,7 +1167,7 @@ mod tests {
                 view_set_id: source_id,
             })
         );
-        let actions = super::super::view_model::command_overlay_items_for(&core);
+        let actions = crate::ui::view_model::command_overlay_items_for(&core);
         assert!(actions.iter().any(|action| matches!(
             &action.intent,
             RyeOsUiIntent::FollowViewSetSelection { view_set_id, .. } if *view_set_id == target_id
@@ -2122,7 +2122,7 @@ mod tests {
         assert_eq!(core.view_sets.len(), 2);
         core.view_sets[0].input_buffers.insert(
             "draft".into(),
-            super::super::model::RyeOsInputState {
+            crate::ui::model::RyeOsInputState {
                 text: "unsent".into(),
                 ..Default::default()
             },
@@ -2199,7 +2199,7 @@ mod tests {
         core.view_sets[0].title = "Development".into();
         core.view_sets[0].input_buffers.insert(
             "draft".into(),
-            super::super::model::RyeOsInputState {
+            crate::ui::model::RyeOsInputState {
                 text: "private draft".into(),
                 ..Default::default()
             },
@@ -2240,8 +2240,10 @@ mod tests {
                 }}
             }),
         );
-        let source_dock =
-            super::model::dock_view_instance_key(source_id, super::model::RyeOsDockEdge::Bottom);
+        let source_dock = crate::ui::model::dock_view_instance_key(
+            source_id,
+            crate::ui::model::RyeOsDockEdge::Bottom,
+        );
         core.selection_attachments.insert(
             source_dock,
             crate::ui::attachment::SelectionAttachment::RequiredSubject {
@@ -2282,8 +2284,10 @@ mod tests {
                 .count(),
             1
         );
-        let duplicate_dock =
-            super::model::dock_view_instance_key(duplicate.id, super::model::RyeOsDockEdge::Bottom);
+        let duplicate_dock = crate::ui::model::dock_view_instance_key(
+            duplicate.id,
+            crate::ui::model::RyeOsDockEdge::Bottom,
+        );
         assert!(matches!(
             core.selection_attachments.get(&duplicate_dock),
             Some(crate::ui::attachment::SelectionAttachment::RequiredSubject {
@@ -2292,7 +2296,8 @@ mod tests {
             }) if input == "subject_slot_bottom" && facets == &["selection.work.thread"]
         ));
         assert!(effects.iter().all(|effect| {
-            let super::effect::RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind else {
+            let crate::ui::effect::RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind
+            else {
                 return true;
             };
             !crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)

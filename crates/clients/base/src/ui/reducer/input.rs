@@ -1626,7 +1626,7 @@ mod tests {
     #[test]
     fn submit_affordance_blocked_without_compiled_binding() {
         let mut unbound = session();
-        unbound.binding_digest.clear();
+        unbound.binding_attachments[0].binding_digest.clear();
         let mut core = RyeOsCore::new(unbound, BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,

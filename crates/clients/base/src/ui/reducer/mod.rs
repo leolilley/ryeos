@@ -2707,7 +2707,7 @@ mod tests {
     #[test]
     fn prefill_retry_turn_without_binding_is_a_noop_with_notice() {
         let mut unbound = session();
-        unbound.binding_digest.clear();
+        unbound.binding_attachments[0].binding_digest.clear();
         let mut core = RyeOsCore::new(unbound, BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -2735,7 +2735,7 @@ mod tests {
     #[test]
     fn exact_view_choice_revalidates_identity_and_intent_after_reorder() {
         let mut browser = writable_session();
-        browser.effective_surface = Some(serde_json::json!({
+        browser.binding_attachments[0].effective_surface = serde_json::json!({
             "name": "exact-pointer",
             "tiles": ["view:test/exact"],
             "views": {
@@ -2757,7 +2757,7 @@ mod tests {
                     }]
                 }
             }
-        }));
+        });
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
         let tile_id = core.view_sets[core.active_view_set].focused_tile;
         let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]
@@ -2892,7 +2892,7 @@ mod tests {
     #[test]
     fn delayed_choice_from_a_hidden_group_tab_is_rejected() {
         let mut browser = writable_session();
-        browser.effective_surface = Some(serde_json::json!({
+        browser.binding_attachments[0].effective_surface = serde_json::json!({
             "name": "group-pointer",
             "tiles": ["view:test/a", "view:test/b"],
             "views": {
@@ -2907,7 +2907,7 @@ mod tests {
                     }}]
                 }
             }
-        }));
+        });
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
         let view_set = &core.view_sets[core.active_view_set];
         let a = view_set
@@ -2962,7 +2962,7 @@ mod tests {
     #[test]
     fn exact_section_toggle_resolves_current_position_after_binding_reorder() {
         let mut browser = writable_session();
-        browser.effective_surface = Some(serde_json::json!({
+        browser.binding_attachments[0].effective_surface = serde_json::json!({
             "name": "section-pointer",
             "tiles": ["view:test/sections"],
             "views": {
@@ -2978,7 +2978,7 @@ mod tests {
                     ]
                 }
             }
-        }));
+        });
         let mut core = RyeOsCore::new(browser, BrowserViewport::default(), 0);
         let tile_id = core.view_sets[core.active_view_set].focused_tile;
         let instance_key = core.view_sets[core.active_view_set].tiles[&tile_id]

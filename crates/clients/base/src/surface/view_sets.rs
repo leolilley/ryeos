@@ -309,7 +309,7 @@ pub fn validate_saved_view_set_templates(templates: &[SavedViewSetTemplate]) -> 
         }
         for (relationship_index, relationship) in template.relationships.iter().enumerate() {
             let relationship_location = format!("{location}.relationships[{relationship_index}]");
-            if !mounts.insert(&relationship.mount) {
+            if !mounts.insert(relationship.mount.clone()) {
                 return Err(format!("{relationship_location}.mount is duplicated"));
             }
             match &relationship.mount {

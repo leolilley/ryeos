@@ -409,18 +409,18 @@ pub async fn handle_open(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .into_iter()
         .filter(|thread| {
-            thread.kind == SEAT_KIND
-                && thread.status == "running"
-                && thread.item_ref == surface_ref
-                && thread.executor_ref == client_ref
+            thread.kind == SEAT_KIND && thread.status == "running" && thread.item_ref == surface_ref
         })
-        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
-    if let Some(thread) = existing {
+        .filter_map(|thread| {
+            let detail = require_owned_seat(&state, &thread.thread_id, &owner).ok()?;
+            (detail.executor_ref == client_ref).then_some((thread, detail))
+        })
+        .max_by(|(a, _), (b, _)| a.updated_at.cmp(&b.updated_at));
+    if let Some((thread, detail)) = existing {
         let _admission = ui_state
             .browser_sessions
             .admit_attachment_dispatch(&session.session_id, &coordinate)
             .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
-        let detail = require_owned_seat(&state, &thread.thread_id, &owner)?;
         let (producer_incarnation, next_engine_seq) = issue_producer(&state, &detail, &owner)?;
         return Ok(json!({
             "thread_id": thread.thread_id,

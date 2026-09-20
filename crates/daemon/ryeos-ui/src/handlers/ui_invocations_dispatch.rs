@@ -590,7 +590,10 @@ fn resolve_binding_request(
                 }
                 ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. }
                 | ryeos_client_base::ui::content::AffordanceInvoke::OpenSavedViewSet { .. }
-                | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveViewSet { .. } => {
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveViewSet { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveParticularViewSet {
+                    ..
+                } => {
                     return Err(HandlerError::BadRequest(
                         "UI-local affordance crossed execution dispatch".into(),
                     )

@@ -4434,9 +4434,12 @@ mod tests {
             }}),
             json!(["view:test/detail"]),
         );
-        let heading = view_heading(&core, "view:test/detail").unwrap();
+        let instance = core.view_sets[0].tiles[&core.view_sets[0].focused_tile]
+            .instance_key
+            .clone();
+        let heading = view_heading(&core, &instance, "view:test/detail").unwrap();
         assert_eq!(heading.title, "A task");
-        let supplement = view_supplement(&core, "view:test/detail").unwrap();
+        let supplement = view_supplement(&core, &instance, "view:test/detail").unwrap();
         assert_eq!(supplement.excerpt[0].value, "<script>not markup</script>");
         let scene = supplement.scene.unwrap();
         assert_eq!(scene.objects[0].end, Some([10.0, 10.0, 0.0]));

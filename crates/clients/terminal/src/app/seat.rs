@@ -52,8 +52,10 @@ pub async fn open_seat_thread(
     client: &DaemonClient,
     binding: &SeatBindingCoordinate,
 ) -> Result<String, String> {
+    let body = serde_json::to_value(binding)
+        .map_err(|error| format!("encode durable UI seat binding: {error}"))?;
     let envelope = client
-        .signed_post("/ui/api/session/seat/open", binding)
+        .signed_post("/ui/api/session/seat/open", &body)
         .await
         .map_err(|error| format!("open durable UI seat: {error}"))?;
     envelope
@@ -71,8 +73,10 @@ async fn reattach_seat_thread(
     // The session endpoint atomically reattaches the freshest owned seat or
     // creates one. Clients never enumerate seat-session threads or author the
     // execution policy that owns them.
+    let body = serde_json::to_value(binding)
+        .map_err(|error| format!("encode durable UI seat binding: {error}"))?;
     let envelope = client
-        .signed_post("/ui/api/session/seat/open", binding)
+        .signed_post("/ui/api/session/seat/open", &body)
         .await
         .map_err(|error| format!("reattach durable UI seat: {error}"))?;
     let thread_id = envelope

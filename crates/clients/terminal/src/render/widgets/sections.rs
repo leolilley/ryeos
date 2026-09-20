@@ -136,6 +136,7 @@ mod tests {
         RyeOsRowVm {
             glyph: None,
             id: primary.to_string(),
+            cursor: 0,
             primary: primary.to_string(),
             secondary: None,
             meta: meta.map(str::to_string),
@@ -153,6 +154,8 @@ mod tests {
 
     fn section(title: &str, collapsed: bool, rows: Vec<RyeOsRowVm>) -> RyeOsSectionVm {
         RyeOsSectionVm {
+            id: title.to_string(),
+            cursor: 0,
             title: title.to_string(),
             count: rows.len(),
             collapsed,

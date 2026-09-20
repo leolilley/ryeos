@@ -477,6 +477,7 @@ mod tests {
             affordance_hints: vec![],
             rows: vec![RyeOsTableRowVm {
                 id: "T-ab".into(),
+                cursor: 0,
                 cells: vec!["T-ab".into()],
                 hierarchy: None,
                 cell_tones: Vec::new(),
@@ -494,6 +495,8 @@ mod tests {
         let input = RyeOsInputVm {
             address: ryeos_client_base::ui::model::RyeOsInputAddress {
                 session_id: "fixture".into(),
+                binding_attachment_id: "fixture".into(),
+                binding_generation: 1,
                 binding_digest: "fixture".into(),
                 view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
                 buffer: ryeos_client_base::ui::model::InputBufferKey::new(

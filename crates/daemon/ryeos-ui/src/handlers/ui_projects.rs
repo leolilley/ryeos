@@ -894,7 +894,7 @@ fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
     let operator =
         ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
     let principal_id = &attachment.compiled_binding.binding.principal_id;
-    Ok((principal_id != operator.principal_id()).then(|| principal_id.clone()))
+    Ok((principal_id.as_str() != operator.principal_id().as_str()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
@@ -914,7 +914,7 @@ fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Resu
     Ok(())
 }
 
-fn retained_principal_id(state: &AppState) -> Result<String> {
+fn retained_principal_id(_state: &AppState) -> Result<String> {
     crate::seat_auth::compiled_ui_attachment()
         .map(|attachment| attachment.compiled_binding.binding.principal_id.clone())
         .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()).into())
