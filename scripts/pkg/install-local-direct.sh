@@ -72,6 +72,9 @@ Options:
                         Use this absolute Cargo target directory for population
                         and installation, including across privileged re-exec.
                         Defaults to this checkout's target directory.
+                        Fresh native nodes bind their substrate identity to a
+                        canonical digest of the staged ryeosd and ryeos binaries
+                        at native substrate protocol 1.
   --crates "A B C"      With --populate, rebuild only these Cargo packages (e.g.
                         --crates ryeosd for a daemon-only source correction).
                         Unselected bundle payloads retain their existing exact
@@ -712,6 +715,20 @@ required_bins=(
 optional_bins=(lillux)
 installed_user_bins=("${required_bins[@]}")
 
+native_substrate_digest() {
+    local binary digest
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    {
+        printf '%s\n' 'ryeos/native-substrate/v1'
+        for binary in "${required_bins[@]}"; do
+            [[ -f "$target_dir/$binary" && ! -L "$target_dir/$binary" ]] || return 1
+            digest="$(sha256sum -- "$target_dir/$binary")" || return 1
+            digest="${digest%% *}"
+            printf '%s %s\n' "$binary" "$digest"
+        done
+    } | sha256sum | cut -d' ' -f1
+}
+
 if [[ $run_populate -eq 1 && $install_transaction_active -eq 0 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     # Be explicit about scope — never trigger a full workspace rebuild implicitly.
@@ -1037,6 +1054,16 @@ if [[ $run_init -eq 1 ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
     init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
+    substrate_identity_path="$state_root/.ai/node/substrate-identity.json"
+    if [[ ! -e "$substrate_identity_path" && ! -L "$substrate_identity_path" ]]; then
+        native_substrate_sha256="$(native_substrate_digest)" || \
+            die "cannot measure the staged native substrate"
+        init_args+=(
+            --substrate-image-digest "sha256:$native_substrate_sha256"
+            --substrate-protocol 1
+        )
+        ryeos_term_note "binding fresh node to staged native substrate protocol 1"
+    fi
     init_status=0
     ryeos_term_suspend
     "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
