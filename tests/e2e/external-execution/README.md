@@ -4,6 +4,50 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Protected supervisor executable checkpoint
+
+Runtime operator epoch 53, signed external-binding schema 5, supervisor
+bootstrap schema 4, and outer-supervisor journal epoch 3 bind the exact admitted
+launcher artifact into placement, activation, durable launch intent, and guest
+startup. The production supervisor is now an executable with a closed fixed-FD
+boundary: its sealed bootstrap, state root, candidate runtime, candidate-private
+parent, launcher, and runtime mount arrive only as inherited authorities. It
+accepts no argv, ambient project path, provider credential, node grant, or
+mutable launcher selection.
+
+The supervisor independently verifies directory-tree disjointness, the exact
+launcher bytes, and the exact admitted runtime tree before attachment or launch.
+Its occurrence-private state anchor permits fresh construction only for an empty
+state root. Reopen after durable launch intent returns typed recovery-only
+evidence and cannot attach again or spawn another launcher. The bounded control
+loop distinguishes retryable transport ambiguity from fatal local failure,
+honors separate execution and post-capture deadlines, and reaps the exact native
+launcher on every terminal path.
+
+Executable-boundary coverage invokes the real binary through Lillux descriptor
+mapping. It refuses missing, unsealed, oversized, and noncanonical bootstrap
+documents, reaches the next fixed authority only after accepting canonical
+bootstrap bytes, and proves a retained launch intent exits recovery-only without
+controller contact or launcher execution. That test exposed and corrected a
+generic Lillux mismatch: inherited directory authorities no longer attempt to
+reopen diagnostic pathnames, while path-opened authorities retain their pathname
+binding checks. Missing inherited fixed descriptors are validated before Rust
+constructs an owning `File`, preventing an I/O-safety abort on refusal.
+
+Focused source evidence on 2026-09-21: the real supervisor TLS/control suite
+passed 19 tests with one subprocess-only helper ignored; the executable boundary
+passed 6 tests; the Lillux inherited-directory group passed 8 tests; application
+external execution passed 31 tests; placement lifecycle passed 8 tests; signed
+node configuration passed 19 tests; shared state external execution passed 51
+tests; and the independent production-DDL Python suite passed 25 tests. No
+external service, provider/model, lifecycle API, credential, grant, install,
+deployment, release, or paid resource was contacted or changed.
+
+This checkpoint does not yet connect the daemon's dedicated-session start owner
+to the external placement lifecycle, settle ambiguous start/cleanup through the
+compound completion owner, install a provider adapter, or prove the complete
+B -> C -> evaluation -> D workflow.
+
 ## Controller-owned durable candidate import checkpoint
 
 Runtime operator epoch 52 makes the controller's signed frame transcript the

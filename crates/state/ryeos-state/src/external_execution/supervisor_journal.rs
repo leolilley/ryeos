@@ -24,12 +24,12 @@ use super::{ExecutionChannelBinding, encode_channel_public_key};
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-const SCHEMA_EPOCH: i64 = 2;
+const SCHEMA_EPOCH: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=2),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=3),
     journal_nonce TEXT NOT NULL UNIQUE,
     directory_identity_json TEXT NOT NULL,
     database_identity_json TEXT NOT NULL,
@@ -285,6 +285,14 @@ impl PreparedExternalSupervisorJournal {
 }
 
 impl AttachedExternalSupervisorJournal {
+    pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
+        &self.0.store_identity
+    }
+
+    pub fn bootstrap(&self) -> &ExternalSupervisorBootstrap {
+        &self.0.bootstrap
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.0.binding.as_ref().expect("attached stage has binding")
     }
@@ -359,6 +367,14 @@ impl AttachedExternalSupervisorJournal {
 }
 
 impl LaunchIntentExternalSupervisorJournal {
+    pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
+        &self.0.store_identity
+    }
+
+    pub fn bootstrap(&self) -> &ExternalSupervisorBootstrap {
+        &self.0.bootstrap
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.0.binding.as_ref().expect("launch stage has binding")
     }
@@ -445,6 +461,14 @@ impl ExternalSupervisorJournalRecovery {
 }
 
 impl RecoveredExternalSupervisorJournal {
+    pub fn store_identity(&self) -> &ExternalSupervisorJournalStoreIdentity {
+        &self.0.store_identity
+    }
+
+    pub fn bootstrap(&self) -> &ExternalSupervisorBootstrap {
+        &self.0.bootstrap
+    }
+
     pub fn binding(&self) -> &ExecutionChannelBinding {
         self.0
             .binding
@@ -802,7 +826,7 @@ mod tests {
         let recipe_digest = recipe.digest().unwrap();
         let roots = vec![STANDARD.encode(b"fixture root")];
         ExternalSupervisorBootstrap {
-            schema: 3,
+            schema: 4,
             controller: ExternalControllerTransportContract {
                 schema: 1,
                 https_origin: "https://controller.example".into(),
@@ -820,6 +844,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
                 requirement: ExternalCandidateRequirement {
                     schema: 2,

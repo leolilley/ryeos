@@ -23,6 +23,11 @@ pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/ex
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
 pub const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
 pub const MAX_TLS_ROOT_BUNDLE_BYTES: usize = 256 * 1024;
+/// Complete secret bootstrap ceiling at the protected supervisor boundary.
+/// This includes the base64-expanded TLS roots and the admitted runtime recipe,
+/// so a bootstrap accepted by the controller is representable by the fixed
+/// sealed-descriptor launch contract.
+pub const MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES: usize = 512 * 1024;
 
 /// Node-signed, non-secret authority for the controller transport. The actual
 /// root certificates are delivered only through the protected supervisor
@@ -147,6 +152,9 @@ pub struct ExternalSupervisorBootstrap {
     pub base_snapshot_hash: String,
     pub execution_binding_hash: String,
     pub supervisor_runtime_hash: String,
+    /// Exact installed launcher executable selected by the signed placement
+    /// generation. Observing a launcher digest after launch is not admission.
+    pub launcher_artifact_hash: String,
     pub candidate_program: AdmittedExternalCandidateProgram,
     pub owner_public_key: String,
     pub bootstrap_capability: String,
@@ -162,7 +170,7 @@ pub struct ExternalSupervisorBootstrap {
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 3,
+            self.schema == 4,
             "unsupported external supervisor bootstrap schema"
         );
         self.controller.validate()?;
@@ -187,6 +195,7 @@ impl ExternalSupervisorBootstrap {
             &self.base_snapshot_hash,
             &self.execution_binding_hash,
             &self.supervisor_runtime_hash,
+            &self.launcher_artifact_hash,
         ] {
             hash(digest)?;
         }
@@ -228,7 +237,12 @@ impl ExternalSupervisorBootstrap {
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate()?;
-        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+        let bytes = lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes();
+        ensure!(
+            bytes.len() <= MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+            "external supervisor bootstrap exceeds its sealed descriptor bound"
+        );
+        Ok(bytes)
     }
 
     pub fn digest(&self) -> Result<String> {
@@ -619,7 +633,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ExternalSupervisorBootstrap {
-            schema: 3,
+            schema: 4,
             controller: controller(&roots),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -629,6 +643,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
                 requirement: ExternalCandidateRequirement {
                     schema: 2,

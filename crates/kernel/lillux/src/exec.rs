@@ -1156,6 +1156,12 @@ pub unsafe fn take_inherited_descriptor_authority(
         return Err("inherited authority overlaps standard I/O".to_owned());
     }
     let raw = i32::try_from(fd).map_err(|_| "inherited authority exceeds fd range".to_owned())?;
+    if unsafe { libc::fcntl(raw, libc::F_GETFD) } < 0 {
+        return Err(format!(
+            "adopt inherited authority descriptor {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     let lease = retain_fork_sensitive_descriptors();
     // SAFETY: upheld by the caller; ownership is immediately transferred into
     // the registered Lillux authority.
@@ -1170,6 +1176,15 @@ mod inherited_directory_traversal_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
+
+    #[test]
+    fn absent_inherited_authority_is_refused_without_constructing_an_owner() {
+        let error = unsafe { take_inherited_descriptor_authority(1_000_000) }.unwrap_err();
+        assert!(
+            error.contains("adopt inherited authority descriptor"),
+            "{error}"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

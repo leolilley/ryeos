@@ -31,6 +31,7 @@ struct BindingDocument {
     runtime_manifest_hash: String,
     runtime_selection_identity: String,
     backend_artifact_hash: String,
+    launcher_artifact_hash: String,
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
@@ -49,7 +50,7 @@ struct BindingDocument {
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 4,
+            self.kind == "node" && self.schema == 5,
             "unsupported external placement binding schema"
         );
         ensure!(
@@ -77,6 +78,7 @@ impl BindingDocument {
             &self.runtime_manifest_hash,
             &self.runtime_selection_identity,
             &self.backend_artifact_hash,
+            &self.launcher_artifact_hash,
         ] {
             ensure!(
                 value.len() == 64
@@ -129,6 +131,7 @@ impl BindingDocument {
             runtime_manifest_hash: self.runtime_manifest_hash.clone(),
             runtime_selection_identity: self.runtime_selection_identity.clone(),
             backend_artifact_hash: self.backend_artifact_hash.clone(),
+            launcher_artifact_hash: self.launcher_artifact_hash.clone(),
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
@@ -160,6 +163,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) runtime_manifest_hash: String,
     pub(crate) runtime_selection_identity: String,
     pub(crate) backend_artifact_hash: String,
+    pub(crate) launcher_artifact_hash: String,
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
@@ -338,7 +342,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 4,
+            schema: 5,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             backend: "fixture".into(),
             account: "account".into(),
@@ -349,6 +353,7 @@ impl RetainedExternalExecutionBinding {
             runtime_manifest_hash: "b".repeat(64),
             runtime_selection_identity: "c".repeat(64),
             backend_artifact_hash: "d".repeat(64),
+            launcher_artifact_hash: "e".repeat(64),
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),

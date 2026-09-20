@@ -775,7 +775,7 @@ pub fn attach_external_execution_channel(
     let mut nonce = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let binding = ryeos_state::external_execution::ExecutionChannelBinding {
-        schema: 3,
+        schema: 4,
         placement_thread_id: authenticated.placement_thread_id.clone(),
         allocation_request_digest: allocation.reservation.request_digest,
         occurrence_id: occurrence.occurrence_id.clone(),
@@ -1446,7 +1446,7 @@ fn supervisor_activation(
         "external supervisor program contradicts its protected lifecycle binding"
     );
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
-        schema: 3,
+        schema: 4,
         controller: contract.controller_transport.clone(),
         tls_root_certificates_der_base64: contract
             .controller_tls_root_certificates_der_base64
@@ -1458,6 +1458,7 @@ fn supervisor_activation(
         base_snapshot_hash: reservation.base_snapshot_hash.clone(),
         execution_binding_hash: reservation.binding_hash.clone(),
         supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+        launcher_artifact_hash: contract.launcher_artifact_hash.clone(),
         candidate_program: program.clone(),
         owner_public_key: reservation.channel_owner_public_key.clone(),
         bootstrap_capability: authority.bootstrap_capability().to_owned(),

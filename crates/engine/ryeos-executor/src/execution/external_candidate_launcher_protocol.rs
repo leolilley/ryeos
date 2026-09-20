@@ -127,6 +127,10 @@ impl LiveInheritedExternalCandidateSupervisor {
         &self.ready_frame
     }
 
+    pub fn has_durable_capture(&self) -> Result<bool> {
+        self.supervisor.journal().has_retained_export()
+    }
+
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
         self.supervisor.dispatch_release(wire)
     }

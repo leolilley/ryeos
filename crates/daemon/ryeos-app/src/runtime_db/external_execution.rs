@@ -491,6 +491,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
         "base_snapshot_hash":&reservation.base_snapshot_hash,
         "execution_binding_hash":&reservation.binding_hash,
         "supervisor_runtime_hash":&contract.runtime_manifest_hash,
+        "launcher_artifact_hash":&contract.launcher_artifact_hash,
         "owner_public_key":&reservation.channel_owner_public_key,
         "bootstrap_capability_hash":&reservation.channel_bootstrap_capability_hash,
         "attachment_deadline_ms":attachment_deadline_ms,

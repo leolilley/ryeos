@@ -4,6 +4,8 @@
 //! bundle from the sealed supervisor bootstrap. It never uses ambient proxy,
 //! CA, credential, redirect, or endpoint configuration.
 
+pub mod runtime;
+
 use std::io::Read as _;
 use std::time::Duration;
 
@@ -13,6 +15,7 @@ use reqwest::blocking::{Client, Response};
 use reqwest::header::CONTENT_TYPE;
 use ryeos_executor::execution::external_candidate_transport::{
     ExternalExecutionChannelTransport, ExternalTransportExchange, ExternalTransportFrame,
+    ExternalTransportStepFailure,
 };
 use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::transport::{
@@ -28,6 +31,7 @@ pub struct AttachedExternalExecutionChannel {
     placement_thread_id: String,
     occurrence_id: String,
     maximum_response_bytes: u64,
+    request_timeout: Duration,
 }
 
 pub fn attach_external_execution_channel(
@@ -73,14 +77,39 @@ pub fn attach_external_execution_channel_exact(
         "external channel attachment",
     )?;
     response.validate_for_bootstrap(bootstrap, &supervisor_public_key)?;
-    let channel = AttachedExternalExecutionChannel {
+    let channel = attached_channel(bootstrap, client)?;
+    Ok((response.binding, channel))
+}
+
+/// Reconstruct only the HTTP transport for an already durably retained exact
+/// binding. This performs no attachment mutation and is therefore the sole
+/// pre-launch recovery path from the outer journal's `attached` stage.
+pub fn reconnect_external_execution_channel(
+    bootstrap: &ExternalSupervisorBootstrap,
+    supervisor_signing_key: &lillux::crypto::SigningKey,
+    binding: &ExecutionChannelBinding,
+) -> Result<AttachedExternalExecutionChannel> {
+    bootstrap.validate_attached_binding(
+        binding,
+        &ryeos_state::external_execution::encode_channel_public_key(
+            &supervisor_signing_key.verifying_key(),
+        )?,
+    )?;
+    attached_channel(bootstrap, build_client(bootstrap)?)
+}
+
+fn attached_channel(
+    bootstrap: &ExternalSupervisorBootstrap,
+    client: Client,
+) -> Result<AttachedExternalExecutionChannel> {
+    Ok(AttachedExternalExecutionChannel {
         client,
         exchange_url: bootstrap.controller.exchange_url()?,
         placement_thread_id: bootstrap.placement_thread_id.clone(),
         occurrence_id: bootstrap.occurrence_id.clone(),
         maximum_response_bytes: bootstrap.controller.maximum_response_bytes,
-    };
-    Ok((response.binding, channel))
+        request_timeout: Duration::from_millis(u64::from(bootstrap.controller.request_timeout_ms)),
+    })
 }
 
 fn build_client(bootstrap: &ExternalSupervisorBootstrap) -> Result<Client> {
@@ -146,25 +175,42 @@ fn decode_response<T: serde::de::DeserializeOwned>(
 
 impl ExternalExecutionChannelTransport for AttachedExternalExecutionChannel {
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange> {
+        self.exchange_until(
+            canonical_supervisor_frame,
+            lillux::time::MonotonicDeadline::after(self.request_timeout),
+        )
+        .map_err(anyhow::Error::new)
+    }
+
+    fn exchange_until(
+        &mut self,
+        canonical_supervisor_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
         let request = ExternalChannelExchangeRequest::from_frame(
             self.placement_thread_id.clone(),
             self.occurrence_id.clone(),
             canonical_supervisor_frame,
-        )?;
-        let request_bytes = canonical_request_bytes(&request)?;
+        )
+        .map_err(ExternalTransportStepFailure::Fatal)?;
+        let request_bytes =
+            canonical_request_bytes(&request).map_err(ExternalTransportStepFailure::Fatal)?;
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(ExternalTransportStepFailure::AmbiguousTransport(
+                anyhow::anyhow!("external exchange deadline elapsed before contact"),
+            ));
+        }
         let response = self
             .client
             .post(self.exchange_url.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(request_bytes)
+            .timeout(self.request_timeout.min(remaining))
             .send()
-            .context("exchange external execution frame")?;
-        let response: ExternalChannelExchangeResponse = decode_response(
-            response,
-            self.maximum_response_bytes,
-            "external channel exchange",
-        )?;
-        response.validate_shape()?;
+            .context("exchange external execution frame")
+            .map_err(ExternalTransportStepFailure::AmbiguousTransport)?;
+        let response = decode_exchange_response(response, self.maximum_response_bytes)?;
         Ok(ExternalTransportExchange {
             schema: response.schema,
             incoming_new: response.incoming_new,
@@ -175,13 +221,57 @@ impl ExternalExecutionChannelTransport for AttachedExternalExecutionChannel {
                 .outbound_frames
                 .into_iter()
                 .map(decode_frame)
-                .collect::<Result<Vec<_>>>()?,
+                .collect::<Result<Vec<_>>>()
+                .map_err(ExternalTransportStepFailure::Fatal)?,
             urgent_revocation_frame: response
                 .urgent_revocation_frame
                 .map(decode_frame)
-                .transpose()?,
+                .transpose()
+                .map_err(ExternalTransportStepFailure::Fatal)?,
         })
     }
+}
+
+fn decode_exchange_response(
+    mut response: Response,
+    maximum_bytes: u64,
+) -> std::result::Result<ExternalChannelExchangeResponse, ExternalTransportStepFailure> {
+    if !response.status().is_success() {
+        return Err(ExternalTransportStepFailure::Fatal(anyhow::anyhow!(
+            "external channel exchange returned HTTP {}",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum_bytes)
+    {
+        return Err(ExternalTransportStepFailure::Fatal(anyhow::anyhow!(
+            "external channel exchange response exceeds its bound"
+        )));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .context("read external channel exchange response")
+        .map_err(ExternalTransportStepFailure::AmbiguousTransport)?;
+    if u64::try_from(bytes.len())
+        .map_err(|error| ExternalTransportStepFailure::Fatal(anyhow::Error::new(error)))?
+        > maximum_bytes
+    {
+        return Err(ExternalTransportStepFailure::Fatal(anyhow::anyhow!(
+            "external channel exchange response exceeds its bound"
+        )));
+    }
+    let decoded: ExternalChannelExchangeResponse = serde_json::from_slice(&bytes)
+        .context("decode external channel exchange response")
+        .map_err(ExternalTransportStepFailure::Fatal)?;
+    decoded
+        .validate_shape()
+        .map_err(ExternalTransportStepFailure::Fatal)?;
+    Ok(decoded)
 }
 
 fn decode_frame(frame: ExternalChannelResponseFrame) -> Result<ExternalTransportFrame> {
@@ -236,7 +326,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ExternalSupervisorBootstrap {
-            schema: 3,
+            schema: 4,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
                     schema: 1,
@@ -261,6 +351,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
                 requirement: ExternalCandidateRequirement {
                     schema: 2,
@@ -881,9 +972,15 @@ mod tests {
             let supervisor_key = lillux::crypto::SigningKey::from_bytes(&[53; 32]);
             let (_, mut channel) =
                 attach_external_execution_channel(&bootstrap, &supervisor_key).unwrap();
-            let result = channel.exchange(br#"{"supervisor":"frame"}"#);
+            let result = channel.exchange_until(
+                br#"{"supervisor":"frame"}"#,
+                lillux::time::MonotonicDeadline::after(Duration::from_secs(2)),
+            );
             if malformed {
-                assert!(result.is_err());
+                assert!(matches!(
+                    result,
+                    Err(ExternalTransportStepFailure::Fatal(_))
+                ));
             } else {
                 let result = result.unwrap();
                 assert_eq!(result.outbound_frames.len(), 1);
@@ -894,6 +991,71 @@ mod tests {
             }
             assert_eq!(server.join().unwrap(), 2);
         }
+    }
+
+    #[test]
+    fn exchange_classifies_protocol_refusal_separately_from_transport_ambiguity() {
+        for response in [
+            http_response("503 Service Unavailable", b"{}", ""),
+            http_response("200 OK", b"{", ""),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\nConnection: close\r\n\r\n".to_vec(),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let bootstrap = bootstrap(
+                format!("https://localhost:{port}"),
+                vec![TEST_CA_DER.to_owned()],
+            );
+            let server_bootstrap = serde_json::to_value(&bootstrap).unwrap();
+            let server = serve_tls(
+                listener,
+                TEST_SERVER_DER,
+                vec![
+                    Box::new(move |request| {
+                        attach_success_response(server_bootstrap.clone(), request)
+                    }),
+                    Box::new(move |_| response.clone()),
+                ],
+            );
+            let supervisor_key = lillux::crypto::SigningKey::from_bytes(&[53; 32]);
+            let (_, mut channel) =
+                attach_external_execution_channel(&bootstrap, &supervisor_key).unwrap();
+            assert!(matches!(
+                channel.exchange_until(
+                    br#"{"supervisor":"frame"}"#,
+                    lillux::time::MonotonicDeadline::after(Duration::from_secs(2)),
+                ),
+                Err(ExternalTransportStepFailure::Fatal(_))
+            ));
+            assert_eq!(server.join().unwrap(), 2);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bootstrap = bootstrap(
+            format!("https://localhost:{port}"),
+            vec![TEST_CA_DER.to_owned()],
+        );
+        let server_bootstrap = serde_json::to_value(&bootstrap).unwrap();
+        let server = serve_tls(
+            listener,
+            TEST_SERVER_DER,
+            vec![
+                Box::new(move |request| attach_success_response(server_bootstrap.clone(), request)),
+                Box::new(|_| Vec::new()),
+            ],
+        );
+        let supervisor_key = lillux::crypto::SigningKey::from_bytes(&[53; 32]);
+        let (_, mut channel) =
+            attach_external_execution_channel(&bootstrap, &supervisor_key).unwrap();
+        assert!(matches!(
+            channel.exchange_until(
+                br#"{"supervisor":"frame"}"#,
+                lillux::time::MonotonicDeadline::after(Duration::from_secs(2)),
+            ),
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
+        ));
+        assert_eq!(server.join().unwrap(), 2);
     }
 
     #[test]

@@ -892,6 +892,7 @@ fn directory_names(directory: &File) -> Result<Vec<std::ffi::OsString>> {
 pub struct PinnedDirectory {
     path: PathBuf,
     directory: File,
+    path_binding_required: bool,
 }
 
 /// One direct child opened without following links. Mixed-tree walkers use
@@ -1864,7 +1865,11 @@ impl PinnedDirectory {
         if !directory.metadata()?.is_dir() {
             anyhow::bail!("open authority is not a directory: {}", path.display());
         }
-        Ok(Self { path, directory })
+        Ok(Self {
+            path,
+            directory,
+            path_binding_required: true,
+        })
     }
 
     /// Adopt one exact directory descriptor deliberately mapped into this
@@ -1879,9 +1884,27 @@ impl PinnedDirectory {
 
         anyhow::ensure!(fd > 2, "inherited directory overlaps standard I/O");
         let raw = i32::try_from(fd).context("inherited directory exceeds fd range")?;
+        // Prove the transport coordinate is live before constructing an owned
+        // File. `File::from_raw_fd` requires a valid descriptor; creating one
+        // from an absent fixed coordinate can otherwise abort on Drop under
+        // Rust's I/O-safety checks instead of returning a fail-closed error.
+        if unsafe { libc::fcntl(raw, libc::F_GETFD) } < 0 {
+            anyhow::bail!(
+                "adopt inherited directory descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         // SAFETY: upheld by the caller; PinnedDirectory immediately becomes
         // the unique descriptor owner.
-        Self::from_open_directory(path, unsafe { File::from_raw_fd(raw) })
+        let directory = unsafe { File::from_raw_fd(raw) };
+        if !directory.metadata()?.is_dir() {
+            anyhow::bail!("inherited authority is not a directory: {}", path.display());
+        }
+        Ok(Self {
+            path,
+            directory,
+            path_binding_required: false,
+        })
     }
 
     pub fn identity(&self) -> Result<PinnedDirectoryIdentity> {
@@ -1890,6 +1913,65 @@ impl PinnedDirectory {
             containing_device,
             inode,
         })
+    }
+
+    /// Prove that two already-pinned directory trees do not contain one
+    /// another. Diagnostic pathnames are deliberately ignored: each ancestry
+    /// walk starts from the held directory descriptor and opens only `..`
+    /// relative to that descriptor until the filesystem root is reached.
+    ///
+    /// Distinct inode identities alone are not sufficient for a mount
+    /// boundary. Mounting an ancestor of a private state directory would still
+    /// expose that state to the child even though the two roots have different
+    /// identities.
+    pub fn require_disjoint_directory_tree(&self, other: &Self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = other;
+            anyhow::bail!("descriptor-rooted directory ancestry is unavailable")
+        }
+        #[cfg(unix)]
+        {
+            if self.is_same_or_ancestor_of(other)? || other.is_same_or_ancestor_of(self)? {
+                anyhow::bail!("pinned directory trees overlap by ancestry");
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn is_same_or_ancestor_of(&self, candidate: &Self) -> Result<bool> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::fs::MetadataExt as _;
+
+        const MAX_ANCESTOR_DEPTH: usize = 4_096;
+        let expected = self.directory.metadata()?;
+        let mut current = candidate.directory.try_clone()?;
+        for _ in 0..MAX_ANCESTOR_DEPTH {
+            let observed = current.metadata()?;
+            if observed.dev() == expected.dev() && observed.ino() == expected.ino() {
+                return Ok(true);
+            }
+            let raw = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    c"..".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("walk pinned directory ancestry");
+            }
+            // SAFETY: openat returned a new owned descriptor.
+            let parent = unsafe { File::from_raw_fd(raw) };
+            let parent_identity = parent.metadata()?;
+            if parent_identity.dev() == observed.dev() && parent_identity.ino() == observed.ino() {
+                return Ok(false);
+            }
+            current = parent;
+        }
+        anyhow::bail!("pinned directory ancestry exceeds its structural bound")
     }
 
     /// Return the age of this exact directory inode's modification time.
@@ -1988,7 +2070,11 @@ impl PinnedDirectory {
                     let pinned = self
                         .open_mount_entry(&entry.name)?
                         .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
-                    let child = Self::from_open_directory(self.path.join(&entry.name), pinned)?;
+                    let child = Self {
+                        path: self.path.join(&entry.name),
+                        directory: pinned,
+                        path_binding_required: self.path_binding_required,
+                    };
                     if child.directory.metadata()?.dev() != root_device {
                         anyhow::bail!("refusing to cross mounted filesystem during removal");
                     }
@@ -2074,6 +2160,7 @@ impl PinnedDirectory {
             Ok(open_directory_no_follow(path)?.map(|directory| Self {
                 path: path.to_path_buf(),
                 directory,
+                path_binding_required: true,
             }))
         }
     }
@@ -2089,6 +2176,7 @@ impl PinnedDirectory {
             Ok(Self {
                 path: path.to_path_buf(),
                 directory: open_or_create_directory_no_follow(path)?,
+                path_binding_required: true,
             })
         }
     }
@@ -2176,6 +2264,7 @@ impl PinnedDirectory {
         Ok(Self {
             path: self.path.clone(),
             directory: self.directory.try_clone()?,
+            path_binding_required: self.path_binding_required,
         })
     }
 
@@ -2457,8 +2546,10 @@ impl PinnedDirectory {
         Ok(())
     }
 
-    /// Reassert owner-only access on this exact open directory and prove that
-    /// its original path still selects the same inode.
+    /// Reassert owner-only access on this exact open directory. Path-opened
+    /// authorities additionally prove that their original path still selects
+    /// the same inode; inherited authorities have no ambient pathname to
+    /// re-resolve and remain descriptor-rooted.
     ///
     /// This is the live-directory counterpart to the bounded tree validators
     /// below. It intentionally does not enumerate children: a process that
@@ -2479,7 +2570,10 @@ impl PinnedDirectory {
             if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
                 anyhow::bail!("pinned directory is not exactly owner-private and accessible");
             }
-            self.ensure_path_binding()
+            if self.path_binding_required {
+                self.ensure_path_binding()?;
+            }
+            Ok(())
         }
     }
 
@@ -2501,7 +2595,10 @@ impl PinnedDirectory {
             {
                 anyhow::bail!("pinned directory is not exactly current-owner mode 0700");
             }
-            self.ensure_path_binding()
+            if self.path_binding_required {
+                self.ensure_path_binding()?;
+            }
+            Ok(())
         }
     }
 
@@ -3034,7 +3131,11 @@ impl PinnedDirectory {
             let name_c = std::ffi::CString::new(name.as_bytes())?;
             let path = self.path.join(name);
             if let Some(directory) = open_child_directory(&self.directory, &name_c, &path)? {
-                return Ok(Self { path, directory });
+                return Ok(Self {
+                    path,
+                    directory,
+                    path_binding_required: self.path_binding_required,
+                });
             }
             if unsafe { libc::mkdirat(self.directory.as_raw_fd(), name_c.as_ptr(), mode) } != 0 {
                 let error = std::io::Error::last_os_error();
@@ -3049,7 +3150,11 @@ impl PinnedDirectory {
                 open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
                     anyhow::anyhow!("secure child directory disappeared: {}", path.display())
                 })?;
-            Ok(Self { path, directory })
+            Ok(Self {
+                path,
+                directory,
+                path_binding_required: self.path_binding_required,
+            })
         }
     }
 
@@ -3074,7 +3179,11 @@ impl PinnedDirectory {
                 open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
                     anyhow::anyhow!("secure child directory disappeared: {}", path.display())
                 })?;
-            Ok(Self { path, directory })
+            Ok(Self {
+                path,
+                directory,
+                path_binding_required: self.path_binding_required,
+            })
         }
     }
 
@@ -3387,7 +3496,11 @@ impl PinnedDirectory {
             let name_c = std::ffi::CString::new(name.as_bytes())?;
             let path = self.path.join(name);
             if let Some(directory) = open_child_directory(&self.directory, &name_c, &path)? {
-                return Ok(Some(Self { path, directory }));
+                return Ok(Some(Self {
+                    path,
+                    directory,
+                    path_binding_required: self.path_binding_required,
+                }));
             }
             if open_regular_at(&self.directory, &name_c, &path)?.is_some() {
                 anyhow::bail!(
@@ -3416,6 +3529,7 @@ impl PinnedDirectory {
                 return Ok(Some(PinnedDirectoryEntry::Directory(Self {
                     path,
                     directory,
+                    path_binding_required: self.path_binding_required,
                 })));
             }
             open_regular_at_flags(
@@ -6512,6 +6626,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn absent_inherited_directory_is_refused_without_constructing_an_owner() {
+        let error = unsafe {
+            PinnedDirectory::take_inherited_directory(
+                PathBuf::from("<missing-inherited-directory>"),
+                1_000_000,
+            )
+        }
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("adopt inherited directory descriptor")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_directory_privacy_and_descendants_are_descriptor_rooted() {
+        use std::os::fd::IntoRawFd as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let raw = pinned.try_clone_descriptor().unwrap().into_raw_fd();
+        let inherited = unsafe {
+            PinnedDirectory::take_inherited_directory(
+                PathBuf::from("<inherited-private-root>"),
+                u32::try_from(raw).unwrap(),
+            )
+        }
+        .unwrap();
+        inherited.require_owner_private_directory().unwrap();
+
+        let child = inherited.create_child(OsStr::new("child"), 0o700).unwrap();
+        child.require_owner_private_directory().unwrap();
+        drop(child);
+        drop(inherited);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn owned_host_files_reject_writable_modes_wrong_owners_and_links() {
         use std::os::unix::fs::PermissionsExt as _;
         let temporary = tempfile::tempdir().unwrap();
@@ -8100,5 +8256,25 @@ mod tests {
             std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_ancestry_distinguishes_nested_and_disjoint_trees() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let nested = first.join("nested");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&second).unwrap();
+
+        let first = PinnedDirectory::open(&first).unwrap().unwrap();
+        let nested = PinnedDirectory::open(&nested).unwrap().unwrap();
+        let second = PinnedDirectory::open(&second).unwrap().unwrap();
+
+        assert!(first.require_disjoint_directory_tree(&nested).is_err());
+        assert!(nested.require_disjoint_directory_tree(&first).is_err());
+        assert!(first.require_disjoint_directory_tree(&first).is_err());
+        first.require_disjoint_directory_tree(&second).unwrap();
     }
 }

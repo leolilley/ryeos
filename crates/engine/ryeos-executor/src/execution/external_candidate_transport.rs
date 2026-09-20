@@ -43,6 +43,52 @@ pub struct ExternalTransportExchange {
 /// canonical bytes.
 pub trait ExternalExecutionChannelTransport {
     fn exchange(&mut self, canonical_supervisor_frame: &[u8]) -> Result<ExternalTransportExchange>;
+
+    /// Perform the same exact exchange beneath the caller's active lifecycle
+    /// deadline. Production transports override this to bind their blocking
+    /// I/O timeout to the remaining window. The default preserves existing
+    /// deterministic fixtures while still refusing an already-expired call.
+    fn exchange_until(
+        &mut self,
+        canonical_supervisor_frame: &[u8],
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> std::result::Result<ExternalTransportExchange, ExternalTransportStepFailure> {
+        if deadline.has_elapsed() {
+            return Err(ExternalTransportStepFailure::AmbiguousTransport(
+                anyhow::anyhow!("external transport deadline elapsed before exchange"),
+            ));
+        }
+        self.exchange(canonical_supervisor_frame)
+            .map_err(ExternalTransportStepFailure::AmbiguousTransport)
+    }
+}
+
+/// A failed exchange is ambiguous and can be retried with the exact retained
+/// signed bytes. Every other failure is local protocol/runtime failure and
+/// must not be retried as though the peer had merely missed a response.
+#[derive(Debug)]
+pub enum ExternalTransportStepFailure {
+    AmbiguousTransport(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
+impl std::fmt::Display for ExternalTransportStepFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AmbiguousTransport(error) => {
+                write!(formatter, "ambiguous external transport outcome: {error:#}")
+            }
+            Self::Fatal(error) => write!(formatter, "external transport driver failed: {error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ExternalTransportStepFailure {}
+
+impl From<anyhow::Error> for ExternalTransportStepFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Fatal(error)
+    }
 }
 
 /// Runtime surface needed by the transport driver. The production
@@ -51,6 +97,7 @@ pub trait ExternalExecutionChannelTransport {
 pub trait ExternalSupervisorRuntime {
     fn binding(&self) -> &ExecutionChannelBinding;
     fn ready_frame(&self) -> &str;
+    fn has_durable_capture(&self) -> Result<bool>;
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
     fn poll_protocol_output(&mut self) -> Result<Option<String>>;
     fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>>;
@@ -63,6 +110,10 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
 
     fn ready_frame(&self) -> &str {
         self.ready_frame()
+    }
+
+    fn has_durable_capture(&self) -> Result<bool> {
+        self.has_durable_capture()
     }
 
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
@@ -111,6 +162,7 @@ pub struct ExternalCandidateTransportDriver<R, T> {
     partial_owner_frame: Option<Vec<u8>>,
     revocation_progress: Option<ExternalTransportProgress>,
     sealed_exports: BTreeSet<(u64, String)>,
+    capture_retained: bool,
     export_applied: bool,
     maximum_response_frames: usize,
     maximum_response_bytes: usize,
@@ -120,6 +172,7 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     ExternalCandidateTransportDriver<R, T>
 {
     pub fn new(runtime: R, transport: T) -> Result<Self> {
+        let capture_retained = runtime.has_durable_capture()?;
         let ready = runtime.ready_frame().as_bytes().to_vec();
         let verified = SignedExecutionFrame::decode_and_verify(
             &ready,
@@ -151,6 +204,7 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             partial_owner_frame: None,
             revocation_progress: None,
             sealed_exports: BTreeSet::new(),
+            capture_retained,
             export_applied: false,
             maximum_response_frames,
             maximum_response_bytes,
@@ -165,6 +219,17 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         self.export_applied
     }
 
+    pub fn has_sealed_export(&self) -> bool {
+        !self.sealed_exports.is_empty()
+    }
+
+    /// The candidate has been quiesced, captured, writer-excluded and retained
+    /// locally. This is deliberately independent of how far the resulting
+    /// export batch has progressed through transport.
+    pub fn has_durable_capture(&self) -> bool {
+        self.capture_retained
+    }
+
     pub fn into_parts(self) -> (R, T) {
         (self.runtime, self.transport)
     }
@@ -174,6 +239,21 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     /// presented. The method never sleeps and never converts a timeout into
     /// evidence about remote execution.
     pub fn step(&mut self) -> Result<ExternalTransportProgress> {
+        self.step_classified().map_err(anyhow::Error::new)
+    }
+
+    pub fn step_classified(
+        &mut self,
+    ) -> std::result::Result<ExternalTransportProgress, ExternalTransportStepFailure> {
+        self.step_classified_until(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(24 * 60 * 60),
+        ))
+    }
+
+    pub fn step_classified_until(
+        &mut self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> std::result::Result<ExternalTransportProgress, ExternalTransportStepFailure> {
         self.enqueue_next_durable_supervisor_frame()?;
         if self.pending_supervisor.is_empty()
             && self.revocation_progress.is_none()
@@ -186,15 +266,18 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 self.runtime.binding(),
                 lillux::time::timestamp_millis(),
             )?;
-            ensure!(
-                verified.frame().direction == ChannelDirection::SupervisorToOwner
-                    && matches!(
-                        verified.frame().payload,
-                        ExecutionChannelPayload::ProtocolBytes { .. }
-                            | ExecutionChannelPayload::ProtocolEof
-                    ),
-                "external runtime output poll returned a non-protocol supervisor frame"
-            );
+            if !(verified.frame().direction == ChannelDirection::SupervisorToOwner
+                && matches!(
+                    verified.frame().payload,
+                    ExecutionChannelPayload::ProtocolBytes { .. }
+                        | ExecutionChannelPayload::ProtocolEof
+                ))
+            {
+                return Err(anyhow::anyhow!(
+                    "external runtime output poll returned a non-protocol supervisor frame"
+                )
+                .into());
+            }
             self.pending_supervisor
                 .insert(verified.frame().sequence, wire.into_bytes());
         }
@@ -209,14 +292,15 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             self.runtime.binding(),
             lillux::time::timestamp_millis(),
         )?;
-        ensure!(
-            sent.frame().direction == ChannelDirection::SupervisorToOwner,
-            "external control loop attempted to send an owner frame"
-        );
+        if sent.frame().direction != ChannelDirection::SupervisorToOwner {
+            return Err(
+                anyhow::anyhow!("external control loop attempted to send an owner frame").into(),
+            );
+        }
 
         // Do not mutate any local frontier before this returns. An error is an
         // ambiguous network outcome and must retain exact-byte retry.
-        let response = self.transport.exchange(&outgoing)?;
+        let response = self.transport.exchange_until(&outgoing, deadline)?;
         self.validate_response(&sent, &response)?;
 
         self.pending_supervisor.remove(&sent.frame().sequence);
@@ -224,15 +308,19 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(sent.digest().to_owned());
             }
-            std::collections::btree_map::Entry::Occupied(entry) => ensure!(
-                entry.get() == sent.digest(),
-                "external controller retained a forked supervisor sequence"
-            ),
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if entry.get() != sent.digest() {
+                    return Err(anyhow::anyhow!(
+                        "external controller retained a forked supervisor sequence"
+                    )
+                    .into());
+                }
+            }
         }
         self.poll_frame = Some(outgoing);
 
         if let Some(urgent) = response.urgent_revocation_frame.as_ref() {
-            return self.dispatch_urgent_revocation(urgent);
+            return Ok(self.dispatch_urgent_revocation(urgent)?);
         }
 
         let mut advanced = false;
@@ -404,6 +492,9 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             lillux::time::timestamp_millis(),
         )?;
         let dispatched = self.runtime.dispatch_owner_frame(wire)?;
+        if matches!(&dispatched.outcome, ExternalOwnerFrameOutcome::Capture(_)) {
+            self.capture_retained = true;
+        }
         if matches!(
             &dispatched.outcome,
             ExternalOwnerFrameOutcome::Acknowledgement
@@ -589,6 +680,7 @@ mod tests {
         protocol_output_polls: usize,
         pending_transport: RefCell<VecDeque<Vec<u8>>>,
         last_acknowledgement: Option<(u64, String, ExecutionFrameApplication, String)>,
+        capture_retained: bool,
     }
 
     impl FixtureRuntime {
@@ -624,6 +716,7 @@ mod tests {
                 protocol_output_polls: 0,
                 pending_transport: RefCell::new(VecDeque::new()),
                 last_acknowledgement: None,
+                capture_retained: false,
             }
         }
 
@@ -672,6 +765,10 @@ mod tests {
 
         fn ready_frame(&self) -> &str {
             &self.ready
+        }
+
+        fn has_durable_capture(&self) -> Result<bool> {
+            Ok(self.capture_retained)
         }
 
         fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
@@ -794,6 +891,7 @@ mod tests {
         journal: LiveGuestJournal,
         owner_predecessor_digest: String,
         protocol_outputs: VecDeque<Vec<u8>>,
+        capture_retained: bool,
         _state_root: tempfile::TempDir,
         _journal_root: tempfile::TempDir,
         _authority: ryeos_state::PinnedStateAuthority,
@@ -942,6 +1040,7 @@ mod tests {
                 journal,
                 owner_predecessor_digest: quiesce.digest().to_owned(),
                 protocol_outputs: VecDeque::new(),
+                capture_retained: true,
                 _state_root: state_root,
                 _journal_root: journal_root,
                 _authority: authority,
@@ -1035,6 +1134,7 @@ mod tests {
                 journal,
                 owner_predecessor_digest: release.digest().to_owned(),
                 protocol_outputs: VecDeque::from([output]),
+                capture_retained: false,
                 _state_root: state_root,
                 _journal_root: journal_root,
                 _authority: authority,
@@ -1049,6 +1149,10 @@ mod tests {
 
         fn ready_frame(&self) -> &str {
             &self.ready
+        }
+
+        fn has_durable_capture(&self) -> Result<bool> {
+            Ok(self.capture_retained)
         }
 
         fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
@@ -1361,7 +1465,10 @@ mod tests {
             TransportAction::Respond(response(&ready, vec![envelope(&owner_ack)], None)),
         ]);
         let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
-        assert!(driver.step().is_err());
+        assert!(matches!(
+            driver.step_classified(),
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
+        ));
         assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
         let outgoing = driver
             .pending_supervisor
@@ -1416,7 +1523,10 @@ mod tests {
             .push_back(b"later-response".to_vec());
         driver.transport.actions.push_back(TransportAction::Fail);
 
-        assert!(driver.step().is_err());
+        assert!(matches!(
+            driver.step_classified(),
+            Err(ExternalTransportStepFailure::AmbiguousTransport(_))
+        ));
         assert_eq!(driver.runtime.protocol_output_polls, 1);
         let output = SignedExecutionFrame::decode_and_verify(
             &driver.transport.calls[1],
@@ -1705,6 +1815,12 @@ mod tests {
         let transport =
             AppliedAckTransport::new(binding.clone(), owner, 3, Some(owner_predecessor_digest), 2);
         let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+
+        assert!(driver.has_durable_capture());
+        assert!(
+            !driver.has_sealed_export(),
+            "durable capture must not depend on transport reaching the seal"
+        );
 
         assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
         assert!(driver.step().is_err(), "first chunk response is ambiguous");
@@ -2170,7 +2286,10 @@ mod tests {
             .transport
             .actions
             .push_back(TransportAction::Respond(response(&sent, vec![], None)));
-        assert!(driver.step().is_err());
+        assert!(matches!(
+            driver.step_classified(),
+            Err(ExternalTransportStepFailure::Fatal(_))
+        ));
         assert_eq!(
             driver.partial_owner_frame.as_deref(),
             Some(protocol.canonical().as_bytes())

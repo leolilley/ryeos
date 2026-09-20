@@ -675,6 +675,25 @@ impl LiveGuestJournal {
             .map_err(Into::into)
     }
 
+    /// Whether this exact guest has durably retained a complete sealed export.
+    /// Transport position is intentionally irrelevant: chunks may still be
+    /// draining after native writer exclusion and CAS retention completed.
+    pub fn has_retained_export(&self) -> Result<bool> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0
+            .owner()
+            .require_owner(&self.0.conn, &self.0.binding)?;
+        self.0
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
+                 WHERE binding_digest=?1)",
+                params![self.0.binding.digest()?],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn supervisor_export_for_capture(
         &self,
         capture: &DurableNativeCandidateCapture,

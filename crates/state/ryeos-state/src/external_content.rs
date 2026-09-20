@@ -756,6 +756,29 @@ pub fn capture_tree(
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
 ) -> anyhow::Result<ExternalContentManifestObject> {
+    capture_tree_selected(root, Some((authored_excludes, policy)), budget, sink)
+}
+
+/// Observe every entry beneath an already-pinned exact realization. Unlike
+/// source capture, this applies no authored, policy, or publisher exclusions:
+/// an ambient entry in a supposedly exact realization must change its identity
+/// rather than disappear from verification.
+#[cfg(unix)]
+pub fn observe_external_content_tree_exact(
+    root: &lillux::PinnedDirectory,
+) -> anyhow::Result<ExternalContentManifestObject> {
+    let mut budget = LaunchCaptureBudget::default();
+    let mut sink = DigestOnlyExternalContentSink;
+    capture_tree_selected(root, None, &mut budget, &mut sink)
+}
+
+#[cfg(unix)]
+fn capture_tree_selected(
+    root: &lillux::PinnedDirectory,
+    selection: Option<(&[String], &ExternalCapturePolicy<'_>)>,
+    budget: &mut LaunchCaptureBudget,
+    sink: &mut dyn ExternalContentBlobSink,
+) -> anyhow::Result<ExternalContentManifestObject> {
     let (root_device, _) = root.device_inode()?;
     let mut entries = Vec::new();
     let mut declaration_entries = 0usize;
@@ -766,8 +789,7 @@ pub fn capture_tree(
         "",
         0,
         root_device,
-        authored_excludes,
-        policy,
+        selection,
         budget,
         sink,
         &mut entries,
@@ -848,8 +870,7 @@ fn capture_directory(
     prefix: &str,
     depth: usize,
     root_device: u64,
-    authored_excludes: &[String],
-    policy: &ExternalCapturePolicy<'_>,
+    selection: Option<(&[String], &ExternalCapturePolicy<'_>)>,
     budget: &mut LaunchCaptureBudget,
     sink: &mut dyn ExternalContentBlobSink,
     entries: &mut Vec<crate::objects::ExternalContentManifestEntry>,
@@ -861,8 +882,7 @@ fn capture_directory(
     let (initial_entries, initial_observed_entries) = admitted_directory_entries(
         directory,
         prefix,
-        authored_excludes,
-        policy,
+        selection,
         budget.remaining_observed_entries,
     )?;
     budget.charge_observed_entries(initial_observed_entries)?;
@@ -914,8 +934,7 @@ fn capture_directory(
                     &path,
                     depth + 1,
                     root_device,
-                    authored_excludes,
-                    policy,
+                    selection,
                     budget,
                     sink,
                     entries,
@@ -994,9 +1013,7 @@ fn capture_directory(
         .remaining_observed_entries
         .checked_add(initial_observed_entries)
         .ok_or_else(|| anyhow::anyhow!("external content observed-entry bound overflow"))?;
-    if admitted_directory_entries(directory, prefix, authored_excludes, policy, final_limit)?.0
-        != initial_entries
-    {
+    if admitted_directory_entries(directory, prefix, selection, final_limit)?.0 != initial_entries {
         anyhow::bail!("external content directory {prefix:?} changed during capture");
     }
     Ok(())
@@ -1005,8 +1022,7 @@ fn capture_directory(
 fn admitted_directory_entries(
     directory: &lillux::PinnedDirectory,
     prefix: &str,
-    authored_excludes: &[String],
-    policy: &ExternalCapturePolicy<'_>,
+    selection: Option<(&[String], &ExternalCapturePolicy<'_>)>,
     max_observed_entries: usize,
 ) -> anyhow::Result<(Vec<lillux::PinnedDirectoryEntryMetadata>, usize)> {
     let observed = directory.entries_no_follow_bounded(max_observed_entries)?;
@@ -1022,15 +1038,17 @@ fn admitted_directory_entries(
                     )));
                 }
             };
-            if author_excluded(name, authored_excludes) {
-                return None;
-            }
             let path = if prefix.is_empty() {
                 name.to_owned()
             } else {
                 format!("{prefix}/{name}")
             };
-            (!policy.excludes(&path)).then_some(Ok(entry))
+            if let Some((authored_excludes, policy)) = selection
+                && (author_excluded(name, authored_excludes) || policy.excludes(&path))
+            {
+                return None;
+            }
+            Some(Ok(entry))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok((admitted, observed_count))
@@ -1304,6 +1322,30 @@ mod tests {
         std::fs::create_dir(root.path().join("__pycache__")).unwrap();
         std::fs::write(root.path().join("__pycache__/module.pyc"), b"ambient").unwrap();
         assert_eq!(observe(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_realization_observation_includes_normally_excluded_ambient_entries() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("module.py"), b"VALUE = 1\n").unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let before = observe_external_content_tree_exact(&pinned).unwrap();
+
+        std::fs::create_dir(root.path().join("__pycache__")).unwrap();
+        std::fs::write(root.path().join("__pycache__/module.pyc"), b"ambient").unwrap();
+        let after = observe_external_content_tree_exact(&pinned).unwrap();
+
+        assert_ne!(
+            external_content_manifest_digest(&before).unwrap(),
+            external_content_manifest_digest(&after).unwrap()
+        );
+        assert!(
+            after
+                .entries
+                .iter()
+                .any(|entry| entry.path == "__pycache__/module.pyc")
+        );
     }
 
     #[cfg(unix)]
