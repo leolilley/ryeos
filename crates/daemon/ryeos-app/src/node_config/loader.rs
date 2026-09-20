@@ -767,7 +767,11 @@ mod tests {
         let dir = system.path().join(".ai/node").join(SECTION_NAME);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("primary.yaml");
-        let mut body = serde_json::json!({"kind":"node", "schema":3,
+        let controller_tls_roots = vec![base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"fixture controller TLS root",
+        )];
+        let mut body = serde_json::json!({"kind":"node", "schema":4,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "backend":"qualified-backend", "account":"account-1",
             "capacity_group":"candidate-workers", "region":"singapore", "plan":"standard",
@@ -781,11 +785,15 @@ mod tests {
                 "schema":1,
                 "https_origin":"https://controller.example:7443",
                 "route_contract":ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT,
-                "tls_root_bundle_digest":"e".repeat(64),
+                "tls_root_bundle_digest":
+                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &controller_tls_roots,
+                    ).unwrap(),
                 "connect_timeout_ms":5000,
                 "request_timeout_ms":10000,
                 "maximum_response_bytes":1048576
             },
+            "controller_tls_root_certificates_der_base64":controller_tls_roots,
             "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
             "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
             "max_workspace_bytes":1048576, "max_export_bytes":524288,
@@ -881,7 +889,17 @@ mod tests {
         }
         write(&body);
 
-        body["controller_transport"]["tls_root_bundle_digest"] = Value::String("f".repeat(64));
+        let rotated_tls_roots = vec![base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"rotated fixture controller TLS root",
+        )];
+        body["controller_tls_root_certificates_der_base64"] = serde_json::json!(rotated_tls_roots);
+        body["controller_transport"]["tls_root_bundle_digest"] = Value::String(
+            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                &rotated_tls_roots,
+            )
+            .unwrap(),
+        );
         write(&body);
         let transport_rotated = load().unwrap();
         assert_ne!(

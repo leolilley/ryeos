@@ -2404,7 +2404,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 47 retains the exact signed controller HTTPS origin, route contract,
 // TLS-root bundle identity and response bounds in every placement generation.
 // Epoch-46 bindings did not authorize a controller transport.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 47;
+// Epoch 48 retains the admitted TLS-root bytes and separates provider
+// allocation from an immutable, independently reconcilable supervisor-start
+// mutation. Epoch-47 rows cannot construct that protected bootstrap.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 48;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2515,6 +2518,40 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "evidence_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_supervisor_activation_intent",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_supervisor_activation_observation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_json",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,

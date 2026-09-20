@@ -144,6 +144,32 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.db.execute("DELETE FROM external_execution_terminal_observation")
 
+    def test_supervisor_activation_is_separate_immutable_bound_effect(self):
+        self.reserve()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "INSERT INTO external_execution_supervisor_activation_intent VALUES('T-one','{}')")
+        self.phase("contact_pending")
+        self.db.execute(
+            "UPDATE external_execution_allocation SET phase='bound', occurrence_json='{}'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "INSERT INTO external_execution_supervisor_activation_observation VALUES('T-one','{}')")
+        self.db.execute(
+            "INSERT INTO external_execution_supervisor_activation_intent VALUES('T-one','{}')")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "UPDATE external_execution_supervisor_activation_intent SET intent_json='changed'")
+        self.db.execute(
+            "INSERT INTO external_execution_supervisor_activation_observation VALUES('T-one','{}')")
+        for statement in (
+            "DELETE FROM external_execution_supervisor_activation_intent",
+            "UPDATE external_execution_supervisor_activation_observation SET observation_json='changed'",
+            "DELETE FROM external_execution_supervisor_activation_observation",
+        ):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute(statement)
+
     def test_contact_claim_cas_has_only_one_winner(self):
         self.reserve()
         command = """UPDATE external_execution_allocation SET phase='contact_pending'

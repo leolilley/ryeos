@@ -22,7 +22,8 @@ use crate::node_config::sections::external_execution::{
 use crate::runtime_db::external_execution::{
     ExternalAllocationContactClaim, ExternalAllocationOccurrence, ExternalAllocationPhase,
     ExternalAllocationRecord, ExternalAllocationReservation, ExternalNoOccurrenceEvidence,
-    ExternalTerminalObservation, ExternalTerminationIntent,
+    ExternalSupervisorActivationIntent, ExternalSupervisorActivationObservation,
+    ExternalSupervisorActivationRecord, ExternalTerminalObservation, ExternalTerminationIntent,
 };
 use crate::runtime_db::{WorkspaceRecord, WorkspaceState};
 use crate::state::AppState;
@@ -49,7 +50,6 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _contract: &ExternalPlacementBackendContract,
         _credential: &PlacementCredential,
         _reservation: &ExternalAllocationReservation,
-        _activation: &ExternalPlacementActivation,
     ) -> Result<ExternalAllocationResolution> {
         bail!("external placement backend does not implement allocation")
     }
@@ -64,6 +64,33 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _reservation: &ExternalAllocationReservation,
     ) -> Result<ExternalAllocationResolution> {
         bail!("external placement backend does not implement allocation reconciliation")
+    }
+
+    /// The one supervisor-start mutation for an already bound occurrence.
+    /// Allocation and activation are deliberately distinct durable effects.
+    fn activate_supervisor(
+        &self,
+        _contract: &ExternalPlacementBackendContract,
+        _credential: &PlacementCredential,
+        _reservation: &ExternalAllocationReservation,
+        _occurrence: &ExternalAllocationOccurrence,
+        _intent: &ExternalSupervisorActivationIntent,
+        _activation: &ExternalSupervisorActivation,
+    ) -> Result<ExternalSupervisorActivationResolution> {
+        bail!("external placement backend does not implement supervisor activation")
+    }
+
+    /// Reconcile the exact retained supervisor-start request. It may observe
+    /// the original mutation but may never create a replacement supervisor.
+    fn reconcile_supervisor_activation(
+        &self,
+        _contract: &ExternalPlacementBackendContract,
+        _credential: &PlacementCredential,
+        _reservation: &ExternalAllocationReservation,
+        _occurrence: &ExternalAllocationOccurrence,
+        _intent: &ExternalSupervisorActivationIntent,
+    ) -> Result<ExternalSupervisorActivationResolution> {
+        bail!("external placement backend does not implement supervisor activation reconciliation")
     }
 
     /// Issue the exact controller-authored termination request once.
@@ -110,15 +137,18 @@ pub(crate) enum ExternalTerminationResolution {
     Pending,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalSupervisorActivationResolution {
+    Started { provider_observation_digest: String },
+    NotStarted { provider_observation_digest: String },
+    Pending,
+}
+
 /// Secret-bearing, one-contact bootstrap material passed only to the selected
 /// protected lifecycle adapter.  It contains no node/operator signing key and
 /// has no serialization or cloning surface.
-pub(crate) struct ExternalPlacementActivation {
-    authority_generation: String,
-    owner_public_key: String,
-    bootstrap_capability: zeroize::Zeroizing<String>,
-    controller_transport:
-        ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+pub(crate) struct ExternalSupervisorActivation {
+    bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
 }
 
 /// Non-secret result of occurrence/bootstrap authentication.  The raw
@@ -214,20 +244,18 @@ impl AuthenticatedExternalOccurrence {
     }
 }
 
-impl ExternalPlacementActivation {
-    pub(crate) fn authority_generation(&self) -> &str {
-        &self.authority_generation
-    }
-    pub(crate) fn owner_public_key(&self) -> &str {
-        &self.owner_public_key
-    }
-    pub(crate) fn bootstrap_capability(&self) -> &str {
-        self.bootstrap_capability.as_str()
-    }
-    pub(crate) fn controller_transport(
+impl ExternalSupervisorActivation {
+    pub(crate) fn bootstrap(
         &self,
-    ) -> &ryeos_state::external_execution::transport::ExternalControllerTransportContract {
-        &self.controller_transport
+    ) -> &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
+        &self.bootstrap
+    }
+}
+
+impl Drop for ExternalSupervisorActivation {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.bootstrap.bootstrap_capability.zeroize();
     }
 }
 
@@ -366,6 +394,22 @@ pub fn authenticate_external_channel_bootstrap(
         .contact_deadline_ms
         .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
         .context("external channel attachment deadline overflow")?;
+    let activation = state
+        .state_store
+        .external_supervisor_activation(placement)?
+        .context("external channel attachment has no durable supervisor activation")?;
+    ensure!(
+        activation.intent.binding_hash == allocation.reservation.binding_hash
+            && activation.intent.request_digest == allocation.reservation.request_digest
+            && activation.intent.occurrence_id == occurrence.occurrence_id
+            && activation.intent.supervisor_runtime_hash == contract.runtime_manifest_hash
+            && activation.intent.attachment_deadline_ms == attach_deadline
+            && activation
+                .observation
+                .as_ref()
+                .is_none_or(|value| value.activation_state == "started"),
+        "external channel attachment contradicts its supervisor activation"
+    );
     let existing = state
         .state_store
         .optional_external_execution_channel(placement)?;
@@ -1039,7 +1083,6 @@ impl PreparedExternalPlacement {
                     contact_lease: ExternalContactLease {
                         gate: self.contact_gate,
                     },
-                    channel_authority: self.channel_authority,
                     _controller_lifetime: self.controller_lifetime,
                 }),
             ),
@@ -1052,6 +1095,7 @@ impl PreparedExternalPlacement {
                         contract: self.contract,
                         credential: self.credential,
                         contact_gate: self.contact_gate,
+                        channel_authority: self.channel_authority,
                         _controller_lifetime: self.controller_lifetime,
                         record,
                     },
@@ -1080,7 +1124,6 @@ pub(crate) struct ExternalPlacementContactPermit {
     credential: PlacementCredential,
     reservation: ExternalAllocationReservation,
     contact_lease: ExternalContactLease,
-    channel_authority: ExternalChannelAuthority,
     // Keep the exact OS-backed controller exclusion live across synchronous
     // provider I/O. Tokio's bounded shutdown cannot cancel spawn_blocking.
     _controller_lifetime: Arc<StateLockLease>,
@@ -1094,6 +1137,7 @@ pub(crate) struct ExternalPlacementReconciliation {
     contract: ExternalPlacementBackendContract,
     credential: PlacementCredential,
     contact_gate: Arc<AtomicBool>,
+    channel_authority: ExternalChannelAuthority,
     // Reconciliation and termination are provider mutations/observations too;
     // they must not overlap a replacement controller generation.
     _controller_lifetime: Arc<StateLockLease>,
@@ -1121,28 +1165,9 @@ impl ExternalContactLease {
 // reconstructing authority from public hashes or caller input.
 impl ExternalPlacementContactPermit {
     pub(crate) fn contact(self) -> Result<ExternalAllocationRecord> {
-        ensure!(
-            self.channel_authority.generation() == self.reservation.channel_authority_generation
-                && self.channel_authority.owner_public_key()
-                    == self.reservation.channel_owner_public_key
-                && self.channel_authority.bootstrap_capability_hash()
-                    == self.reservation.channel_bootstrap_capability_hash,
-            "external placement activation changed its retained reservation"
-        );
-        let activation = ExternalPlacementActivation {
-            authority_generation: self.channel_authority.generation().to_owned(),
-            owner_public_key: self.channel_authority.owner_public_key(),
-            bootstrap_capability: zeroize::Zeroizing::new(
-                self.channel_authority.bootstrap_capability().to_owned(),
-            ),
-            controller_transport: self.contract.controller_transport.clone(),
-        };
-        let resolution = self.backend.allocate(
-            &self.contract,
-            &self.credential,
-            &self.reservation,
-            &activation,
-        )?;
+        let resolution =
+            self.backend
+                .allocate(&self.contract, &self.credential, &self.reservation)?;
         // The consuming call has returned, so this process can no longer issue
         // the delayed original request. Release before accepting an exact
         // negative response as settlement evidence.
@@ -1171,9 +1196,110 @@ impl ExternalPlacementReconciliation {
         )
     }
 
+    /// Start the protected supervisor exactly once after allocation has bound
+    /// an occurrence. An exact replay or daemon restart observes the retained
+    /// request and can only reconcile that mutation.
+    pub(crate) fn activate_or_reconcile(self) -> Result<ExternalSupervisorActivationRecord> {
+        ensure!(
+            self.contact_gate
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "external supervisor activation decision is already in progress"
+        );
+        let _contact_lease = ExternalContactLease {
+            gate: self.contact_gate.clone(),
+        };
+        let placement = &self.record.reservation.placement_thread_id;
+        let current = self
+            .state_store
+            .external_allocation(placement)?
+            .context("external allocation disappeared before supervisor activation")?;
+        ensure!(
+            matches!(
+                current.phase,
+                ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
+            ),
+            "external supervisor activation requires a retained bound occurrence"
+        );
+        let occurrence = current
+            .occurrence
+            .as_ref()
+            .context("external supervisor activation has no exact occurrence")?;
+        let (intent, activation) = supervisor_activation(
+            &self.contract,
+            &current.reservation,
+            occurrence,
+            &self.channel_authority,
+        )?;
+        let owns_contact = self
+            .state_store
+            .begin_external_supervisor_activation(placement, &intent)?;
+        if !owns_contact {
+            if let Some(record) = self
+                .state_store
+                .external_supervisor_activation(placement)?
+                .filter(|record| record.observation.is_some())
+            {
+                return Ok(record);
+            }
+        }
+        let resolution = if owns_contact {
+            self.backend.activate_supervisor(
+                &self.contract,
+                &self.credential,
+                &current.reservation,
+                occurrence,
+                &intent,
+                &activation,
+            )?
+        } else {
+            self.backend.reconcile_supervisor_activation(
+                &self.contract,
+                &self.credential,
+                &current.reservation,
+                occurrence,
+                &intent,
+            )?
+        };
+        if let Some((activation_state, provider_observation_digest)) = match resolution {
+            ExternalSupervisorActivationResolution::Started {
+                provider_observation_digest,
+            } => Some(("started", provider_observation_digest)),
+            ExternalSupervisorActivationResolution::NotStarted {
+                provider_observation_digest,
+            } => Some(("not_started", provider_observation_digest)),
+            ExternalSupervisorActivationResolution::Pending => None,
+        } {
+            self.state_store.settle_external_supervisor_activation(
+                placement,
+                &ExternalSupervisorActivationObservation {
+                    schema: 1,
+                    binding_hash: current.reservation.binding_hash.clone(),
+                    request_digest: current.reservation.request_digest.clone(),
+                    occurrence_id: occurrence.occurrence_id.clone(),
+                    activation_request_digest: intent.activation_request_digest.clone(),
+                    activation_state: activation_state.into(),
+                    provider_observation_digest,
+                },
+            )?;
+        }
+        self.state_store
+            .external_supervisor_activation(placement)?
+            .context("external supervisor activation intent disappeared")
+    }
+
     /// Start the exact termination request once, or reconcile it after
     /// restart. The durable intent is committed before the adapter mutation.
     pub(crate) fn terminate_or_reconcile(self) -> Result<ExternalAllocationRecord> {
+        ensure!(
+            self.contact_gate
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "external placement lifecycle decision is already in progress"
+        );
+        let _contact_lease = ExternalContactLease {
+            gate: self.contact_gate.clone(),
+        };
         let placement = &self.record.reservation.placement_thread_id;
         let current = self
             .state_store
@@ -1241,6 +1367,76 @@ impl ExternalPlacementReconciliation {
             .external_allocation(placement)?
             .context("external allocation disappeared after cleanup observation")
     }
+}
+
+fn supervisor_activation(
+    contract: &ExternalPlacementBackendContract,
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    authority: &ExternalChannelAuthority,
+) -> Result<(
+    ExternalSupervisorActivationIntent,
+    ExternalSupervisorActivation,
+)> {
+    ensure!(
+        authority.generation() == reservation.channel_authority_generation
+            && authority.owner_public_key() == reservation.channel_owner_public_key
+            && authority.bootstrap_capability_hash()
+                == reservation.channel_bootstrap_capability_hash,
+        "external supervisor activation changed its retained channel authority"
+    );
+    let attachment_deadline_ms = reservation
+        .contact_deadline_ms
+        .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
+        .context("external supervisor attachment deadline overflow")?;
+    let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+    let post_execution_timeout_seconds = contract
+        .observation_timeout_seconds
+        .checked_add(contract.cleanup_timeout_seconds)
+        .context("external supervisor post-execution timeout overflow")?;
+    let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
+        schema: 1,
+        controller: contract.controller_transport.clone(),
+        tls_root_certificates_der_base64: contract
+            .controller_tls_root_certificates_der_base64
+            .clone(),
+        placement_thread_id: reservation.placement_thread_id.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        allocation_request_digest: reservation.request_digest.clone(),
+        admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+        base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+        execution_binding_hash: reservation.binding_hash.clone(),
+        supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+        owner_public_key: reservation.channel_owner_public_key.clone(),
+        bootstrap_capability: authority.bootstrap_capability().to_owned(),
+        attachment_deadline_ms,
+        execution_timeout_seconds: reservation.timeout_seconds,
+        post_execution_timeout_seconds,
+        channel_max_bytes,
+    };
+    bootstrap.validate()?;
+    let activation_request_digest =
+        crate::runtime_db::external_execution::external_supervisor_activation_request_digest(
+            reservation,
+            occurrence,
+            contract,
+            attachment_deadline_ms,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+        )?;
+    let intent = ExternalSupervisorActivationIntent {
+        schema: 1,
+        binding_hash: reservation.binding_hash.clone(),
+        request_digest: reservation.request_digest.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+        activation_request_digest,
+        attachment_deadline_ms,
+        execution_timeout_seconds: reservation.timeout_seconds,
+        post_execution_timeout_seconds,
+        channel_max_bytes,
+    };
+    Ok((intent, ExternalSupervisorActivation { bootstrap }))
 }
 
 fn apply_allocation_resolution(
@@ -1325,6 +1521,8 @@ mod tests {
         artifact: String,
         allocate_calls: AtomicUsize,
         allocation_observations: AtomicUsize,
+        activation_calls: AtomicUsize,
+        activation_observations: AtomicUsize,
         terminate_calls: AtomicUsize,
         termination_observations: AtomicUsize,
     }
@@ -1335,6 +1533,8 @@ mod tests {
                 artifact: "d".repeat(64),
                 allocate_calls: AtomicUsize::new(0),
                 allocation_observations: AtomicUsize::new(0),
+                activation_calls: AtomicUsize::new(0),
+                activation_observations: AtomicUsize::new(0),
                 terminate_calls: AtomicUsize::new(0),
                 termination_observations: AtomicUsize::new(0),
             }
@@ -1362,16 +1562,8 @@ mod tests {
             &self,
             _contract: &ExternalPlacementBackendContract,
             _credential: &PlacementCredential,
-            reservation: &ExternalAllocationReservation,
-            activation: &ExternalPlacementActivation,
+            _reservation: &ExternalAllocationReservation,
         ) -> Result<ExternalAllocationResolution> {
-            ensure!(
-                activation.authority_generation() == reservation.channel_authority_generation
-                    && activation.owner_public_key() == reservation.channel_owner_public_key
-                    && lillux::sha256_hex(activation.bootstrap_capability().as_bytes())
-                        == reservation.channel_bootstrap_capability_hash,
-                "fixture allocator received wrong channel activation"
-            );
             self.allocate_calls.fetch_add(1, Ordering::SeqCst);
             bail!("fixture lost the create response after provider mutation")
         }
@@ -1386,6 +1578,43 @@ mod tests {
             Ok(ExternalAllocationResolution::Bound {
                 occurrence_id: "fixture-occurrence".into(),
                 provider_observation_digest: "f".repeat(64),
+            })
+        }
+
+        fn activate_supervisor(
+            &self,
+            _contract: &ExternalPlacementBackendContract,
+            _credential: &PlacementCredential,
+            reservation: &ExternalAllocationReservation,
+            occurrence: &ExternalAllocationOccurrence,
+            intent: &ExternalSupervisorActivationIntent,
+            activation: &ExternalSupervisorActivation,
+        ) -> Result<ExternalSupervisorActivationResolution> {
+            let bootstrap = activation.bootstrap();
+            ensure!(
+                bootstrap.placement_thread_id == reservation.placement_thread_id
+                    && bootstrap.occurrence_id == occurrence.occurrence_id
+                    && bootstrap.owner_public_key == reservation.channel_owner_public_key
+                    && lillux::sha256_hex(bootstrap.bootstrap_capability.as_bytes())
+                        == reservation.channel_bootstrap_capability_hash
+                    && intent.activation_request_digest.len() == 64,
+                "fixture adapter received wrong supervisor activation"
+            );
+            self.activation_calls.fetch_add(1, Ordering::SeqCst);
+            bail!("fixture lost the supervisor-start response after provider mutation")
+        }
+
+        fn reconcile_supervisor_activation(
+            &self,
+            _contract: &ExternalPlacementBackendContract,
+            _credential: &PlacementCredential,
+            _reservation: &ExternalAllocationReservation,
+            _occurrence: &ExternalAllocationOccurrence,
+            _intent: &ExternalSupervisorActivationIntent,
+        ) -> Result<ExternalSupervisorActivationResolution> {
+            self.activation_observations.fetch_add(1, Ordering::SeqCst);
+            Ok(ExternalSupervisorActivationResolution::Started {
+                provider_observation_digest: "3".repeat(64),
             })
         }
 
@@ -1779,15 +2008,6 @@ mod tests {
         let credential = credential(&InstalledExternalExecutionBinding::test_fixture());
         let authority =
             ExternalChannelAuthority::test_fixture(&reservation.channel_authority_generation);
-        let activation = ExternalPlacementActivation {
-            authority_generation: authority.generation().to_owned(),
-            owner_public_key: authority.owner_public_key(),
-            bootstrap_capability: zeroize::Zeroizing::new(
-                authority.bootstrap_capability().to_owned(),
-            ),
-            controller_transport: contract.controller_transport.clone(),
-        };
-
         assert!(matches!(
             db.claim_external_allocation_contact("T-one", &reservation.request_digest)
                 .unwrap(),
@@ -1795,7 +2015,7 @@ mod tests {
         ));
         assert!(
             backend
-                .allocate(&contract, &credential, &reservation, &activation)
+                .allocate(&contract, &credential, &reservation)
                 .is_err()
         );
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
@@ -1826,6 +2046,62 @@ mod tests {
         db.bind_external_allocation("T-one", &occurrence).unwrap();
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.allocation_observations.load(Ordering::SeqCst), 1);
+
+        let (activation_intent, activation) =
+            supervisor_activation(&contract, &reservation, &occurrence, &authority).unwrap();
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &activation_intent)
+                .unwrap()
+        );
+        assert!(
+            backend
+                .activate_supervisor(
+                    &contract,
+                    &credential,
+                    &reservation,
+                    &occurrence,
+                    &activation_intent,
+                    &activation,
+                )
+                .is_err()
+        );
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        drop(db);
+
+        let db = crate::runtime_db::RuntimeDb::open(&path).unwrap();
+        assert!(
+            !db.begin_external_supervisor_activation("T-one", &activation_intent)
+                .unwrap()
+        );
+        let ExternalSupervisorActivationResolution::Started {
+            provider_observation_digest,
+        } = backend
+            .reconcile_supervisor_activation(
+                &contract,
+                &credential,
+                &reservation,
+                &occurrence,
+                &activation_intent,
+            )
+            .unwrap()
+        else {
+            panic!("fixture activation reconciliation did not prove supervisor start");
+        };
+        db.settle_external_supervisor_activation(
+            "T-one",
+            &ExternalSupervisorActivationObservation {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: reservation.request_digest.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                activation_request_digest: activation_intent.activation_request_digest.clone(),
+                activation_state: "started".into(),
+                provider_observation_digest,
+            },
+        )
+        .unwrap();
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
 
         let intent = ExternalTerminationIntent {
             schema: 1,
@@ -1924,8 +2200,46 @@ mod tests {
         )
         .claim()
         .unwrap();
+        let ExternalPlacementContactDecision::Reconcile(activation) = decision else {
+            panic!("bound occurrence did not retain activation authority");
+        };
+        assert!(activation.activate_or_reconcile().is_err());
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+
+        let decision = prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap();
+        let ExternalPlacementContactDecision::Reconcile(activation) = decision else {
+            panic!("ambiguous activation did not retain reconciliation authority");
+        };
+        let activated = activation.activate_or_reconcile().unwrap();
+        assert_eq!(
+            activated
+                .observation
+                .as_ref()
+                .map(|value| value.activation_state.as_str()),
+            Some("started")
+        );
+
+        let decision = prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap();
         let ExternalPlacementContactDecision::Reconcile(cleanup) = decision else {
-            panic!("bound occurrence did not retain cleanup authority");
+            panic!("activated occurrence did not retain cleanup authority");
         };
         assert!(cleanup.terminate_or_reconcile().is_err());
         assert_eq!(
@@ -1952,6 +2266,8 @@ mod tests {
         );
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.allocation_observations.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
         assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 1);
     }
@@ -2004,6 +2320,49 @@ mod tests {
             .phase,
             ExternalAllocationPhase::ContactedNoOccurrence
         );
+    }
+
+    #[test]
+    fn active_supervisor_contact_blocks_termination_mutation() {
+        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let backend = Arc::new(FaultBackend::new());
+        let gate = Arc::new(AtomicBool::new(false));
+        assert!(matches!(
+            store
+                .claim_external_allocation_contact("T-one", &reservation.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Contact(_)
+        ));
+        store
+            .bind_external_allocation(
+                "T-one",
+                &ExternalAllocationOccurrence {
+                    schema: 1,
+                    binding_hash: reservation.binding_hash.clone(),
+                    request_digest: reservation.request_digest.clone(),
+                    occurrence_id: "fixture-occurrence".into(),
+                    provider_observation_digest: "f".repeat(64),
+                },
+            )
+            .unwrap();
+        let decision = prepared_fixture(
+            store,
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime,
+        )
+        .claim()
+        .unwrap();
+        let ExternalPlacementContactDecision::Reconcile(cleanup) = decision else {
+            panic!("bound occurrence did not retain cleanup authority");
+        };
+        gate.store(true, Ordering::Release);
+        assert!(cleanup.terminate_or_reconcile().is_err());
+        assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 0);
+        assert!(gate.load(Ordering::Acquire));
+        gate.store(false, Ordering::Release);
     }
 
     #[test]

@@ -4,6 +4,40 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Durable supervisor activation checkpoint
+
+Runtime operator epoch 48 and external binding schema 4 separate occurrence
+allocation from the one allowed supervisor-start mutation. The signed binding
+retains the exact ordered TLS roots as well as their digest, runtime manifest
+and runtime selection. Allocation no longer transports activation secrets.
+After an occurrence is bound, the controller first retains a canonical
+activation intent, then either performs that exact mutation once or reconciles
+it after an ambiguous response or restart. The activation capability remains
+non-cloneable, non-debuggable and zeroized on drop.
+
+Recovery recomputes the activation-request identity from the retained binding,
+reservation, occurrence and channel-authority hashes. First mutation rechecks
+the exact live dedicated-session/workspace owner in its SQLite writer
+transaction; exact retained replay remains reconciliation-only after owner
+state changes. Channel registration joins the activation transactionally:
+pending or positively observed activation may attach, while `not_started` and
+attachment exclude one another in both commit orders. Activation and external
+termination also share one process-local lifecycle gate, so cleanup cannot
+settle while a delayed start mutation remains possible.
+
+Focused source evidence on 2026-09-21: application test compilation passed;
+29 runtime allocation/channel tests, 8 placement-owner tests, the exact signed
+binding admission/rotation test, and 25 independent production-DDL SQLite tests
+passed. Regressions cover orphaned first activation, exact restart replay,
+canonical intent/observation digest replacement, both attachment/non-start race
+orders, and activation/termination exclusion. Independent architecture,
+reservation-owner/recovery, and testing re-review found no remaining blocker
+after the specific recovery-validator assertion was corrected. No install, node lifecycle,
+provider/model, Render, credential, grant, or paid-resource contact occurred.
+
+This checkpoint still has no supervisor executable, production lifecycle
+adapter, dispatch integration, or complete B -> C -> evaluation -> D proof.
+
 ## Current program admission slice
 
 Profile schema 9 requires `external_candidate`: either explicit `null` for local

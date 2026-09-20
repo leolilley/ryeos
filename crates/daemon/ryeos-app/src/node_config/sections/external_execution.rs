@@ -35,6 +35,7 @@ struct BindingDocument {
     storage_policy: String,
     cleanup_proof: String,
     controller_transport: ExternalControllerTransportContract,
+    controller_tls_root_certificates_der_base64: Vec<String>,
     max_active: u16,
     timeout_seconds: u32,
     contact_timeout_seconds: u32,
@@ -48,7 +49,7 @@ struct BindingDocument {
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 3,
+            self.kind == "node" && self.schema == 4,
             "unsupported external placement binding schema"
         );
         ensure!(
@@ -109,6 +110,12 @@ impl BindingDocument {
             "placement binding storage or transfer budgets exceed bounds"
         );
         self.controller_transport.validate()?;
+        ensure!(
+            ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                &self.controller_tls_root_certificates_der_base64,
+            )? == self.controller_transport.tls_root_bundle_digest,
+            "external controller TLS roots changed their signed identity"
+        );
         Ok(())
     }
 
@@ -119,11 +126,16 @@ impl BindingDocument {
             capacity_group: self.capacity_group.clone(),
             region: self.region.clone(),
             plan: self.plan.clone(),
+            runtime_manifest_hash: self.runtime_manifest_hash.clone(),
+            runtime_selection_identity: self.runtime_selection_identity.clone(),
             backend_artifact_hash: self.backend_artifact_hash.clone(),
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
             controller_transport: self.controller_transport.clone(),
+            controller_tls_root_certificates_der_base64: self
+                .controller_tls_root_certificates_der_base64
+                .clone(),
             max_active: self.max_active,
             timeout_seconds: self.timeout_seconds,
             contact_timeout_seconds: self.contact_timeout_seconds,
@@ -145,11 +157,14 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) capacity_group: String,
     pub(crate) region: String,
     pub(crate) plan: String,
+    pub(crate) runtime_manifest_hash: String,
+    pub(crate) runtime_selection_identity: String,
     pub(crate) backend_artifact_hash: String,
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
     pub(crate) controller_transport: ExternalControllerTransportContract,
+    pub(crate) controller_tls_root_certificates_der_base64: Vec<String>,
     pub(crate) max_active: u16,
     pub(crate) timeout_seconds: u32,
     pub(crate) contact_timeout_seconds: u32,
@@ -317,9 +332,13 @@ impl RetainedExternalExecutionBinding {
 
     #[cfg(test)]
     pub(crate) fn test_fixture() -> Self {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let controller_tls_root_certificates_der_base64 =
+            vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 3,
+            schema: 4,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             backend: "fixture".into(),
             account: "account".into(),
@@ -339,11 +358,16 @@ impl RetainedExternalExecutionBinding {
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
                         .into(),
-                tls_root_bundle_digest: "e".repeat(64),
+                tls_root_bundle_digest:
+                    ryeos_state::external_execution::transport::external_tls_root_bundle_digest(
+                        &controller_tls_root_certificates_der_base64,
+                    )
+                    .unwrap(),
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
             },
+            controller_tls_root_certificates_der_base64,
             max_active: 1,
             timeout_seconds: 60,
             contact_timeout_seconds: 30,

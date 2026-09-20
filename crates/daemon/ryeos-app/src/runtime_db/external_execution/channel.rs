@@ -141,8 +141,9 @@ impl RuntimeDb {
         require_session_owner(&tx, &allocation.reservation)?;
         let occurrence = allocation
             .occurrence
+            .as_ref()
             .context("external allocation has no exact occurrence")?;
-        let reservation = allocation.reservation;
+        let reservation = &allocation.reservation;
         if allocation.phase != ExternalAllocationPhase::Bound
             || binding.allocation_request_digest != reservation.request_digest
             || binding.occurrence_id != occurrence.occurrence_id
@@ -153,6 +154,9 @@ impl RuntimeDb {
         {
             bail!("external channel contradicts its allocation owner");
         }
+        let retained = read_retained_binding(&tx, &reservation.binding_hash)?
+            .context("external channel lost its retained binding generation")?;
+        require_supervisor_activation_allows_channel(&tx, &allocation, binding, &retained)?;
         let prior: Option<(String, String)> = tx.query_row(
             "SELECT binding_digest,binding_json FROM external_execution_channel WHERE placement_thread_id=?1",
             [&binding.placement_thread_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
@@ -163,8 +167,6 @@ impl RuntimeDb {
             return Ok(());
         }
         require_launch_ready_session(&tx, &binding.placement_thread_id)?;
-        let retained = read_retained_binding(&tx, &reservation.binding_hash)?
-            .context("external channel lost its retained binding generation")?;
         let contract = retained.backend_contract();
         // Sample the production clock only after acquiring the writer lock.
         // Lock contention must not carry stale pre-expiry authority across the
@@ -593,6 +595,20 @@ impl JournalOwner for NodeJournalOwner {
 
 pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
     journal::validate_channels(conn, &NodeJournalOwner)?;
+    let mut channels = conn.prepare(
+        "SELECT placement_thread_id FROM external_execution_channel ORDER BY placement_thread_id",
+    )?;
+    let placements = channels
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for placement in placements {
+        let allocation =
+            read(conn, &placement)?.context("external channel lost its allocation owner")?;
+        let retained = read_retained_binding(conn, &allocation.reservation.binding_hash)?
+            .context("external channel lost its retained binding generation")?;
+        let binding = load_binding(conn, &placement)?;
+        require_supervisor_activation_allows_channel(conn, &allocation, &binding, &retained)?;
+    }
     let invalid_import: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM external_execution_import i
         LEFT JOIN external_execution_channel c ON c.binding_digest=i.binding_digest
         LEFT JOIN external_execution_frame f ON f.binding_digest=i.binding_digest AND f.frame_digest=i.export_frame_digest
@@ -626,36 +642,59 @@ mod tests {
         max_frames: u32,
         max_bytes: u64,
     ) -> (ExecutionChannelBinding, SigningKey, SigningKey) {
-        let reservation = super::super::tests::reservation(db, "channel");
+        let (_, _, _, binding, owner, supervisor) =
+            pending_channel(db, "channel", "external-one", max_frames, max_bytes);
+        db.register_external_execution_channel(&binding).unwrap();
+        (binding, owner, supervisor)
+    }
+
+    fn pending_channel(
+        db: &RuntimeDb,
+        suffix: &str,
+        occurrence_id: &str,
+        max_frames: u32,
+        max_bytes: u64,
+    ) -> (
+        ExternalAllocationReservation,
+        ExternalAllocationOccurrence,
+        ExternalSupervisorActivationIntent,
+        ExecutionChannelBinding,
+        SigningKey,
+        SigningKey,
+    ) {
+        let reservation = super::super::tests::reservation(db, suffix);
         super::super::tests::reserve(db, &reservation).unwrap();
         db.claim_external_allocation_contact(
             &reservation.placement_thread_id,
             &reservation.request_digest,
         )
         .unwrap();
-        db.bind_external_allocation(
-            &reservation.placement_thread_id,
-            &ExternalAllocationOccurrence {
-                schema: 1,
-                binding_hash: reservation.binding_hash.clone(),
-                request_digest: reservation.request_digest.clone(),
-                occurrence_id: "external-one".into(),
-                provider_observation_digest: "f".repeat(64),
-            },
-        )
-        .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence_id.into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
+            .unwrap();
+        let activation = super::super::tests::activation_intent(&reservation, &occurrence);
+        assert!(
+            db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
         let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
         let supervisor = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
             schema: 1,
-            placement_thread_id: reservation.placement_thread_id,
-            allocation_request_digest: reservation.request_digest,
-            occurrence_id: "external-one".into(),
-            admitted_capsule_hash: reservation.admitted_capsule_hash,
-            base_snapshot_hash: reservation.base_snapshot_hash,
-            execution_binding_hash: reservation.binding_hash,
-            supervisor_runtime_hash: "f".repeat(64),
+            placement_thread_id: reservation.placement_thread_id.clone(),
+            allocation_request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+            base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+            execution_binding_hash: reservation.binding_hash.clone(),
+            supervisor_runtime_hash: activation.supervisor_runtime_hash.clone(),
             channel_nonce: "9".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
@@ -665,8 +704,14 @@ mod tests {
             max_frames,
             max_bytes,
         };
-        db.register_external_execution_channel(&binding).unwrap();
-        (binding, owner, supervisor)
+        (
+            reservation,
+            occurrence,
+            activation,
+            binding,
+            owner,
+            supervisor,
+        )
     }
 
     #[test]
@@ -680,17 +725,20 @@ mod tests {
             &reservation.request_digest,
         )
         .unwrap();
-        db.bind_external_allocation(
-            &reservation.placement_thread_id,
-            &ExternalAllocationOccurrence {
-                schema: 1,
-                binding_hash: reservation.binding_hash.clone(),
-                request_digest: reservation.request_digest.clone(),
-                occurrence_id: "external-expired".into(),
-                provider_observation_digest: "f".repeat(64),
-            },
-        )
-        .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "external-expired".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
+            .unwrap();
+        let activation = super::super::tests::activation_intent(&reservation, &occurrence);
+        assert!(
+            db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
         let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
         let supervisor = lillux::crypto::generate_signing_key();
         // Simulate authentication while the bootstrap window was valid, then
@@ -705,7 +753,7 @@ mod tests {
             admitted_capsule_hash: reservation.admitted_capsule_hash,
             base_snapshot_hash: reservation.base_snapshot_hash,
             execution_binding_hash: reservation.binding_hash,
-            supervisor_runtime_hash: "f".repeat(64),
+            supervisor_runtime_hash: activation.supervisor_runtime_hash,
             channel_nonce: "9".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
@@ -739,6 +787,75 @@ mod tests {
             binding
         );
     }
+
+    #[test]
+    fn retained_non_start_refuses_a_previously_authenticated_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (reservation, occurrence, activation, binding, _, _) = pending_channel(
+            &db,
+            "not-started-before-attach",
+            "external-not-started-before-attach",
+            100,
+            1024 * 1024,
+        );
+        db.settle_external_supervisor_activation(
+            &reservation.placement_thread_id,
+            &ExternalSupervisorActivationObservation {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: reservation.request_digest.clone(),
+                occurrence_id: occurrence.occurrence_id,
+                activation_request_digest: activation.activation_request_digest,
+                activation_state: "not_started".into(),
+                provider_observation_digest: "7".repeat(64),
+            },
+        )
+        .unwrap();
+        assert!(db.register_external_execution_channel(&binding).is_err());
+        assert!(
+            db.optional_external_execution_channel(&reservation.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn attached_channel_refuses_later_non_start_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (reservation, occurrence, activation, binding, _, _) = pending_channel(
+            &db,
+            "attach-before-not-started",
+            "external-attach-before-not-started",
+            100,
+            1024 * 1024,
+        );
+        db.register_external_execution_channel(&binding).unwrap();
+        assert!(
+            db.settle_external_supervisor_activation(
+                &reservation.placement_thread_id,
+                &ExternalSupervisorActivationObservation {
+                    schema: 1,
+                    binding_hash: reservation.binding_hash.clone(),
+                    request_digest: reservation.request_digest.clone(),
+                    occurrence_id: occurrence.occurrence_id,
+                    activation_request_digest: activation.activation_request_digest,
+                    activation_state: "not_started".into(),
+                    provider_observation_digest: "7".repeat(64),
+                },
+            )
+            .is_err()
+        );
+        assert!(
+            db.external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .observation
+                .is_none()
+        );
+    }
+
     fn wire(
         binding: &ExecutionChannelBinding,
         key: &SigningKey,

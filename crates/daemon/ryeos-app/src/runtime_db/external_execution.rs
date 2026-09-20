@@ -75,6 +75,42 @@ CREATE TRIGGER external_execution_no_occurrence_no_delete
 BEFORE DELETE ON external_execution_no_occurrence
 BEGIN SELECT RAISE(ABORT, 'external no-occurrence evidence is retained'); END;
 
+CREATE TABLE external_execution_supervisor_activation_intent (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
+    intent_json TEXT NOT NULL
+);
+CREATE TRIGGER external_execution_supervisor_activation_intent_insert_guard
+BEFORE INSERT ON external_execution_supervisor_activation_intent
+WHEN NOT EXISTS(SELECT 1 FROM external_execution_allocation a
+    WHERE a.placement_thread_id=NEW.placement_thread_id
+      AND a.phase='bound' AND a.occurrence_json IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation has no executable bound occurrence'); END;
+CREATE TRIGGER external_execution_supervisor_activation_intent_immutable
+BEFORE UPDATE ON external_execution_supervisor_activation_intent
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation intent is immutable'); END;
+CREATE TRIGGER external_execution_supervisor_activation_intent_no_delete
+BEFORE DELETE ON external_execution_supervisor_activation_intent
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation intent is retained'); END;
+
+CREATE TABLE external_execution_supervisor_activation_observation (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
+    observation_json TEXT NOT NULL
+);
+CREATE TRIGGER external_execution_supervisor_activation_observation_insert_guard
+BEFORE INSERT ON external_execution_supervisor_activation_observation
+WHEN NOT EXISTS(SELECT 1 FROM external_execution_allocation a
+    JOIN external_execution_supervisor_activation_intent i
+      ON i.placement_thread_id=a.placement_thread_id
+    WHERE a.placement_thread_id=NEW.placement_thread_id
+      AND a.phase IN ('bound','quarantined') AND a.occurrence_json IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation observation has no durable intent'); END;
+CREATE TRIGGER external_execution_supervisor_activation_observation_immutable
+BEFORE UPDATE ON external_execution_supervisor_activation_observation
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation observation is immutable'); END;
+CREATE TRIGGER external_execution_supervisor_activation_observation_no_delete
+BEFORE DELETE ON external_execution_supervisor_activation_observation
+BEGIN SELECT RAISE(ABORT, 'external supervisor activation observation is retained'); END;
+
 CREATE TABLE external_execution_termination_intent (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
     intent_json TEXT NOT NULL
@@ -352,6 +388,160 @@ impl ExternalNoOccurrenceEvidence {
     }
 }
 
+/// Exact controller-authored supervisor start request, retained before the
+/// lifecycle adapter is allowed to mutate the bound occurrence. Capability
+/// plaintext and TLS certificate bytes remain outside this public journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalSupervisorActivationIntent {
+    pub schema: u32,
+    pub binding_hash: String,
+    pub request_digest: String,
+    pub occurrence_id: String,
+    pub supervisor_runtime_hash: String,
+    pub activation_request_digest: String,
+    pub attachment_deadline_ms: i64,
+    pub execution_timeout_seconds: u32,
+    pub post_execution_timeout_seconds: u32,
+    pub channel_max_bytes: u64,
+}
+
+impl ExternalSupervisorActivationIntent {
+    fn validate(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+    ) -> Result<()> {
+        if self.schema != 1
+            || self.binding_hash != reservation.binding_hash
+            || self.request_digest != reservation.request_digest
+            || self.occurrence_id != occurrence.occurrence_id
+            || self.execution_timeout_seconds != reservation.timeout_seconds
+            || self.attachment_deadline_ms <= reservation.contact_deadline_ms
+            || !(1..=900).contains(&self.post_execution_timeout_seconds)
+            || !(1..=64 * 1024 * 1024).contains(&self.channel_max_bytes)
+        {
+            bail!("external supervisor activation intent contradicts its occurrence");
+        }
+        validate_sha256("external supervisor runtime", &self.supervisor_runtime_hash)?;
+        validate_sha256(
+            "external supervisor activation request",
+            &self.activation_request_digest,
+        )
+    }
+
+    fn validate_contract(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
+    ) -> Result<()> {
+        let exact_attachment_deadline = reservation
+            .contact_deadline_ms
+            .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
+            .context("external supervisor attachment deadline overflow")?;
+        if self.supervisor_runtime_hash != contract.runtime_manifest_hash
+            || self.attachment_deadline_ms != exact_attachment_deadline
+            || self.post_execution_timeout_seconds
+                != contract
+                    .observation_timeout_seconds
+                    .checked_add(contract.cleanup_timeout_seconds)
+                    .context("external supervisor post-execution timeout overflow")?
+            || self.channel_max_bytes != contract.max_transfer_bytes.min(64 * 1024 * 1024)
+        {
+            bail!("external supervisor activation changed its retained binding contract");
+        }
+        ensure!(
+            self.activation_request_digest
+                == external_supervisor_activation_request_digest(
+                    reservation,
+                    occurrence,
+                    contract,
+                    self.attachment_deadline_ms,
+                    self.post_execution_timeout_seconds,
+                    self.channel_max_bytes,
+                )?,
+            "external supervisor activation request identity changed"
+        );
+        Ok(())
+    }
+}
+
+/// Reproduce the exact non-secret identity of one supervisor-start mutation.
+/// The capability plaintext and TLS roots are deliberately absent: their
+/// retained hashes already bind the corresponding protected generations.
+pub(crate) fn external_supervisor_activation_request_digest(
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
+    attachment_deadline_ms: i64,
+    post_execution_timeout_seconds: u32,
+    channel_max_bytes: u64,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain":"ryeos.external-supervisor-activation.v1",
+        "controller":&contract.controller_transport,
+        "tls_root_bundle_digest":&contract.controller_transport.tls_root_bundle_digest,
+        "placement_thread_id":&reservation.placement_thread_id,
+        "occurrence_id":&occurrence.occurrence_id,
+        "allocation_request_digest":&reservation.request_digest,
+        "admitted_capsule_hash":&reservation.admitted_capsule_hash,
+        "base_snapshot_hash":&reservation.base_snapshot_hash,
+        "execution_binding_hash":&reservation.binding_hash,
+        "supervisor_runtime_hash":&contract.runtime_manifest_hash,
+        "owner_public_key":&reservation.channel_owner_public_key,
+        "bootstrap_capability_hash":&reservation.channel_bootstrap_capability_hash,
+        "attachment_deadline_ms":attachment_deadline_ms,
+        "execution_timeout_seconds":reservation.timeout_seconds,
+        "post_execution_timeout_seconds":post_execution_timeout_seconds,
+        "channel_max_bytes":channel_max_bytes,
+    }))
+}
+
+/// Independently observed result for the exact supervisor-start request.
+/// `not_started` is terminal only for activation; the allocated occurrence
+/// still requires provider-terminal cleanup before capacity can be released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalSupervisorActivationObservation {
+    pub schema: u32,
+    pub binding_hash: String,
+    pub request_digest: String,
+    pub occurrence_id: String,
+    pub activation_request_digest: String,
+    pub activation_state: String,
+    pub provider_observation_digest: String,
+}
+
+impl ExternalSupervisorActivationObservation {
+    fn validate(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        intent: &ExternalSupervisorActivationIntent,
+    ) -> Result<()> {
+        if self.schema != 1
+            || self.binding_hash != reservation.binding_hash
+            || self.request_digest != reservation.request_digest
+            || self.occurrence_id != occurrence.occurrence_id
+            || self.activation_request_digest != intent.activation_request_digest
+            || !matches!(self.activation_state.as_str(), "started" | "not_started")
+        {
+            bail!("external supervisor activation observation contradicts its intent");
+        }
+        validate_sha256(
+            "external supervisor activation observation",
+            &self.provider_observation_digest,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalSupervisorActivationRecord {
+    pub intent: ExternalSupervisorActivationIntent,
+    pub observation: Option<ExternalSupervisorActivationObservation>,
+}
+
 /// Durable request written before the one allowed termination mutation. The
 /// request identity is derived by the controller and is never supplied by a
 /// worker or provider response.
@@ -590,6 +780,19 @@ fn validate_lifecycle_evidence(conn: &Connection, record: &ExternalAllocationRec
         "observation_json",
         placement,
     )?;
+    let activation: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
+        conn,
+        "external_execution_supervisor_activation_intent",
+        "intent_json",
+        placement,
+    )?;
+    let activation_observation: Option<ExternalSupervisorActivationObservation> =
+        read_canonical_evidence(
+            conn,
+            "external_execution_supervisor_activation_observation",
+            "observation_json",
+            placement,
+        )?;
     if let Some(evidence) = &no_occurrence {
         evidence.validate(&record.reservation)?;
     }
@@ -600,6 +803,27 @@ fn validate_lifecycle_evidence(conn: &Connection, record: &ExternalAllocationRec
                 .occurrence
                 .as_ref()
                 .context("external termination intent has no occurrence")?,
+        )?;
+    }
+    if let Some(intent) = &activation {
+        intent.validate(
+            &record.reservation,
+            record
+                .occurrence
+                .as_ref()
+                .context("external supervisor activation intent has no occurrence")?,
+        )?;
+    }
+    if let Some(observation) = &activation_observation {
+        observation.validate(
+            &record.reservation,
+            record
+                .occurrence
+                .as_ref()
+                .context("external supervisor activation observation has no occurrence")?,
+            activation
+                .as_ref()
+                .context("external supervisor activation observation has no intent")?,
         )?;
     }
     if let Some(observation) = &terminal {
@@ -622,9 +846,23 @@ fn validate_lifecycle_evidence(conn: &Connection, record: &ExternalAllocationRec
     {
         bail!("external termination intent did not fence execution");
     }
+    if activation.is_some()
+        && !matches!(
+            record.phase,
+            ExternalAllocationPhase::Bound
+                | ExternalAllocationPhase::Quarantined
+                | ExternalAllocationPhase::Terminated
+        )
+    {
+        bail!("external supervisor activation has no retained bound occurrence");
+    }
     match record.phase {
         ExternalAllocationPhase::ContactedNoOccurrence => ensure!(
-            no_occurrence.is_some() && termination.is_none() && terminal.is_none(),
+            no_occurrence.is_some()
+                && activation.is_none()
+                && activation_observation.is_none()
+                && termination.is_none()
+                && terminal.is_none(),
             "settled no-occurrence allocation lacks its exact evidence"
         ),
         ExternalAllocationPhase::Terminated => ensure!(
@@ -707,6 +945,48 @@ fn read_retained_binding(
     .transpose()
 }
 
+fn require_supervisor_activation_allows_channel(
+    conn: &Connection,
+    record: &ExternalAllocationRecord,
+    binding: &ryeos_state::external_execution::ExecutionChannelBinding,
+    retained: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+) -> Result<()> {
+    let occurrence = record
+        .occurrence
+        .as_ref()
+        .context("external channel activation has no occurrence")?;
+    let intent: ExternalSupervisorActivationIntent = read_canonical_evidence(
+        conn,
+        "external_execution_supervisor_activation_intent",
+        "intent_json",
+        &record.reservation.placement_thread_id,
+    )?
+    .context("external channel has no durable supervisor activation intent")?;
+    intent.validate(&record.reservation, occurrence)?;
+    intent.validate_contract(
+        &record.reservation,
+        occurrence,
+        &retained.backend_contract(),
+    )?;
+    ensure!(
+        binding.supervisor_runtime_hash == intent.supervisor_runtime_hash,
+        "external channel changed its activated supervisor runtime"
+    );
+    if let Some(observation) = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
+        conn,
+        "external_execution_supervisor_activation_observation",
+        "observation_json",
+        &record.reservation.placement_thread_id,
+    )? {
+        observation.validate(&record.reservation, occurrence, &intent)?;
+        ensure!(
+            observation.activation_state == "started",
+            "external channel cannot attach after supervisor non-start evidence"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     let mut bindings = conn.prepare("SELECT binding_hash,capacity_owner,binding_json FROM external_execution_binding_generation")?;
     for row in bindings.query_map([], |row| {
@@ -755,6 +1035,21 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
             record.reservation.max_active,
             record.reservation.timeout_seconds,
         )?;
+        if let Some(intent) = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
+            conn,
+            "external_execution_supervisor_activation_intent",
+            "intent_json",
+            &placement,
+        )? {
+            intent.validate_contract(
+                &record.reservation,
+                record
+                    .occurrence
+                    .as_ref()
+                    .context("external supervisor activation lost its occurrence")?,
+                &retained.backend_contract(),
+            )?;
+        }
         validate_lifecycle_evidence(conn, &record)?;
     }
     channel::validate_channels(conn)?;
@@ -1058,6 +1353,174 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Persist the exact supervisor-start mutation before adapter contact.
+    /// `true` is the sole permission to issue it; an exact replay receives
+    /// reconciliation authority only and must never start another supervisor.
+    pub(crate) fn begin_external_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &ExternalSupervisorActivationIntent,
+    ) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, placement)?.context("external allocation is absent")?;
+        let occurrence = record
+            .occurrence
+            .as_ref()
+            .context("external supervisor activation requires an exact occurrence")?;
+        intent.validate(&record.reservation, occurrence)?;
+        let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
+            .context("external supervisor activation lost its binding generation")?;
+        intent.validate_contract(
+            &record.reservation,
+            occurrence,
+            &retained.backend_contract(),
+        )?;
+        let prior: Option<ExternalSupervisorActivationIntent> = read_canonical_evidence(
+            &tx,
+            "external_execution_supervisor_activation_intent",
+            "intent_json",
+            placement,
+        )?;
+        if let Some(prior) = prior {
+            ensure!(
+                prior == *intent,
+                "external supervisor activation intent changed"
+            );
+            tx.commit()?;
+            return Ok(false);
+        }
+        ensure!(
+            record.phase == ExternalAllocationPhase::Bound,
+            "new external supervisor activation requires an executable bound occurrence"
+        );
+        require_session_owner(&tx, &record.reservation)?;
+        require_launch_ready_session(&tx, placement)?;
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        ensure!(
+            now < intent.attachment_deadline_ms,
+            "external supervisor activation deadline expired before contact"
+        );
+        tx.execute(
+            "INSERT INTO external_execution_supervisor_activation_intent VALUES(?1,?2)",
+            params![
+                placement,
+                lillux::canonical_json(&serde_json::to_value(intent)?)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub(crate) fn external_supervisor_activation(
+        &self,
+        placement: &str,
+    ) -> Result<Option<ExternalSupervisorActivationRecord>> {
+        let record = read(&self.conn, placement)?.context("external allocation is absent")?;
+        let Some(intent) = read_canonical_evidence::<ExternalSupervisorActivationIntent>(
+            &self.conn,
+            "external_execution_supervisor_activation_intent",
+            "intent_json",
+            placement,
+        )?
+        else {
+            return Ok(None);
+        };
+        let occurrence = record
+            .occurrence
+            .as_ref()
+            .context("external supervisor activation has no occurrence")?;
+        intent.validate(&record.reservation, occurrence)?;
+        let retained = read_retained_binding(&self.conn, &record.reservation.binding_hash)?
+            .context("external supervisor activation lost its binding generation")?;
+        intent.validate_contract(
+            &record.reservation,
+            occurrence,
+            &retained.backend_contract(),
+        )?;
+        let observation = read_canonical_evidence::<ExternalSupervisorActivationObservation>(
+            &self.conn,
+            "external_execution_supervisor_activation_observation",
+            "observation_json",
+            placement,
+        )?;
+        if let Some(observation) = &observation {
+            observation.validate(&record.reservation, occurrence, &intent)?;
+        }
+        Ok(Some(ExternalSupervisorActivationRecord {
+            intent,
+            observation,
+        }))
+    }
+
+    pub(crate) fn settle_external_supervisor_activation(
+        &self,
+        placement: &str,
+        observation: &ExternalSupervisorActivationObservation,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record = read(&tx, placement)?.context("external allocation is absent")?;
+        let occurrence = record
+            .occurrence
+            .as_ref()
+            .context("external supervisor activation observation has no occurrence")?;
+        let intent: ExternalSupervisorActivationIntent = read_canonical_evidence(
+            &tx,
+            "external_execution_supervisor_activation_intent",
+            "intent_json",
+            placement,
+        )?
+        .context("external supervisor activation observation has no durable intent")?;
+        let retained = read_retained_binding(&tx, &record.reservation.binding_hash)?
+            .context("external supervisor activation lost its binding generation")?;
+        intent.validate_contract(
+            &record.reservation,
+            occurrence,
+            &retained.backend_contract(),
+        )?;
+        observation.validate(&record.reservation, occurrence, &intent)?;
+        ensure!(
+            matches!(
+                record.phase,
+                ExternalAllocationPhase::Bound | ExternalAllocationPhase::Quarantined
+            ),
+            "external supervisor activation observation arrived after occurrence settlement"
+        );
+        let prior: Option<ExternalSupervisorActivationObservation> = read_canonical_evidence(
+            &tx,
+            "external_execution_supervisor_activation_observation",
+            "observation_json",
+            placement,
+        )?;
+        if let Some(prior) = prior {
+            ensure!(
+                prior == *observation,
+                "external supervisor activation observation changed"
+            );
+            tx.commit()?;
+            return Ok(());
+        }
+        if observation.activation_state == "not_started" {
+            let attached: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
+                [placement],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                !attached,
+                "external supervisor cannot be observed not started after channel attachment"
+            );
+        }
+        tx.execute(
+            "INSERT INTO external_execution_supervisor_activation_observation VALUES(?1,?2)",
+            params![
+                placement,
+                lillux::canonical_json(&serde_json::to_value(observation)?)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Persist the exact termination mutation intent. `true` is the unique
     /// process-local permission to issue that request; `false` is recovery
     /// authority only and must use observation/reconciliation.
@@ -1343,6 +1806,39 @@ mod tests {
         )
     }
 
+    pub(super) fn activation_intent(
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+    ) -> ExternalSupervisorActivationIntent {
+        let contract = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture().backend_contract();
+        let attachment_deadline_ms = reservation.contact_deadline_ms
+            + i64::from(contract.observation_timeout_seconds) * 1_000;
+        let post_execution_timeout_seconds =
+            contract.observation_timeout_seconds + contract.cleanup_timeout_seconds;
+        let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+        let activation_request_digest = external_supervisor_activation_request_digest(
+            reservation,
+            occurrence,
+            &contract,
+            attachment_deadline_ms,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+        )
+        .unwrap();
+        ExternalSupervisorActivationIntent {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+            activation_request_digest,
+            attachment_deadline_ms,
+            execution_timeout_seconds: reservation.timeout_seconds,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+        }
+    }
+
     #[test]
     fn external_contact_is_claimed_once_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -1423,6 +1919,190 @@ mod tests {
         );
         let second = reservation(&db, "two");
         assert!(reserve(&db, &second).is_err());
+    }
+
+    #[test]
+    fn supervisor_activation_requires_bound_occurrence_and_reconciles_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let reservation = reservation(&db, "one");
+        reserve(&db, &reservation).unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        let intent = activation_intent(&reservation, &occurrence);
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &intent)
+                .is_err()
+        );
+        db.claim_external_allocation_contact("T-one", &reservation.request_digest)
+            .unwrap();
+        db.bind_external_allocation("T-one", &occurrence).unwrap();
+
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &intent)
+                .unwrap()
+        );
+        assert!(
+            !db.begin_external_supervisor_activation("T-one", &intent)
+                .unwrap()
+        );
+        let mut changed = intent.clone();
+        changed.supervisor_runtime_hash = "6".repeat(64);
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &changed)
+                .is_err()
+        );
+        drop(db);
+
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(
+            !db.begin_external_supervisor_activation("T-one", &intent)
+                .unwrap()
+        );
+        let observation = ExternalSupervisorActivationObservation {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            activation_state: "started".into(),
+            provider_observation_digest: "7".repeat(64),
+        };
+        db.settle_external_supervisor_activation("T-one", &observation)
+            .unwrap();
+        db.settle_external_supervisor_activation("T-one", &observation)
+            .unwrap();
+        let retained = db.external_supervisor_activation("T-one").unwrap().unwrap();
+        assert_eq!(retained.intent, intent);
+        assert_eq!(retained.observation.as_ref(), Some(&observation));
+        let mut changed = observation;
+        changed.activation_state = "not_started".into();
+        assert!(
+            db.settle_external_supervisor_activation("T-one", &changed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn first_supervisor_activation_requires_a_live_launch_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "orphaned");
+        reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact(
+            &reservation.placement_thread_id,
+            &reservation.request_digest,
+        )
+        .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-orphaned".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET state='orphaned' WHERE workspace_id=?1",
+                [&reservation.workspace_id],
+            )
+            .unwrap();
+        let intent = activation_intent(&reservation, &occurrence);
+        assert!(
+            db.begin_external_supervisor_activation(&reservation.placement_thread_id, &intent)
+                .is_err()
+        );
+        let retained: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_supervisor_activation_intent WHERE placement_thread_id=?1",
+                [&reservation.placement_thread_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, 0);
+    }
+
+    #[test]
+    fn recovery_validation_recomputes_supervisor_activation_request_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let reservation = reservation(&db, "activation-digest");
+        reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact(
+            &reservation.placement_thread_id,
+            &reservation.request_digest,
+        )
+        .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-activation-digest".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
+            .unwrap();
+        let intent = activation_intent(&reservation, &occurrence);
+        assert!(
+            db.begin_external_supervisor_activation(&reservation.placement_thread_id, &intent)
+                .unwrap()
+        );
+        let observation = ExternalSupervisorActivationObservation {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            activation_state: "started".into(),
+            provider_observation_digest: "7".repeat(64),
+        };
+        db.settle_external_supervisor_activation(&reservation.placement_thread_id, &observation)
+            .unwrap();
+        validate_current(&db.conn).unwrap();
+        let mut replaced_intent = intent;
+        replaced_intent.activation_request_digest = "6".repeat(64);
+        let mut replaced_observation = observation;
+        replaced_observation.activation_request_digest = "6".repeat(64);
+        db.conn
+            .execute_batch(
+                "DROP TRIGGER external_execution_supervisor_activation_intent_immutable;
+                 DROP TRIGGER external_execution_supervisor_activation_observation_immutable;",
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE external_execution_supervisor_activation_intent SET intent_json=?2 WHERE placement_thread_id=?1",
+                params![
+                    reservation.placement_thread_id,
+                    lillux::canonical_json(&serde_json::to_value(&replaced_intent).unwrap()).unwrap()
+                ],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE external_execution_supervisor_activation_observation SET observation_json=?2 WHERE placement_thread_id=?1",
+                params![
+                    reservation.placement_thread_id,
+                    lillux::canonical_json(&serde_json::to_value(&replaced_observation).unwrap())
+                        .unwrap()
+                ],
+            )
+            .unwrap();
+        let error = validate_current(&db.conn).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("external supervisor activation request identity changed")
+        );
     }
 
     #[test]

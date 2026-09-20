@@ -13929,6 +13929,35 @@ impl StateStore {
             .settle_external_no_occurrence(placement, evidence)
     }
 
+    pub(crate) fn begin_external_supervisor_activation(
+        &self,
+        placement: &str,
+        intent: &runtime_db::external_execution::ExternalSupervisorActivationIntent,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .begin_external_supervisor_activation(placement, intent)
+    }
+
+    pub(crate) fn external_supervisor_activation(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalSupervisorActivationRecord>> {
+        self.lock()?
+            .runtime_db
+            .external_supervisor_activation(placement)
+    }
+
+    pub(crate) fn settle_external_supervisor_activation(
+        &self,
+        placement: &str,
+        observation: &runtime_db::external_execution::ExternalSupervisorActivationObservation,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .settle_external_supervisor_activation(placement, observation)
+    }
+
     pub(crate) fn begin_external_termination(
         &self,
         placement: &str,
