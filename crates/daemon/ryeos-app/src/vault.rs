@@ -59,8 +59,10 @@ use anyhow::{Result, anyhow, bail};
 use ryeos_engine::roots;
 
 pub mod external_channel;
+pub mod external_connector;
 pub mod placement;
 use external_channel::ExternalChannelAuthorityAccess;
+use external_connector::ExternalConnectorCapabilityAccess;
 use placement::PlacementCredentialAccess;
 
 // Vault key-name policy + write helpers live in
@@ -163,6 +165,34 @@ fn runtime_physical_prefix(bundle_id: &str, namespace: &str) -> Result<String> {
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
+    /// Retrieve one app-private local connector capability generation. It is
+    /// distinct from the remote supervisor bootstrap and never appears in
+    /// operator/runtime secret enumeration.
+    fn external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        bail!("vault backend does not support protected external connector capability")
+    }
+
+    /// Insert-only generation provisioning. No overwrite or deletion API is
+    /// available to runtime, project, provider, or operator-secret callers.
+    fn provision_external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+        _value: &str,
+    ) -> Result<()> {
+        bail!("vault backend does not support protected external connector capability")
+    }
+
+    /// Atomically load or create the exact immutable local connector secret.
+    fn ensure_external_connector_capability(
+        &self,
+        _access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        bail!("vault backend does not support protected external connector capability")
+    }
+
     /// Retrieve one app-private controller signer/bootstrap generation.  It is
     /// never exposed through operator/runtime secret enumeration.
     fn external_channel_authority(
@@ -744,6 +774,56 @@ impl SealedEnvelopeVault {
 }
 
 impl NodeVault for SealedEnvelopeVault {
+    fn external_connector_capability(
+        &self,
+        access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        let mut entries = self.read_all_internal()?;
+        let result = entries.remove(access.physical_key());
+        use zeroize::Zeroize as _;
+        for value in entries.values_mut() {
+            value.zeroize();
+        }
+        result
+            .map(zeroize::Zeroizing::new)
+            .ok_or_else(|| anyhow!("protected external connector capability generation is absent"))
+    }
+
+    fn provision_external_connector_capability(
+        &self,
+        access: &ExternalConnectorCapabilityAccess,
+        value: &str,
+    ) -> Result<()> {
+        validate_secret_value(value)?;
+        access.validate_value(value)?;
+        self.read_modify_write(|map| {
+            if let Some(existing) = map.get(access.physical_key()) {
+                if existing != value {
+                    bail!("external connector capability generation is immutable");
+                }
+                return Ok(());
+            }
+            map.insert(access.physical_key().to_owned(), value.to_owned());
+            Ok(())
+        })
+    }
+
+    fn ensure_external_connector_capability(
+        &self,
+        access: &ExternalConnectorCapabilityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.read_modify_write(|map| {
+            if let Some(existing) = map.get(access.physical_key()) {
+                access.validate_value(existing)?;
+                return Ok(zeroize::Zeroizing::new(existing.clone()));
+            }
+            let value = access.generate_value()?;
+            access.validate_value(&value)?;
+            map.insert(access.physical_key().to_owned(), value.clone());
+            Ok(zeroize::Zeroizing::new(value))
+        })
+    }
+
     fn external_channel_authority(
         &self,
         access: &ExternalChannelAuthorityAccess,

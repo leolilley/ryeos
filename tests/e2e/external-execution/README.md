@@ -4,6 +4,29 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Protected connector capability provisioning checkpoint
+
+The controller vault now has a separate app-private generation for the local
+external-candidate connector capability. It is distinct from placement
+credentials and the remote supervisor bootstrap, uses a domain-separated
+reserved physical key, and is absent from operator and runtime-bundle reads,
+listings, writes, and deletion. Creation is atomic and insert-only; concurrent
+ensures select one exact capability and reopening returns that same generation.
+
+The canonical schema-1 document binds one lowercase SHA-256 generation to one
+random 256-bit capability. The plaintext is zeroizing and exposed only through
+the crate-private connector-configuration accessor. Authentication derives the
+hash from the decoded raw capability bytes and compares fixed-length canonical
+hashes in constant time. Focused source evidence on 2026-09-21: all 4 connector
+vault tests passed, covering concurrent creation, reopen, malformed coordinates,
+schema/generation substitution, unknown fields, noncanonical JSON/base64,
+failed-provision rollback, immutable replay, default-backend refusal, and
+operator/runtime invisibility.
+
+This checkpoint is protected secret provisioning only. It does not persist a
+connector occurrence, open a listener, authenticate a peer, grant reconnect or
+input-replay authority, configure Codex, or contact a provider.
+
 ## Signed connector admission checkpoint
 
 Runtime operator epoch 54, signed external-binding schema 6, external-candidate
