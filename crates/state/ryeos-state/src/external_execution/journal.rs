@@ -9,9 +9,11 @@
 use super::transcript::{ChannelPhase, FrameFrontier, urgent_control};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding, ExecutionChannelBudget,
-    ExecutionChannelPayload, SignedExecutionFrame, TERMINAL_CONTROL_BYTES,
+    ExecutionChannelPayload, ExecutionFrame, ExecutionFrameApplication, SignedExecutionFrame,
+    TERMINAL_CONTROL_BYTES,
 };
 use anyhow::{Context as _, Result, bail};
+use lillux::crypto::SigningKey;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// Common tables and immutable transitions. Each owner additionally protects
@@ -113,6 +115,24 @@ pub trait JournalOwner {
         completion_request_digest: &str,
         writer_exclusion_evidence_hash: &str,
     ) -> Result<()>;
+
+    /// Resolve an authenticated application retained outside the contiguous
+    /// frame table. This exists only for sticky terminal revocation that may
+    /// cross a missing predecessor; ordinary frames must return `None`.
+    fn out_of_band_application_state(
+        &self,
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        direction: ChannelDirection,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<Option<ExecutionFrameApplication>>;
+
+    /// True only when this journal is the destination-side application owner,
+    /// so `pending` proves bytes were never claimed locally. A source-side
+    /// controller must return false: missing peer evidence is uncertainty, and
+    /// a late exact Applied acknowledgement remains admissible after cancel.
+    fn can_prove_pending_input_revoked(&self) -> bool;
 }
 
 /// Exact durable result of trying to acquire one retained application.
@@ -125,6 +145,34 @@ pub enum ApplicationClaim {
     AlreadyClaimed,
     AlreadyApplied,
     Revoked,
+}
+
+/// One exact retained outbound frame eligible for transport replay. The bytes
+/// are the original canonical signed wire representation; callers must never
+/// reconstruct them from fields.
+pub struct PendingExecutionFrame {
+    direction: ChannelDirection,
+    sequence: u64,
+    digest: String,
+    wire: Vec<u8>,
+}
+
+impl PendingExecutionFrame {
+    pub fn direction(&self) -> ChannelDirection {
+        self.direction
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn wire(&self) -> &[u8] {
+        &self.wire
+    }
 }
 
 impl ApplicationClaim {
@@ -173,12 +221,14 @@ pub fn record_revocation(
         "INSERT INTO external_execution_revocation VALUES(?1,?2,?3)",
         params![binding.digest()?, verified.digest(), verified.canonical()],
     )?;
-    tx.execute(
-        "UPDATE external_execution_frame SET application='revoked'
-        WHERE binding_digest=?1 AND application='pending'
-        AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
-        [binding.digest()?],
-    )?;
+    if owner.can_prove_pending_input_revoked() {
+        tx.execute(
+            "UPDATE external_execution_frame SET application='revoked'
+            WHERE binding_digest=?1 AND application='pending'
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            [binding.digest()?],
+        )?;
+    }
     Ok(true)
 }
 
@@ -281,11 +331,28 @@ pub fn append_frame(
             i64::try_from(frame.acknowledged_peer_sequence)?
         ],
     )?;
+    if let ExecutionChannelPayload::Acknowledge {
+        peer_frame_sequence,
+        peer_frame_digest,
+        application,
+    } = &frame.payload
+    {
+        reconcile_peer_application(
+            tx,
+            owner,
+            &binding,
+            &frame.binding_digest,
+            frame.direction.opposite(),
+            *peer_frame_sequence,
+            peer_frame_digest,
+            *application,
+        )?;
+    }
     tx.execute(
         "UPDATE external_execution_channel SET state=?2 WHERE placement_thread_id=?1",
         params![placement, next.as_str()],
     )?;
-    if revoked(tx, &frame.binding_digest)? {
+    if revoked(tx, &frame.binding_digest)? && owner.can_prove_pending_input_revoked() {
         tx.execute(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
@@ -294,7 +361,9 @@ pub fn append_frame(
         )?;
     }
     match &frame.payload {
-        ExecutionChannelPayload::Cancel | ExecutionChannelPayload::Stopped { .. } => {
+        ExecutionChannelPayload::Cancel | ExecutionChannelPayload::Stopped { .. }
+            if owner.can_prove_pending_input_revoked() =>
+        {
             // Pending input has provably not been applied. Claimed input
             // remains unknown; cancellation may overtake it but cannot
             // relabel it as uncontacted or completed.
@@ -320,6 +389,505 @@ pub fn append_frame(
         _ => {}
     }
     Ok(true)
+}
+
+fn reconcile_peer_application(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    binding: &ExecutionChannelBinding,
+    binding_digest: &str,
+    direction: ChannelDirection,
+    sequence: u64,
+    digest: &str,
+    reported: ExecutionFrameApplication,
+) -> Result<()> {
+    let retained: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT frame_digest,application,json_extract(frame_json,'$.frame.payload.kind')
+         FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+            params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_digest, mut state, payload_kind)) = retained else {
+        let actual = owner
+            .out_of_band_application_state(tx, binding, direction, sequence, digest)?
+            .context("external acknowledgement target is not retained")?;
+        if !application_state_proves(actual, reported) {
+            bail!("external acknowledgement exceeds terminal application evidence");
+        }
+        return Ok(());
+    };
+    if stored_digest != digest {
+        bail!("external application acknowledgement changed its peer frame");
+    }
+    match reported {
+        ExecutionFrameApplication::Retained => {
+            if state != "pending" {
+                bail!("external application acknowledgement regressed from retained state");
+            }
+        }
+        ExecutionFrameApplication::Claimed => match state.as_str() {
+            "pending" => {
+                tx.execute(
+                    "UPDATE external_execution_frame SET application='claimed'
+                     WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+                    params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
+                )?;
+            }
+            "claimed" => {}
+            _ => bail!("external application acknowledgement regressed or reopened a frame"),
+        },
+        ExecutionFrameApplication::Applied => {
+            if state == "pending" {
+                tx.execute(
+                    "UPDATE external_execution_frame SET application='claimed'
+                     WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+                    params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
+                )?;
+                state = "claimed".to_owned();
+            }
+            match state.as_str() {
+                "claimed" => {
+                    tx.execute(
+                        "UPDATE external_execution_frame SET application='applied'
+                         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+                        params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
+                    )?;
+                }
+                "applied" => {}
+                _ => bail!("external applied acknowledgement reopened a revoked frame"),
+            }
+        }
+        ExecutionFrameApplication::Revoked => {
+            if !matches!(payload_kind.as_str(), "release" | "protocol_bytes") {
+                bail!("external revocation acknowledgement named a non-input frame");
+            }
+            match state.as_str() {
+                "pending" => {
+                    tx.execute(
+                        "UPDATE external_execution_frame SET application='revoked'
+                         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+                        params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
+                    )?;
+                }
+                "revoked" => {}
+                _ => bail!("external revocation acknowledgement changed uncertain application"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Author and retain one exact directional frame inside the caller's writer
+/// transaction. A commit error is uncertain publication: recover the retained
+/// frontier rather than guessing a successor.
+pub fn author_frame(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+    signing_key: &SigningKey,
+    payload: ExecutionChannelPayload,
+) -> Result<AuthenticatedExecutionFrame> {
+    let prepared = prepare_frame(tx, owner, placement, direction, signing_key, payload)?;
+    if !append_frame(tx, owner, placement, prepared.canonical().as_bytes())? {
+        bail!("fresh external frame unexpectedly duplicated");
+    }
+    Ok(prepared)
+}
+
+/// Prepare the exact next signed frame while holding the journal writer. This
+/// is separated from append solely so terminal revocation can be committed in
+/// an independent transaction before its gap-sensitive transcript append.
+pub fn prepare_frame(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+    signing_key: &SigningKey,
+    payload: ExecutionChannelPayload,
+) -> Result<AuthenticatedExecutionFrame> {
+    let binding = load_binding(tx, placement)?;
+    owner.require_owner(tx, &binding)?;
+    let binding_digest = binding.digest()?;
+    let prior: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT sequence,frame_digest FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction=?2
+             ORDER BY sequence DESC LIMIT 1",
+            params![binding_digest, direction.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (sequence, previous_frame_digest) = match prior {
+        Some((sequence, digest)) => (
+            u64::try_from(sequence)?
+                .checked_add(1)
+                .context("external frame sequence overflow")?,
+            Some(digest),
+        ),
+        None => (1, None),
+    };
+    let acknowledged_peer_sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2",
+        params![binding_digest, direction.opposite().as_str()],
+        |row| row.get(0),
+    )?;
+    let signed = SignedExecutionFrame::sign(
+        ExecutionFrame {
+            schema: 1,
+            binding_digest,
+            direction,
+            sequence,
+            previous_frame_digest,
+            acknowledged_peer_sequence: u64::try_from(acknowledged_peer_sequence)?,
+            payload,
+        },
+        &binding,
+        signing_key,
+    )?;
+    let wire = lillux::canonical_json(&serde_json::to_value(signed)?)?.into_bytes();
+    SignedExecutionFrame::decode_and_verify(&wire, &binding, lillux::time::timestamp_millis())
+}
+
+/// Recover or author an exact signed acknowledgement of the peer frame's
+/// current durable application state. Node ingress suppresses ack-of-ack;
+/// the outbound supervisor may emit one to advance its cumulative receive
+/// frontier and then reuse that exact frame for polling.
+pub fn ensure_application_acknowledgement(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    acknowledgement_direction: ChannelDirection,
+    peer_sequence: u64,
+    peer_digest: &str,
+    signing_key: &SigningKey,
+    acknowledge_acknowledgement: bool,
+) -> Result<Option<AuthenticatedExecutionFrame>> {
+    let binding = load_binding(tx, placement)?;
+    let binding_digest = binding.digest()?;
+    let peer_direction = acknowledgement_direction.opposite();
+    let (stored_digest, application, payload_kind): (String, String, String) = tx.query_row(
+        "SELECT frame_digest,application,json_extract(frame_json,'$.frame.payload.kind')
+         FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+        params![
+            binding_digest,
+            peer_direction.as_str(),
+            i64::try_from(peer_sequence)?
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if stored_digest != peer_digest {
+        bail!("external acknowledgement changed its peer frame");
+    }
+    if payload_kind == "acknowledge" && !acknowledge_acknowledgement {
+        return Ok(None);
+    }
+    let application = match application.as_str() {
+        "pending" => ExecutionFrameApplication::Retained,
+        "claimed" => ExecutionFrameApplication::Claimed,
+        "applied" => ExecutionFrameApplication::Applied,
+        "revoked" => ExecutionFrameApplication::Revoked,
+        _ => bail!("external peer frame has unknown application state"),
+    };
+    ensure_application_acknowledgement_for_state(
+        tx,
+        owner,
+        placement,
+        acknowledgement_direction,
+        peer_sequence,
+        peer_digest,
+        application,
+        signing_key,
+    )
+}
+
+/// Recover or author exact application evidence when the target is retained in
+/// an owner-specific terminal journal rather than the contiguous transcript.
+/// The caller must authenticate the exact target and state before invoking it.
+pub fn ensure_application_acknowledgement_for_state(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    acknowledgement_direction: ChannelDirection,
+    peer_sequence: u64,
+    peer_digest: &str,
+    application: ExecutionFrameApplication,
+    signing_key: &SigningKey,
+) -> Result<Option<AuthenticatedExecutionFrame>> {
+    let binding = load_binding(tx, placement)?;
+    owner.require_owner(tx, &binding)?;
+    super::hash(peer_digest)?;
+    if peer_sequence == 0 {
+        bail!("external acknowledgement target sequence is zero");
+    }
+    let binding_digest = binding.digest()?;
+    let application_name = match application {
+        ExecutionFrameApplication::Retained => "retained",
+        ExecutionFrameApplication::Claimed => "claimed",
+        ExecutionFrameApplication::Applied => "applied",
+        ExecutionFrameApplication::Revoked => "revoked",
+    };
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction=?2
+             AND json_extract(frame_json,'$.frame.payload.kind')='acknowledge'
+             AND json_extract(frame_json,'$.frame.payload.peer_frame_sequence')=?3
+             AND json_extract(frame_json,'$.frame.payload.peer_frame_digest')=?4
+             AND json_extract(frame_json,'$.frame.payload.application')=?5
+             ORDER BY sequence ASC LIMIT 1",
+            params![
+                binding_digest,
+                acknowledgement_direction.as_str(),
+                i64::try_from(peer_sequence)?,
+                peer_digest,
+                application_name
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(wire) = existing {
+        return Ok(Some(SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?));
+    }
+    Ok(Some(author_frame(
+        tx,
+        owner,
+        placement,
+        acknowledgement_direction,
+        signing_key,
+        ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence: peer_sequence,
+            peer_frame_digest: peer_digest.to_owned(),
+            application,
+        },
+    )?))
+}
+
+/// Recover the bounded exact outbound backlog from the peer's latest retained
+/// acknowledgement. Claimed input is never replayed; a revoked gap blocks the
+/// transcript instead of skipping ahead to terminal control.
+pub fn pending_transport_frames(
+    conn: &Connection,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+    frame_limit: usize,
+    byte_limit: usize,
+) -> Result<Vec<PendingExecutionFrame>> {
+    if frame_limit == 0 || frame_limit > 256 || byte_limit == 0 || byte_limit > 16 * 1024 * 1024 {
+        bail!("external transport response bounds are invalid");
+    }
+    let binding = load_binding(conn, placement)?;
+    owner.require_owner(conn, &binding)?;
+    let binding_digest = binding.digest()?;
+    let terminally_revoked = revoked(conn, &binding_digest)?;
+    let acknowledged: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(acknowledged_peer_sequence),0)
+         FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2",
+        params![binding_digest, direction.opposite().as_str()],
+        |row| row.get(0),
+    )?;
+    let mut statement = conn.prepare(
+        "SELECT sequence,frame_digest,frame_json,application
+         FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2 AND sequence>?3
+         ORDER BY sequence ASC",
+    )?;
+    let mut rows = statement.query(params![binding_digest, direction.as_str(), acknowledged])?;
+    let mut result = Vec::new();
+    let mut bytes = 0_usize;
+    let mut expected = u64::try_from(acknowledged)?
+        .checked_add(1)
+        .context("external transport frontier overflow")?;
+    while let Some(row) = rows.next()? {
+        let sequence = u64::try_from(row.get::<_, i64>(0)?)?;
+        if sequence != expected {
+            bail!("external transport backlog has a sequence gap");
+        }
+        expected = expected
+            .checked_add(1)
+            .context("external transport sequence overflow")?;
+        let digest: String = row.get(1)?;
+        let canonical: String = row.get(2)?;
+        let application: String = row.get(3)?;
+        if application != "pending" && terminally_revoked {
+            // A separately retained signed cancellation may overtake this
+            // uncertain or revoked predecessor. Never replay the predecessor;
+            // the caller retrieves cancellation from the urgent lane below.
+            break;
+        }
+        if application != "pending" {
+            bail!("external reconnect cannot replay {application} frame {sequence}");
+        }
+        let verified = authenticate_retained_frame(
+            &binding,
+            direction,
+            i64::try_from(sequence)?,
+            &digest,
+            canonical.as_bytes(),
+            binding.issued_at_ms,
+        )?;
+        if terminally_revoked && matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
+        {
+            // Sticky cancellation is returned only through the urgent lane so
+            // callers cannot accidentally serialize it behind ordinary input.
+            break;
+        }
+        if terminally_revoked
+            && matches!(
+                verified.frame().payload,
+                ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+            )
+        {
+            // Cancellation fences this uncertain source-side input. Its exact
+            // bytes are not replayed, while later signed Claimed/Applied proof
+            // remains admissible as historical evidence.
+            break;
+        }
+        let next_bytes = bytes
+            .checked_add(canonical.len())
+            .context("external transport response size overflow")?;
+        if result.len() >= frame_limit || next_bytes > byte_limit {
+            break;
+        }
+        bytes = next_bytes;
+        result.push(PendingExecutionFrame {
+            direction,
+            sequence,
+            digest,
+            wire: canonical.into_bytes(),
+        });
+    }
+    Ok(result)
+}
+
+/// Return the exact sticky cancellation independently of the contiguous
+/// ordinary backlog. This is the sole lane allowed to cross a missing,
+/// claimed, or revoked input predecessor; it never turns that input into
+/// retryable work. Signed peer evidence suppresses the lane once cancellation
+/// itself has been retained remotely.
+pub fn pending_terminal_revocation_frame(
+    conn: &Connection,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+) -> Result<Option<PendingExecutionFrame>> {
+    let binding = load_binding(conn, placement)?;
+    owner.require_owner(conn, &binding)?;
+    let binding_digest = binding.digest()?;
+    let retained: Option<(String, String)> = conn
+        .query_row(
+            "SELECT frame_digest,frame_json FROM external_execution_revocation
+             WHERE binding_digest=?1",
+            [&binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((digest, canonical)) = retained else {
+        return Ok(None);
+    };
+    let verified = SignedExecutionFrame::decode_and_verify(
+        canonical.as_bytes(),
+        &binding,
+        binding.issued_at_ms,
+    )?;
+    if verified.digest() != digest
+        || verified.frame().direction != direction
+        || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
+    {
+        bail!("external urgent revocation changed retained authority");
+    }
+    let sequence = verified.frame().sequence;
+    let cumulative_ack: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(acknowledged_peer_sequence),0)
+         FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2",
+        params![binding_digest, direction.opposite().as_str()],
+        |row| row.get(0),
+    )?;
+    let application_ack: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2
+           AND json_extract(frame_json,'$.frame.payload.kind')='acknowledge'
+           AND json_extract(frame_json,'$.frame.payload.peer_frame_sequence')=?3
+           AND json_extract(frame_json,'$.frame.payload.peer_frame_digest')=?4)",
+        params![
+            binding_digest,
+            direction.opposite().as_str(),
+            i64::try_from(sequence)?,
+            digest
+        ],
+        |row| row.get(0),
+    )?;
+    if u64::try_from(cumulative_ack)? >= sequence || application_ack {
+        return Ok(None);
+    }
+    Ok(Some(PendingExecutionFrame {
+        direction,
+        sequence,
+        digest,
+        wire: canonical.into_bytes(),
+    }))
+}
+
+/// Complete an incoming acknowledgement's own no-effect application in the
+/// same transaction that retained and reconciled its signed peer evidence.
+/// Outbound acknowledgements must not use this helper: their application is
+/// controlled only by later signed evidence from the remote peer.
+pub fn apply_received_acknowledgement(
+    tx: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+    sequence: u64,
+    digest: &str,
+) -> Result<()> {
+    let binding = load_binding(tx, placement)?;
+    let row: (String, String) = tx.query_row(
+        "SELECT frame_digest,frame_json FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+        params![
+            binding.digest()?,
+            direction.as_str(),
+            i64::try_from(sequence)?
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if row.0 != digest {
+        bail!("incoming acknowledgement changed its retained digest");
+    }
+    let verified = authenticate_retained_frame(
+        &binding,
+        direction,
+        i64::try_from(sequence)?,
+        digest,
+        row.1.as_bytes(),
+        binding.issued_at_ms,
+    )?;
+    if !matches!(
+        verified.frame().payload,
+        ExecutionChannelPayload::Acknowledge { .. }
+    ) {
+        bail!("no-effect application requires an acknowledgement frame");
+    }
+    match claim_application(tx, owner, placement, direction, sequence, digest)? {
+        ApplicationClaim::New(_) => {
+            finish_application(tx, owner, placement, direction, sequence, digest)
+        }
+        ApplicationClaim::AlreadyApplied => Ok(()),
+        ApplicationClaim::AlreadyClaimed => {
+            bail!("incoming acknowledgement retained an uncertain no-effect application")
+        }
+        ApplicationClaim::Revoked => bail!("incoming acknowledgement was unexpectedly revoked"),
+    }
 }
 
 /// Claim exactly once. A crash after commit is uncertain delivery, never a
@@ -683,10 +1251,55 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                     writer_exclusion_evidence_hash,
                 )?;
             }
+            if let ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence,
+                peer_frame_digest,
+                application: reported,
+            } = &frame.payload
+            {
+                let peer: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT frame_digest,application FROM external_execution_frame
+                     WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
+                        params![
+                            binding_digest,
+                            frame.direction.opposite().as_str(),
+                            i64::try_from(*peer_frame_sequence)?
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((peer_digest, peer_application)) = peer {
+                    if peer_digest != *peer_frame_digest
+                        || !retained_application_proves(&peer_application, *reported)
+                    {
+                        bail!("retained external acknowledgement contradicts peer application");
+                    }
+                } else {
+                    let actual = owner
+                        .out_of_band_application_state(
+                            conn,
+                            &binding,
+                            frame.direction.opposite(),
+                            *peer_frame_sequence,
+                            peer_frame_digest,
+                        )?
+                        .context("retained acknowledgement lost its terminal target")?;
+                    if !application_state_proves(actual, *reported) {
+                        bail!("retained acknowledgement exceeds terminal application evidence");
+                    }
+                }
+            }
             owner_quiesced_applied |= application == "applied"
                 && frame.direction == ChannelDirection::OwnerToSupervisor
                 && matches!(frame.payload, ExecutionChannelPayload::Quiesce { .. });
-            unsettled[index] |= !matches!(application.as_str(), "applied" | "revoked");
+            // Acknowledgements are durable transcript evidence, not executable
+            // applications. Their cumulative peer frontier retires transport;
+            // requiring an acknowledgement-of-acknowledgement would create an
+            // infinite control loop.
+            unsettled[index] |=
+                !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. })
+                    && !matches!(application.as_str(), "applied" | "revoked");
             frontiers[index] = FrameFrontier::from_retained(
                 frame.sequence,
                 Some(verified.digest().to_owned()),
@@ -712,7 +1325,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         if revoked_input && !terminal_close_observed {
             bail!("revoked external input has no authenticated close evidence");
         }
-        if pending_input && terminal_close_observed {
+        if pending_input && terminal_close_observed && owner.can_prove_pending_input_revoked() {
             bail!("closed external execution retained pending input");
         }
         if state != ChannelPhase::parse(&stored_state)?
@@ -730,6 +1343,32 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         bail!("external transcript has no channel owner");
     }
     Ok(())
+}
+
+fn retained_application_proves(retained: &str, reported: ExecutionFrameApplication) -> bool {
+    let actual = match retained {
+        "pending" => ExecutionFrameApplication::Retained,
+        "claimed" => ExecutionFrameApplication::Claimed,
+        "applied" => ExecutionFrameApplication::Applied,
+        "revoked" => ExecutionFrameApplication::Revoked,
+        _ => return false,
+    };
+    application_state_proves(actual, reported)
+}
+
+fn application_state_proves(
+    actual: ExecutionFrameApplication,
+    reported: ExecutionFrameApplication,
+) -> bool {
+    match reported {
+        ExecutionFrameApplication::Retained => true,
+        ExecutionFrameApplication::Claimed => matches!(
+            actual,
+            ExecutionFrameApplication::Claimed | ExecutionFrameApplication::Applied
+        ),
+        ExecutionFrameApplication::Applied => actual == ExecutionFrameApplication::Applied,
+        ExecutionFrameApplication::Revoked => actual == ExecutionFrameApplication::Revoked,
+    }
 }
 
 fn retained_budget(
@@ -763,6 +1402,7 @@ fn retained_budget(
 mod tests {
     use super::*;
     use crate::external_execution::{ExecutionFrame, ExternalStopReason};
+    use anyhow::ensure;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
 
@@ -820,6 +1460,43 @@ mod tests {
                 bail!("test export is not retained exactly");
             }
             Ok(())
+        }
+
+        fn out_of_band_application_state(
+            &self,
+            conn: &Connection,
+            binding: &ExecutionChannelBinding,
+            direction: ChannelDirection,
+            sequence: u64,
+            digest: &str,
+        ) -> Result<Option<ExecutionFrameApplication>> {
+            let wire: Option<String> = conn
+                .query_row(
+                    "SELECT frame_json FROM external_execution_revocation
+                     WHERE binding_digest=?1 AND frame_digest=?2",
+                    params![binding.digest()?, digest],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(wire) = wire else {
+                return Ok(None);
+            };
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                frame.frame().direction == direction
+                    && frame.frame().sequence == sequence
+                    && matches!(frame.frame().payload, ExecutionChannelPayload::Cancel),
+                "test terminal application changed exact revocation"
+            );
+            Ok(Some(ExecutionFrameApplication::Retained))
+        }
+
+        fn can_prove_pending_input_revoked(&self) -> bool {
+            true
         }
     }
 
@@ -1048,6 +1725,165 @@ mod tests {
         assert!(append(&conn, &binding, &ready_wire).unwrap());
         conn.execute("DELETE FROM test_owner", []).unwrap();
         assert!(append(&conn, &binding, &ready_wire).is_err());
+    }
+
+    #[test]
+    fn application_ack_target_is_independent_of_cumulative_receive_frontier() {
+        let (conn, binding, owner, supervisor) = setup();
+        let ready_digest = ready(&conn, &binding, &supervisor);
+        let (release_wire, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release_wire).unwrap();
+        claim(
+            &conn,
+            &binding,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            &release_digest,
+        )
+        .unwrap();
+        let (cancel_wire, _cancel_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest.clone()),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        {
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+            append_frame(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+            finish_application(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                1,
+                &release_digest,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        let acknowledgement = ensure_application_acknowledgement(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            &release_digest,
+            &supervisor,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(acknowledgement.frame().acknowledged_peer_sequence, 2);
+        assert_eq!(
+            acknowledgement.frame().previous_frame_digest.as_deref(),
+            Some(ready_digest.as_str())
+        );
+        assert!(matches!(
+            &acknowledgement.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest,
+                application: ExecutionFrameApplication::Applied,
+            } if peer_frame_digest == &release_digest
+        ));
+        tx.commit().unwrap();
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
+
+    #[test]
+    fn sticky_cancellation_uses_urgent_lane_across_revoked_input_gap() {
+        let (conn, binding, owner, supervisor) = setup();
+        let ready_digest = ready(&conn, &binding, &supervisor);
+        let (release_wire, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release_wire).unwrap();
+        let (cancel_wire, cancel_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        {
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+            append_frame(&tx, &TestOwner, &binding.placement_thread_id, &cancel_wire).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(
+            pending_transport_frames(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                8,
+                64 * 1024,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let urgent = pending_terminal_revocation_frame(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(urgent.sequence(), 2);
+        assert_eq!(urgent.digest(), cancel_digest);
+        assert_eq!(urgent.wire(), cancel_wire);
+
+        let (cancel_ack, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            0,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 2,
+                peer_frame_digest: cancel_digest,
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        append(&conn, &binding, &cancel_ack).unwrap();
+        assert!(
+            pending_terminal_revocation_frame(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+            )
+            .unwrap()
+            .is_none()
+        );
+        validate_channels(&conn, &TestOwner).unwrap();
     }
 
     #[test]

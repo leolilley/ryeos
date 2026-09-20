@@ -177,6 +177,49 @@ supervisor deployment, protected Codex execution, or a production lifecycle
 adapter. The installed backend registry remains empty and no external or model
 contact occurred.
 
+## Authenticated exchange and reconnect checkpoint
+
+Runtime operator epoch 46 and guest-journal epoch 5 add the application-level
+exchange required above HTTP. The signed daemon-only
+`/external-execution/channel/exchange` route is composed with the same
+occurrence-only verifier as attachment; it grants neither an ordinary workload
+scope nor node enrollment. A request carries one exact supervisor-signed frame
+and the controller returns exact owner-signed backlog, a separately selected
+urgent revocation frame when cancellation must overtake an ordinary gap, and
+the retained channel frontiers. HTTP completion is transport evidence only and
+never advances application state.
+
+Application acknowledgements distinguish the exact target frame from the
+cumulative peer receive frontier. Receiving a valid acknowledgement applies
+that acknowledgement frame's own no-effect transition atomically, so an
+acknowledgement cannot permanently block later input. Exact signed-frame retry
+is idempotent; claimed input is never replayed as new work. Reopen validates
+both signed transcript and retained application projections.
+
+Cancellation is sticky but does not fabricate negative execution evidence. The
+guest may revoke locally retained, provably unclaimed input and acknowledge a
+terminal control frame out of band across a missing predecessor. The controller
+cannot make that proof about already dispatched input: it retains the input as
+uncertain, fences replay, and still accepts late exact claimed/applied evidence.
+The urgent lane therefore delivers cancellation without either deadlocking
+behind an ordinary gap or converting an ambiguous outcome into non-execution.
+Neither cancellation nor a stopped observation proves provider cleanup.
+
+Focused source evidence on 2026-09-21: 38 shared state/journal tests, 13
+application-channel tests, 37 API tests selected by the `external_` filter, 24
+independent Python/SQLite tests, and the composed supervisor capture/replay test
+pass. Independent architecture, reservation-owner/security and
+tests/documentation reviews found and corrected cumulative-frontier confusion,
+acknowledgement-of-acknowledgement blocking, cancellation behind a transcript
+gap, and false controller-side revocation. Re-review found no remaining blocker
+in this inactive exchange slice.
+
+This is still not an installed or live network qualification. The production
+backend registry is empty, no guest supervisor network loop or TLS/server
+identity has been qualified, and no provider, model, Render, or worker contact
+occurred. The signed route/service definitions and source checks do not prove a
+remote B -> C workflow.
+
 The sections below retain earlier checkpoint evidence. References there to
 missing guest implementation or older schema versions describe those checkpoints.
 
@@ -408,8 +451,8 @@ isolation or substitute the diagnostic bwrap fixture.
 ## Still required
 
 - Complete Codex tool/configuration closure, beyond the pinned routing probe.
-- Protected admission binding and actual authenticated outbound transport.
-- Guest supervisor executable/control loop and exact runtime/bootstrap realization.
+- Guest supervisor network control loop over the authenticated exchange and
+  exact runtime/bootstrap realization, including installed server identity.
 - Wiring and qualification of native capture and candidate-only content transfer.
 - Connect verified external termination/restart reconciliation to the compound
   completion owner and qualify it through an installed adapter.

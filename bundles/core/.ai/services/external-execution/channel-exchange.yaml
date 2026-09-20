@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-20T11:36:51Z:3b0915f6ab48c98cb731a3455b941da4ecf32963d180e6917ac419a298f32428:pMIIJgS8YmfT+O7L+8Ol3vGEniEg6K9/sy95sbgQ16gSKZgtwaC3qLyyPkXNpxsFSFUmacr3EBTRWRShMAZ6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external_execution.channel_exchange
+availability: daemon_only
+record_thread: false
+required_caps: []
+description: "Exchange exact signed frames with one attached external supervisor"

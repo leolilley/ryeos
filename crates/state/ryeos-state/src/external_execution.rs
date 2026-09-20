@@ -148,7 +148,27 @@ pub enum ExecutionChannelPayload {
     Stopped {
         reason: ExternalStopReason,
     },
-    Acknowledge,
+    Acknowledge {
+        /// Exact peer frame whose application state is reported. This is
+        /// deliberately distinct from the frame header's cumulative transport
+        /// receive frontier: an older claimed operation may finish after later
+        /// peer frames have already been retained.
+        peer_frame_sequence: u64,
+        peer_frame_digest: String,
+        /// Durable destination-side state. Transport receipt alone may report
+        /// only `retained`; `claimed` and `applied` require the destination's
+        /// journal transition, while `revoked` proves it was never applied.
+        application: ExecutionFrameApplication,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionFrameApplication {
+    Retained,
+    Claimed,
+    Applied,
+    Revoked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,7 +306,18 @@ impl ExecutionChannelPayload {
                 hash(completion_request_digest)?;
                 hash(writer_exclusion_evidence_hash)?;
             }
-            Release | Cancel | Stopped { .. } | Acknowledge => {}
+            Acknowledge {
+                peer_frame_sequence,
+                peer_frame_digest,
+                ..
+            } => {
+                ensure!(
+                    *peer_frame_sequence > 0,
+                    "external acknowledgement target sequence is zero"
+                );
+                hash(peer_frame_digest)?;
+            }
+            Release | Cancel | Stopped { .. } => {}
         }
         Ok(())
     }
@@ -405,6 +436,17 @@ fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> 
         (1, None) => {}
         (2.., Some(digest)) => hash(digest)?,
         _ => bail!("external frame predecessor is missing or unexpected"),
+    }
+    if let ExecutionChannelPayload::Acknowledge {
+        peer_frame_sequence,
+        peer_frame_digest: _,
+        application: _,
+    } = &frame.payload
+    {
+        ensure!(
+            *peer_frame_sequence > 0,
+            "external application acknowledgement has no peer frame"
+        );
     }
     frame.payload.validate(binding, frame.direction)?;
     let size = lillux::canonical_json(&serde_json::to_value(frame)?)?.len();
@@ -548,14 +590,13 @@ mod tests {
         binding.max_frames = 1;
         binding.max_bytes = 500;
         let mut budget = ExecutionChannelBudget::default();
-        budget
-            .retain(&binding, &ExecutionChannelPayload::Acknowledge, 500)
-            .unwrap();
-        assert!(
-            budget
-                .retain(&binding, &ExecutionChannelPayload::Acknowledge, 1)
-                .is_err()
-        );
+        let acknowledgement = ExecutionChannelPayload::Acknowledge {
+            peer_frame_sequence: 1,
+            peer_frame_digest: "a".repeat(64),
+            application: ExecutionFrameApplication::Retained,
+        };
+        budget.retain(&binding, &acknowledgement, 500).unwrap();
+        assert!(budget.retain(&binding, &acknowledgement, 1).is_err());
         budget
             .retain(&binding, &ExecutionChannelPayload::Cancel, 600)
             .unwrap();
@@ -567,8 +608,7 @@ mod tests {
         assert_eq!(budget.ordinary_bytes, 500);
         assert_eq!(budget.terminal_frames, 1);
         let mut peer = ExecutionChannelBudget::default();
-        peer.retain(&binding, &ExecutionChannelPayload::Acknowledge, 500)
-            .unwrap();
+        peer.retain(&binding, &acknowledgement, 500).unwrap();
         peer.retain(
             &binding,
             &ExecutionChannelPayload::Stopped {

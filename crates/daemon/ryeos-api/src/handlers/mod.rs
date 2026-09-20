@@ -186,6 +186,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
     external_execution_channel::DESCRIPTOR,
+    external_execution_channel::EXCHANGE_DESCRIPTOR,
     trace_branch::DESCRIPTOR,
     trace_inspect::DESCRIPTOR,
     commands_submit::DESCRIPTOR,

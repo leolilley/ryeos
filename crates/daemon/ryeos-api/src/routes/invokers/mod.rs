@@ -338,6 +338,10 @@ mod tests {
             "external_occurrence",
             Arc::new(external_occurrence_invocation::ExternalOccurrenceAuthFactory),
         );
+        registry.register(
+            "external_channel",
+            Arc::new(external_occurrence_invocation::ExternalChannelAuthFactory),
+        );
         let invoker =
             compile_auth_invoker_with_registry("external_occurrence", None, "r1", &registry)
                 .unwrap();
@@ -354,6 +358,13 @@ mod tests {
             ),
             Err(RouteConfigError::InvalidSourceConfig { .. })
         ));
+        assert!(matches!(
+            compile_auth_invoker("external_channel", None, "r1"),
+            Err(RouteConfigError::UnknownVerifier { .. })
+        ));
+        assert!(
+            compile_auth_invoker_with_registry("external_channel", None, "r1", &registry).is_ok()
+        );
     }
 
     #[test]

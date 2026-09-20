@@ -2398,7 +2398,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 45 cuts allocation reservations to schema 2, retaining the exact
 // controller channel-key generation and bootstrap-capability identity before
 // provider contact. Epoch-44 rows cannot authorize occurrence attachment.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 45;
+// Epoch 46 cuts channel acknowledgement payloads to exact peer digest plus
+// retained/claimed/applied/revoked application evidence. Epoch-45 unit
+// acknowledgements cannot authorize replay or application reconciliation.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 46;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

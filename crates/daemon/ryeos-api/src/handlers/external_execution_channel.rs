@@ -21,6 +21,15 @@ pub struct Request {
     pub supervisor_public_key: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeRequest {
+    pub schema: u32,
+    pub placement_thread_id: String,
+    pub occurrence_id: String,
+    pub frame_base64: String,
+}
+
 impl Request {
     pub fn validate_shape(&self) -> Result<()> {
         ensure!(self.schema == 1, "unsupported external attachment schema");
@@ -52,12 +61,59 @@ impl Request {
     }
 }
 
+impl ExchangeRequest {
+    pub fn validate_shape(&self) -> Result<()> {
+        ensure!(self.schema == 1, "unsupported external exchange schema");
+        ensure!(
+            !self.placement_thread_id.is_empty() && self.placement_thread_id.len() <= 256,
+            "external exchange placement is invalid"
+        );
+        ensure!(
+            !self.occurrence_id.is_empty() && self.occurrence_id.len() <= 512,
+            "external exchange occurrence is invalid"
+        );
+        self.decode_frame().map(|_| ())
+    }
+
+    pub fn decode_frame(&self) -> Result<Vec<u8>> {
+        ensure!(
+            !self.frame_base64.is_empty()
+                && self.frame_base64.len()
+                    <= ryeos_state::external_execution::MAX_FRAME_BYTES.div_ceil(3) * 4,
+            "external exchange frame exceeds its encoded bound"
+        );
+        let wire = STANDARD
+            .decode(&self.frame_base64)
+            .map_err(|_| anyhow::anyhow!("external exchange frame is invalid base64"))?;
+        ensure!(
+            wire.len() <= ryeos_state::external_execution::MAX_FRAME_BYTES
+                && STANDARD.encode(&wire) == self.frame_base64,
+            "external exchange frame is not canonical"
+        );
+        Ok(wire)
+    }
+
+    pub fn principal_id(&self) -> String {
+        format!("external-occurrence:{}", self.occurrence_id)
+    }
+}
+
 fn require_occurrence_principal(req: &Request, ctx: &HandlerContext) -> Result<()> {
     ctx.require_verified()
         .map_err(|error| anyhow::anyhow!(error))?;
     ensure!(
         ctx.fingerprint == req.principal_id(),
         "external attachment principal changed its occurrence"
+    );
+    Ok(())
+}
+
+fn require_exchange_principal(req: &ExchangeRequest, ctx: &HandlerContext) -> Result<()> {
+    ctx.require_verified()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    ensure!(
+        ctx.fingerprint == req.principal_id(),
+        "external exchange principal changed its occurrence"
     );
     Ok(())
 }
@@ -83,6 +139,54 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     }))
 }
 
+pub async fn handle_exchange(
+    req: ExchangeRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    req.validate_shape()?;
+    require_exchange_principal(&req, &ctx)?;
+    let wire = req.decode_frame()?;
+    let authenticated = ryeos_app::external_placement::authenticate_external_channel_frame(
+        &state,
+        &req.placement_thread_id,
+        &req.occurrence_id,
+        &wire,
+    )?;
+    let result = ryeos_app::external_placement::exchange_external_channel_frame(
+        &state,
+        &authenticated,
+        &wire,
+    )?;
+    let frames = result
+        .outbound()
+        .iter()
+        .map(|frame| {
+            serde_json::json!({
+                "sequence": frame.sequence(),
+                "frame_digest": frame.frame_digest(),
+                "frame_base64": STANDARD.encode(frame.canonical_wire()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let urgent_revocation = result.urgent_revocation().map(|frame| {
+        serde_json::json!({
+            "sequence": frame.sequence(),
+            "frame_digest": frame.frame_digest(),
+            "frame_base64": STANDARD.encode(frame.canonical_wire()),
+        })
+    });
+    Ok(serde_json::json!({
+        "schema": 1,
+        "incoming_new": result.incoming_new(),
+        "incoming_sequence": authenticated.sequence(),
+        "incoming_frame_digest": authenticated.frame_digest(),
+        "acknowledgement_frame_digest": result.acknowledgement_digest(),
+        "outbound_frames": frames,
+        "urgent_revocation_frame": urgent_revocation,
+    }))
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-execution/channel-attach",
     endpoint: "external_execution.channel_attach",
@@ -96,6 +200,19 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
             handle(req, ctx, state).await
+        })
+    },
+};
+
+pub const EXCHANGE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:external-execution/channel-exchange",
+    endpoint: "external_execution.channel_exchange",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: ExchangeRequest = crate::handler_error::parse_request(params)?;
+            handle_exchange(req, ctx, state).await
         })
     },
 };
@@ -165,5 +282,52 @@ mod tests {
             &HandlerContext::new(request.principal_id(), Vec::new(), true),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn exchange_shape_is_bounded_closed_and_occurrence_scoped() {
+        let request = ExchangeRequest {
+            schema: 1,
+            placement_thread_id: "T-placement".into(),
+            occurrence_id: "occurrence-one".into(),
+            frame_base64: STANDARD.encode(b"{}"),
+        };
+        request.validate_shape().unwrap();
+        assert_eq!(request.decode_frame().unwrap(), b"{}");
+        assert_eq!(request.principal_id(), "external-occurrence:occurrence-one");
+        require_exchange_principal(
+            &request,
+            &HandlerContext::new(request.principal_id(), Vec::new(), true),
+        )
+        .unwrap();
+        assert!(
+            require_exchange_principal(
+                &request,
+                &HandlerContext::new("operator".into(), Vec::new(), true),
+            )
+            .is_err()
+        );
+        let unknown = serde_json::json!({
+            "schema":1,
+            "placement_thread_id":"T-placement",
+            "occurrence_id":"occurrence-one",
+            "frame_base64":STANDARD.encode(b"{}"),
+            "extra":true,
+        });
+        assert!(serde_json::from_value::<ExchangeRequest>(unknown).is_err());
+    }
+
+    #[test]
+    fn exchange_rejects_noncanonical_or_oversized_frame_encoding() {
+        let mut request = ExchangeRequest {
+            schema: 1,
+            placement_thread_id: "T-placement".into(),
+            occurrence_id: "occurrence-one".into(),
+            frame_base64: "e30".into(),
+        };
+        assert!(request.validate_shape().is_err());
+        request.frame_base64 =
+            "A".repeat(ryeos_state::external_execution::MAX_FRAME_BYTES.div_ceil(3) * 4 + 1);
+        assert!(request.validate_shape().is_err());
     }
 }

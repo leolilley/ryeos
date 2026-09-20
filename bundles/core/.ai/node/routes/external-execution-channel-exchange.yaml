@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-20T11:36:51Z:fc106cbbf455d29e8eb919c6cc98d9e1944bcfdec43406f707c3b45341bf5379:66GcX3ZHW5yyPylKQ07VJd597OdsNi5UaRIWpaAKlmPnQoSH0bFVlMd5CGM9wqabZeOr/n9VolgrWlGi53YyAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-execution/channel-exchange
+path: /external-execution/channel/exchange
+methods:
+  - POST
+auth: external_channel
+request:
+  body: json
+limits:
+  body_bytes_max: 600000
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:external-execution/channel-exchange

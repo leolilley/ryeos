@@ -128,6 +128,78 @@ pub struct AuthenticatedExternalOccurrence {
     allocation_request_digest: String,
 }
 
+/// Signature-authenticated supervisor exchange coordinate. It carries no
+/// signing key, capability or general node principal.
+pub struct AuthenticatedExternalChannelFrame {
+    placement_thread_id: String,
+    occurrence_id: String,
+    sequence: u64,
+    frame_digest: String,
+}
+
+pub struct ExternalChannelOutboundFrame {
+    sequence: u64,
+    frame_digest: String,
+    canonical_wire: Vec<u8>,
+}
+
+pub struct ExternalChannelExchangeResult {
+    incoming_new: bool,
+    acknowledgement_digest: Option<String>,
+    outbound: Vec<ExternalChannelOutboundFrame>,
+    urgent_revocation: Option<ExternalChannelOutboundFrame>,
+}
+
+impl AuthenticatedExternalChannelFrame {
+    pub fn placement_thread_id(&self) -> &str {
+        &self.placement_thread_id
+    }
+
+    pub fn occurrence_id(&self) -> &str {
+        &self.occurrence_id
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn frame_digest(&self) -> &str {
+        &self.frame_digest
+    }
+}
+
+impl ExternalChannelOutboundFrame {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn frame_digest(&self) -> &str {
+        &self.frame_digest
+    }
+
+    pub fn canonical_wire(&self) -> &[u8] {
+        &self.canonical_wire
+    }
+}
+
+impl ExternalChannelExchangeResult {
+    pub fn incoming_new(&self) -> bool {
+        self.incoming_new
+    }
+
+    pub fn acknowledgement_digest(&self) -> Option<&str> {
+        self.acknowledgement_digest.as_deref()
+    }
+
+    pub fn outbound(&self) -> &[ExternalChannelOutboundFrame] {
+        &self.outbound
+    }
+
+    pub fn urgent_revocation(&self) -> Option<&ExternalChannelOutboundFrame> {
+        self.urgent_revocation.as_ref()
+    }
+}
+
 impl AuthenticatedExternalOccurrence {
     pub fn placement_thread_id(&self) -> &str {
         &self.placement_thread_id
@@ -321,6 +393,200 @@ pub fn authenticate_external_channel_bootstrap(
         placement_thread_id: placement.to_owned(),
         occurrence_id: occurrence_id.to_owned(),
         allocation_request_digest: allocation.reservation.request_digest,
+    })
+}
+
+/// Authenticate an attached supervisor solely through its exact channel key.
+/// This is not node enrollment and does not reuse the expiring bootstrap
+/// capability after attachment.
+pub fn authenticate_external_channel_frame(
+    state: &AppState,
+    placement: &str,
+    occurrence_id: &str,
+    wire: &[u8],
+) -> Result<AuthenticatedExternalChannelFrame> {
+    let controller_lifetime = state
+        .extensions
+        .get::<StateLockLease>()
+        .context("external channel controller has no retained state-lock lifetime")?;
+    controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)
+        .context("external channel controller lease has the wrong app root")?;
+    let binding = state.state_store.external_execution_channel(placement)?;
+    ensure!(
+        binding.occurrence_id == occurrence_id,
+        "external channel exchange changed its occurrence"
+    );
+    let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        wire,
+        &binding,
+        lillux::time::timestamp_millis(),
+    )?;
+    ensure!(
+        verified.frame().direction
+            == ryeos_state::external_execution::ChannelDirection::SupervisorToOwner,
+        "external channel exchange requires a supervisor-authored frame"
+    );
+    Ok(AuthenticatedExternalChannelFrame {
+        placement_thread_id: placement.to_owned(),
+        occurrence_id: occurrence_id.to_owned(),
+        sequence: verified.frame().sequence,
+        frame_digest: verified.digest().to_owned(),
+    })
+}
+
+/// Retain one authenticated supervisor frame and return only exact signed
+/// owner frames from the durable backlog. HTTP completion is not application
+/// evidence; the supervisor must send a later signed acknowledgement.
+pub fn exchange_external_channel_frame(
+    state: &AppState,
+    authenticated: &AuthenticatedExternalChannelFrame,
+    wire: &[u8],
+) -> Result<ExternalChannelExchangeResult> {
+    let allocation = state
+        .state_store
+        .external_allocation(&authenticated.placement_thread_id)?
+        .context("external channel exchange lost its allocation")?;
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("external channel exchange lost its occurrence")?;
+    ensure!(
+        occurrence.occurrence_id == authenticated.occurrence_id,
+        "external channel exchange authentication is stale"
+    );
+    let access =
+        ExternalChannelAuthorityAccess::new(&allocation.reservation.channel_authority_generation)?;
+    let authority = access.decode(
+        state
+            .vault
+            .external_channel_authority(&access)
+            .context("read protected external channel signer")?,
+    )?;
+    let binding = state
+        .state_store
+        .external_execution_channel(&authenticated.placement_thread_id)?;
+    ensure!(
+        authority.owner_public_key() == binding.owner_public_key,
+        "protected external channel signer changed its binding"
+    );
+    let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+        wire,
+        &binding,
+        lillux::time::timestamp_millis(),
+    )?;
+    ensure!(
+        verified.frame().sequence == authenticated.sequence
+            && verified.digest() == authenticated.frame_digest,
+        "external channel frame changed after authentication"
+    );
+    let exchanged = state.state_store.exchange_external_supervisor_frame(
+        &authenticated.placement_thread_id,
+        wire,
+        authority.owner_signing_key(),
+        16,
+        1024 * 1024,
+    )?;
+    let acknowledgement_digest = exchanged
+        .acknowledgement
+        .as_ref()
+        .map(|frame| frame.digest().to_owned());
+    let mut outbound = Vec::with_capacity(exchanged.outbound.len());
+    for frame in exchanged.outbound {
+        ensure!(
+            frame.direction()
+                == ryeos_state::external_execution::ChannelDirection::OwnerToSupervisor,
+            "external channel backlog changed direction"
+        );
+        outbound.push(ExternalChannelOutboundFrame {
+            sequence: frame.sequence(),
+            frame_digest: frame.digest().to_owned(),
+            canonical_wire: frame.wire().to_vec(),
+        });
+    }
+    let urgent_revocation = exchanged
+        .urgent_revocation
+        .map(|frame| {
+            ensure!(
+                frame.direction()
+                    == ryeos_state::external_execution::ChannelDirection::OwnerToSupervisor,
+                "external urgent revocation changed direction"
+            );
+            Ok(ExternalChannelOutboundFrame {
+                sequence: frame.sequence(),
+                frame_digest: frame.digest().to_owned(),
+                canonical_wire: frame.wire().to_vec(),
+            })
+        })
+        .transpose()?;
+    Ok(ExternalChannelExchangeResult {
+        incoming_new: exchanged.incoming_new,
+        acknowledgement_digest,
+        outbound,
+        urgent_revocation,
+    })
+}
+
+/// Author one controller command from protected authority. This function is an
+/// internal runtime boundary, not a workload service: candidates and external
+/// supervisors never receive the owner signer.
+pub fn author_external_channel_command(
+    state: &AppState,
+    placement: &str,
+    payload: ryeos_state::external_execution::ExecutionChannelPayload,
+) -> Result<ExternalChannelOutboundFrame> {
+    ensure!(
+        matches!(
+            &payload,
+            ryeos_state::external_execution::ExecutionChannelPayload::Release
+                | ryeos_state::external_execution::ExecutionChannelPayload::ProtocolBytes { .. }
+                | ryeos_state::external_execution::ExecutionChannelPayload::Quiesce { .. }
+                | ryeos_state::external_execution::ExecutionChannelPayload::Cancel
+        ),
+        "external controller cannot author a supervisor observation or acknowledgement"
+    );
+    let controller_lifetime = state
+        .extensions
+        .get::<StateLockLease>()
+        .context("external channel controller has no retained state-lock lifetime")?;
+    controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)
+        .context("external channel controller lease has the wrong app root")?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("external channel command lost its allocation")?;
+    let access =
+        ExternalChannelAuthorityAccess::new(&allocation.reservation.channel_authority_generation)?;
+    let authority = access.decode(
+        state
+            .vault
+            .external_channel_authority(&access)
+            .context("read protected external channel signer")?,
+    )?;
+    let binding = state.state_store.external_execution_channel(placement)?;
+    ensure!(
+        authority.owner_public_key() == binding.owner_public_key,
+        "protected external channel signer changed its binding"
+    );
+    let frame = if matches!(
+        &payload,
+        ryeos_state::external_execution::ExecutionChannelPayload::Cancel
+    ) {
+        state
+            .state_store
+            .author_external_owner_revocation(placement, authority.owner_signing_key())?
+    } else {
+        state.state_store.author_external_owner_frame(
+            placement,
+            authority.owner_signing_key(),
+            payload,
+        )?
+    };
+    Ok(ExternalChannelOutboundFrame {
+        sequence: frame.frame().sequence,
+        frame_digest: frame.digest().to_owned(),
+        canonical_wire: frame.canonical().as_bytes().to_vec(),
     })
 }
 

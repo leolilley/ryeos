@@ -78,7 +78,7 @@ impl ChannelPhase {
             }
             Cancel if !matches!(self, Self::Stopped | Self::Stopping) => Self::Stopping,
             Stopped { .. } if self != Self::Stopped => Self::Stopped,
-            Acknowledge => self,
+            Acknowledge { .. } => self,
             _ => bail!(
                 "external channel payload contradicts lifecycle state {}",
                 self.as_str()
@@ -137,7 +137,7 @@ pub fn urgent_control(payload: &ExecutionChannelPayload) -> bool {
         payload,
         ExecutionChannelPayload::Cancel
             | ExecutionChannelPayload::Stopped { .. }
-            | ExecutionChannelPayload::Acknowledge
+            | ExecutionChannelPayload::Acknowledge { .. }
     )
 }
 
@@ -210,7 +210,15 @@ mod tests {
             assert_eq!(phase.as_str(), name);
             assert_eq!(
                 phase
-                    .advance(None, &ExecutionChannelPayload::Acknowledge, false)
+                    .advance(
+                        None,
+                        &ExecutionChannelPayload::Acknowledge {
+                            peer_frame_sequence: 1,
+                            peer_frame_digest: "a".repeat(64),
+                            application: super::super::ExecutionFrameApplication::Retained,
+                        },
+                        false,
+                    )
                     .unwrap(),
                 phase
             );
@@ -241,7 +249,11 @@ mod tests {
             sequence: 3,
             previous_frame_digest: Some(digest.clone()),
             acknowledged_peer_sequence: 1,
-            payload: ExecutionChannelPayload::Acknowledge,
+            payload: ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: "c".repeat(64),
+                application: super::super::ExecutionFrameApplication::Retained,
+            },
         };
         frontier.require_successor(&frame, 1).unwrap();
         frame.sequence = 2;

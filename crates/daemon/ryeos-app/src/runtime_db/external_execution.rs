@@ -10,6 +10,7 @@ use super::*;
 use anyhow::ensure;
 
 mod channel;
+pub(crate) use channel::ExternalSupervisorExchange;
 
 pub(super) const FIRST_EPOCH: u32 = 40;
 pub(super) const GUARD_SQL: &str = r#"CREATE TABLE external_execution_guard (

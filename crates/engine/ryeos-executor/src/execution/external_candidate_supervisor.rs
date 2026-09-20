@@ -68,29 +68,48 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         &self.journal
     }
 
+    /// Retain a controller-authored acknowledgement without inventing an
+    /// executable application for it. The shared journal reconciles the exact
+    /// supervisor frame state named by the signed payload.
+    pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
+        let verified = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+            wire,
+            self.journal.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        ensure!(
+            verified.frame().direction == ChannelDirection::OwnerToSupervisor
+                && matches!(
+                    verified.frame().payload,
+                    ExecutionChannelPayload::Acknowledge { .. }
+                ),
+            "supervisor acknowledgement ingress requires an owner acknowledgement"
+        );
+        self.journal.record_owner_acknowledgement(wire)
+    }
+
+    pub fn ensure_supervisor_acknowledgement(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+        peer_sequence: u64,
+        peer_digest: &str,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        self.journal
+            .ensure_supervisor_acknowledgement(signing_key, peer_sequence, peer_digest)
+    }
+
     pub fn publish_ready(
         &self,
         signing_key: &lillux::crypto::SigningKey,
     ) -> Result<AuthenticatedExecutionFrame> {
         let binding = self.journal.binding();
-        let ready = self.journal.author_supervisor_frame(
+        self.journal.author_supervisor_frame(
             signing_key,
             ExecutionChannelPayload::Ready {
                 supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
             },
-        )?;
-        let GuestApplicationClaim::New(token) = self.journal.claim(
-            ChannelDirection::SupervisorToOwner,
-            ready.frame().sequence,
-            ready.digest(),
-        )?
-        else {
-            anyhow::bail!("fresh supervisor readiness was not claimable")
-        };
-        let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
-        self.journal.finish(performed)?;
-        Ok(ready)
+        )
     }
 
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -566,9 +585,28 @@ mod tests {
             ..Default::default()
         };
         let mut runtime = SerializedExternalCandidateSupervisor::new(live, launcher);
-        runtime.publish_ready(&supervisor_key).unwrap();
-        let release =
-            signed_owner_frame(&binding, &owner, 1, None, ExecutionChannelPayload::Release);
+        let ready = runtime.publish_ready(&supervisor_key).unwrap();
+        let ready_ack = signed_owner_frame(
+            &binding,
+            &owner,
+            1,
+            None,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: ready.frame().sequence,
+                peer_frame_digest: ready.digest().to_owned(),
+                application: ryeos_state::external_execution::ExecutionFrameApplication::Applied,
+            },
+        );
+        runtime
+            .record_owner_acknowledgement(ready_ack.canonical().as_bytes())
+            .unwrap();
+        let release = signed_owner_frame(
+            &binding,
+            &owner,
+            2,
+            Some(ready_ack.digest().to_owned()),
+            ExecutionChannelPayload::Release,
+        );
         assert_eq!(
             runtime
                 .dispatch_release(release.canonical().as_bytes())
@@ -578,7 +616,7 @@ mod tests {
         let quiesce = signed_owner_frame(
             &binding,
             &owner,
-            2,
+            3,
             Some(release.digest().to_owned()),
             ExecutionChannelPayload::Quiesce {
                 completion_request_digest,

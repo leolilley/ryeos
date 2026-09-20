@@ -217,6 +217,12 @@ fn build_route_table(
             ryeos_api::routes::invokers::external_occurrence_invocation::ExternalOccurrenceAuthFactory,
         ),
     );
+    extensions.auth.register(
+        "external_channel",
+        Arc::new(
+            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalChannelAuthFactory,
+        ),
+    );
 
     ryeos_ui::register_extensions(&mut extensions, &mut mode_registry, ui);
 

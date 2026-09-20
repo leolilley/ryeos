@@ -2,8 +2,16 @@
 use super::*;
 use ryeos_state::external_execution::journal::{self, JournalOwner, load_binding, revoked};
 use ryeos_state::external_execution::{
-    ChannelDirection, ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
+    AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
+    ExecutionChannelPayload, SignedExecutionFrame,
 };
+
+pub(crate) struct ExternalSupervisorExchange {
+    pub incoming_new: bool,
+    pub acknowledgement: Option<AuthenticatedExecutionFrame>,
+    pub outbound: Vec<journal::PendingExecutionFrame>,
+    pub urgent_revocation: Option<journal::PendingExecutionFrame>,
+}
 
 impl RuntimeDb {
     /// Accept only terminal revocation without waiting for missing protocol
@@ -227,6 +235,183 @@ impl RuntimeDb {
         Ok(result)
     }
 
+    /// Author one controller-owned command/acknowledgement using the protected
+    /// occurrence key. The caller must recover the journal after an uncertain
+    /// commit rather than guessing another sequence.
+    pub(crate) fn author_external_owner_frame(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        payload: ExecutionChannelPayload,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let frame = journal::author_frame(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::OwnerToSupervisor,
+            signing_key,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(frame)
+    }
+
+    /// Commit sticky cancellation before attempting its contiguous transcript
+    /// append. Recovery reuses the exact retained signed frame; it never mints
+    /// another cancel sequence after an uncertain commit.
+    pub(crate) fn author_external_owner_revocation(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        let first = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&first, placement)?;
+        let binding_digest = binding.digest()?;
+        let retained: Option<String> = first
+            .query_row(
+                "SELECT frame_json FROM external_execution_revocation WHERE binding_digest=?1",
+                [&binding_digest],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let frame = if let Some(wire) = retained {
+            SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?
+        } else {
+            let frame = journal::prepare_frame(
+                &first,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                signing_key,
+                ExecutionChannelPayload::Cancel,
+            )?;
+            journal::record_revocation(
+                &first,
+                &NodeJournalOwner,
+                placement,
+                frame.canonical().as_bytes(),
+            )?;
+            frame
+        };
+        first.commit()?;
+
+        let second = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        journal::append_frame(
+            &second,
+            &NodeJournalOwner,
+            placement,
+            frame.canonical().as_bytes(),
+        )?;
+        second.commit()?;
+        Ok(frame)
+    }
+
+    /// Ensure the current exact destination-side state of a supervisor frame
+    /// has a signed owner acknowledgement. Exact recovery returns the existing
+    /// frame; it never creates another acknowledgement for the same state.
+    pub(crate) fn ensure_external_owner_acknowledgement(
+        &self,
+        placement: &str,
+        peer_sequence: u64,
+        peer_digest: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let frame = ensure_owner_acknowledgement_tx(
+            &tx,
+            placement,
+            peer_sequence,
+            peer_digest,
+            signing_key,
+        )?;
+        tx.commit()?;
+        Ok(frame)
+    }
+
+    pub(crate) fn pending_external_owner_transport_frames(
+        &self,
+        placement: &str,
+        frame_limit: usize,
+        byte_limit: usize,
+    ) -> Result<Vec<journal::PendingExecutionFrame>> {
+        journal::pending_transport_frames(
+            &self.conn,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::OwnerToSupervisor,
+            frame_limit,
+            byte_limit,
+        )
+    }
+
+    /// Atomically retain one supervisor frame, recover or author its exact
+    /// acknowledgement, and read a bounded owner backlog. The response itself
+    /// grants no application state; only a later signed supervisor
+    /// acknowledgement can advance outbound application.
+    pub(crate) fn exchange_external_supervisor_frame(
+        &self,
+        placement: &str,
+        wire: &[u8],
+        signing_key: &lillux::crypto::SigningKey,
+        frame_limit: usize,
+        byte_limit: usize,
+    ) -> Result<ExternalSupervisorExchange> {
+        let binding = load_binding(&self.conn, placement)?;
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            &binding,
+            lillux::time::timestamp_millis(),
+        )?;
+        if verified.frame().direction != ChannelDirection::SupervisorToOwner {
+            bail!("external exchange accepts only supervisor-authored frames");
+        }
+        let sequence = verified.frame().sequence;
+        let digest = verified.digest().to_owned();
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let incoming_new = journal::append_frame(&tx, &NodeJournalOwner, placement, wire)?;
+        if matches!(
+            verified.frame().payload,
+            ExecutionChannelPayload::Acknowledge { .. }
+        ) {
+            journal::apply_received_acknowledgement(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                verified.frame().direction,
+                sequence,
+                &digest,
+            )?;
+        }
+        let acknowledgement =
+            ensure_owner_acknowledgement_tx(&tx, placement, sequence, &digest, signing_key)?;
+        let outbound = journal::pending_transport_frames(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::OwnerToSupervisor,
+            frame_limit,
+            byte_limit,
+        )?;
+        let urgent_revocation = journal::pending_terminal_revocation_frame(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            ChannelDirection::OwnerToSupervisor,
+        )?;
+        tx.commit()?;
+        Ok(ExternalSupervisorExchange {
+            incoming_new,
+            acknowledgement,
+            outbound,
+            urgent_revocation,
+        })
+    }
+
     /// Claim one already-authenticated frame for application. A crash after
     /// this CAS is an unknown application, not a retry license. Applied frames
     /// may be acknowledged repeatedly without forwarding their bytes again.
@@ -271,6 +456,25 @@ impl RuntimeDb {
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn ensure_owner_acknowledgement_tx(
+    tx: &Transaction<'_>,
+    placement: &str,
+    peer_sequence: u64,
+    peer_digest: &str,
+    signing_key: &lillux::crypto::SigningKey,
+) -> Result<Option<AuthenticatedExecutionFrame>> {
+    journal::ensure_application_acknowledgement(
+        tx,
+        &NodeJournalOwner,
+        placement,
+        ChannelDirection::OwnerToSupervisor,
+        peer_sequence,
+        peer_digest,
+        signing_key,
+        false,
+    )
 }
 
 struct NodeJournalOwner;
@@ -320,7 +524,7 @@ impl JournalOwner for NodeJournalOwner {
                 payload,
                 ExecutionChannelPayload::Cancel
                     | ExecutionChannelPayload::Stopped { .. }
-                    | ExecutionChannelPayload::Acknowledge
+                    | ExecutionChannelPayload::Acknowledge { .. }
             )
         {
             bail!("quarantined allocation cannot execute or author a candidate export");
@@ -367,6 +571,24 @@ impl JournalOwner for NodeJournalOwner {
         }
         Ok(())
     }
+
+    fn out_of_band_application_state(
+        &self,
+        _conn: &Connection,
+        _binding: &ExecutionChannelBinding,
+        _direction: ChannelDirection,
+        _sequence: u64,
+        _digest: &str,
+    ) -> Result<Option<ryeos_state::external_execution::ExecutionFrameApplication>> {
+        // Controller-authored cancellation is retained in the ordinary node
+        // transcript before transport. Only the guest has a gap-crossing
+        // terminal application journal.
+        Ok(None)
+    }
+
+    fn can_prove_pending_input_revoked(&self) -> bool {
+        false
+    }
 }
 
 pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
@@ -391,7 +613,9 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
-    use ryeos_state::external_execution::{ExecutionFrame, ExternalStopReason};
+    use ryeos_state::external_execution::{
+        ExecutionFrame, ExecutionFrameApplication, ExternalStopReason,
+    };
 
     fn setup(db: &RuntimeDb) -> (ExecutionChannelBinding, SigningKey, SigningKey) {
         setup_limits(db, 100, 1024 * 1024)
@@ -620,7 +844,11 @@ mod tests {
             1,
             None,
             1,
-            ExecutionChannelPayload::Acknowledge,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: cancel_digest.clone(),
+                application: ExecutionFrameApplication::Retained,
+            },
         );
         assert!(
             db.record_external_execution_frame(placement, &late)
@@ -772,8 +1000,8 @@ mod tests {
         db.finish_external_frame_application(placement, direction, 1, &release_digest)
             .unwrap();
         assert!(
-            !db.claim_external_frame_application(placement, direction, 2, &input_digest)
-                .unwrap()
+            db.claim_external_frame_application(placement, direction, 2, &input_digest)
+                .is_err()
         );
         assert_eq!(
             db.external_allocation(placement).unwrap().unwrap().phase,
@@ -834,8 +1062,8 @@ mod tests {
         );
         assert!(db.external_execution_revoked(placement).unwrap());
         assert!(
-            !db.claim_external_frame_application(placement, direction, 1, &release_digest)
-                .unwrap()
+            db.claim_external_frame_application(placement, direction, 1, &release_digest)
+                .is_err()
         );
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
@@ -843,8 +1071,8 @@ mod tests {
         db.record_external_execution_frame(placement, &input)
             .unwrap();
         assert!(
-            !db.claim_external_frame_application(placement, direction, 2, &input_digest)
-                .unwrap()
+            db.claim_external_frame_application(placement, direction, 2, &input_digest)
+                .is_err()
         );
         db.record_external_execution_frame(placement, &cancel)
             .unwrap();
@@ -1001,7 +1229,11 @@ mod tests {
             2,
             Some(release_digest.clone()),
             1,
-            ExecutionChannelPayload::Acknowledge,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: ready_digest.clone(),
+                application: ExecutionFrameApplication::Retained,
+            },
         );
         assert!(db.record_external_execution_frame(placement, &ack).is_err());
         let (cancel, _) = wire(
@@ -1170,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn external_channel_cancel_revokes_pending_input_without_settling_allocation() {
+    fn external_channel_cancel_preserves_remote_uncertainty_without_settling_allocation() {
         let root = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         let (binding, owner, supervisor) = setup(&db);
@@ -1199,14 +1431,24 @@ mod tests {
         db.record_external_execution_frame(placement, &cancel)
             .unwrap();
         assert!(
-            !db.claim_external_frame_application(
+            db.claim_external_frame_application(
                 placement,
                 ChannelDirection::OwnerToSupervisor,
                 1,
                 &release_digest
             )
-            .unwrap()
+            .is_err()
         );
+        let release_application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=1",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(release_application, "pending");
         assert!(
             db.claim_external_frame_application(
                 placement,
@@ -1303,5 +1545,300 @@ mod tests {
             db.record_external_execution_frame(placement, &fork)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn signed_exchange_replays_exact_backlog_and_advances_only_from_peer_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let (ready_wire, ready_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+        );
+        let first = db
+            .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(first.incoming_new);
+        let acknowledgement = first.acknowledgement.unwrap();
+        assert_eq!(first.outbound.len(), 1);
+        assert_eq!(
+            first.outbound[0].wire(),
+            acknowledgement.canonical().as_bytes()
+        );
+        let owner_ack_digest = acknowledgement.digest().to_owned();
+        assert!(matches!(
+            acknowledgement.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                application: ExecutionFrameApplication::Retained,
+                ..
+            }
+        ));
+
+        let retry = db
+            .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(!retry.incoming_new);
+        assert_eq!(retry.acknowledgement.unwrap().digest(), owner_ack_digest);
+        assert_eq!(retry.outbound.len(), 1);
+        assert_eq!(retry.outbound[0].digest(), owner_ack_digest);
+
+        let (retained_ack_wire, retained_ack_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest.clone()),
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: owner_ack_digest.clone(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        let drained = db
+            .exchange_external_supervisor_frame(
+                placement,
+                &retained_ack_wire,
+                &owner,
+                16,
+                1024 * 1024,
+            )
+            .unwrap();
+        assert!(drained.incoming_new);
+        assert!(drained.acknowledgement.is_none());
+        assert!(drained.outbound.is_empty());
+
+        let release = db
+            .author_external_owner_frame(placement, &owner, ExecutionChannelPayload::Release)
+            .unwrap();
+        assert_eq!(release.frame().sequence, 2);
+        assert_eq!(release.frame().acknowledged_peer_sequence, 2);
+        let pending = db
+            .pending_external_owner_transport_frames(placement, 16, 1024 * 1024)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].digest(), release.digest());
+
+        let (applied_ack_wire, applied_ack_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(retained_ack_digest),
+            2,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 2,
+                peer_frame_digest: release.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        let applied = db
+            .exchange_external_supervisor_frame(
+                placement,
+                &applied_ack_wire,
+                &owner,
+                16,
+                1024 * 1024,
+            )
+            .unwrap();
+        assert!(applied.acknowledgement.is_none());
+        assert!(applied.outbound.is_empty());
+        let application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=2",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(application, "applied");
+
+        let cancel = db
+            .author_external_owner_revocation(placement, &owner)
+            .unwrap();
+        let cancel_retry = db
+            .author_external_owner_revocation(placement, &owner)
+            .unwrap();
+        assert_eq!(cancel_retry.digest(), cancel.digest());
+        assert!(db.external_execution_revoked(placement).unwrap());
+        let pending = db
+            .pending_external_owner_transport_frames(placement, 16, 1024 * 1024)
+            .unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(
+            journal::pending_terminal_revocation_frame(
+                &db.conn,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+            )
+            .unwrap()
+            .unwrap()
+            .digest(),
+            cancel.digest()
+        );
+        let (cancel_ack_wire, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(applied_ack_digest),
+            3,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 3,
+                peer_frame_digest: cancel.digest().to_owned(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        let cancel_drained = db
+            .exchange_external_supervisor_frame(
+                placement,
+                &cancel_ack_wire,
+                &owner,
+                16,
+                1024 * 1024,
+            )
+            .unwrap();
+        assert!(cancel_drained.outbound.is_empty());
+        assert!(cancel_drained.urgent_revocation.is_none());
+
+        let stale_retry = db
+            .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(!stale_retry.incoming_new);
+        assert!(stale_retry.outbound.is_empty());
+        validate_channels(&db.conn).unwrap();
+    }
+
+    #[test]
+    fn signed_exchange_delivers_sticky_cancel_across_revoked_predecessor() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let (ready_wire, ready_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+        );
+        let first = db
+            .exchange_external_supervisor_frame(placement, &ready_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        let owner_ack = first.acknowledgement.unwrap();
+        let (poll_wire, poll_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: owner_ack.frame().sequence,
+                peer_frame_digest: owner_ack.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        let drained = db
+            .exchange_external_supervisor_frame(placement, &poll_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(drained.outbound.is_empty());
+
+        let release = db
+            .author_external_owner_frame(placement, &owner, ExecutionChannelPayload::Release)
+            .unwrap();
+        let cancel = db
+            .author_external_owner_revocation(placement, &owner)
+            .unwrap();
+        assert_eq!(release.frame().sequence, 2);
+        assert_eq!(cancel.frame().sequence, 3);
+
+        let urgent = db
+            .exchange_external_supervisor_frame(placement, &poll_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(urgent.outbound.is_empty());
+        let urgent_frame = urgent.urgent_revocation.unwrap();
+        assert_eq!(urgent_frame.sequence(), 3);
+        assert_eq!(urgent_frame.digest(), cancel.digest());
+        assert_eq!(urgent_frame.wire(), cancel.canonical().as_bytes());
+        let repeated = db
+            .exchange_external_supervisor_frame(placement, &poll_wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            repeated.urgent_revocation.unwrap().digest(),
+            cancel.digest()
+        );
+
+        // The guest may already have applied Release while its signed evidence
+        // was in flight. Controller-side `pending` is uncertainty, not proof
+        // of non-execution; historical Applied evidence must remain admissible
+        // without suppressing the urgent Cancel.
+        let (release_ack, release_ack_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(poll_digest),
+            2,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 2,
+                peer_frame_digest: release.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        let historical = db
+            .exchange_external_supervisor_frame(placement, &release_ack, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert_eq!(
+            historical.urgent_revocation.unwrap().digest(),
+            cancel.digest()
+        );
+
+        let (cancel_ack, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(release_ack_digest),
+            3,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 3,
+                peer_frame_digest: cancel.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        let settled_transport = db
+            .exchange_external_supervisor_frame(placement, &cancel_ack, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(settled_transport.outbound.is_empty());
+        assert!(settled_transport.urgent_revocation.is_none());
+        let release_application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor' AND sequence=2",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(release_application, "applied");
+        validate_channels(&db.conn).unwrap();
     }
 }

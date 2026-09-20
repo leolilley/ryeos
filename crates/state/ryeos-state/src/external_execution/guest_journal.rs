@@ -18,7 +18,7 @@ use super::export::{ValidatedCandidateRetention, validated_retained_candidate_ro
 use super::journal::{self, ApplicationClaim, JournalOwner};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
-    ExecutionChannelPayload, ExecutionFrame, SignedExecutionFrame,
+    ExecutionChannelPayload, SignedExecutionFrame,
 };
 use crate::{
     DurableCasPublicationKey, DurableCasUploadStage, DurableExternalCandidateReceipt,
@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 4;
+const SCHEMA_EPOCH: i64 = 5;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=4),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=5),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -723,6 +723,43 @@ impl LiveGuestJournal {
         Ok(result)
     }
 
+    /// Retain, reconcile and complete one controller acknowledgement as an
+    /// atomic no-effect application. This must be used only for received
+    /// acknowledgements; locally authored frames remain pending remote proof.
+    pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            &self.0.binding,
+            lillux::time::timestamp_millis(),
+        )?;
+        ensure!(
+            verified.frame().direction == ChannelDirection::OwnerToSupervisor
+                && matches!(
+                    verified.frame().payload,
+                    ExecutionChannelPayload::Acknowledge { .. }
+                ),
+            "guest acknowledgement ingress requires an owner acknowledgement"
+        );
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        let inserted = journal::append_frame(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            wire,
+        )?;
+        journal::apply_received_acknowledgement(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            verified.frame().direction,
+            verified.frame().sequence,
+            verified.digest(),
+        )?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
     /// Author one exact supervisor observation from the retained directional
     /// frontiers and append it in the same SQLite writer transaction. A commit
     /// error is uncertain publication and must never be retried by guessing a
@@ -734,60 +771,107 @@ impl LiveGuestJournal {
     ) -> Result<AuthenticatedExecutionFrame> {
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let verified = journal::author_frame(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            signing_key,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(verified)
+    }
+
+    /// Recover or author a signed supervisor acknowledgement of the peer
+    /// frame's current durable guest application state. Unlike node ingress,
+    /// the outbound supervisor may acknowledge an owner acknowledgement once
+    /// so its cumulative frontier can advance and that exact frame can serve
+    /// as the reconnect poll.
+    pub fn ensure_supervisor_acknowledgement(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+        peer_sequence: u64,
+        peer_digest: &str,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         let binding_digest = self.0.binding.digest()?;
-        let prior: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT sequence,frame_digest FROM external_execution_frame
-                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
-                 ORDER BY sequence DESC LIMIT 1",
-                [&binding_digest],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (sequence, previous_frame_digest) = match prior {
-            Some((sequence, digest)) => (
-                u64::try_from(sequence)?
-                    .checked_add(1)
-                    .context("supervisor frame sequence overflow")?,
-                Some(digest),
-            ),
-            None => (1, None),
-        };
-        let acknowledged_peer_sequence: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sequence),0) FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction='owner_to_supervisor'",
-            [&binding_digest],
+        let contiguous: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND sequence=?2 AND frame_digest=?3)",
+            params![binding_digest, i64::try_from(peer_sequence)?, peer_digest],
             |row| row.get(0),
         )?;
-        let signed = SignedExecutionFrame::sign(
-            ExecutionFrame {
-                schema: 1,
-                binding_digest,
-                direction: ChannelDirection::SupervisorToOwner,
-                sequence,
-                previous_frame_digest,
-                acknowledged_peer_sequence: u64::try_from(acknowledged_peer_sequence)?,
-                payload,
-            },
-            &self.0.binding,
-            signing_key,
-        )?;
-        let wire = lillux::canonical_json(&serde_json::to_value(signed)?)?.into_bytes();
-        ensure!(
-            journal::append_frame(
+        let frame = if contiguous {
+            journal::ensure_application_acknowledgement(
                 &tx,
                 &self.0.owner(),
                 &self.0.binding.placement_thread_id,
-                &wire,
-            )?,
-            "fresh supervisor observation unexpectedly duplicated"
-        );
+                ChannelDirection::SupervisorToOwner,
+                peer_sequence,
+                peer_digest,
+                signing_key,
+                true,
+            )?
+        } else {
+            let terminal: (String, String, String) = tx.query_row(
+                "SELECT r.frame_digest,r.frame_json,t.application
+                 FROM external_execution_revocation r
+                 JOIN external_guest_terminal_application t
+                   ON t.binding_digest=r.binding_digest
+                  AND t.frame_digest=r.frame_digest
+                 WHERE r.binding_digest=?1",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let retained = SignedExecutionFrame::decode_and_verify(
+                terminal.1.as_bytes(),
+                &self.0.binding,
+                self.0.binding.issued_at_ms,
+            )?;
+            ensure!(
+                terminal.0 == peer_digest
+                    && retained.digest() == peer_digest
+                    && retained.frame().sequence == peer_sequence
+                    && retained.frame().direction == ChannelDirection::OwnerToSupervisor
+                    && matches!(retained.frame().payload, ExecutionChannelPayload::Cancel),
+                "guest terminal acknowledgement changed sticky revocation"
+            );
+            let application = match terminal.2.as_str() {
+                "claimed" => crate::external_execution::ExecutionFrameApplication::Claimed,
+                "applied" => crate::external_execution::ExecutionFrameApplication::Applied,
+                _ => anyhow::bail!("guest terminal application has an invalid state"),
+            };
+            journal::ensure_application_acknowledgement_for_state(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                peer_sequence,
+                peer_digest,
+                application,
+                signing_key,
+            )?
+        };
         tx.commit()?;
-        SignedExecutionFrame::decode_and_verify(
-            &wire,
-            &self.0.binding,
-            lillux::time::timestamp_millis(),
+        Ok(frame)
+    }
+
+    pub fn pending_supervisor_transport_frames(
+        &self,
+        frame_limit: usize,
+        byte_limit: usize,
+    ) -> Result<Vec<journal::PendingExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        journal::pending_transport_frames(
+            &self.0.conn,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            frame_limit,
+            byte_limit,
         )
     }
 
@@ -1755,6 +1839,52 @@ impl JournalOwner for GuestOwner<'_> {
         );
         Ok(())
     }
+
+    fn out_of_band_application_state(
+        &self,
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        direction: ChannelDirection,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<Option<crate::external_execution::ExecutionFrameApplication>> {
+        let retained: Option<(String, String)> = conn
+            .query_row(
+                "SELECT r.frame_json,COALESCE(t.application,'retained')
+                 FROM external_execution_revocation r
+                 LEFT JOIN external_guest_terminal_application t
+                   ON t.binding_digest=r.binding_digest
+                  AND t.frame_digest=r.frame_digest
+                 WHERE r.binding_digest=?1 AND r.frame_digest=?2",
+                params![binding.digest()?, digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((wire, application)) = retained else {
+            return Ok(None);
+        };
+        let frame = SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            frame.frame().direction == direction
+                && frame.frame().sequence == sequence
+                && matches!(frame.frame().payload, ExecutionChannelPayload::Cancel),
+            "guest terminal application changed sticky revocation"
+        );
+        Ok(Some(match application.as_str() {
+            "retained" => crate::external_execution::ExecutionFrameApplication::Retained,
+            "claimed" => crate::external_execution::ExecutionFrameApplication::Claimed,
+            "applied" => crate::external_execution::ExecutionFrameApplication::Applied,
+            _ => anyhow::bail!("guest terminal application has an invalid state"),
+        }))
+    }
+
+    fn can_prove_pending_input_revoked(&self) -> bool {
+        true
+    }
 }
 
 fn configure(conn: &Connection) -> Result<()> {
@@ -2128,27 +2258,74 @@ mod tests {
         live.finish(performed).unwrap();
 
         assert!(
-            live.author_supervisor_frame(&owner, ExecutionChannelPayload::Acknowledge)
-                .is_err()
+            live.author_supervisor_frame(
+                &owner,
+                ExecutionChannelPayload::Acknowledge {
+                    peer_frame_sequence: 1,
+                    peer_frame_digest: release_digest.clone(),
+                    application: crate::external_execution::ExecutionFrameApplication::Applied,
+                },
+            )
+            .is_err()
         );
         let observation = live
-            .author_supervisor_frame(&supervisor, ExecutionChannelPayload::Acknowledge)
-            .unwrap();
+            .ensure_supervisor_acknowledgement(&supervisor, 1, &release_digest)
+            .unwrap()
+            .expect("applied owner input requires one exact acknowledgement");
         assert_eq!(observation.frame().sequence, 2);
         assert_eq!(observation.frame().acknowledged_peer_sequence, 1);
         assert!(observation.frame().previous_frame_digest.is_some());
-        let GuestApplicationClaim::New(token) = live
-            .claim(
-                ChannelDirection::SupervisorToOwner,
-                observation.frame().sequence,
-                observation.digest(),
-            )
+        assert_eq!(
+            live.ensure_supervisor_acknowledgement(&supervisor, 1, &release_digest)
+                .unwrap()
+                .unwrap()
+                .digest(),
+            observation.digest(),
+            "recovery must return the retained signed acknowledgement"
+        );
+        let pending = live
+            .pending_supervisor_transport_frames(4, 64 * 1024)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].digest(), observation.digest());
+        assert_eq!(pending[0].wire(), observation.canonical().as_bytes());
+
+        let (owner_ack, owner_ack_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            observation.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: observation.frame().sequence,
+                peer_frame_digest: observation.digest().to_owned(),
+                application: crate::external_execution::ExecutionFrameApplication::Retained,
+            },
+        );
+        assert!(live.record_owner_acknowledgement(&owner_ack).unwrap());
+        assert!(
+            live.pending_supervisor_transport_frames(4, 64 * 1024)
+                .unwrap()
+                .is_empty(),
+            "signed peer evidence must advance the transport frontier"
+        );
+
+        let ack_of_ack = live
+            .ensure_supervisor_acknowledgement(&supervisor, 2, &owner_ack_digest)
             .unwrap()
-        else {
-            panic!("authored observation must be freshly claimable")
-        };
-        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
-        live.finish(performed).unwrap();
+            .expect("the supervisor may acknowledge an owner acknowledgement once");
+        assert_eq!(ack_of_ack.frame().sequence, 3);
+        assert_eq!(ack_of_ack.frame().acknowledged_peer_sequence, 2);
+        assert!(matches!(
+            &ack_of_ack.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 2,
+                peer_frame_digest,
+                application:
+                    crate::external_execution::ExecutionFrameApplication::Applied,
+            } if peer_frame_digest == &owner_ack_digest
+        ));
         live.validate().unwrap();
     }
 
@@ -2525,7 +2702,7 @@ mod tests {
     fn revocation_commit_survives_a_transcript_gap() {
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
-        let (live, binding, owner, _supervisor, bootstrap, store_identity) =
+        let (live, binding, owner, supervisor, bootstrap, store_identity) =
             live_store(&root, &authority);
         let (cancel, cancel_digest) = wire(
             &binding,
@@ -2545,6 +2722,26 @@ mod tests {
                 revocation_committed: true,
                 ..
             }
+        ));
+        let GuestTerminalApplicationClaim::New(token) =
+            live.claim_terminal_revocation(&committed).unwrap()
+        else {
+            panic!("gap-crossing cancellation must retain one terminal claim")
+        };
+        let (_, performed) = live.apply_terminal_revocation(token, |_| Ok(())).unwrap();
+        live.finish_terminal_revocation(performed).unwrap();
+        let acknowledgement = live
+            .ensure_supervisor_acknowledgement(&supervisor, 2, &cancel_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(acknowledgement.frame().acknowledged_peer_sequence, 0);
+        assert!(matches!(
+            &acknowledgement.frame().payload,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 2,
+                peer_frame_digest,
+                application: crate::external_execution::ExecutionFrameApplication::Applied,
+            } if peer_frame_digest == &cancel_digest
         ));
         drop(live);
         let recovered = RecoveredGuestJournal::open(

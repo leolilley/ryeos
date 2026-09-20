@@ -10,6 +10,7 @@ use crate::routes::invocation::{
 use crate::routes::invokers::AuthVerifierFactory;
 
 pub struct ExternalOccurrenceAuthFactory;
+pub struct ExternalChannelAuthFactory;
 
 impl AuthVerifierFactory for ExternalOccurrenceAuthFactory {
     fn compile(
@@ -28,7 +29,25 @@ impl AuthVerifierFactory for ExternalOccurrenceAuthFactory {
     }
 }
 
+impl AuthVerifierFactory for ExternalChannelAuthFactory {
+    fn compile(
+        &self,
+        auth_config: Option<&serde_json::Value>,
+        route_id: &str,
+    ) -> Result<std::sync::Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        if auth_config.is_some_and(|value| !value.is_null()) {
+            return Err(RouteConfigError::InvalidSourceConfig {
+                id: route_id.into(),
+                src: "external_channel_verifier".into(),
+                reason: "auth_config is not accepted".into(),
+            });
+        }
+        Ok(std::sync::Arc::new(CompiledExternalChannelVerifier))
+    }
+}
+
 struct CompiledExternalOccurrenceVerifier;
+struct CompiledExternalChannelVerifier;
 
 static CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Principal,
@@ -78,6 +97,61 @@ impl CompiledRouteInvocation for CompiledExternalOccurrenceVerifier {
             id: request.principal_id(),
             scopes: Vec::new(),
             verifier_key: "external_occurrence",
+            verified: true,
+            authorized_key_class: None,
+            authenticated_origin_site_id: None,
+            authenticated_grant_authority: None,
+            metadata,
+        }))
+    }
+}
+
+#[axum::async_trait]
+impl CompiledRouteInvocation for CompiledExternalChannelVerifier {
+    fn contract(&self) -> &'static RouteInvocationContract {
+        &CONTRACT
+    }
+
+    async fn invoke(
+        &self,
+        ctx: RouteInvocationContext,
+    ) -> Result<RouteInvocationResult, RouteDispatchError> {
+        let request: crate::handlers::external_execution_channel::ExchangeRequest =
+            serde_json::from_slice(&ctx.body_raw).map_err(|_| RouteDispatchError::Unauthorized)?;
+        request
+            .validate_shape()
+            .map_err(|_| RouteDispatchError::Unauthorized)?;
+        let wire = request
+            .decode_frame()
+            .map_err(|_| RouteDispatchError::Unauthorized)?;
+        let authenticated = ryeos_app::external_placement::authenticate_external_channel_frame(
+            &ctx.state,
+            &request.placement_thread_id,
+            &request.occurrence_id,
+            &wire,
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                route_id = %ctx.route_id,
+                placement = %request.placement_thread_id,
+                error = %error,
+                "external channel verification failed"
+            );
+            RouteDispatchError::Unauthorized
+        })?;
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "placement_thread_id".into(),
+            authenticated.placement_thread_id().to_owned(),
+        );
+        metadata.insert(
+            "frame_digest".into(),
+            authenticated.frame_digest().to_owned(),
+        );
+        Ok(RouteInvocationResult::Principal(RoutePrincipal {
+            id: request.principal_id(),
+            scopes: Vec::new(),
+            verifier_key: "external_channel",
             verified: true,
             authorized_key_class: None,
             authenticated_origin_site_id: None,

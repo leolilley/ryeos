@@ -87,6 +87,19 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     ready_frame: String,
 }
 
+pub enum ExternalOwnerFrameOutcome {
+    Application(SupervisorApplicationOutcome),
+    Capture(super::external_candidate_supervisor::SupervisorCaptureOutcome),
+    Acknowledgement,
+}
+
+pub struct ExternalOwnerFrameDispatch {
+    pub outcome: ExternalOwnerFrameOutcome,
+    /// Exact durable signed supervisor frame. Reconnect resends these bytes;
+    /// it never rebuilds the acknowledgement from request state.
+    pub acknowledgement_frame: String,
+}
+
 impl LiveInheritedExternalCandidateSupervisor {
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         &self.process_identity
@@ -123,6 +136,52 @@ impl LiveInheritedExternalCandidateSupervisor {
             &self.occurrence_digest,
             &self.bootstrap_digest,
         )
+    }
+
+    /// Apply one controller frame through the live guest journal and native
+    /// launcher, then durably author the exact resulting application state.
+    /// A partial protocol write returns a signed `claimed` acknowledgement;
+    /// the caller must continue this same frame locally until `applied`.
+    pub fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            self.supervisor.journal().binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        ensure!(
+            verified.frame().direction
+                == ryeos_state::external_execution::ChannelDirection::OwnerToSupervisor,
+            "external supervisor accepts only controller-authored frames"
+        );
+        let sequence = verified.frame().sequence;
+        let digest = verified.digest().to_owned();
+        let outcome = match &verified.frame().payload {
+            ExecutionChannelPayload::Release => {
+                ExternalOwnerFrameOutcome::Application(self.dispatch_release(wire)?)
+            }
+            ExecutionChannelPayload::ProtocolBytes { .. } => {
+                ExternalOwnerFrameOutcome::Application(self.dispatch_protocol_chunk(wire)?)
+            }
+            ExecutionChannelPayload::Cancel => {
+                ExternalOwnerFrameOutcome::Application(self.dispatch_cancel(wire)?)
+            }
+            ExecutionChannelPayload::Quiesce { .. } => {
+                ExternalOwnerFrameOutcome::Capture(self.dispatch_quiesce(wire)?)
+            }
+            ExecutionChannelPayload::Acknowledge { .. } => {
+                self.supervisor.record_owner_acknowledgement(wire)?;
+                ExternalOwnerFrameOutcome::Acknowledgement
+            }
+            _ => anyhow::bail!("controller sent a supervisor-only external payload"),
+        };
+        let acknowledgement = self
+            .supervisor
+            .ensure_supervisor_acknowledgement(&self.supervisor_signing_key, sequence, &digest)?
+            .context("external owner frame has no supervisor acknowledgement")?;
+        Ok(ExternalOwnerFrameDispatch {
+            outcome,
+            acknowledgement_frame: acknowledgement.canonical().to_owned(),
+        })
     }
 
     /// Authoritative local cleanup. Returning `Ok` proves the exact launcher

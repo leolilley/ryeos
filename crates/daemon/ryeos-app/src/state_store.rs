@@ -13878,6 +13878,47 @@ impl StateStore {
             .optional_external_execution_channel(placement)
     }
 
+    pub(crate) fn exchange_external_supervisor_frame(
+        &self,
+        placement: &str,
+        wire: &[u8],
+        signing_key: &lillux::crypto::SigningKey,
+        frame_limit: usize,
+        byte_limit: usize,
+    ) -> Result<runtime_db::external_execution::ExternalSupervisorExchange> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.exchange_external_supervisor_frame(
+            placement,
+            wire,
+            signing_key,
+            frame_limit,
+            byte_limit,
+        )
+    }
+
+    pub(crate) fn author_external_owner_frame(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+        payload: ryeos_state::external_execution::ExecutionChannelPayload,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .author_external_owner_frame(placement, signing_key, payload)
+    }
+
+    pub(crate) fn author_external_owner_revocation(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .author_external_owner_revocation(placement, signing_key)
+    }
+
     pub(crate) fn settle_external_no_occurrence(
         &self,
         placement: &str,
