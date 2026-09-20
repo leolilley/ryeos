@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
@@ -32,7 +33,6 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-base64 = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-provider-contract = { workspace = true }
 ryeos-scheduler = { workspace = true }

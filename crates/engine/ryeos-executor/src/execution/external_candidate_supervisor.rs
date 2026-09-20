@@ -32,6 +32,17 @@ pub trait ExternalCandidateLauncherClient {
         frame: &AuthenticatedExecutionFrame,
     ) -> Result<DurableNativeCandidateCapture>;
     fn acknowledge_finish(&mut self, frame_digest: &str) -> Result<()>;
+    /// Read at most one bounded candidate protocol output chunk. `None` is a
+    /// non-terminal empty poll; EOF is represented separately so it cannot be
+    /// confused with an idle but still-live exec-server.
+    fn poll_protocol_output(&mut self) -> Result<CandidateProtocolOutput>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateProtocolOutput {
+    Bytes(Vec<u8>),
+    Idle,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +64,8 @@ pub struct SerializedExternalCandidateSupervisor<L> {
     journal: LiveGuestJournal,
     launcher: L,
     pending_protocol: Option<GuestApplicationToken>,
+    pending_protocol_output: Option<CandidateProtocolOutput>,
+    protocol_output_closed: bool,
 }
 
 impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L> {
@@ -61,6 +74,8 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             journal,
             launcher,
             pending_protocol: None,
+            pending_protocol_output: None,
+            protocol_output_closed: false,
         }
     }
 
@@ -110,6 +125,51 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 base_snapshot_hash: binding.base_snapshot_hash.clone(),
             },
         )
+    }
+
+    /// Move one bounded candidate stdout chunk into the authenticated guest
+    /// transcript. The caller must serialize this with controller dispatch and
+    /// retry the exact authored frame after transport ambiguity; it must never
+    /// read another chunk while this frame remains pending.
+    pub fn poll_protocol_output(
+        &mut self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        if self.protocol_output_closed {
+            return Ok(None);
+        }
+        if self.pending_protocol_output.is_none() {
+            match self.launcher.poll_protocol_output()? {
+                CandidateProtocolOutput::Idle => return Ok(None),
+                output => self.pending_protocol_output = Some(output),
+            }
+        }
+        let payload = match self
+            .pending_protocol_output
+            .as_ref()
+            .context("candidate protocol output disappeared before journal authoring")?
+        {
+            CandidateProtocolOutput::Bytes(bytes) => {
+                ensure!(
+                    !bytes.is_empty()
+                        && bytes.len() <= ryeos_state::external_execution::MAX_CHUNK_BYTES,
+                    "candidate protocol output exceeds its channel bound"
+                );
+                use base64::Engine as _;
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }
+            }
+            CandidateProtocolOutput::Closed => ExecutionChannelPayload::ProtocolEof,
+            CandidateProtocolOutput::Idle => unreachable!("idle output is never retained"),
+        };
+        let closed = matches!(payload, ExecutionChannelPayload::ProtocolEof);
+        let authored = self.journal.author_supervisor_frame(signing_key, payload)?;
+        self.pending_protocol_output = None;
+        if closed {
+            self.protocol_output_closed = true;
+        }
+        Ok(Some(authored))
     }
 
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -351,6 +411,8 @@ mod tests {
         releases: usize,
         captures: usize,
         finish_acks: Vec<String>,
+        protocol_output: std::collections::VecDeque<CandidateProtocolOutput>,
+        protocol_output_polls: usize,
     }
 
     impl ExternalCandidateLauncherClient for RecordingLauncher {
@@ -378,6 +440,14 @@ mod tests {
         fn acknowledge_finish(&mut self, frame_digest: &str) -> Result<()> {
             self.finish_acks.push(frame_digest.to_owned());
             Ok(())
+        }
+
+        fn poll_protocol_output(&mut self) -> Result<CandidateProtocolOutput> {
+            self.protocol_output_polls += 1;
+            Ok(self
+                .protocol_output
+                .pop_front()
+                .unwrap_or(CandidateProtocolOutput::Idle))
         }
     }
 
@@ -588,6 +658,14 @@ mod tests {
         runtime
             .record_owner_acknowledgement(ready_ack.canonical().as_bytes())
             .unwrap();
+        runtime
+            .launcher
+            .protocol_output
+            .push_back(CandidateProtocolOutput::Bytes(
+                b"retained-before-journal".to_vec(),
+            ));
+        assert!(runtime.poll_protocol_output(&supervisor_key).is_err());
+        assert_eq!(runtime.launcher.protocol_output_polls, 1);
         let release = signed_owner_frame(
             &binding,
             &owner,
@@ -601,6 +679,39 @@ mod tests {
                 .unwrap(),
             SupervisorApplicationOutcome::Applied
         );
+        let protocol = runtime
+            .poll_protocol_output(&supervisor_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            protocol.protocol_bytes().unwrap(),
+            b"retained-before-journal".to_vec()
+        );
+        assert_eq!(runtime.launcher.protocol_output_polls, 1);
+        runtime
+            .launcher
+            .protocol_output
+            .push_back(CandidateProtocolOutput::Closed);
+        runtime
+            .launcher
+            .protocol_output
+            .push_back(CandidateProtocolOutput::Closed);
+        let eof = runtime
+            .poll_protocol_output(&supervisor_key)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            eof.frame().payload,
+            ExecutionChannelPayload::ProtocolEof
+        ));
+        assert!(
+            runtime
+                .poll_protocol_output(&supervisor_key)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runtime.launcher.protocol_output_polls, 2);
+        assert_eq!(runtime.launcher.protocol_output.len(), 1);
         let quiesce = signed_owner_frame(
             &binding,
             &owner,

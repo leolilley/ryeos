@@ -4,6 +4,44 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Bidirectional candidate transport checkpoint
+
+Runtime operator epoch 49 and guest-journal epoch 6 add the missing candidate
+stdout half of the protected protocol. The fixed inherited launcher protocol now
+provides bounded output polling over the same descriptor-authenticated channel
+used for input and capture. The launcher retains candidate stdout instead of
+discarding it, performs an exact-bound EOF/overflow probe, and never exposes an
+ambient path or descriptor.
+
+The serialized supervisor signs non-empty candidate output as
+`protocol_bytes` and records one distinct `protocol_eof` observation when the
+endpoint closes. EOF is supervisor-only and preserves the running or quiescing
+phase; it is not candidate success, writer exclusion, export retention,
+occurrence cleanup, or capacity-release evidence. The transport driver polls
+output only without a pending supervisor frame and retains the exact signed
+frame across ambiguous HTTP failure instead of reading the candidate twice.
+
+Transport completion is now typed. Only a controller-signed `applied`
+acknowledgement naming the exact locally authored `export_sealed` frame yields
+`ExportApplied`; retention, claim, an unrelated acknowledgement, EOF, HTTP
+success, or an empty poll cannot manufacture success.
+
+Focused source evidence on 2026-09-21: bounded test compilation passed for
+`ryeos-state`, `ryeos-app`, `ryeos-executor`, and the external launcher;
+40 state external-execution tests, 20 executor external-candidate tests
+(including the real inherited-descriptor child), and 25 independent
+production-DDL SQLite tests passed. The regressions cover supervisor-only EOF,
+EOF lifecycle preservation, author-failure retention and one-shot EOF, exact-bound
+EOF/idle/overflow, byte-identical ambiguous retry without a second read, duplex
+progress during partial stdin, no post-capture polling, and exact sealed-export
+application. The descriptor child required the explicit test sandbox exception.
+No installation, lifecycle, provider/model, Render, credential, grant, or paid
+resource was contacted or changed.
+
+This checkpoint still does not provide the protected supervisor executable,
+production lifecycle adapter, structured-session connector, or complete
+B -> C -> evaluation -> D proof.
+
 ## Durable supervisor activation checkpoint
 
 Runtime operator epoch 48 and external binding schema 4 separate occurrence

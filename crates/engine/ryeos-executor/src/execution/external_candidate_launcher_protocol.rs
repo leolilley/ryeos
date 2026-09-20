@@ -4,6 +4,7 @@
 use std::io::{Read as _, Write as _};
 
 use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_state::external_execution::guest_journal::AuthenticatedLauncherReady;
 use ryeos_state::external_execution::guest_journal::{
     DurableNativeCandidateCapture, LauncherOccurrenceEvidence, PreparedGuestJournal,
@@ -19,8 +20,8 @@ use super::external_candidate_launcher::{
     LAUNCHER_CONTROL_FD, PreparedExternalCandidateLauncherRequest,
 };
 use super::external_candidate_supervisor::{
-    ExternalCandidateLauncherClient, SerializedExternalCandidateSupervisor,
-    SupervisorApplicationOutcome,
+    CandidateProtocolOutput, ExternalCandidateLauncherClient,
+    SerializedExternalCandidateSupervisor, SupervisorApplicationOutcome,
 };
 
 const PROTOCOL_SCHEMA: u32 = 1;
@@ -60,6 +61,15 @@ enum LauncherMessage {
     FinishAcknowledged {
         schema: u32,
         frame_digest: String,
+    },
+    PollOutput {
+        schema: u32,
+        maximum_bytes: usize,
+    },
+    Output {
+        schema: u32,
+        bytes_base64: String,
+        closed: bool,
     },
     Failed {
         schema: u32,
@@ -186,6 +196,13 @@ impl LiveInheritedExternalCandidateSupervisor {
             outcome,
             acknowledgement_frame: acknowledgement.canonical().to_owned(),
         })
+    }
+
+    pub fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+        Ok(self
+            .supervisor
+            .poll_protocol_output(&self.supervisor_signing_key)?
+            .map(|frame| frame.canonical().to_owned()))
     }
 
     /// Authoritative local cleanup. Returning `Ok` proves the exact launcher
@@ -472,6 +489,108 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
         );
         Ok(())
     }
+
+    fn poll_protocol_output(&mut self) -> Result<CandidateProtocolOutput> {
+        write_message(
+            &mut self.channel,
+            self.deadline,
+            &LauncherMessage::PollOutput {
+                schema: PROTOCOL_SCHEMA,
+                maximum_bytes: ryeos_state::external_execution::MAX_CHUNK_BYTES,
+            },
+        )?;
+        match read_message(&mut self.channel, self.deadline)? {
+            LauncherMessage::Output {
+                schema,
+                bytes_base64,
+                closed,
+            } if schema == PROTOCOL_SCHEMA => {
+                let bytes = STANDARD
+                    .decode(&bytes_base64)
+                    .map_err(|_| anyhow::anyhow!("dedicated launcher output is invalid base64"))?;
+                ensure!(
+                    bytes.len() <= ryeos_state::external_execution::MAX_CHUNK_BYTES
+                        && STANDARD.encode(&bytes) == bytes_base64,
+                    "dedicated launcher output changed its bounded canonical bytes"
+                );
+                match (bytes.is_empty(), closed) {
+                    (false, _) => Ok(CandidateProtocolOutput::Bytes(bytes)),
+                    (true, false) => Ok(CandidateProtocolOutput::Idle),
+                    (true, true) => Ok(CandidateProtocolOutput::Closed),
+                }
+            }
+            _ => anyhow::bail!("dedicated launcher returned a mismatched output poll response"),
+        }
+    }
+}
+
+struct BoundedCandidateProtocolOutput {
+    output: std::fs::File,
+    maximum_bytes: u64,
+    observed_bytes: u64,
+    closed: bool,
+}
+
+impl BoundedCandidateProtocolOutput {
+    fn new(output: std::fs::File, maximum_bytes: u64) -> Result<Self> {
+        ensure!(
+            (1..=64 * 1024 * 1024).contains(&maximum_bytes),
+            "candidate protocol output bound is invalid"
+        );
+        Ok(Self {
+            output,
+            maximum_bytes,
+            observed_bytes: 0,
+            closed: false,
+        })
+    }
+
+    fn poll(&mut self, maximum_bytes: usize) -> Result<CandidateProtocolOutput> {
+        ensure!(
+            (1..=ryeos_state::external_execution::MAX_CHUNK_BYTES).contains(&maximum_bytes),
+            "candidate protocol output poll bound is invalid"
+        );
+        if self.closed {
+            return Ok(CandidateProtocolOutput::Closed);
+        }
+        let remaining = self
+            .maximum_bytes
+            .checked_sub(self.observed_bytes)
+            .context("candidate protocol output exceeded its aggregate bound")?;
+        let probe_only = remaining == 0;
+        let limit = if probe_only {
+            1
+        } else {
+            maximum_bytes.min(usize::try_from(remaining).unwrap_or(usize::MAX))
+        };
+        let mut bytes = vec![0_u8; limit];
+        let count = match self.output.read(&mut bytes) {
+            Ok(0) => {
+                self.closed = true;
+                return Ok(CandidateProtocolOutput::Closed);
+            }
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(CandidateProtocolOutput::Idle);
+            }
+            Err(error) => return Err(error).context("read candidate protocol output"),
+        };
+        ensure!(
+            !probe_only,
+            "candidate protocol output exceeded its aggregate bound"
+        );
+        bytes.truncate(count);
+        self.observed_bytes = self
+            .observed_bytes
+            .checked_add(u64::try_from(count)?)
+            .context("candidate protocol output byte count overflow")?;
+        Ok(CandidateProtocolOutput::Bytes(bytes))
+    }
 }
 
 /// Run the bounded local protocol after a dedicated launcher has prepared its
@@ -479,11 +598,15 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
 pub fn serve_native_candidate_launcher(
     mut channel: lillux::InheritedDuplexChannel,
     mut candidate: NativeExternalCandidate,
+    protocol_output: std::fs::File,
+    maximum_output_bytes: u64,
     authority: ryeos_state::PinnedStateAuthority,
     bootstrap_digest: String,
     expected_binding: ExecutionChannelBinding,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
+    let mut protocol_output =
+        BoundedCandidateProtocolOutput::new(protocol_output, maximum_output_bytes)?;
     let bootstrap = read_message(&mut channel, deadline)?;
     let (challenge, occurrence_digest) = match &bootstrap {
         LauncherMessage::Bootstrap {
@@ -616,6 +739,28 @@ pub fn serve_native_candidate_launcher(
                     },
                 )?;
             }
+            LauncherMessage::PollOutput {
+                schema,
+                maximum_bytes,
+            } if schema == PROTOCOL_SCHEMA
+                && (1..=ryeos_state::external_execution::MAX_CHUNK_BYTES)
+                    .contains(&maximum_bytes) =>
+            {
+                let (bytes, closed) = match protocol_output.poll(maximum_bytes)? {
+                    CandidateProtocolOutput::Bytes(bytes) => (bytes, false),
+                    CandidateProtocolOutput::Idle => (Vec::new(), false),
+                    CandidateProtocolOutput::Closed => (Vec::new(), true),
+                };
+                write_message(
+                    &mut channel,
+                    deadline,
+                    &LauncherMessage::Output {
+                        schema: PROTOCOL_SCHEMA,
+                        bytes_base64: STANDARD.encode(bytes),
+                        closed,
+                    },
+                )?;
+            }
             _ => anyhow::bail!("dedicated launcher received an invalid local message"),
         }
     }
@@ -664,7 +809,7 @@ fn read_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::engine::general_purpose::STANDARD;
     use lillux::crypto::SigningKey;
     use ryeos_state::external_execution::{ChannelDirection, ExecutionFrame, SignedExecutionFrame};
 
@@ -720,6 +865,54 @@ mod tests {
             lillux::time::timestamp_millis(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn candidate_output_exact_bound_distinguishes_eof_from_overflow() {
+        fn file(bytes: &[u8]) -> std::fs::File {
+            let mut output = tempfile::tempfile().unwrap();
+            output.write_all(bytes).unwrap();
+            std::io::Seek::rewind(&mut output).unwrap();
+            output
+        }
+
+        let mut exact = BoundedCandidateProtocolOutput::new(file(b"exact"), 5).unwrap();
+        assert_eq!(
+            exact.poll(5).unwrap(),
+            CandidateProtocolOutput::Bytes(b"exact".to_vec())
+        );
+        assert_eq!(exact.poll(5).unwrap(), CandidateProtocolOutput::Closed);
+        assert_eq!(exact.poll(5).unwrap(), CandidateProtocolOutput::Closed);
+
+        let mut overflow = BoundedCandidateProtocolOutput::new(file(b"excess"), 5).unwrap();
+        assert_eq!(
+            overflow.poll(5).unwrap(),
+            CandidateProtocolOutput::Bytes(b"exces".to_vec())
+        );
+        assert!(overflow.poll(5).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_output_exact_bound_waits_for_real_eof() {
+        use std::os::fd::FromRawFd as _;
+
+        let mut descriptors = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK,) },
+            0
+        );
+        let output = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+        writer.write_all(b"ok").unwrap();
+        let mut bounded = BoundedCandidateProtocolOutput::new(output, 2).unwrap();
+        assert_eq!(
+            bounded.poll(2).unwrap(),
+            CandidateProtocolOutput::Bytes(b"ok".to_vec())
+        );
+        assert_eq!(bounded.poll(2).unwrap(), CandidateProtocolOutput::Idle);
+        drop(writer);
+        assert_eq!(bounded.poll(2).unwrap(), CandidateProtocolOutput::Closed);
     }
 
     #[test]
@@ -794,6 +987,23 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(matches!(
+            read_message(&mut channel, deadline).unwrap(),
+            LauncherMessage::PollOutput {
+                schema: PROTOCOL_SCHEMA,
+                maximum_bytes,
+            } if maximum_bytes == ryeos_state::external_execution::MAX_CHUNK_BYTES
+        ));
+        write_message(
+            &mut channel,
+            deadline,
+            &LauncherMessage::Output {
+                schema: PROTOCOL_SCHEMA,
+                bytes_base64: STANDARD.encode(b"bounded-reply"),
+                closed: false,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -830,6 +1040,10 @@ mod tests {
         let frame = release(&binding, &owner);
         client.release(&frame).unwrap();
         client.acknowledge_finish(frame.digest()).unwrap();
+        assert_eq!(
+            client.poll_protocol_output().unwrap(),
+            CandidateProtocolOutput::Bytes(b"bounded-reply".to_vec())
+        );
         assert!(server.wait().unwrap().success());
     }
 }

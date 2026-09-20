@@ -66,6 +66,7 @@ impl ChannelPhase {
             ProtocolBytes { .. } if self == Self::Running && before_execution_deadline => {
                 Self::Running
             }
+            ProtocolEof if matches!(self, Self::Running | Self::Quiescing) => self,
             Quiesce { .. } if self == Self::Running => Self::Quiescing,
             ExportObjectChunk { .. } if self == Self::Quiescing => Self::Quiescing,
             ExportSealed {
@@ -156,6 +157,23 @@ mod tests {
             .advance(None, &quiesce, false)
             .unwrap();
         assert_eq!(phase, ChannelPhase::Quiescing);
+        assert_eq!(
+            ChannelPhase::Running
+                .advance(None, &ExecutionChannelPayload::ProtocolEof, false)
+                .unwrap(),
+            ChannelPhase::Running
+        );
+        assert_eq!(
+            phase
+                .advance(None, &ExecutionChannelPayload::ProtocolEof, false)
+                .unwrap(),
+            ChannelPhase::Quiescing
+        );
+        assert!(
+            ChannelPhase::Ready
+                .advance(None, &ExecutionChannelPayload::ProtocolEof, false)
+                .is_err()
+        );
         assert!(phase.permits_pending_input());
         let seal = ExecutionChannelPayload::ExportSealed {
             candidate_snapshot_hash: "b".repeat(64),

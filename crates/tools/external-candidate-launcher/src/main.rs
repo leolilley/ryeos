@@ -32,19 +32,11 @@ fn run() -> Result<()> {
         }
         .map_err(anyhow::Error::msg)?;
         let output_state = Arc::new(AtomicU8::new(0));
-        let _stdout = drain(
-            output.stdout,
-            "stdout",
-            spec.max_stdout_bytes,
-            1,
-            channel.try_clone()?,
-            output_state.clone(),
-        )?;
         let _stderr = drain(
             output.stderr,
             "stderr",
             spec.max_stderr_bytes,
-            2,
+            1,
             channel.try_clone()?,
             output_state.clone(),
         )?;
@@ -60,6 +52,8 @@ fn run() -> Result<()> {
         let result = serve_native_candidate_launcher(
             channel,
             candidate,
+            output.stdout,
+            spec.max_stdout_bytes,
             authority,
             bootstrap_digest,
             spec.binding,
@@ -67,9 +61,7 @@ fn run() -> Result<()> {
         );
         match output_state.load(Ordering::Acquire) {
             0 => result,
-            1 => anyhow::bail!("external candidate exceeded stdout bound"),
-            2 => anyhow::bail!("external candidate exceeded stderr bound"),
-            _ => anyhow::bail!("external candidate exceeded stdout and stderr bounds"),
+            _ => anyhow::bail!("external candidate exceeded stderr bound"),
         }
     }
 }

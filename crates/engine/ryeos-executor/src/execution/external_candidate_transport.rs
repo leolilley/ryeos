@@ -52,6 +52,7 @@ pub trait ExternalSupervisorRuntime {
     fn binding(&self) -> &ExecutionChannelBinding;
     fn ready_frame(&self) -> &str;
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
+    fn poll_protocol_output(&mut self) -> Result<Option<String>>;
 }
 
 impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
@@ -65,6 +66,10 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
 
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
         self.dispatch_owner_frame(wire)
+    }
+
+    fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+        LiveInheritedExternalCandidateSupervisor::poll_protocol_output(self)
     }
 }
 
@@ -81,6 +86,10 @@ pub enum ExternalTransportProgress {
     /// provider cleanup evidence is still missing. This must not be reported
     /// as successful revocation or used to release placement capacity.
     RevokedAwaitingCleanup,
+    /// The controller signed `applied` evidence for the exact sealed export
+    /// authored and durably retained by this supervisor. Transport receipt or
+    /// a merely retained/claimed acknowledgement cannot produce this state.
+    ExportApplied,
 }
 
 /// Bounded, single-occurrence control loop. It owns neither placement nor
@@ -89,9 +98,12 @@ pub struct ExternalCandidateTransportDriver<R, T> {
     runtime: R,
     transport: T,
     pending_supervisor: BTreeMap<u64, Vec<u8>>,
+    delivered_supervisor: BTreeMap<u64, String>,
     poll_frame: Option<Vec<u8>>,
     partial_owner_frame: Option<Vec<u8>>,
     revocation_progress: Option<ExternalTransportProgress>,
+    sealed_exports: BTreeSet<(u64, String)>,
+    export_applied: bool,
     maximum_response_frames: usize,
     maximum_response_bytes: usize,
 }
@@ -126,9 +138,12 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             runtime,
             transport,
             pending_supervisor,
+            delivered_supervisor: BTreeMap::new(),
             poll_frame: None,
             partial_owner_frame: None,
             revocation_progress: None,
+            sealed_exports: BTreeSet::new(),
+            export_applied: false,
             maximum_response_frames,
             maximum_response_bytes,
         })
@@ -136,6 +151,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
 
     pub fn is_revoked(&self) -> bool {
         self.revocation_progress.is_some()
+    }
+
+    pub fn is_export_applied(&self) -> bool {
+        self.export_applied
     }
 
     pub fn into_parts(self) -> (R, T) {
@@ -147,6 +166,29 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     /// presented. The method never sleeps and never converts a timeout into
     /// evidence about remote execution.
     pub fn step(&mut self) -> Result<ExternalTransportProgress> {
+        if self.pending_supervisor.is_empty()
+            && self.revocation_progress.is_none()
+            && !self.export_applied
+            && self.sealed_exports.is_empty()
+            && let Some(wire) = self.runtime.poll_protocol_output()?
+        {
+            let verified = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                self.runtime.binding(),
+                lillux::time::timestamp_millis(),
+            )?;
+            ensure!(
+                verified.frame().direction == ChannelDirection::SupervisorToOwner
+                    && matches!(
+                        verified.frame().payload,
+                        ExecutionChannelPayload::ProtocolBytes { .. }
+                            | ExecutionChannelPayload::ProtocolEof
+                    ),
+                "external runtime output poll returned a non-protocol supervisor frame"
+            );
+            self.pending_supervisor
+                .insert(verified.frame().sequence, wire.into_bytes());
+        }
         let outgoing = self
             .pending_supervisor
             .first_key_value()
@@ -169,6 +211,15 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         self.validate_response(&sent, &response)?;
 
         self.pending_supervisor.remove(&sent.frame().sequence);
+        match self.delivered_supervisor.entry(sent.frame().sequence) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(sent.digest().to_owned());
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => ensure!(
+                entry.get() == sent.digest(),
+                "external controller retained a forked supervisor sequence"
+            ),
+        }
         self.poll_frame = Some(outgoing);
 
         if let Some(urgent) = response.urgent_revocation_frame.as_ref() {
@@ -198,7 +249,9 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 }
             }
         }
-        if let Some(progress) = self.revocation_progress {
+        if self.export_applied {
+            Ok(ExternalTransportProgress::ExportApplied)
+        } else if let Some(progress) = self.revocation_progress {
             Ok(progress)
         } else if advanced || response.incoming_new {
             Ok(ExternalTransportProgress::Advanced)
@@ -336,7 +389,30 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     }
 
     fn dispatch_ordinary(&mut self, wire: &[u8]) -> Result<()> {
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            self.runtime.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
         let dispatched = self.runtime.dispatch_owner_frame(wire)?;
+        if matches!(
+            &dispatched.outcome,
+            ExternalOwnerFrameOutcome::Acknowledgement
+        ) {
+            if let ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence,
+                peer_frame_digest,
+                application: ryeos_state::external_execution::ExecutionFrameApplication::Applied,
+            } = &verified.frame().payload
+            {
+                if self
+                    .sealed_exports
+                    .contains(&(*peer_frame_sequence, peer_frame_digest.clone()))
+                {
+                    self.export_applied = true;
+                }
+            }
+        }
         let is_partial = matches!(
             dispatched.outcome,
             ExternalOwnerFrameOutcome::Application(SupervisorApplicationOutcome::Partial)
@@ -362,24 +438,43 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             .unwrap_or(u64::MAX)
         });
         for wire in frames {
-            let verified = SignedExecutionFrame::decode_and_verify(
-                &wire,
-                self.runtime.binding(),
-                lillux::time::timestamp_millis(),
-            )?;
+            self.enqueue_supervisor_wire(wire)?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_supervisor_wire(&mut self, wire: Vec<u8>) -> Result<()> {
+        let verified = SignedExecutionFrame::decode_and_verify(
+            &wire,
+            self.runtime.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        ensure!(
+            verified.frame().direction == ChannelDirection::SupervisorToOwner,
+            "external dispatcher returned a controller-authored frame"
+        );
+        if matches!(
+            verified.frame().payload,
+            ExecutionChannelPayload::ExportSealed { .. }
+        ) {
+            self.sealed_exports
+                .insert((verified.frame().sequence, verified.digest().to_owned()));
+        }
+        if let Some(delivered_digest) = self.delivered_supervisor.get(&verified.frame().sequence) {
             ensure!(
-                verified.frame().direction == ChannelDirection::SupervisorToOwner,
-                "external dispatcher returned a controller-authored frame"
+                delivered_digest == verified.digest(),
+                "external dispatcher forked a delivered supervisor sequence"
             );
-            match self.pending_supervisor.entry(verified.frame().sequence) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(wire);
-                }
-                std::collections::btree_map::Entry::Occupied(entry) => ensure!(
-                    entry.get() == &wire,
-                    "external dispatcher forked a supervisor sequence"
-                ),
+            return Ok(());
+        }
+        match self.pending_supervisor.entry(verified.frame().sequence) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(wire);
             }
+            std::collections::btree_map::Entry::Occupied(entry) => ensure!(
+                entry.get() == &wire,
+                "external dispatcher forked a supervisor sequence"
+            ),
         }
         Ok(())
     }
@@ -415,9 +510,13 @@ mod tests {
         previous_digest: String,
         dispatched: Vec<&'static str>,
         protocol_partial: bool,
+        protocol_stays_partial: bool,
         revoked: bool,
         cancel_uncertain: bool,
         fail_next_dispatch: bool,
+        protocol_outputs: VecDeque<Vec<u8>>,
+        protocol_output_polls: usize,
+        last_acknowledgement: Option<(u64, String, ExecutionFrameApplication, String)>,
     }
 
     impl FixtureRuntime {
@@ -445,9 +544,13 @@ mod tests {
                 previous_digest: ready.digest().to_owned(),
                 dispatched: Vec::new(),
                 protocol_partial: false,
+                protocol_stays_partial: false,
                 revoked: false,
                 cancel_uncertain: false,
                 fail_next_dispatch: false,
+                protocol_outputs: VecDeque::new(),
+                protocol_output_polls: 0,
+                last_acknowledgement: None,
             }
         }
 
@@ -456,6 +559,13 @@ mod tests {
             peer: &AuthenticatedExecutionFrame,
             application: ExecutionFrameApplication,
         ) -> String {
+            if let Some((sequence, digest, retained_application, wire)) = &self.last_acknowledgement
+                && *sequence == peer.frame().sequence
+                && digest == peer.digest()
+                && *retained_application == application
+            {
+                return wire.clone();
+            }
             let signed = sign(
                 &self.binding,
                 &self.supervisor_key,
@@ -471,7 +581,14 @@ mod tests {
             );
             self.next_sequence += 1;
             self.previous_digest = signed.digest().to_owned();
-            signed.canonical().to_owned()
+            let wire = signed.canonical().to_owned();
+            self.last_acknowledgement = Some((
+                peer.frame().sequence,
+                peer.digest().to_owned(),
+                application,
+                wire.clone(),
+            ));
+            wire
         }
     }
 
@@ -516,7 +633,7 @@ mod tests {
                 }
                 ExecutionChannelPayload::ProtocolBytes { .. } if !self.revoked => {
                     self.dispatched.push("protocol");
-                    if self.protocol_partial {
+                    if self.protocol_partial && !self.protocol_stays_partial {
                         (
                             ExternalOwnerFrameOutcome::Application(
                                 SupervisorApplicationOutcome::Applied,
@@ -566,6 +683,27 @@ mod tests {
                 outcome,
                 acknowledgement_frame,
             })
+        }
+
+        fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+            self.protocol_output_polls += 1;
+            let Some(bytes) = self.protocol_outputs.pop_front() else {
+                return Ok(None);
+            };
+            let frame = sign(
+                &self.binding,
+                &self.supervisor_key,
+                ChannelDirection::SupervisorToOwner,
+                self.next_sequence,
+                Some(self.previous_digest.clone()),
+                0,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(bytes),
+                },
+            );
+            self.next_sequence += 1;
+            self.previous_digest = frame.digest().to_owned();
+            Ok(Some(frame.canonical().to_owned()))
         }
     }
 
@@ -747,6 +885,356 @@ mod tests {
         assert_eq!(transport.calls[0], transport.calls[1]);
         assert_eq!(transport.calls[2], transport.calls[3]);
         assert_eq!(runtime.dispatched, vec!["acknowledge"]);
+    }
+
+    #[test]
+    fn candidate_protocol_output_is_signed_and_retried_without_a_second_read() {
+        let (binding, _owner, supervisor) = fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor);
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        driver
+            .runtime
+            .protocol_outputs
+            .push_back(b"exec-server-response".to_vec());
+        driver
+            .runtime
+            .protocol_outputs
+            .push_back(b"later-response".to_vec());
+        driver.transport.actions.push_back(TransportAction::Fail);
+
+        assert!(driver.step().is_err());
+        assert_eq!(driver.runtime.protocol_output_polls, 1);
+        let output = SignedExecutionFrame::decode_and_verify(
+            &driver.transport.calls[1],
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert_eq!(
+            output.protocol_bytes().unwrap(),
+            b"exec-server-response".to_vec()
+        );
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(&output, vec![], None)));
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.transport.calls[1], driver.transport.calls[2]);
+        assert_eq!(driver.runtime.protocol_output_polls, 1);
+        assert_eq!(
+            driver.runtime.protocol_outputs.front().unwrap(),
+            b"later-response"
+        );
+    }
+
+    #[test]
+    fn candidate_output_progresses_while_protocol_input_remains_partial() {
+        let (binding, owner, supervisor) = fixture();
+        let mut runtime = FixtureRuntime::new(binding.clone(), supervisor);
+        runtime.protocol_stays_partial = true;
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let protocol = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            ready.frame().sequence,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"request larger than pipe capacity"),
+            },
+        );
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![envelope(&protocol)],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        let claimed = SignedExecutionFrame::decode_and_verify(
+            driver.pending_supervisor.first_key_value().unwrap().1,
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        driver
+            .runtime
+            .protocol_outputs
+            .push_back(b"response needed before more input".to_vec());
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(&claimed, vec![], None)));
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert!(driver.pending_supervisor.is_empty());
+
+        let expected_output = sign(
+            &binding,
+            &driver.runtime.supervisor_key,
+            ChannelDirection::SupervisorToOwner,
+            driver.runtime.next_sequence,
+            Some(driver.runtime.previous_digest.clone()),
+            0,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"response needed before more input"),
+            },
+        );
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(
+                &expected_output,
+                vec![],
+                None,
+            )));
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.runtime.protocol_output_polls, 1);
+        let sent = SignedExecutionFrame::decode_and_verify(
+            driver.transport.calls.last().unwrap(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        assert_eq!(
+            sent.protocol_bytes().unwrap(),
+            b"response needed before more input".to_vec()
+        );
+    }
+
+    #[test]
+    fn only_applied_acknowledgement_of_exact_sealed_export_is_success_terminal() {
+        let (binding, owner, supervisor) = fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor.clone());
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+
+        let export = sign(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready.digest().to_owned()),
+            0,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: "1".repeat(64),
+                completion_request_digest: "2".repeat(64),
+                writer_exclusion_evidence_hash: "3".repeat(64),
+            },
+        );
+        driver
+            .enqueue_supervisor_wire(export.canonical().as_bytes().to_vec())
+            .unwrap();
+        driver.runtime.next_sequence = 3;
+        driver.runtime.previous_digest = export.digest().to_owned();
+
+        let claimed = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            export.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: export.frame().sequence,
+                peer_frame_digest: export.digest().to_owned(),
+                application: ExecutionFrameApplication::Claimed,
+            },
+        );
+        driver
+            .dispatch_ordinary(claimed.canonical().as_bytes())
+            .unwrap();
+        assert!(!driver.is_export_applied());
+
+        let unrelated = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(claimed.digest().to_owned()),
+            ready.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: ready.frame().sequence,
+                peer_frame_digest: ready.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        driver
+            .dispatch_ordinary(unrelated.canonical().as_bytes())
+            .unwrap();
+        assert!(!driver.is_export_applied());
+
+        let wrong_digest = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            3,
+            Some(unrelated.digest().to_owned()),
+            export.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: export.frame().sequence,
+                peer_frame_digest: "9".repeat(64),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        driver
+            .dispatch_ordinary(wrong_digest.canonical().as_bytes())
+            .unwrap();
+        assert!(!driver.is_export_applied());
+
+        let applied = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            4,
+            Some(wrong_digest.digest().to_owned()),
+            export.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: export.frame().sequence,
+                peer_frame_digest: export.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        driver
+            .dispatch_ordinary(applied.canonical().as_bytes())
+            .unwrap();
+        assert!(driver.is_export_applied());
+    }
+
+    #[test]
+    fn sealed_export_wait_does_not_poll_a_reaped_candidate() {
+        let (binding, owner, supervisor) = fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor.clone());
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        let export = sign(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready.digest().to_owned()),
+            0,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: "1".repeat(64),
+                completion_request_digest: "2".repeat(64),
+                writer_exclusion_evidence_hash: "3".repeat(64),
+            },
+        );
+        driver
+            .enqueue_supervisor_wire(export.canonical().as_bytes().to_vec())
+            .unwrap();
+        driver.runtime.next_sequence = 3;
+        driver.runtime.previous_digest = export.digest().to_owned();
+        driver
+            .runtime
+            .protocol_outputs
+            .push_back(b"must-not-be-read-after-capture".to_vec());
+        let retained = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            export.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: export.frame().sequence,
+                peer_frame_digest: export.digest().to_owned(),
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(
+                &export,
+                vec![envelope(&retained)],
+                None,
+            )));
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+
+        let acknowledgement = SignedExecutionFrame::decode_and_verify(
+            driver.pending_supervisor.first_key_value().unwrap().1,
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(
+                &acknowledgement,
+                vec![],
+                None,
+            )));
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert!(driver.pending_supervisor.is_empty());
+        assert_eq!(driver.runtime.protocol_output_polls, 0);
+
+        let applied = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(retained.digest().to_owned()),
+            export.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: export.frame().sequence,
+                peer_frame_digest: export.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(
+                &acknowledgement,
+                vec![envelope(&applied)],
+                None,
+            )));
+        assert_eq!(
+            driver.step().unwrap(),
+            ExternalTransportProgress::ExportApplied
+        );
+        assert_eq!(driver.runtime.protocol_output_polls, 0);
+        assert_eq!(driver.runtime.protocol_outputs.len(), 1);
     }
 
     #[test]

@@ -2407,7 +2407,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 48 retains the admitted TLS-root bytes and separates provider
 // allocation from an immutable, independently reconcilable supervisor-start
 // mutation. Epoch-47 rows cannot construct that protected bootstrap.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 48;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 49;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

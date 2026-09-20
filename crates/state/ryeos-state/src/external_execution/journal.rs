@@ -82,7 +82,7 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
  OR NEW.acknowledged_peer_sequence != OLD.acknowledged_peer_sequence
  OR NOT ((OLD.application='pending' AND NEW.application='claimed')
      OR (OLD.application='pending' AND NEW.application='revoked'
-         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes'),0))
+         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof'),0))
      OR (OLD.application='claimed' AND NEW.application='applied'))
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
@@ -225,7 +225,7 @@ pub fn record_revocation(
         tx.execute(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
             [binding.digest()?],
         )?;
     }
@@ -356,7 +356,7 @@ pub fn append_frame(
         tx.execute(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
             [&frame.binding_digest],
         )?;
     }
@@ -369,7 +369,7 @@ pub fn append_frame(
             // relabel it as uncontacted or completed.
             tx.execute("UPDATE external_execution_frame SET application='revoked'
                 WHERE binding_digest=?1 AND application='pending'
-                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
@@ -461,7 +461,10 @@ fn reconcile_peer_application(
             }
         }
         ExecutionFrameApplication::Revoked => {
-            if !matches!(payload_kind.as_str(), "release" | "protocol_bytes") {
+            if !matches!(
+                payload_kind.as_str(),
+                "release" | "protocol_bytes" | "protocol_eof"
+            ) {
                 bail!("external revocation acknowledgement named a non-input frame");
             }
             match state.as_str() {
@@ -745,7 +748,9 @@ pub fn pending_transport_frames(
         if terminally_revoked
             && matches!(
                 verified.frame().payload,
-                ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+                ExecutionChannelPayload::Release
+                    | ExecutionChannelPayload::ProtocolBytes { .. }
+                    | ExecutionChannelPayload::ProtocolEof
             )
         {
             // Cancellation fences this uncertain source-side input. Its exact
@@ -943,7 +948,9 @@ pub fn claim_application(
     if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
         && matches!(
             verified.frame().payload,
-            ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+            ExecutionChannelPayload::Release
+                | ExecutionChannelPayload::ProtocolBytes { .. }
+                | ExecutionChannelPayload::ProtocolEof
         )
     {
         bail!("external execution deadline passed before application");
@@ -955,7 +962,9 @@ pub fn claim_application(
     )?;
     if matches!(
         verified.frame().payload,
-        ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+        ExecutionChannelPayload::Release
+            | ExecutionChannelPayload::ProtocolBytes { .. }
+            | ExecutionChannelPayload::ProtocolEof
     ) && !ChannelPhase::parse(&state)?.permits_pending_input()
     {
         bail!("external execution was revoked before pending application");
@@ -1213,7 +1222,9 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             }
             let is_input = matches!(
                 frame.payload,
-                ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+                ExecutionChannelPayload::Release
+                    | ExecutionChannelPayload::ProtocolBytes { .. }
+                    | ExecutionChannelPayload::ProtocolEof
             );
             if application == "revoked" {
                 if !is_input {

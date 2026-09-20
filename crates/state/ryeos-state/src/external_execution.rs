@@ -130,6 +130,9 @@ pub enum ExecutionChannelPayload {
     ProtocolBytes {
         bytes_base64: String,
     },
+    /// Candidate protocol stdout reached EOF. This is an endpoint transport
+    /// observation, not candidate success, writer exclusion, or cleanup.
+    ProtocolEof,
     Quiesce {
         completion_request_digest: String,
     },
@@ -255,7 +258,11 @@ impl ExecutionChannelPayload {
         let owner_only = matches!(self, Release | Quiesce { .. } | Cancel);
         let supervisor_only = matches!(
             self,
-            Ready { .. } | ExportObjectChunk { .. } | ExportSealed { .. } | Stopped { .. }
+            Ready { .. }
+                | ProtocolEof
+                | ExportObjectChunk { .. }
+                | ExportSealed { .. }
+                | Stopped { .. }
         );
         ensure!(
             !owner_only || direction == ChannelDirection::OwnerToSupervisor,
@@ -318,7 +325,7 @@ impl ExecutionChannelPayload {
                 );
                 hash(peer_frame_digest)?;
             }
-            Release | Cancel | Stopped { .. } => {}
+            Release | ProtocolEof | Cancel | Stopped { .. } => {}
         }
         Ok(())
     }
@@ -679,12 +686,19 @@ mod tests {
     }
     #[test]
     fn external_frames_reject_unknown_fields_wrong_directions_and_bounds() {
-        let (binding, owner, _) = binding();
+        let (binding, owner, supervisor) = binding();
         let mut value = frame(&binding);
         value.payload = ExecutionChannelPayload::Stopped {
             reason: ExternalStopReason::Fault,
         };
         assert!(SignedExecutionFrame::sign(value, &binding, &owner).is_err());
+        let mut value = frame(&binding);
+        value.payload = ExecutionChannelPayload::ProtocolEof;
+        assert!(SignedExecutionFrame::sign(value, &binding, &owner).is_err());
+        let mut value = frame(&binding);
+        value.direction = ChannelDirection::SupervisorToOwner;
+        value.payload = ExecutionChannelPayload::ProtocolEof;
+        assert!(SignedExecutionFrame::sign(value, &binding, &supervisor).is_ok());
         let signed = SignedExecutionFrame::sign(frame(&binding), &binding, &owner).unwrap();
         let mut wire = serde_json::to_value(&signed).unwrap();
         wire["extra"] = true.into();
