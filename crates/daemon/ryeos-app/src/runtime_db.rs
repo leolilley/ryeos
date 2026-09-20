@@ -2388,7 +2388,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // stable predecode reset guard. Controller death cannot settle these owners.
 // Epoch 41 moves the authenticated channel journal into its shared owner and
 // refuses channels/frames that are inserted directly in advanced state.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 41;
+// Epoch 42 retains exact signed placement-binding generations before any
+// allocation contact so restart cleanup never depends on the current config.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 42;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2401,6 +2403,35 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
         application_id: RUNTIME_APP_ID,
         tables: &[
+            sqlite_schema::TableSpec {
+                name: "external_execution_binding_generation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_hash",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "capacity_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retained_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
             sqlite_schema::TableSpec {
                 name: "external_execution_revocation",
                 columns: &[

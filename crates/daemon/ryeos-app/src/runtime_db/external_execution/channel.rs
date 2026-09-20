@@ -344,7 +344,7 @@ mod tests {
         max_bytes: u64,
     ) -> (ExecutionChannelBinding, SigningKey, SigningKey) {
         let reservation = super::super::tests::reservation(db, "channel");
-        db.reserve_external_allocation(&reservation).unwrap();
+        super::super::tests::reserve(db, &reservation).unwrap();
         db.claim_external_allocation_contact(
             &reservation.placement_thread_id,
             &reservation.request_digest,

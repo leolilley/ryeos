@@ -18,6 +18,18 @@ pub(super) const GUARD_SQL: &str = r#"CREATE TABLE external_execution_guard (
 )"#;
 
 pub(super) const JOURNAL_SQL: &str = r#"
+CREATE TABLE external_execution_binding_generation (
+    binding_hash TEXT PRIMARY KEY,
+    capacity_owner TEXT NOT NULL,
+    binding_json TEXT NOT NULL,
+    retained_at_ms INTEGER NOT NULL
+);
+CREATE TRIGGER external_execution_binding_generation_no_update
+BEFORE UPDATE ON external_execution_binding_generation
+BEGIN SELECT RAISE(ABORT, 'retained external binding generation is immutable'); END;
+CREATE TRIGGER external_execution_binding_generation_no_delete
+BEFORE DELETE ON external_execution_binding_generation
+BEGIN SELECT RAISE(ABORT, 'retained external binding generation requires explicit obligation-aware cleanup'); END;
 CREATE TABLE external_execution_allocation (
     placement_thread_id TEXT PRIMARY KEY,
     capacity_owner TEXT NOT NULL,
@@ -358,6 +370,25 @@ pub(super) fn ensure_resettable(conn: &Connection, epoch: u32) -> Result<()> {
 }
 
 pub(super) fn validate_current(conn: &Connection) -> Result<()> {
+    let mut bindings = conn.prepare("SELECT binding_hash,capacity_owner,binding_json FROM external_execution_binding_generation")?;
+    for row in bindings.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (digest, capacity, json) = row?;
+        let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+            serde_json::from_str(&json).context("decode retained external binding generation")?;
+        retained.validate()?;
+        if retained.digest() != digest
+            || retained.capacity_owner() != capacity
+            || retained.canonical_json()? != json
+        {
+            bail!("retained external binding generation changed");
+        }
+    }
     let unsettled: i64 = conn.query_row(
         "SELECT COUNT(*) FROM external_execution_allocation WHERE phase!='no_contact'",
         [],
@@ -376,6 +407,31 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
         if record.phase != ExternalAllocationPhase::NoContact {
             require_session_owner(conn, &record.reservation)?;
         }
+        let retained: Option<(String, String)> = conn
+            .query_row(
+                "SELECT capacity_owner,binding_json
+                 FROM external_execution_binding_generation WHERE binding_hash=?1",
+                [&record.reservation.binding_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (capacity_owner, binding_json) =
+            retained.context("external allocation lost its exact retained binding generation")?;
+        let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+            serde_json::from_str(&binding_json)
+                .context("decode allocation's retained external binding generation")?;
+        retained.validate()?;
+        if retained.digest() != record.reservation.binding_hash
+            || retained.capacity_owner() != capacity_owner
+            || capacity_owner != record.reservation.capacity_owner
+            || retained.canonical_json()? != binding_json
+        {
+            bail!("external allocation contradicts its retained binding generation");
+        }
+        retained.check_reservation_limits(
+            record.reservation.max_active,
+            record.reservation.timeout_seconds,
+        )?;
     }
     channel::validate_channels(conn)?;
     Ok(())
@@ -434,10 +490,39 @@ impl RuntimeDb {
     pub(crate) fn reserve_external_allocation(
         &self,
         reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
     ) -> Result<ExternalAllocationRecord> {
         reservation.validate()?;
+        retained_binding.validate()?;
+        retained_binding
+            .check_reservation_limits(reservation.max_active, reservation.timeout_seconds)?;
+        if retained_binding.digest() != reservation.binding_hash
+            || retained_binding.capacity_owner() != reservation.capacity_owner
+        {
+            bail!("external allocation contradicts its retained binding generation");
+        }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         validate_current(&tx)?;
+        let binding_json = retained_binding.canonical_json()?;
+        let prior: Option<(String, String)> = tx.query_row(
+            "SELECT capacity_owner,binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
+            [retained_binding.digest()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        match prior {
+            Some((capacity, json))
+                if capacity == retained_binding.capacity_owner() && json == binding_json => {}
+            Some(_) => bail!("retained external binding generation replay changed"),
+            None => {
+                tx.execute(
+                    "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,?4)",
+                    params![
+                        retained_binding.digest(),
+                        retained_binding.capacity_owner(),
+                        binding_json,
+                        i64::try_from(lillux::time::timestamp_millis())?
+                    ],
+                )?;
+            }
+        }
         if let Some(existing) = read(&tx, &reservation.placement_thread_id)? {
             if existing.reservation != *reservation {
                 bail!("external allocation replay changed its exact reservation");
@@ -649,6 +734,7 @@ mod tests {
                 params![workspace, placement, "b".repeat(64)],
             )
             .unwrap();
+        let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         ExternalAllocationReservation {
             schema: 1,
             placement_thread_id: placement,
@@ -657,13 +743,23 @@ mod tests {
             worker_instance_id: worker,
             worker_boot_epoch: 1,
             base_snapshot_hash: "b".repeat(64),
-            binding_hash: "c".repeat(64),
-            capacity_owner: "d".repeat(64),
+            binding_hash: binding.digest().to_owned(),
+            capacity_owner: binding.capacity_owner().to_owned(),
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
             contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
         }
+    }
+
+    pub(super) fn reserve(
+        db: &RuntimeDb,
+        reservation: &ExternalAllocationReservation,
+    ) -> Result<ExternalAllocationRecord> {
+        db.reserve_external_allocation(
+            reservation,
+            &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture(),
+        )
     }
 
     #[test]
@@ -673,11 +769,11 @@ mod tests {
         let db = RuntimeDb::open(&path).unwrap();
         let reserved = reservation(&db, "one");
         assert_eq!(
-            db.reserve_external_allocation(&reserved).unwrap().phase,
+            reserve(&db, &reserved).unwrap().phase,
             ExternalAllocationPhase::Reserved
         );
         assert_eq!(
-            db.reserve_external_allocation(&reserved).unwrap().phase,
+            reserve(&db, &reserved).unwrap().phase,
             ExternalAllocationPhase::Reserved
         );
         assert!(
@@ -691,6 +787,12 @@ mod tests {
         assert!(db.discard_all_thread_history(true).is_err());
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
+        let retained_json: String = db.conn.query_row(
+            "SELECT binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
+            [&reserved.binding_hash], |row| row.get(0)).unwrap();
+        let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+            serde_json::from_str(&retained_json).unwrap();
+        retained.validate().unwrap();
         assert!(
             !db.claim_external_allocation_contact("T-one", &reserved.request_digest)
                 .unwrap()
@@ -710,7 +812,113 @@ mod tests {
             vec!["a".repeat(64), "b".repeat(64)]
         );
         let second = reservation(&db, "two");
-        assert!(db.reserve_external_allocation(&second).is_err());
+        assert!(reserve(&db, &second).is_err());
+    }
+
+    #[test]
+    fn external_reservation_atomically_retains_exact_binding_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "one");
+        let mut wrong = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let mut value = serde_json::to_value(&wrong).unwrap();
+        value["capacity_owner"] = serde_json::Value::String("f".repeat(64));
+        wrong = serde_json::from_value(value).unwrap();
+        assert!(
+            db.reserve_external_allocation(&reservation, &wrong)
+                .is_err()
+        );
+        let exact = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let exact_value = serde_json::to_value(&exact).unwrap();
+        for (field, changed) in [
+            (
+                "credential_generation",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "runtime_manifest_hash",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "runtime_selection_identity",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "backend_artifact_hash",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            ("max_active", serde_json::Value::from(2)),
+            ("timeout_seconds", serde_json::Value::from(61)),
+        ] {
+            let mut value = exact_value.clone();
+            value["document"][field] = changed;
+            let changed: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+                serde_json::from_value(value).unwrap();
+            assert!(
+                changed.validate().is_err(),
+                "retained field {field} escaped signed-source join"
+            );
+        }
+        let mut wider = reservation.clone();
+        wider.max_active = 2;
+        assert!(db.reserve_external_allocation(&wider, &exact).is_err());
+        let mut missing_owner = reservation.clone();
+        missing_owner.placement_thread_id = "T-missing".into();
+        missing_owner.workspace_id = "W-missing".into();
+        missing_owner.worker_instance_id = "worker-missing".into();
+        assert!(
+            db.reserve_external_allocation(&missing_owner, &exact)
+                .is_err()
+        );
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_binding_generation",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        reserve(&db, &reservation).unwrap();
+        assert!(
+            db.conn
+                .execute(
+                    "UPDATE external_execution_binding_generation SET binding_json='{}'",
+                    []
+                )
+                .is_err()
+        );
+        assert!(
+            db.conn
+                .execute("DELETE FROM external_execution_binding_generation", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_rechecks_allocation_limits_against_retained_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "one");
+        reserve(&db, &reservation).unwrap();
+
+        // Model structural storage corruption after reservation. Startup must
+        // not accept a wider allocation merely because both rows remain
+        // individually well-formed and the binding identity still exists.
+        db.conn
+            .execute("DROP TRIGGER external_execution_transition_guard", [])
+            .unwrap();
+        let mut widened = reservation;
+        widened.max_active = 2;
+        let widened = lillux::canonical_json(&serde_json::to_value(widened).unwrap()).unwrap();
+        db.conn
+            .execute(
+                "UPDATE external_execution_allocation SET reservation_json=?1
+                 WHERE placement_thread_id='T-one'",
+                [widened],
+            )
+            .unwrap();
+        assert!(validate_current(&db.conn).is_err());
     }
 
     #[test]
@@ -718,7 +926,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
-        db.reserve_external_allocation(&reserved).unwrap();
+        reserve(&db, &reserved).unwrap();
         db.cancel_external_allocation("T-one").unwrap();
         db.cancel_external_allocation("T-one").unwrap();
         assert!(
@@ -729,7 +937,7 @@ mod tests {
         db.release_credential_profile("P-one", "worker-one")
             .unwrap();
         assert_eq!(
-            db.reserve_external_allocation(&reserved).unwrap().phase,
+            reserve(&db, &reserved).unwrap().phase,
             ExternalAllocationPhase::NoContact
         );
     }
@@ -739,7 +947,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
-        db.reserve_external_allocation(&reserved).unwrap();
+        reserve(&db, &reserved).unwrap();
         db.claim_external_allocation_contact("T-one", &reserved.request_digest)
             .unwrap();
         db.cancel_external_allocation("T-one").unwrap();
@@ -792,14 +1000,14 @@ mod tests {
         let reserved = reservation(&db, "one");
         let mut wrong = reserved.clone();
         wrong.base_snapshot_hash = "f".repeat(64);
-        assert!(db.reserve_external_allocation(&wrong).is_err());
+        assert!(reserve(&db, &wrong).is_err());
         wrong = reserved.clone();
         wrong.worker_boot_epoch += 1;
-        assert!(db.reserve_external_allocation(&wrong).is_err());
-        db.reserve_external_allocation(&reserved).unwrap();
+        assert!(reserve(&db, &wrong).is_err());
+        reserve(&db, &reserved).unwrap();
         wrong = reserved.clone();
         wrong.binding_hash = "f".repeat(64);
-        assert!(db.reserve_external_allocation(&wrong).is_err());
+        assert!(reserve(&db, &wrong).is_err());
         assert!(
             db.claim_external_allocation_contact("T-one", &"f".repeat(64))
                 .is_err()

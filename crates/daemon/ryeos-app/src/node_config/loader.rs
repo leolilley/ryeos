@@ -50,6 +50,7 @@ struct VerifiedItem {
     path: PathBuf,
     ctx: NodeItemContext,
     signer_fingerprint: String,
+    signer_verifying_key: [u8; 32],
     body: Value,
     signed_source: std::sync::Arc<str>,
 }
@@ -102,6 +103,7 @@ pub(crate) struct NodeConfigAdmission {
     /// Exact bytes verified by the loader, never a re-read of source_file.
     pub(crate) signed_source: std::sync::Arc<str>,
     pub(crate) signer_fingerprint: String,
+    pub(crate) signer_verifying_key: [u8; 32],
 }
 
 pub(crate) struct NodeConfigSnapshotBuilder {
@@ -145,6 +147,7 @@ impl NodeConfigSnapshotBuilder {
             command_provenance: source.command_provenance()?,
             signed_source: verified.signed_source.clone(),
             signer_fingerprint: verified.signer_fingerprint.clone(),
+            signer_verifying_key: verified.signer_verifying_key,
         };
         record.admit(self, &admission)
     }
@@ -284,6 +287,11 @@ fn verify_and_parse(
             trust_class
         );
     }
+    let signer_verifying_key = trust_store
+        .get(&signer_fingerprint)
+        .context("verified node-config signer disappeared from trust store")?
+        .verifying_key
+        .to_bytes();
 
     let body_str = strip_signature(&content);
     let body: Value = serde_yaml::from_str(&body_str)
@@ -352,6 +360,7 @@ fn verify_and_parse(
         path: path.to_path_buf(),
         ctx,
         signer_fingerprint,
+        signer_verifying_key,
         body,
         signed_source: content.into(),
     })

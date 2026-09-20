@@ -25,6 +25,33 @@ recovered execution, pooled execution, exclusive launch and the bridge must
 refuse external profiles until that owner and protected connector are supplied.
 Historical capsule inspection remains distinct from permission to execute it.
 
+## Protected placement-binding retention checkpoint
+
+Node admission now retains the exact verified signed binding source, signer
+fingerprint and verifying key used by the loader. Before an external allocation
+can be reserved, the application journal atomically retains a private canonical
+generation containing that source and its decoded binding document. Recovery
+re-verifies the signature, joins the signed body to the retained document,
+recomputes the binding and stable capacity-owner identities, and checks every
+allocation's requested concurrency and timeout against the signed maximums.
+Binding generations are immutable while their obligation-aware collection path
+remains intentionally unavailable. A failed reservation rolls the generation
+insert back with the session-owner transaction.
+
+Runtime operator schema epoch 42 contains this exact retained-generation table
+and its immutability triggers. Focused evidence on 2026-09-20: 16 application
+allocation/channel tests, 19 signed node-config loader tests, 21 schema-filtered
+application tests and 22 independent Python/SQLite tests passed. The corruption
+case widens an otherwise canonical retained allocation after bypassing its SQL
+transition trigger and proves startup validation still rejects it against the
+signed binding limit.
+
+This checkpoint is retention integrity, not placement admission or provider
+readiness. The production owner still must load the exact owning session capsule,
+qualify the backend, artifact and protected credential generation, reserve the
+joined authority, and mint the one-shot allocator-contact capability. No cloud
+call, model call, worker execution or cleanup claim is enabled by this slice.
+
 The supervisor/launcher implementation through `f08547e9f` retains native capture
 under a durable occurrence receipt and reconciles exact quiesce/export replay.
 At the start of this slice, 33 state external-execution tests and the composed
