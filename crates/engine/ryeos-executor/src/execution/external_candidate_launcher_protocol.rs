@@ -15,6 +15,9 @@ use ryeos_state::external_execution::{
 use serde::{Deserialize, Serialize};
 
 use super::external_candidate::NativeExternalCandidate;
+use super::external_candidate_launcher::{
+    LAUNCHER_CONTROL_FD, PreparedExternalCandidateLauncherRequest,
+};
 use super::external_candidate_supervisor::{
     ExternalCandidateLauncherClient, SerializedExternalCandidateSupervisor,
     SupervisorApplicationOutcome,
@@ -176,6 +179,22 @@ pub fn launch_external_candidate_supervisor(
     })
 }
 
+pub fn launch_prepared_external_candidate_supervisor(
+    prepared_journal: PreparedGuestJournal,
+    prepared: PreparedExternalCandidateLauncherRequest,
+    launcher_artifact_digest: &str,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<LiveInheritedExternalCandidateSupervisor> {
+    launch_external_candidate_supervisor(
+        prepared_journal,
+        prepared.request,
+        launcher_artifact_digest,
+        "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
+        LAUNCHER_CONTROL_FD,
+        deadline,
+    )
+}
+
 impl InheritedExternalCandidateLauncherClient {
     pub fn authenticate(
         mut channel: lillux::InheritedDuplexChannel,
@@ -304,27 +323,32 @@ pub fn serve_native_candidate_launcher(
     mut channel: lillux::InheritedDuplexChannel,
     mut candidate: NativeExternalCandidate,
     expected_binding: ExecutionChannelBinding,
-    expected_challenge: &str,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
     let bootstrap = read_message(&mut channel, deadline)?;
-    match &bootstrap {
+    let challenge = match &bootstrap {
         LauncherMessage::Bootstrap {
             schema,
             binding,
             challenge,
         } if *schema == PROTOCOL_SCHEMA
             && binding == &expected_binding
-            && challenge == expected_challenge => {}
+            && challenge.len() == 64
+            && challenge
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) =>
+        {
+            challenge
+        }
         _ => anyhow::bail!("dedicated launcher bootstrap changed exact authority"),
-    }
+    };
     write_message(
         &mut channel,
         deadline,
         &LauncherMessage::Ready {
             schema: PROTOCOL_SCHEMA,
             binding_digest: expected_binding.digest()?,
-            challenge_digest: lillux::sha256_hex(expected_challenge.as_bytes()),
+            challenge_digest: lillux::sha256_hex(challenge.as_bytes()),
         },
     )?;
     loop {

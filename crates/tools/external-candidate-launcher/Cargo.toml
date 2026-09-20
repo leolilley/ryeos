@@ -1,0 +1,16 @@
+[package]
+name = "ryeos-external-candidate-launcher"
+version = "0.5.99"
+edition = "2024"
+description = "Dedicated descriptor-bootstrapped RyeOS external candidate launcher"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-external-candidate-launcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+ryeos-executor = { workspace = true }

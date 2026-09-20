@@ -11,6 +11,7 @@ mod direct_output;
 pub mod effective_program_projection;
 pub(crate) mod execution_realization;
 pub mod external_candidate;
+pub mod external_candidate_launcher;
 pub mod external_candidate_launcher_protocol;
 pub mod external_candidate_supervisor;
 pub(crate) mod external_content;

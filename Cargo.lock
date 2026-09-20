@@ -2815,6 +2815,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-external-candidate-launcher"
+version = "0.5.99"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "ryeos-executor",
+]
+
+[[package]]
 name = "ryeos-graph-definition"
 version = "0.1.0"
 dependencies = [

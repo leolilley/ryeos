@@ -21,6 +21,8 @@ pub use character_device::{
     CharacterDeviceSpec, resource_observation_contract_digest,
 };
 pub use exec::InheritedReadonlyDocument;
+#[cfg(unix)]
+pub use exec::take_inherited_descriptor_authority;
 pub use exec::take_inherited_duplex_channel_from_env;
 pub use exec::{
     AbortedProcess, AttachmentAbortError, AttachmentReleaseError, CooperativeChildTermination,

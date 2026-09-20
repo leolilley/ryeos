@@ -1867,6 +1867,23 @@ impl PinnedDirectory {
         Ok(Self { path, directory })
     }
 
+    /// Adopt one exact directory descriptor deliberately mapped into this
+    /// process by a trusted Lillux parent. `path` is diagnostic only.
+    ///
+    /// # Safety
+    /// `fd` must be uniquely owned by the caller. No `File` or registered
+    /// authority may still own the same descriptor coordinate.
+    #[cfg(unix)]
+    pub unsafe fn take_inherited_directory(path: PathBuf, fd: u32) -> Result<Self> {
+        use std::os::fd::FromRawFd as _;
+
+        anyhow::ensure!(fd > 2, "inherited directory overlaps standard I/O");
+        let raw = i32::try_from(fd).context("inherited directory exceeds fd range")?;
+        // SAFETY: upheld by the caller; PinnedDirectory immediately becomes
+        // the unique descriptor owner.
+        Self::from_open_directory(path, unsafe { File::from_raw_fd(raw) })
+    }
+
     pub fn identity(&self) -> Result<PinnedDirectoryIdentity> {
         let (containing_device, inode) = self.device_inode()?;
         Ok(PinnedDirectoryIdentity {

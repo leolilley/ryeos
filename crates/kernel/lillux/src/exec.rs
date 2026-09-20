@@ -831,6 +831,71 @@ impl InheritedDescriptorAuthority {
         inherited_fds.push(self.clone());
     }
 
+    /// Map this exact authority to one explicit descriptor in a trusted child.
+    /// The parent keeps CLOEXEC set; the mapping is installed only in Lillux's
+    /// final pre-exec boundary. The child must adopt the descriptor through a
+    /// type-specific Lillux API before using it as authority.
+    pub fn bind_to_subprocess_request(
+        &self,
+        request: &mut SubprocessRequest,
+        target_fd: u32,
+    ) -> Result<(), String> {
+        if target_fd <= 2 {
+            return Err("mapped inherited authority overlaps standard I/O".to_owned());
+        }
+        if request
+            .inherited_fd_mappings
+            .iter()
+            .any(|mapping| mapping.target_fd == target_fd)
+        {
+            return Err(format!(
+                "subprocess already contains target descriptor mapping {target_fd}"
+            ));
+        }
+        let source = self.inherited_descriptor()?;
+        if request
+            .inherited_fd_mappings
+            .iter()
+            .map(InheritedDescriptorMapping::source_descriptor)
+            .collect::<Result<Vec<_>, _>>()?
+            .contains(&source)
+        {
+            return Err(format!(
+                "subprocess already contains inherited authority source descriptor {source}"
+            ));
+        }
+        request
+            .inherited_fd_mappings
+            .push(InheritedDescriptorMapping {
+                source: self.clone(),
+                target_fd,
+            });
+        Ok(())
+    }
+
+    /// Bind this exact executable at a fixed child descriptor and make that
+    /// descriptor the subprocess image. The `/proc` spelling is constructed
+    /// inside Lillux; callers never derive executable authority from a path.
+    pub fn bind_as_subprocess_executable(
+        &self,
+        request: &mut SubprocessRequest,
+        target_fd: u32,
+    ) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (request, target_fd);
+            return Err("descriptor-bound subprocess executables require Linux".to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.require_owned_executable()
+                .map_err(|error| error.to_string())?;
+            self.bind_to_subprocess_request(request, target_fd)?;
+            request.cmd = format!("/proc/self/fd/{target_fd}");
+            Ok(())
+        }
+    }
+
     /// Physically close this registered descriptor only when it has no other
     /// strong owner and the fork barrier can be leased before `deadline`.
     /// Failure returns the unchanged owner. This proves this descriptor's
@@ -1073,6 +1138,31 @@ impl InheritedDescriptorAuthority {
     pub(crate) fn file(&self) -> &std::fs::File {
         &self.handle
     }
+}
+
+/// Adopt one exact descriptor deliberately mapped into this process by a
+/// trusted Lillux parent. This is not ambient descriptor discovery.
+///
+/// # Safety
+/// `fd` must be uniquely owned by the caller. No `File` or registered
+/// authority may still own the same descriptor coordinate.
+#[cfg(unix)]
+pub unsafe fn take_inherited_descriptor_authority(
+    fd: u32,
+) -> Result<InheritedDescriptorAuthority, String> {
+    use std::os::fd::FromRawFd as _;
+
+    if fd <= 2 {
+        return Err("inherited authority overlaps standard I/O".to_owned());
+    }
+    let raw = i32::try_from(fd).map_err(|_| "inherited authority exceeds fd range".to_owned())?;
+    let lease = retain_fork_sensitive_descriptors();
+    // SAFETY: upheld by the caller; ownership is immediately transferred into
+    // the registered Lillux authority.
+    InheritedDescriptorAuthority::from_owned_file(
+        unsafe { std::fs::File::from_raw_fd(raw) },
+        &lease,
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -1810,7 +1900,10 @@ mod inherited_unix_stream_tests {
             let error = unsafe { take_inherited_duplex_channel("TEST_SESSION_FD", descriptor) }
                 .err()
                 .expect("standard output/error descriptors must be rejected");
-            assert!(error.contains("overlaps standard output or error"), "{error}");
+            assert!(
+                error.contains("overlaps standard output or error"),
+                "{error}"
+            );
         }
     }
 }
