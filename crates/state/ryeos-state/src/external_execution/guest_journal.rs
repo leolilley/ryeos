@@ -187,6 +187,21 @@ pub struct GuestJournalStoreIdentity {
 /// become live exactly once after the dedicated launcher is bound.
 pub struct PreparedGuestJournal(GuestStore);
 
+/// Exact empty guest-store inode reserved before the outer supervisor records
+/// launch intent. The retained identity can be anchored independently before
+/// this value initializes any guest journal state. It is process-local and has
+/// no reopen path: a crash after outer launch intent is recovery-only and must
+/// never manufacture another launcher.
+pub struct ReservedGuestJournal {
+    directory: lillux::PinnedDirectory,
+    lifetime_lock: lillux::PinnedDirectoryLock,
+    database_file: File,
+    bootstrap_digest: String,
+    state_runtime_identity_json: String,
+    binding: ExecutionChannelBinding,
+    store_identity: GuestJournalStoreIdentity,
+}
+
 /// Launch intent joined durably to one exact held process and inherited local
 /// channel challenge, but not yet authenticated as ready.
 pub struct BoundGuestJournal(GuestStore);
@@ -355,6 +370,105 @@ impl GuestApplicationAck {
     }
 }
 
+impl GuestJournalStoreIdentity {
+    pub fn bootstrap_digest(&self) -> &str {
+        &self.bootstrap_digest
+    }
+
+    pub fn binding_digest(&self) -> &str {
+        &self.binding_digest
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        ensure!(
+            self.schema == 1,
+            "unsupported guest journal identity schema"
+        );
+        hash(&self.journal_nonce, "guest journal nonce")?;
+        hash(&self.bootstrap_digest, "external bootstrap digest")?;
+        hash(&self.binding_digest, "external binding digest")?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
+}
+
+impl ReservedGuestJournal {
+    pub fn store_identity(&self) -> &GuestJournalStoreIdentity {
+        &self.store_identity
+    }
+
+    pub fn bootstrap_digest(&self) -> &str {
+        &self.bootstrap_digest
+    }
+
+    pub fn binding(&self) -> &ExecutionChannelBinding {
+        &self.binding
+    }
+
+    /// Initialize the already-anchored exact inode. This can be consumed only
+    /// by the process that reserved it; recovery never reopens this authority.
+    pub fn initialize(self) -> Result<PreparedGuestJournal> {
+        ensure_same_file(&self.directory, &self.database_file)?;
+        ensure!(
+            self.database_file.metadata()?.len() == 0,
+            "reserved external guest database is not empty"
+        );
+        ensure!(
+            self.directory.entry_names()? == [OsString::from(DATABASE_NAME)],
+            "reserved external guest directory gained an ambient entry"
+        );
+        let conn = open_exact(&self.directory, &self.database_file)?;
+        configure(&conn)?;
+        conn.execute_batch(&complete_schema())?;
+        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
+        conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
+        let binding_digest = self.binding.digest()?;
+        let binding_json = lillux::canonical_json(&serde_json::to_value(&self.binding)?)?;
+        let directory_identity_json =
+            lillux::canonical_json(&serde_json::to_value(self.directory.identity()?)?)?;
+        let database_identity_json = lillux::canonical_json(&serde_json::to_value(
+            self.store_identity.database_identity,
+        )?)?;
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO external_guest_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,'launch_intent')",
+            params![
+                SCHEMA_EPOCH,
+                &self.bootstrap_digest,
+                &binding_digest,
+                &self.store_identity.journal_nonce,
+                &directory_identity_json,
+                &database_identity_json,
+                &self.state_runtime_identity_json
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL)",
+            params![
+                &self.binding.placement_thread_id,
+                self.binding.digest()?,
+                &binding_json
+            ],
+        )?;
+        tx.commit()?;
+        self.database_file.sync_all()?;
+        self.directory.sync()?;
+        let store = GuestStore {
+            conn,
+            directory: self.directory,
+            _lifetime_lock: self.lifetime_lock,
+            database_file: self.database_file,
+            bootstrap_digest: self.bootstrap_digest,
+            state_runtime_identity_json: self.state_runtime_identity_json,
+            binding: self.binding,
+            store_identity: self.store_identity,
+        };
+        store.validate()?;
+        Ok(PreparedGuestJournal(store))
+    }
+}
+
 impl PreparedGuestJournal {
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
@@ -374,6 +488,17 @@ impl PreparedGuestJournal {
         bootstrap_digest: &str,
         binding: ExecutionChannelBinding,
     ) -> Result<Self> {
+        Self::reserve(directory, authority, bootstrap_digest, binding)?.initialize()
+    }
+
+    /// Reserve the exact empty database inode so an independent outer owner
+    /// can durably retain [`GuestJournalStoreIdentity`] before launch intent.
+    pub fn reserve(
+        directory: lillux::PinnedDirectory,
+        authority: &PinnedStateAuthority,
+        bootstrap_digest: &str,
+        binding: ExecutionChannelBinding,
+    ) -> Result<ReservedGuestJournal> {
         hash(bootstrap_digest, "external bootstrap digest")?;
         binding.validate()?;
         directory.require_owner_private_directory()?;
@@ -388,64 +513,33 @@ impl PreparedGuestJournal {
         let database_file =
             directory.open_regular_create(OsStr::new(DATABASE_NAME), true, true, 0o600)?;
         directory.sync()?;
-        let conn = open_exact(&directory, &database_file)?;
-        configure(&conn)?;
-        let schema = complete_schema();
-        conn.execute_batch(&schema)?;
-        conn.pragma_update(None, "application_id", APPLICATION_ID)?;
-        conn.pragma_update(None, "user_version", SCHEMA_EPOCH)?;
         let binding_digest = binding.digest()?;
-        let binding_json = lillux::canonical_json(&serde_json::to_value(&binding)?)?;
-        let directory_identity_json =
-            lillux::canonical_json(&serde_json::to_value(directory.identity()?)?)?;
         let state_runtime_identity_json = lillux::canonical_json(&serde_json::to_value(
             authority.runtime_directory().identity()?,
         )?)?;
         let journal_nonce = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
         let database_identity = lillux::pinned_regular_file_identity(&database_file)?;
-        let database_identity_json =
-            lillux::canonical_json(&serde_json::to_value(database_identity)?)?;
         let store_identity = GuestJournalStoreIdentity {
             schema: 1,
-            journal_nonce: journal_nonce.clone(),
+            journal_nonce,
             directory_identity: directory.identity()?,
             database_identity,
             bootstrap_digest: bootstrap_digest.to_owned(),
-            binding_digest: binding_digest.clone(),
+            binding_digest,
             state_runtime_identity_json: state_runtime_identity_json.clone(),
         };
-        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO external_guest_meta VALUES(1,?1,?2,?3,?4,?5,?6,?7,'launch_intent')",
-            params![
-                SCHEMA_EPOCH,
-                bootstrap_digest,
-                binding_digest,
-                journal_nonce,
-                directory_identity_json,
-                database_identity_json,
-                state_runtime_identity_json
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL)",
-            params![binding.placement_thread_id, binding_digest, binding_json],
-        )?;
-        tx.commit()?;
         database_file.sync_all()?;
         directory.sync()?;
-        let store = GuestStore {
-            conn,
+        store_identity.digest()?;
+        Ok(ReservedGuestJournal {
             directory,
-            _lifetime_lock: lifetime_lock,
+            lifetime_lock,
             database_file,
             bootstrap_digest: bootstrap_digest.to_owned(),
             state_runtime_identity_json,
             binding,
             store_identity,
-        };
-        store.validate()?;
-        Ok(Self(store))
+        })
     }
 
     /// Persist one exact held launcher occurrence before releasing it.
@@ -1905,6 +1999,8 @@ fn journal_name() -> OsString {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
     use crate::external_execution::{
         ExecutionFrame, NativeNamespaceExit, NativeWriterExclusionMechanism,
@@ -2097,6 +2193,121 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn outer_owner_can_anchor_exact_guest_inode_before_initialization() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (binding, _owner, _supervisor) = binding();
+        let bootstrap = "9".repeat(64);
+        let reserved =
+            PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
+                .unwrap();
+        let outer_anchor = reserved.store_identity().clone();
+        outer_anchor.digest().unwrap();
+        assert_eq!(reserved.bootstrap_digest(), bootstrap);
+        assert_eq!(reserved.binding(), &binding);
+        let prepared = reserved.initialize().unwrap();
+        assert_eq!(prepared.store_identity(), &outer_anchor);
+        prepared.0.validate().unwrap();
+    }
+
+    #[test]
+    fn abandoned_guest_reservation_cannot_be_reinitialized_or_reopened_live() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (binding, _owner, _supervisor) = binding();
+        let bootstrap = "9".repeat(64);
+        let reserved =
+            PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
+                .unwrap();
+        let outer_anchor = reserved.store_identity().clone();
+        drop(reserved);
+        let reopened = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        assert!(
+            PreparedGuestJournal::create(
+                reopened.try_clone().unwrap(),
+                &authority,
+                &bootstrap,
+                binding.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            RecoveredGuestJournal::open(reopened, &authority, &outer_anchor, &bootstrap, &binding,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn guest_reservation_refuses_mutation_and_competing_owner_before_initialization() {
+        enum Mutation {
+            ReplaceInode,
+            WriteBytes,
+            AmbientEntry,
+            CompetingOwner,
+        }
+
+        for mutation in [
+            Mutation::ReplaceInode,
+            Mutation::WriteBytes,
+            Mutation::AmbientEntry,
+            Mutation::CompetingOwner,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+            directory.tighten_owner_private_directory().unwrap();
+            let (_state_root, authority) = state_authority();
+            let (binding, _owner, _supervisor) = binding();
+            let bootstrap = "9".repeat(64);
+            let reserved =
+                PreparedGuestJournal::reserve(directory, &authority, &bootstrap, binding.clone())
+                    .unwrap();
+
+            match mutation {
+                Mutation::ReplaceInode => {
+                    let replacement = root.path().join("replacement");
+                    std::fs::File::create(&replacement)
+                        .unwrap()
+                        .sync_all()
+                        .unwrap();
+                    std::fs::rename(replacement, root.path().join(DATABASE_NAME)).unwrap();
+                    assert!(reserved.initialize().is_err());
+                }
+                Mutation::WriteBytes => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(root.path().join(DATABASE_NAME))
+                        .unwrap()
+                        .write_all(b"not empty")
+                        .unwrap();
+                    assert!(reserved.initialize().is_err());
+                }
+                Mutation::AmbientEntry => {
+                    std::fs::File::create(root.path().join("ambient")).unwrap();
+                    assert!(reserved.initialize().is_err());
+                }
+                Mutation::CompetingOwner => {
+                    let competing = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+                    let error = match PreparedGuestJournal::reserve(
+                        competing, &authority, &bootstrap, binding,
+                    ) {
+                        Ok(_) => panic!("competing guest owner acquired reservation"),
+                        Err(error) => format!("{error:#}"),
+                    };
+                    assert!(
+                        error.contains("external guest directory already has a live owner"),
+                        "competing reservation failed at the wrong boundary: {error}"
+                    );
+                    reserved.initialize().unwrap();
+                }
+            }
+        }
     }
 
     #[test]

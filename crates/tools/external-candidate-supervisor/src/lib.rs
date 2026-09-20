@@ -14,12 +14,11 @@ use reqwest::header::CONTENT_TYPE;
 use ryeos_executor::execution::external_candidate_transport::{
     ExternalExecutionChannelTransport, ExternalTransportExchange, ExternalTransportFrame,
 };
+use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::transport::{
-    EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachRequest, ExternalChannelAttachResponse,
-    ExternalChannelExchangeRequest, ExternalChannelExchangeResponse, ExternalChannelResponseFrame,
-    ExternalSupervisorBootstrap,
+    ExternalChannelAttachRequest, ExternalChannelAttachResponse, ExternalChannelExchangeRequest,
+    ExternalChannelExchangeResponse, ExternalChannelResponseFrame, ExternalSupervisorBootstrap,
 };
-use ryeos_state::external_execution::{ExecutionChannelBinding, encode_channel_public_key};
 
 const ATTACH_RESPONSE_BYTES: u64 = 64 * 1024;
 
@@ -39,18 +38,29 @@ pub fn attach_external_execution_channel(
     // An identical retry must remain possible after a successful registration
     // whose HTTP response was lost, even when the bootstrap deadline has since
     // passed. The caller must preserve this exact key and request across retry.
+    let request = bootstrap.attachment_request(supervisor_signing_key)?;
+    attach_external_execution_channel_exact(bootstrap, supervisor_signing_key, &request)
+}
+
+/// Retry one exact durably retained attachment request. This never regenerates
+/// a supervisor key or changes request bytes after an ambiguous response.
+pub fn attach_external_execution_channel_exact(
+    bootstrap: &ExternalSupervisorBootstrap,
+    supervisor_signing_key: &lillux::crypto::SigningKey,
+    request: &ExternalChannelAttachRequest,
+) -> Result<(ExecutionChannelBinding, AttachedExternalExecutionChannel)> {
     bootstrap.validate()?;
+    request.validate_for_bootstrap(bootstrap)?;
+    let supervisor_public_key = request.supervisor_public_key.clone();
+    ensure!(
+        supervisor_public_key
+            == ryeos_state::external_execution::encode_channel_public_key(
+                &supervisor_signing_key.verifying_key(),
+            )?,
+        "external attachment request changed its retained supervisor key"
+    );
     let client = build_client(bootstrap)?;
-    let supervisor_public_key = encode_channel_public_key(&supervisor_signing_key.verifying_key())?;
-    let request = ExternalChannelAttachRequest {
-        schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
-        placement_thread_id: bootstrap.placement_thread_id.clone(),
-        occurrence_id: bootstrap.occurrence_id.clone(),
-        bootstrap_capability: bootstrap.bootstrap_capability.clone(),
-        supervisor_public_key: supervisor_public_key.clone(),
-    };
-    request.validate_shape()?;
-    let request_bytes = canonical_request_bytes(&request)?;
+    let request_bytes = request.canonical_bytes()?;
     let response = client
         .post(bootstrap.controller.attach_url()?)
         .header(CONTENT_TYPE, "application/json")
@@ -197,6 +207,11 @@ mod tests {
         AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
         ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
     };
+    use ryeos_state::external_execution::encode_channel_public_key;
+    use ryeos_state::external_execution::supervisor_journal::{
+        ExternalSupervisorJournalRecovery, PreparedExternalSupervisorJournal,
+    };
+    use ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_TRANSPORT_SCHEMA;
 
     const TEST_CA_DER: &str = "MIIDETCCAfmgAwIBAgIUX+scmKJ6HD/VzI8cSkNb1CDQYYMwDQYJKoZIhvcNAQELBQAwGDEWMBQGA1UEAwwNUnllT1MgVGVzdCBDQTAeFw0yNjA5MjAxMzQ1NDVaFw0zNjA5MTcxMzQ1NDVaMBgxFjAUBgNVBAMMDVJ5ZU9TIFRlc3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC+O+75C261AEfbAhLd1BO0VJmKyR4jk6bDQ1EU3druPMqf6qfvcfFye+FqR2mTyjRw0Lzw+WpEfpUT2Vo7qQVbSMnsaw9do1OK+gI2A+L2bWLH2uCN4nLULEbN91COVmnzY19sQz1esCDkGAza8RbgZjXOabK7Nil7R1HyFtlWj96eik5OEGjEpdAJQpsT9hhJXslyMBmSTtccR3Zl5fL7hbBnI8aUG5EbgPg/SWrtCN2M25RmmFdPbBz5aspSfsv8G4LsqH6NaDKwTC0iliR79C/D+wCFKcnOZIvHCDhTgAcNi0I44W0J0MlAm96wXmmv2Im1UF6DagU5cH/avTuVAgMBAAGjUzBRMB0GA1UdDgQWBBQM8Xib0/5JOrMFvPu3AFMR4v+m/DAfBgNVHSMEGDAWgBQM8Xib0/5JOrMFvPu3AFMR4v+m/DAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCaxmJjrKa4su45TmAYnZPDxRqvgDomTmO89BBPXnY5qHTUZ2bfu6o3vtm5tRywiQXpQkzYIEqYJbT2RndFxgwPigyUqKviA+URXSMX7C8dn01eUtqIe73XYnsBey57JjnRgYtERBytFCGFaaqrreT+Tf1ZV4mjrqqgTyEXxr5/L+TtyYq1D4b4dWSkyEuf8qPFP36RGkVxC0dDzhwXC5AiewkPgGTiQvzcWVB+FyYKmrVMdkR6o5+1Chw7IJiPZSm4/JLX3UQb+Wc/+Lc7lMx4APqExKlW0KLTLCmYZ6gnff6bva6DLcYbZuxu486fc7DPFK3hNqLzrjkaAq5MlFqH";
     const TEST_SERVER_DER: &str = "MIIDJzCCAg+gAwIBAgIUO9YtUXKy4lBXHfmjbWP+VWuMp2IwDQYJKoZIhvcNAQELBQAwGDEWMBQGA1UEAwwNUnllT1MgVGVzdCBDQTAeFw0yNjA5MjAxMzQ1NDVaFw0zNjA5MTcxMzQ1NDVaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALmtC3mDEpcyntYNCnHHF97p3C3gcKVTWHOaahFOrcylv4uLnIlkNS//HBGPvWrL4r+7JUGiMyHny5h8zzhXsfBB8AnhqqaYdnpBbthh6mEJmQ9xrB8x8Zxe/aShIDeVViIAa4mMSBok9nCdW6KZc/1LmteIG70ulpDDbl4zHWIp/vJU6rrQzJbzyVfGFwKCD6hwQfhp9RMOmogaC6CtRhsEDqTmjpRHnmXTKbxDXHd22LgxwWqqPhh7nhBpab90B6YF6krKsCwXBO6lW6IOSSS6zODXkVi0DEUCuWqOmSEbETp5DwIeQXCzZPBJMO3seYSMsO/4sWnbZ1gmjQdq9CkCAwEAAaNtMGswFAYDVR0RBA0wC4IJbG9jYWxob3N0MBMGA1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBTbuqZMwWmYDtA+W2h5EwZ8pEfnojAfBgNVHSMEGDAWgBQM8Xib0/5JOrMFvPu3AFMR4v+m/DANBgkqhkiG9w0BAQsFAAOCAQEAOA9Wly9zikvpml9I5pcBG9BuZwS3W9y5jk+nVbgEMHndcHxbBttRMw7EcvqHku8YkOIqnrGQm27CtomoH7RdzOjG1pxtDH4hrEpPWpP/PJpnbMNAvMHamABNQDQTQT8sIIJdDMtCIN2/sqaryAt2PTf7tdEZR4OApFD83UQ1Ba7Xauxct8aVsgaijdjnxnK+z3/5Czx+lwBl5mxTwfnYn8DBckjF0lRAKUcQ3A1Vo680zwg52hiGXvmCTHjWiYMK3suLtYdE0HKIp2xphEmpdQNdQW7VUOHq3xD+QSBfpbTkGRKpqyaXfN4sORg72d5J3pYPydwn8v2BBcbcSpkFmA==";
@@ -721,18 +736,26 @@ mod tests {
             i64::try_from(lillux::time::timestamp_millis()).unwrap() + 100;
         let server_bootstrap = serde_json::to_value(&bootstrap).unwrap();
         let retained_response = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+        let retained_request = Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
         let first_retained = retained_response.clone();
         let second_retained = retained_response.clone();
+        let first_request = retained_request.clone();
+        let second_request = retained_request.clone();
         let server = serve_tls(
             listener,
             TEST_SERVER_DER,
             vec![
                 Box::new(move |request| {
+                    *first_request.lock().unwrap() = Some(request_body(&request).to_vec());
                     *first_retained.lock().unwrap() =
                         Some(attach_success_response(server_bootstrap.clone(), request));
                     Vec::new()
                 }),
                 Box::new(move |request| {
+                    assert_eq!(
+                        request_body(&request),
+                        second_request.lock().unwrap().as_deref().unwrap()
+                    );
                     let attach: ExternalChannelAttachRequest =
                         serde_json::from_slice(request_body(&request)).unwrap();
                     assert_eq!(
@@ -746,18 +769,54 @@ mod tests {
                 }),
             ],
         );
-        let supervisor_key = lillux::crypto::SigningKey::from_bytes(&[53; 32]);
-        assert!(attach_external_execution_channel(&bootstrap, &supervisor_key).is_err());
+        let outer = tempfile::tempdir().unwrap();
+        let outer_directory = lillux::PinnedDirectory::open(outer.path())
+            .unwrap()
+            .unwrap();
+        outer_directory.tighten_owner_private_directory().unwrap();
+        let journal = PreparedExternalSupervisorJournal::create(
+            outer_directory,
+            bootstrap,
+            lillux::crypto::SigningKey::from_bytes(&[53; 32]),
+        )
+        .unwrap();
+        let store_identity = journal.store_identity().clone();
+        assert!(
+            attach_external_execution_channel_exact(
+                journal.bootstrap(),
+                journal.supervisor_signing_key(),
+                journal.attachment_request(),
+            )
+            .is_err()
+        );
+        drop(journal);
         std::thread::sleep(Duration::from_millis(150));
+        let ExternalSupervisorJournalRecovery::Prepared(recovered) =
+            ExternalSupervisorJournalRecovery::open(
+                lillux::PinnedDirectory::open(outer.path())
+                    .unwrap()
+                    .unwrap(),
+                &store_identity,
+            )
+            .unwrap()
+        else {
+            panic!("ambiguous attachment did not recover its prepared authority")
+        };
         assert!(
             i64::try_from(lillux::time::timestamp_millis()).unwrap()
-                >= bootstrap.attachment_deadline_ms
+                >= recovered.bootstrap().attachment_deadline_ms
         );
-        let (binding, _) = attach_external_execution_channel(&bootstrap, &supervisor_key).unwrap();
+        let (binding, _) = attach_external_execution_channel_exact(
+            recovered.bootstrap(),
+            recovered.supervisor_signing_key(),
+            recovered.attachment_request(),
+        )
+        .unwrap();
         assert_eq!(
             binding.supervisor_public_key,
-            encode_channel_public_key(&supervisor_key.verifying_key()).unwrap()
+            encode_channel_public_key(&recovered.supervisor_signing_key().verifying_key()).unwrap()
         );
+        recovered.record_binding(binding).unwrap();
         assert_eq!(server.join().unwrap(), 2);
     }
 

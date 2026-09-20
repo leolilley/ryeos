@@ -2838,6 +2838,7 @@ dependencies = [
  "ryeos-state",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3070,6 +3071,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

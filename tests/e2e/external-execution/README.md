@@ -4,6 +4,44 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Durable external supervisor authority checkpoint
+
+The protected external supervisor now has an occurrence-private rollback-delete
+SQLite journal outside the candidate and guest store. Before first attachment it
+durably retains the exact sealed bootstrap, a fresh supervisor signing key, and
+the canonical attachment request. An ambiguous HTTPS response can therefore be
+retried after process restart with byte-identical request and key material; it
+cannot silently create a second channel identity.
+
+An accepted binding is committed before candidate preparation. The supervisor
+then reserves the exact empty guest database inode, retains that independent
+anchor together with the exact launcher specification/bootstrap/artifact
+digests, and commits one-way launch intent before native spawn. Reopen may
+continue only the already-retained `prepared` or `attached` pre-launch
+transition. Once launch intent exists, the recovered type exposes evidence and
+validation only; it cannot return to attachment or launch authority. An
+abandoned empty guest reservation similarly has no reopen path.
+
+Both outer and guest stores hold an exclusive owner-private directory lock and
+verify exact directory/database inode identity. Recovery validates the complete
+SQLite table, constraint, index, and trigger SQL—not only application/version
+markers and `quick_check`—plus every canonical bootstrap, request, key, binding,
+guest anchor, and lifecycle join. Focused tests refuse removed/replaced triggers,
+extra tables, same-directory database replacement, retained-content
+substitution, guest binding/bootstrap substitution, nonempty or replaced guest
+reservations, ambient entries, and competing live owners. They reopen every
+pre-launch stage, including launch intent while the guest inode remains empty.
+The native HTTPS regression drops and reopens the outer journal between a lost
+attachment response and an exact retry after the original bootstrap deadline.
+
+Focused source evidence on 2026-09-21: 6 outer-journal tests and 15 guest-journal
+tests passed with one Cargo job. The durable HTTPS retry regression passed
+outside the sandbox because it requires a loopback TLS listener; its initial
+sandbox failure was only `EPERM` at local bind. No external network, provider,
+model, lifecycle, credential, grant, installation, or paid resource was
+contacted or changed. This checkpoint still does not provide the production
+supervisor executable/control loop or complete remote worker workflow.
+
 ## Exact external candidate program checkpoint
 
 Runtime operator epoch 50 and guest-journal epoch 7 cut the external execution

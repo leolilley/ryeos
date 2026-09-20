@@ -222,6 +222,33 @@ impl ExternalSupervisorBootstrap {
         Ok(())
     }
 
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(lillux::sha256_hex(&self.canonical_bytes()?))
+    }
+
+    pub fn attachment_request(
+        &self,
+        supervisor_signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ExternalChannelAttachRequest> {
+        self.validate()?;
+        let request = ExternalChannelAttachRequest {
+            schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+            placement_thread_id: self.placement_thread_id.clone(),
+            occurrence_id: self.occurrence_id.clone(),
+            bootstrap_capability: self.bootstrap_capability.clone(),
+            supervisor_public_key: super::encode_channel_public_key(
+                &supervisor_signing_key.verifying_key(),
+            )?,
+        };
+        request.validate_for_bootstrap(self)?;
+        Ok(request)
+    }
+
     pub fn binding_max_frames(&self) -> Result<u32> {
         self.validate()?;
         Ok(u32::try_from(
@@ -318,6 +345,27 @@ impl ExternalChannelAttachRequest {
 
     pub fn principal_id(&self) -> String {
         format!("external-occurrence:{}", self.occurrence_id)
+    }
+
+    pub fn validate_for_bootstrap(&self, bootstrap: &ExternalSupervisorBootstrap) -> Result<()> {
+        self.validate_shape()?;
+        bootstrap.validate()?;
+        ensure!(
+            self.placement_thread_id == bootstrap.placement_thread_id
+                && self.occurrence_id == bootstrap.occurrence_id
+                && self.bootstrap_capability == bootstrap.bootstrap_capability,
+            "external attachment request changed its sealed bootstrap"
+        );
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate_shape()?;
+        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?.into_bytes())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(lillux::sha256_hex(&self.canonical_bytes()?))
     }
 }
 

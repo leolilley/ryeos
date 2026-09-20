@@ -14,6 +14,7 @@ pub mod admission;
 pub mod export;
 pub mod guest_journal;
 pub mod journal;
+pub mod supervisor_journal;
 pub mod transcript;
 pub mod transport;
 
