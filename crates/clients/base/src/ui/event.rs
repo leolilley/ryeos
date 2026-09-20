@@ -111,6 +111,10 @@ pub enum RyeOsUiIntent {
         instance_key: RyeOsViewInstanceKey,
         view_set_id: crate::ids::ViewSetId,
     },
+    SupplyRequiredSubject {
+        instance_key: RyeOsViewInstanceKey,
+        source_view_set_id: crate::ids::ViewSetId,
+    },
     ReleaseBindingAttachment {
         binding_attachment_id: String,
         binding_generation: u64,

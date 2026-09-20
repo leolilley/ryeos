@@ -135,6 +135,13 @@ impl RyeOsCore {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.instance_has_unresolved_required_subject(&key.view_instance_key) {
+            self.notice(
+                "This view requires a subject before input can be submitted.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         let Some(input) = self
             .binding_for_instance(&key.view_instance_key, &view_ref)
             .and_then(|binding| binding.input.clone())
@@ -445,6 +452,13 @@ impl RyeOsCore {
         let Some((origin_key, _)) = self.focused_input_instance() else {
             return Vec::new();
         };
+        if self.instance_has_unresolved_required_subject(&origin_key.view_instance_key) {
+            self.notice(
+                "This view requires a subject before input can be submitted.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         if self.refuse_blocked_mutation_for_instance(&origin_key.view_instance_key) {
             return Vec::new();
         }
@@ -566,6 +580,13 @@ impl RyeOsCore {
         affordance_id: &str,
         value: &str,
     ) -> Vec<RyeOsEffect> {
+        if self.instance_has_unresolved_required_subject(invocation_origin) {
+            self.notice(
+                "This view requires a subject before input can be submitted.",
+                RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         let Some(binding) = self.binding_for_instance(invocation_origin, view_ref) else {
             return Vec::new();
         };

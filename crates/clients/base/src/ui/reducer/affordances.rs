@@ -59,6 +59,13 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
+        if self.instance_has_unresolved_required_subject(instance_key) {
+            self.notice(
+                "This view requires a subject before it can act.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         let Some(binding) = self.binding_for_instance(instance_key, view_ref) else {
             return Vec::new();
         };
@@ -193,6 +200,13 @@ impl RyeOsCore {
                     self.notice("This view's selection is pinned. Follow a view set before changing its selection.", super::view_model::RyeOsTone::Warn);
                     return Vec::new();
                 }
+                Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. }) => {
+                    self.notice(
+                        "This view requires a subject before its selection can change.",
+                        super::view_model::RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
                 None => None,
             }
         } else {
@@ -224,6 +238,7 @@ impl RyeOsCore {
                     view_set_id,
                 }) => Some(*view_set_id),
                 Some(super::super::attachment::SelectionAttachment::Pinned { .. }) => None,
+                Some(super::super::attachment::SelectionAttachment::RequiredSubject { .. }) => None,
                 None => Some(self.view_sets[self.active_view_set].id),
             };
             let folded = self.seat.fold();

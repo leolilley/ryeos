@@ -840,6 +840,7 @@ impl RyeOsCore {
             &insertion_attachment_id,
             &fresh_subjects,
             &saved_sets,
+            crate::ui::layout_preferences::RequiredSubjectMountPolicy::RequireResolved,
         ) {
             self.notice(
                 format!("Cannot resume particular view set: {error}"),

@@ -105,6 +105,21 @@
     </div>
   {:else if model.type === "placeholder"}
     <EmptyState title={model.title} message={model.message} />
+  {:else if model.type === "required_subject"}
+    <section class="required-subject" aria-labelledby={`required-subject-${tileId}`} aria-live="polite">
+      <span class="required-subject-kicker">Unresolved view</span>
+      <h3 id={`required-subject-${tileId}`}>{model.title}</h3>
+      <p><strong>{model.input}</strong> needs {model.facets.join(", ")}.</p>
+      {#if model.actions.length > 0}
+        <div class="required-subject-actions" aria-label="Compatible current selections">
+          {#each model.actions as action, index}
+            <button data-focus-key={`view:${instanceKey}:required-subject:${index}`} title={action.title} onclick={() => dispatch({ type: "activate", intent: action.intent })}>{action.label}</button>
+          {/each}
+        </div>
+      {:else}
+        <p class="required-subject-waiting">Select a compatible subject in another open set.</p>
+      {/if}
+    </section>
   {:else if model.type === "map" || model.type === "atlas"}
     <SceneView scene={model.scene} />
   {:else if model.type === "field"}

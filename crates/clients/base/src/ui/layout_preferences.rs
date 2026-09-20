@@ -17,6 +17,12 @@ use std::collections::BTreeMap;
 pub const MAX_LAYOUT_PREFERENCE_BYTES: usize = 256 * 1024;
 const SCHEMA: &str = "ryeos.ui.layout-preferences.v4";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequiredSubjectMountPolicy {
+    AllowUnresolved,
+    RequireResolved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Scope {
@@ -400,6 +406,23 @@ impl RyeOsCore {
                 return Err("this composition has mixed or unresolved project contexts; the reusable template cannot preserve them".into());
             }
             let source = match self.selection_attachment_for_instance(&instance) {
+                Some(super::attachment::SelectionAttachment::RequiredSubject { input, facets }) => {
+                    let view_ref = self
+                        .mounted_view_ref(&instance)
+                        .ok_or("saved relationship references an unmounted view")?;
+                    let binding = self
+                        .binding_for_instance(&instance, view_ref)
+                        .ok_or("saved relationship binding is unavailable")?;
+                    let declared = super::attachment::selection_dependencies(binding);
+                    if declared.len() != facets.len()
+                        || facets.iter().any(|facet| !declared.contains(facet))
+                    {
+                        return Err(
+                            "unresolved subject no longer matches the admitted view binding".into(),
+                        );
+                    }
+                    SavedViewSelectionSource::RequiredSubject { input, facets }
+                }
                 Some(super::attachment::SelectionAttachment::Pinned { .. }) => {
                     let view_ref = self
                         .mounted_view_ref(&instance)
@@ -464,11 +487,12 @@ impl RyeOsCore {
         } else {
             BTreeMap::new()
         };
-        self.open_saved_view_set_template_with_relationships(
+        self.open_saved_view_set_template_with_policy(
             template,
             insertion_attachment_id,
             &BTreeMap::new(),
             &saved_sets,
+            RequiredSubjectMountPolicy::AllowUnresolved,
         )
     }
 
@@ -482,11 +506,29 @@ impl RyeOsCore {
         fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
         saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
     ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
+        self.open_saved_view_set_template_with_policy(
+            template,
+            insertion_attachment_id,
+            fresh_subjects,
+            saved_sets,
+            RequiredSubjectMountPolicy::RequireResolved,
+        )
+    }
+
+    pub(crate) fn open_saved_view_set_template_with_policy(
+        &mut self,
+        template: &SavedViewSetTemplate,
+        insertion_attachment_id: &str,
+        fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
+        saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
+        subject_policy: RequiredSubjectMountPolicy,
+    ) -> Result<Vec<super::effect::RyeOsEffect>, String> {
         self.mount_saved_view_set_template_with_relationships(
             template,
             insertion_attachment_id,
             fresh_subjects,
             saved_sets,
+            subject_policy,
         )?;
         Ok(self.refresh_view_set_sources())
     }
@@ -500,6 +542,7 @@ impl RyeOsCore {
         insertion_attachment_id: &str,
         fresh_subjects: &BTreeMap<String, BTreeMap<String, Value>>,
         saved_sets: &BTreeMap<String, crate::ids::ViewSetId>,
+        subject_policy: RequiredSubjectMountPolicy,
     ) -> Result<(), String> {
         if self.view_sets.len() >= crate::surface::view_sets::MAX_VIEW_SETS {
             return Err("view set limit reached".into());
@@ -592,14 +635,26 @@ impl RyeOsCore {
                         .get(view_ref)
                         .ok_or("saved relationship binding is unavailable")?;
                     let declared = super::attachment::selection_dependencies(binding);
-                    if facets.iter().any(|facet| !declared.contains(facet)) {
+                    if declared.len() != facets.len()
+                        || facets.iter().any(|facet| !declared.contains(facet))
+                    {
                         return Err(format!(
                             "required fresh subject has facets not read by the current view: {input}"
                         ));
                     }
-                    let supplied = fresh_subjects
-                        .get(input)
-                        .ok_or_else(|| format!("required fresh subject is missing: {input}"))?;
+                    let Some(supplied) = fresh_subjects.get(input) else {
+                        if subject_policy == RequiredSubjectMountPolicy::AllowUnresolved {
+                            resolved_relationships.push((
+                                instance,
+                                super::attachment::SelectionAttachment::RequiredSubject {
+                                    input: input.clone(),
+                                    facets: facets.clone(),
+                                },
+                            ));
+                            continue;
+                        }
+                        return Err(format!("required fresh subject is missing: {input}"));
+                    };
                     if supplied.len() != facets.len()
                         || facets.iter().any(|facet| !supplied.contains_key(facet))
                     {
@@ -965,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_template_requires_a_fresh_subject_instead_of_serializing_a_pin() {
+    fn reusable_template_opens_unresolved_without_serializing_a_pin() {
         let mut target = core();
         let instance = target.view_sets[0]
             .tiles
@@ -991,12 +1046,35 @@ mod tests {
         assert!(!encoded.contains("fingerprint"));
 
         let mut reopened = core();
-        let before = reopened.view_sets.len();
-        let error = reopened
+        reopened
             .open_saved_view_set_template(&template, "attachment:test")
-            .unwrap_err();
-        assert!(error.contains("required fresh subject is missing"));
-        assert_eq!(reopened.view_sets.len(), before);
+            .unwrap();
+        let unresolved_instance = center_mounts(&reopened.view_sets[1]).unwrap()[0].clone();
+        assert!(matches!(
+            reopened.selection_attachments.get(&unresolved_instance),
+            Some(super::super::attachment::SelectionAttachment::RequiredSubject {
+                input,
+                facets,
+            }) if input == "subject_tile_0" && facets == &["selection.work.id"]
+        ));
+        let recaptured = reopened
+            .export_active_view_set_template("saved-again".into(), "Saved again".into())
+            .unwrap();
+        assert_eq!(recaptured.relationships, template.relationships);
+
+        let before_strict = reopened.view_sets.len();
+        assert!(
+            reopened
+                .open_saved_view_set_template_with_relationships(
+                    &template,
+                    "attachment:test",
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                )
+                .unwrap_err()
+                .contains("required fresh subject is missing")
+        );
+        assert_eq!(reopened.view_sets.len(), before_strict);
 
         let mut inputs = BTreeMap::new();
         inputs.insert(
@@ -1011,7 +1089,7 @@ mod tests {
                 &BTreeMap::new(),
             )
             .unwrap();
-        let reopened_instance = center_mounts(&reopened.view_sets[1]).unwrap()[0].clone();
+        let reopened_instance = center_mounts(&reopened.view_sets[2]).unwrap()[0].clone();
         let Some(super::super::attachment::SelectionAttachment::Pinned { values, .. }) =
             reopened.selection_attachments.get(&reopened_instance)
         else {

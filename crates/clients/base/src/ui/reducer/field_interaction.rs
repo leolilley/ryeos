@@ -746,6 +746,7 @@ impl RyeOsCore {
             crate::ui::attachment::SelectionAttachment::Pinned { fingerprint, .. } => {
                 format!("pinned:{fingerprint}")
             }
+            crate::ui::attachment::SelectionAttachment::RequiredSubject { .. } => return None,
         };
         Some(format!(
             "{surface_instance}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{attachment}\u{1f}{scope_id}",

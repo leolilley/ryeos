@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T07:22:30Z:5887d9040c35b6a318eb997e2bc417090df80a40472cf256d003a184692b01c2:02dYL931hNr6KiJ5T//4Nb38TGAVVeQjSTydeXPMcidEWKwsxjF6JciBcwyITCFixulVR2Wlsuf0sGjm9fa7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-20T01:35:20Z:ae0ac0da5051f4c8516874eb9b9acbd3c602defa99250f67e5a1cdab7e8a6965:pSmXL3n0bMmMGnfzcI8+yNGxOt2DvTed/elF5Xn+NH8UjiQs2tpqg5bpOro1DhvYV/Tysr08Jr+Q3AuqGCR9Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -84,10 +84,19 @@ saved template and reopen only when that template has an explicit live set
 resolution. Pins become named required fresh-subject inputs containing only
 logical facet names: neither captured values nor fingerprints are durable.
 Every mounted tile and slot must have exactly one relationship; omission is not
-an implicit follow-own-set default. Missing inputs and missing linked sets
-refuse before the composition mutates. The library's open action supplies a
-required subject from the invoking mount's current explicit selection at that
-moment; it never recovers the value that existed when the template was saved.
+an implicit follow-own-set default. Missing linked sets refuse before the
+composition mutates. A default reusable-library open does not borrow the
+invoking mount's ambient selection. A required subject with no explicit fresh
+input mounts visibly unresolved while the rest of the composition opens. That
+mount is an engine-wide execution fence: eager, on-demand, mention and
+completion reads, UI/service/Rye affordances, composers and input submission
+all refuse until completion. Rust projects its exact input/facet requirement
+and compatible source-set choices to every renderer. Activation re-resolves
+the named set's current scoped facets, revalidates the target binding and byte
+bounds, and installs an exact pin without accepting client-provided values.
+Saving or duplicating an unresolved mount preserves only that relationship
+shape. Explicit upfront subject supply and particular-set resume remain strict:
+missing or partial inputs fail atomically and never degrade to unresolved.
 
 Particular view sets have a separate revisioned principal-config collection.
 They retain reusable composition plus only a registered project `local_id` and

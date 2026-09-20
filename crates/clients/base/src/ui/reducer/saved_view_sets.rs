@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn reusable_pin_is_reopened_from_the_current_explicit_subject() {
+    fn reusable_pin_opens_unresolved_without_using_ambient_subject() {
         let session = session_with_surface(json!({
             "name": "test",
             "tiles": ["view:test/library"],
@@ -163,7 +163,7 @@ mod tests {
                 }]
             }),
         );
-        assert_eq!(effects.len(), 1);
+        assert!(effects.is_empty());
         let opened = core.view_sets[core.active_view_set]
             .tiles
             .values()
@@ -171,12 +171,15 @@ mod tests {
             .unwrap()
             .instance_key
             .clone();
-        let Some(crate::ui::attachment::SelectionAttachment::Pinned { values, .. }) =
-            core.selection_attachments.get(&opened)
-        else {
-            panic!("reusable pin must be supplied afresh")
-        };
-        assert_eq!(values["selection.work.thread"], "T-current");
+        assert_eq!(
+            core.selection_attachments.get(&opened),
+            Some(
+                &crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                    input: "subject_tile_0".into(),
+                    facets: vec!["selection.work.thread".into()],
+                }
+            )
+        );
     }
 
     #[test]
@@ -356,26 +359,6 @@ impl RyeOsCore {
             let template = serde_json::from_value::<SavedViewSetTemplate>(value)
                 .map_err(|error| error.to_string())?;
             validate_saved_view_set_templates(std::slice::from_ref(&template))?;
-            let mut fresh_subjects = BTreeMap::new();
-            for relationship in &template.relationships {
-                let SavedViewSelectionSource::RequiredSubject { input, facets } =
-                    &relationship.source
-                else {
-                    continue;
-                };
-                let values = fresh_subjects
-                    .entry(input.clone())
-                    .or_insert_with(BTreeMap::new);
-                for facet in facets {
-                    let reference = Value::String(format!("@facet:{facet}"));
-                    let resolved = super::content::resolve_params(&reference, |key| {
-                        self.facet_value_for_instance(instance, key)
-                    });
-                    if !resolved.is_null() {
-                        values.insert(facet.clone(), resolved);
-                    }
-                }
-            }
             let saved_sets = if template.relationships.iter().any(|relationship| {
                 matches!(
                     &relationship.source,
@@ -386,11 +369,12 @@ impl RyeOsCore {
             } else {
                 BTreeMap::new()
             };
-            self.open_saved_view_set_template_with_relationships(
+            self.open_saved_view_set_template_with_policy(
                 &template,
                 &attachment_id,
-                &fresh_subjects,
+                &BTreeMap::new(),
                 &saved_sets,
+                crate::ui::layout_preferences::RequiredSubjectMountPolicy::AllowUnresolved,
             )
         })();
         match result {

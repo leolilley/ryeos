@@ -1,9 +1,9 @@
 //! Runtime subject attachment for mounted views.
 //!
 //! Attachments are presentation/session state keyed by mounted instance. They
-//! are deliberately outside reusable layout preferences: a pinned observation
-//! is not portable authority and opening a saved composition starts with fresh
-//! follow-own-set relationships.
+//! are deliberately outside reusable layout preferences. A pinned observation
+//! is not portable authority; reusable compositions retain only relationship
+//! shape and may mount a required subject as an explicit execution fence.
 
 use super::content::ViewBinding;
 use super::model::RyeOsCore;
@@ -21,6 +21,13 @@ pub enum SelectionAttachment {
     Pinned {
         values: BTreeMap<String, Value>,
         fingerprint: String,
+    },
+    /// A reusable composition retained the shape of a subject relationship,
+    /// but deliberately retained none of its values or authority.  This is an
+    /// engine execution fence, not an empty selection.
+    RequiredSubject {
+        input: String,
+        facets: Vec<String>,
     },
 }
 
@@ -144,6 +151,7 @@ impl RyeOsCore {
                 .any(|view_set| view_set.id == *view_set_id)
                 .then_some(*view_set_id),
             Some(SelectionAttachment::Pinned { .. }) => None,
+            Some(SelectionAttachment::RequiredSubject { .. }) => None,
             None => self
                 .view_set_index_for_instance(instance)
                 .map(|index| self.view_sets[index].id),
@@ -163,12 +171,88 @@ impl RyeOsCore {
         }
         match self.selection_attachments.get(instance) {
             Some(SelectionAttachment::Pinned { values, .. }) => values.get(logical_facet).cloned(),
+            Some(SelectionAttachment::RequiredSubject { .. }) => None,
             Some(SelectionAttachment::FollowViewSet { .. }) | None => {
                 let view_set_id = self.followed_selection_view_set(instance)?;
                 let key = super::seat::selection_storage_key(view_set_id, logical_facet)?;
                 fold.get(&key).cloned()
             }
         }
+    }
+
+    pub(crate) fn unresolved_required_subject(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+    ) -> Option<(String, Vec<String>)> {
+        match self.selection_attachments.get(instance) {
+            Some(SelectionAttachment::RequiredSubject { input, facets }) => {
+                Some((input.clone(), facets.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn instance_has_unresolved_required_subject(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+    ) -> bool {
+        matches!(
+            self.selection_attachments.get(instance),
+            Some(SelectionAttachment::RequiredSubject { .. })
+        )
+    }
+
+    pub(crate) fn subject_values_from_view_set(
+        &self,
+        view_set_id: ViewSetId,
+        facets: &[String],
+    ) -> Option<BTreeMap<String, Value>> {
+        if !self.view_sets.iter().any(|set| set.id == view_set_id) {
+            return None;
+        }
+        let fold = self.seat.fold();
+        let mut values = BTreeMap::new();
+        for facet in facets {
+            let reference = Value::String(format!("@facet:{facet}"));
+            let value = super::content::resolve_params(&reference, |candidate| {
+                let key = super::seat::selection_storage_key(view_set_id, candidate)?;
+                fold.get(&key).cloned()
+            });
+            if value.is_null() {
+                return None;
+            }
+            values.insert(facet.clone(), value);
+        }
+        Some(values)
+    }
+
+    pub(crate) fn bounded_pinned_subject(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+        values: BTreeMap<String, Value>,
+    ) -> Result<SelectionAttachment, String> {
+        let encoded = serde_json::to_vec(&values).map_err(|error| error.to_string())?;
+        let byte_limit = self
+            .binding_attachment_for_instance(instance)
+            .ok_or("active session request bounds are unavailable")?
+            .binding_request_bounds
+            .max_request_bytes;
+        if byte_limit == 0 {
+            return Err("active session request byte bound is zero".into());
+        }
+        let byte_limit = usize::try_from(byte_limit)
+            .map_err(|_| "active session request byte bound exceeds this platform")?;
+        if encoded.len() > byte_limit {
+            return Err(format!(
+                "pinned selection is {} bytes (max {byte_limit})",
+                encoded.len()
+            ));
+        }
+        use sha2::{Digest, Sha256};
+        Ok(SelectionAttachment::Pinned {
+            values,
+            fingerprint: format!("{:x}", Sha256::digest(&encoded)),
+        })
     }
 
     /// Capture only selection roots actually read by the mounted binding. The
@@ -178,6 +262,9 @@ impl RyeOsCore {
         &self,
         instance: &RyeOsViewInstanceKey,
     ) -> Result<SelectionAttachment, String> {
+        if self.instance_has_unresolved_required_subject(instance) {
+            return Err("required subject has not been supplied".into());
+        }
         let view_ref = self
             .mounted_view_ref(instance)
             .ok_or("view instance is not mounted")?;
@@ -197,29 +284,7 @@ impl RyeOsCore {
                 values.insert(key, value);
             }
         }
-        let encoded = serde_json::to_vec(&values).map_err(|error| error.to_string())?;
-        let byte_limit = self
-            .binding_attachment_for_instance(instance)
-            .ok_or("active session request bounds are unavailable")?
-            .binding_request_bounds
-            .max_request_bytes;
-        if byte_limit == 0 {
-            return Err("active session request byte bound is zero".into());
-        }
-        let byte_limit = usize::try_from(byte_limit)
-            .map_err(|_| "active session request byte bound exceeds this platform")?;
-        if encoded.len() > byte_limit {
-            return Err(format!(
-                "pinned selection is {} bytes (max {byte_limit})",
-                encoded.len()
-            ));
-        }
-        use sha2::{Digest, Sha256};
-        let fingerprint = format!("{:x}", Sha256::digest(&encoded));
-        Ok(SelectionAttachment::Pinned {
-            values,
-            fingerprint,
-        })
+        self.bounded_pinned_subject(instance, values)
     }
 }
 

@@ -38,6 +38,13 @@ impl RyeOsCore {
         let Some(view_ref) = self.active_attachment_view(&instance) else {
             return Vec::new();
         };
+        if self.instance_has_unresolved_required_subject(&instance) {
+            self.notice(
+                "Cannot pin selection until the required subject is supplied.",
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
         let pinned = match self.capture_pinned_selection(&instance) {
             Ok(pinned) => pinned,
             Err(error) => {
@@ -120,6 +127,27 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
+        if let Some((input, facets)) = self.unresolved_required_subject(&instance) {
+            let Some(binding) = self.binding_for_instance(&instance, &view_ref) else {
+                return Vec::new();
+            };
+            let declared = super::super::attachment::selection_dependencies(binding);
+            let compatible = declared.len() == facets.len()
+                && facets.iter().all(|facet| declared.contains(facet))
+                && self
+                    .subject_values_from_view_set(view_set_id, &facets)
+                    .and_then(|values| self.bounded_pinned_subject(&instance, values).ok())
+                    .is_some();
+            if !compatible {
+                self.notice(
+                    format!(
+                        "Cannot follow selection for {input}: the source set is not compatible."
+                    ),
+                    super::view_model::RyeOsTone::Warn,
+                );
+                return Vec::new();
+            }
+        }
         let next = super::super::attachment::SelectionAttachment::FollowViewSet { view_set_id };
         if self.selection_attachments.get(&instance) == Some(&next)
             || (!self.selection_attachments.contains_key(&instance)
@@ -129,6 +157,67 @@ impl RyeOsCore {
         }
         self.selection_attachments.insert(instance.clone(), next);
         self.refresh_attachment_subject(&instance, &view_ref)
+    }
+
+    pub(crate) fn supply_required_subject(
+        &mut self,
+        instance: RyeOsViewInstanceKey,
+        source_view_set_id: ViewSetId,
+    ) -> Vec<RyeOsEffect> {
+        let Some(view_ref) = self.active_attachment_view(&instance) else {
+            return Vec::new();
+        };
+        let Some((input, facets)) = self.unresolved_required_subject(&instance) else {
+            return Vec::new();
+        };
+        let Some(binding) = self.binding_for_instance(&instance, &view_ref) else {
+            return Vec::new();
+        };
+        let declared = super::super::attachment::selection_dependencies(binding);
+        if declared.len() != facets.len() || facets.iter().any(|facet| !declared.contains(facet)) {
+            self.notice(
+                format!(
+                    "Cannot supply {input}: the admitted view now requires a different subject."
+                ),
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        }
+        let Some(values) = self.subject_values_from_view_set(source_view_set_id, &facets) else {
+            self.notice(
+                format!(
+                    "Cannot supply {input}: that view set has no complete compatible selection."
+                ),
+                super::view_model::RyeOsTone::Warn,
+            );
+            return Vec::new();
+        };
+        let pinned = match self.bounded_pinned_subject(&instance, values) {
+            Ok(pinned) => pinned,
+            Err(error) => {
+                self.notice(
+                    format!("Cannot supply {input}: {error}"),
+                    super::view_model::RyeOsTone::Warn,
+                );
+                return Vec::new();
+            }
+        };
+        // Recheck the exact relationship immediately before mutation. Nothing
+        // above may turn a stale UI action into a subject change.
+        if self.unresolved_required_subject(&instance) != Some((input.clone(), facets)) {
+            return Vec::new();
+        }
+        self.selection_attachments.insert(instance.clone(), pinned);
+        self.invalidate_view_sources(&instance);
+        self.reset_field_replay_for_subject(&instance);
+        let effects = self.emit_fetch_source_for_instance(instance, &view_ref);
+        self.floor_source_fetches(&effects, true);
+        self.notice(
+            format!("Subject supplied from the current selection for {input}."),
+            super::view_model::RyeOsTone::Good,
+        );
+        self.bump_generation();
+        effects
     }
 }
 
@@ -172,6 +261,126 @@ mod tests {
         let key = crate::ui::seat::selection_storage_key(view_set_id, "selection.work").unwrap();
         core.seat
             .append_facet(key, serde_json::json!({"thread": thread}));
+    }
+
+    #[test]
+    fn unresolved_subject_is_a_source_and_attachment_action_fence() {
+        let (mut core, instance) = core_with_selection_view();
+        let owner = core.view_sets[core.active_view_set].id;
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        assert!(
+            core.emit_fetch_source_for_instance(instance.clone(), "view:test/selection")
+                .is_empty()
+        );
+        assert!(
+            core.compiled_binding_operation(
+                &instance,
+                crate::ui::binding::UiBindingCoordinate::Source {
+                    view_ref: "view:test/selection".into(),
+                    channel: "initial".into(),
+                },
+                UiBindingPayload::SourceParameters {
+                    params: serde_json::json!({}),
+                },
+            )
+            .is_none()
+        );
+        assert!(core.pin_view_selection(instance.clone()).is_empty());
+        assert!(
+            core.follow_view_set_selection(instance.clone(), owner)
+                .is_empty()
+        );
+        assert!(matches!(
+            core.selection_attachments.get(&instance),
+            Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. })
+        ));
+    }
+
+    #[test]
+    fn supply_required_subject_reads_the_named_set_and_pins_exact_facets() {
+        let (mut core, instance) = core_with_selection_view();
+        let source = core.view_sets[core.active_view_set].id;
+        set_selection(&mut core, source, "T-current");
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        let effects = core.supply_required_subject(instance.clone(), source);
+        assert_eq!(effects.len(), 1, "only the initial source is activated");
+        let Some(crate::ui::attachment::SelectionAttachment::Pinned { values, .. }) =
+            core.selection_attachments.get(&instance)
+        else {
+            panic!("required subject must become a pin")
+        };
+        assert_eq!(values.len(), 1);
+        assert_eq!(values["selection.work.thread"], "T-current");
+
+        set_selection(&mut core, source, "T-later");
+        assert_eq!(
+            core.facet_value_for_instance(&instance, "selection.work.thread"),
+            Some(serde_json::json!("T-current"))
+        );
+    }
+
+    #[test]
+    fn incomplete_source_set_leaves_required_subject_unresolved() {
+        let (mut core, instance) = core_with_selection_view();
+        let source = core.view_sets[core.active_view_set].id;
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        assert!(
+            core.supply_required_subject(instance.clone(), source)
+                .is_empty()
+        );
+        assert!(matches!(
+            core.selection_attachments.get(&instance),
+            Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. })
+        ));
+    }
+
+    #[test]
+    fn compatible_follow_replaces_required_subject_without_pinning_values() {
+        let (mut core, instance) = core_with_selection_view();
+        let source = core.view_sets[core.active_view_set].id;
+        set_selection(&mut core, source, "T-current");
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        let effects = core.follow_view_set_selection(instance.clone(), source);
+        assert!(!effects.is_empty());
+        assert_eq!(
+            core.selection_attachments.get(&instance),
+            Some(&crate::ui::attachment::SelectionAttachment::FollowViewSet {
+                view_set_id: source,
+            })
+        );
+        set_selection(&mut core, source, "T-later");
+        assert_eq!(
+            core.facet_value_for_instance(&instance, "selection.work.thread"),
+            Some(serde_json::json!("T-later"))
+        );
     }
 
     #[test]

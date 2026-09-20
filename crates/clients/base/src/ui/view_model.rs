@@ -549,6 +549,12 @@ pub enum RyeOsViewVm {
         title: String,
         message: String,
     },
+    RequiredSubject {
+        title: String,
+        input: String,
+        facets: Vec<String>,
+        actions: Vec<RyeOsTileIntentVm>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1241,6 +1247,14 @@ fn bound_view_vm_keyed(
             message: format!("view {view_ref} is not embedded in the effective surface"),
         };
     };
+    if let Some((input, facets)) = core.unresolved_required_subject(instance_key) {
+        return RyeOsViewVm::RequiredSubject {
+            title: "Subject required".into(),
+            actions: required_subject_actions(core, instance_key, &facets),
+            input,
+            facets,
+        };
+    }
     // A binding that failed to parse/validate shows its reason, not its
     // (absent) content — honest degrade, not a silent "not embedded".
     if let Some(reason) = &binding.degraded {
@@ -3528,6 +3542,9 @@ fn selection_attachment_label(core: &RyeOsCore, instance: &RyeOsViewInstanceKey)
         Some(super::attachment::SelectionAttachment::Pinned { .. }) => {
             Some("Selection pinned".to_string())
         }
+        Some(super::attachment::SelectionAttachment::RequiredSubject { input, .. }) => {
+            Some(format!("Subject required · {input}"))
+        }
         Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id }) => {
             (core.view_sets[containing].id != view_set_id).then(|| {
                 core.view_sets
@@ -3561,6 +3578,9 @@ fn selection_attachment_intents(
     }
     let can_pin = !super::attachment::selection_dependencies(binding).is_empty();
     let current = core.selection_attachment_for_instance(instance);
+    if let Some(super::attachment::SelectionAttachment::RequiredSubject { facets, .. }) = &current {
+        return required_subject_actions(core, instance, facets);
+    }
     let mut actions = Vec::new();
     if can_pin
         && !matches!(
@@ -3605,6 +3625,55 @@ fn selection_attachment_intents(
         });
     }
     actions
+}
+
+fn required_subject_actions(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    facets: &[String],
+) -> Vec<RyeOsTileIntentVm> {
+    let mut title_counts = std::collections::BTreeMap::new();
+    for set in &core.view_sets {
+        *title_counts.entry(set.title.as_str()).or_insert(0usize) += 1;
+    }
+    core.view_sets
+        .iter()
+        .enumerate()
+        .filter(|(_, set)| core.subject_values_from_view_set(set.id, facets).is_some())
+        .flat_map(|(index, set)| {
+            let label = if title_counts.get(set.title.as_str()).copied().unwrap_or(0) > 1 {
+                format!("Use selection in {} · set {}", set.title, index + 1)
+            } else {
+                format!("Use selection in {}", set.title)
+            };
+            let follow_label = if title_counts.get(set.title.as_str()).copied().unwrap_or(0) > 1 {
+                format!("Follow selection in {} · set {}", set.title, index + 1)
+            } else {
+                format!("Follow selection in {}", set.title)
+            };
+            [
+                RyeOsTileIntentVm {
+                    title: format!(
+                        "Pin the exact current selection to {} without changing its binding",
+                        instance.as_str()
+                    ),
+                    label,
+                    intent: RyeOsUiIntent::SupplyRequiredSubject {
+                        instance_key: instance.clone(),
+                        source_view_set_id: set.id,
+                    },
+                },
+                RyeOsTileIntentVm {
+                    title: "Follow this set as its compatible selection changes".into(),
+                    label: follow_label,
+                    intent: RyeOsUiIntent::FollowViewSetSelection {
+                        instance_key: instance.clone(),
+                        view_set_id: set.id,
+                    },
+                },
+            ]
+        })
+        .collect()
 }
 
 /// Both renderers receive exact mounted coordinates from this projection.

@@ -59,3 +59,11 @@
   .field-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .field-detail { top: 50px; width: min(230px, 58%); }
 }
+.required-subject { display: grid; align-content: center; justify-items: start; gap: 12px; min-height: 100%; padding: clamp(24px, 5vw, 72px); }
+.required-subject-kicker { color: var(--accent-bright); font: 9px var(--font-data); letter-spacing: .13em; text-transform: uppercase; }
+.required-subject h3 { margin: 0; color: var(--text); font: 400 clamp(24px, 3vw, 42px)/1.05 var(--font-ui); }
+.required-subject p { max-width: 68ch; margin: 0; color: var(--muted); }
+.required-subject-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.required-subject-actions button { padding: 9px 12px; border: 1px solid var(--line-strong); color: var(--text); background: var(--plane); }
+.required-subject-actions button:hover, .required-subject-actions button:focus-visible { border-color: var(--accent-bright); background: var(--plane-selected); }
+.required-subject-waiting { color: var(--faint) !important; font: 10px var(--font-data); }

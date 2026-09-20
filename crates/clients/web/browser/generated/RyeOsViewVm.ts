@@ -8,6 +8,7 @@ import type { RyeOsSectionVm } from "./RyeOsSectionVm";
 import type { RyeOsTableRowVm } from "./RyeOsTableRowVm";
 import type { RyeOsTextLineVm } from "./RyeOsTextLineVm";
 import type { RyeOsTextPositionVm } from "./RyeOsTextPositionVm";
+import type { RyeOsTileIntentVm } from "./RyeOsTileIntentVm";
 import type { RyeOsTimelineEntryVm } from "./RyeOsTimelineEntryVm";
 
 export type RyeOsViewVm =
@@ -45,4 +46,5 @@ export type RyeOsViewVm =
    * widget.
    */
   | { type: "table"; title: string; columns: string[]; total_rows: bigint; provenance?: string | null; affordance_hints: string[]; rows: RyeOsTableRowVm[] }
-  | { type: "placeholder"; title: string; message: string };
+  | { type: "placeholder"; title: string; message: string }
+  | { type: "required_subject"; title: string; input: string; facets: string[]; actions: RyeOsTileIntentVm[] };

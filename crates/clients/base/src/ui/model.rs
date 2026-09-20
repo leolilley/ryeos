@@ -1054,6 +1054,12 @@ impl RyeOsCore {
         super::binding::UiBindingRequest,
         super::binding::UiBindingRequestBounds,
     )> {
+        // RequiredSubject is an engine execution fence. Keep this check at the
+        // common mounted-operation boundary so a new or forged reducer event
+        // cannot bypass the more specific source/input/affordance guards.
+        if self.instance_has_unresolved_required_subject(instance) {
+            return None;
+        }
         let attachment_id = self.instance_binding_attachments.get(instance)?;
         self.compiled_binding_operation_for_attachment(attachment_id, coordinate, payload)
     }
@@ -1218,6 +1224,9 @@ impl RyeOsCore {
         let mention_fetches: Vec<(String, String, String)> = visible_input_instances
             .iter()
             .filter_map(|(instance_key, view_ref)| {
+                if self.instance_has_unresolved_required_subject(instance_key) {
+                    return None;
+                }
                 let binding = self.binding_for_instance(instance_key, view_ref)?;
                 let input = binding.input.as_ref()?;
                 input.mentions.as_ref()?;
@@ -1259,6 +1268,9 @@ impl RyeOsCore {
         let completion_fetches: Vec<(String, String, String)> = visible_input_instances
             .iter()
             .filter_map(|(instance_key, view_ref)| {
+                if self.instance_has_unresolved_required_subject(instance_key) {
+                    return None;
+                }
                 let binding = self.binding_for_instance(instance_key, view_ref)?;
                 let input = binding.input.as_ref()?;
                 input.completion.as_ref()?;
@@ -1586,6 +1598,9 @@ impl RyeOsCore {
         hint_single_flight: bool,
         only_channel: Option<&str>,
     ) -> Vec<RyeOsEffect> {
+        if self.instance_has_unresolved_required_subject(&instance_key) {
+            return Vec::new();
+        }
         let Some(attachment_id) = self
             .instance_binding_attachments
             .get(&instance_key)
@@ -1829,6 +1844,9 @@ impl RyeOsCore {
         role: &str,
         dynamic_params: serde_json::Value,
     ) -> Option<RyeOsEffect> {
+        if self.instance_has_unresolved_required_subject(&instance_key) {
+            return None;
+        }
         let attachment_id = self
             .instance_binding_attachments
             .get(&instance_key)?
@@ -1915,6 +1933,9 @@ impl RyeOsCore {
         let deferred = self.deferred_source_fetches.remove(source_key)?;
         self.data.source_errors.remove(source_key);
         let instance = super::source_key::RyeOsSourceInstanceKey::decode(source_key)?.view_instance;
+        if self.instance_has_unresolved_required_subject(&instance) {
+            return None;
+        }
         let Some((request, request_bounds)) = self.compiled_binding_operation(
             &instance,
             super::binding::UiBindingCoordinate::Source {

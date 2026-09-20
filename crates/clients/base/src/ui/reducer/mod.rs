@@ -538,6 +538,13 @@ impl RyeOsCore {
                 let Some((origin, _)) = self.focused_input_instance() else {
                     return Vec::new();
                 };
+                if self.instance_has_unresolved_required_subject(&origin.view_instance_key) {
+                    self.notice(
+                        "This view requires a subject before controlling work.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
                 // Esc while the head thread works → cancel it through the single
                 // ryeos cancel path: `service:commands/submit { cancel }`, the
                 // same channel row affordances use. No-op if
@@ -1091,6 +1098,10 @@ impl RyeOsCore {
                 instance_key,
                 view_set_id,
             } => self.follow_view_set_selection(instance_key, view_set_id),
+            RyeOsUiIntent::SupplyRequiredSubject {
+                instance_key,
+                source_view_set_id,
+            } => self.supply_required_subject(instance_key, source_view_set_id),
             RyeOsUiIntent::ResizeSplit {
                 layout_guard,
                 path,
@@ -1215,6 +1226,13 @@ impl RyeOsCore {
                 let Some((origin, _)) = self.focused_input_instance() else {
                     return Vec::new();
                 };
+                if self.instance_has_unresolved_required_subject(&origin.view_instance_key) {
+                    self.notice(
+                        "This view requires a subject before controlling work.",
+                        RyeOsTone::Warn,
+                    );
+                    return Vec::new();
+                }
                 if self.refuse_blocked_mutation_for_instance(&origin.view_instance_key) {
                     return Vec::new();
                 }

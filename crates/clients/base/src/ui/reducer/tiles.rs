@@ -134,7 +134,15 @@ impl RyeOsCore {
         for (source, duplicate) in source_tiles.into_iter().zip(duplicate_tiles) {
             if let Some(attachment_id) = self.instance_binding_attachments.get(&source).cloned() {
                 self.instance_binding_attachments
-                    .insert(duplicate, attachment_id);
+                    .insert(duplicate.clone(), attachment_id);
+            }
+            if let Some(
+                attachment @ super::super::attachment::SelectionAttachment::RequiredSubject {
+                    ..
+                },
+            ) = self.selection_attachments.get(&source).cloned()
+            {
+                self.selection_attachments.insert(duplicate, attachment);
             }
         }
         for edge in [
@@ -147,7 +155,15 @@ impl RyeOsCore {
             let duplicate = super::model::dock_view_instance_key(duplicate_id, edge);
             if let Some(attachment_id) = self.instance_binding_attachments.get(&source).cloned() {
                 self.instance_binding_attachments
-                    .insert(duplicate, attachment_id);
+                    .insert(duplicate.clone(), attachment_id);
+            }
+            if let Some(
+                attachment @ super::super::attachment::SelectionAttachment::RequiredSubject {
+                    ..
+                },
+            ) = self.selection_attachments.get(&source).cloned()
+            {
+                self.selection_attachments.insert(duplicate, attachment);
             }
         }
         self.switch_view_set_tab(self.view_sets.len() - 1)
@@ -2199,6 +2215,20 @@ mod tests {
             .values()
             .map(|tile| tile.view.view_ref.clone())
             .collect();
+        let unresolved_source = core.view_sets[0]
+            .tile_ids()
+            .into_iter()
+            .find_map(|tile_id| core.view_sets[0].tiles.get(&tile_id))
+            .unwrap()
+            .instance_key
+            .clone();
+        core.selection_attachments.insert(
+            unresolved_source,
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
 
         core.duplicate_view_set(source_id);
 
@@ -2221,6 +2251,16 @@ mod tests {
                 .map(|tile| tile.view.view_ref.clone())
                 .collect::<std::collections::BTreeSet<_>>(),
             source_views
+        );
+        assert_eq!(
+            duplicate_instances
+                .iter()
+                .filter(|instance| matches!(
+                    core.selection_attachments.get(*instance),
+                    Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. })
+                ))
+                .count(),
+            1
         );
     }
 

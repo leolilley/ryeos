@@ -354,6 +354,16 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
             lines.push(title.clone());
             lines.push(message.clone());
         }
+        RyeOsViewVm::RequiredSubject {
+            title,
+            input,
+            facets,
+            actions,
+        } => {
+            lines.push(title.clone());
+            lines.push(format!("{input}: {}", facets.join(", ")));
+            lines.extend(actions.iter().map(|action| format!("• {}", action.label)));
+        }
     }
     draw_lines(surface, rect, &lines);
 }
