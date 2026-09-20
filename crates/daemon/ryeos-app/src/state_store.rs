@@ -14051,6 +14051,48 @@ impl StateStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_external_frame_test_fixture(
+        &self,
+        placement: &str,
+        direction: ryeos_state::external_execution::ChannelDirection,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        anyhow::ensure!(
+            g.runtime_db
+                .claim_external_frame_application(placement, direction, sequence, digest,)?,
+            "external frame test fixture was already claimed"
+        );
+        g.runtime_db
+            .finish_external_frame_application(placement, direction, sequence, digest)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn external_candidate_test_authority(&self) -> &ryeos_state::PinnedStateAuthority {
+        &self.state_authority
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim_external_candidate_import_test_fixture(
+        &self,
+        placement: &str,
+        seal_sequence: u64,
+        seal_digest: &str,
+    ) -> Result<()> {
+        match self.lock()?.runtime_db.claim_external_candidate_import(
+            placement,
+            seal_sequence,
+            seal_digest,
+        )? {
+            runtime_db::external_execution::ExternalCandidateImportClaim::Reconcile(_) => Ok(()),
+            runtime_db::external_execution::ExternalCandidateImportClaim::AlreadyApplied(_) => {
+                bail!("external candidate import test fixture was already applied")
+            }
+        }
+    }
+
     /// Content-only retention under the existing write/CAS guard owner. The
     /// caller must keep its assembly guard until this transaction commits.
     pub fn retain_external_candidate_import(
@@ -14071,6 +14113,88 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db
             .retain_external_candidate_import(placement, &verified, &self.state_authority)
+    }
+
+    /// Reconcile one exact sealed external export from the controller's
+    /// immutable signed transcript. The write permit retains the same CAS
+    /// guard across reconstruction, closure verification, durable rooting and
+    /// the atomic application commit. Reconciliation may repeat only
+    /// content-addressed CAS writes; it never replays candidate execution.
+    pub(crate) fn reconcile_external_candidate_import(
+        &self,
+        placement: &str,
+        seal_sequence: u64,
+        seal_digest: &str,
+    ) -> Result<()> {
+        use ryeos_state::external_execution::export::{
+            CandidateExportAssembler, validate_retained_candidate_coordinates,
+        };
+
+        let permit = self.acquire_write_permit()?;
+        let claim = self.lock()?.runtime_db.claim_external_candidate_import(
+            placement,
+            seal_sequence,
+            seal_digest,
+        )?;
+        match claim {
+            runtime_db::external_execution::ExternalCandidateImportClaim::AlreadyApplied(
+                retained,
+            ) => {
+                if retained.seal_sequence != seal_sequence || retained.seal_digest != seal_digest {
+                    bail!("retained external import changed its exact seal");
+                }
+                validate_retained_candidate_coordinates(
+                    &self.state_authority,
+                    permit.cas_guard(),
+                    &retained.binding,
+                    &retained.candidate_snapshot_hash,
+                    &retained.completion_request_digest,
+                    &retained.writer_exclusion_evidence_hash,
+                )?;
+                Ok(())
+            }
+            runtime_db::external_execution::ExternalCandidateImportClaim::Reconcile(plan) => {
+                let mut assembler = CandidateExportAssembler::new(
+                    &self.state_authority,
+                    permit.cas_guard(),
+                    plan.binding.clone(),
+                    &plan.quiesce,
+                )?;
+                let mut imported = None;
+                for (index, frame) in plan.export_frames.iter().enumerate() {
+                    let result = assembler.accept(frame)?;
+                    if index + 1 == plan.export_frames.len() {
+                        imported = result;
+                    } else if result.is_some() {
+                        bail!("external candidate export sealed before its retained terminator");
+                    }
+                }
+                let imported = imported.context(
+                    "external candidate export retained no completed candidate at its seal",
+                )?;
+                let verified = imported.validate_retention(
+                    &self.state_authority,
+                    permit.cas_guard(),
+                    &plan.binding,
+                )?;
+                let g = self.lock()?;
+                g.runtime_db.finish_external_candidate_import(
+                    placement,
+                    &plan,
+                    &verified,
+                    &self.state_authority,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn recoverable_external_candidate_imports(
+        &self,
+        placement: Option<&str>,
+    ) -> Result<Vec<runtime_db::external_execution::ExternalCandidateImportTarget>> {
+        self.lock()?
+            .runtime_db
+            .recoverable_external_candidate_imports(placement)
     }
 
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {

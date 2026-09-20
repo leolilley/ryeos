@@ -10,7 +10,9 @@ use super::*;
 use anyhow::ensure;
 
 mod channel;
-pub(crate) use channel::ExternalSupervisorExchange;
+pub(crate) use channel::{
+    ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalSupervisorExchange,
+};
 
 pub(super) const FIRST_EPOCH: u32 = 40;
 pub(super) const GUARD_SQL: &str = r#"CREATE TABLE external_execution_guard (
@@ -1739,6 +1741,14 @@ mod tests {
     use super::*;
 
     pub(super) fn reservation(db: &RuntimeDb, suffix: &str) -> ExternalAllocationReservation {
+        reservation_with_base(db, suffix, &"b".repeat(64))
+    }
+
+    pub(super) fn reservation_with_base(
+        db: &RuntimeDb,
+        suffix: &str,
+        base_snapshot_hash: &str,
+    ) -> ExternalAllocationReservation {
         let placement = format!("T-{suffix}");
         let workspace = format!("W-{suffix}");
         let worker = format!("worker-{suffix}");
@@ -1769,7 +1779,7 @@ mod tests {
                 "INSERT INTO execution_workspace(workspace_id,thread_id,launch_owner,backend_id,
              base_snapshot,root_path,state,created_at_ms,updated_at_ms)
              VALUES(?1,?2,'dedicated_worker_session','fixture',?3,'/fixture','ready',1,1)",
-                params![workspace, placement, "b".repeat(64)],
+                params![workspace, placement, base_snapshot_hash],
             )
             .unwrap();
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
@@ -1780,7 +1790,7 @@ mod tests {
             workspace_id: workspace,
             worker_instance_id: worker,
             worker_boot_epoch: 1,
-            base_snapshot_hash: "b".repeat(64),
+            base_snapshot_hash: base_snapshot_hash.to_owned(),
             binding_hash: binding.digest().to_owned(),
             capacity_owner: binding.capacity_owner().to_owned(),
             channel_authority_generation: "3".repeat(64),

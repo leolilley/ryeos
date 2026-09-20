@@ -1215,6 +1215,7 @@ async fn run(
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
                 external_placement_backends: Arc::new(Default::default()),
+                external_candidate_imports: Arc::new(Default::default()),
                 node_policy: node_policy_snapshot,
                 vault,
                 command_registry,
@@ -2254,6 +2255,20 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
         return Ok(());
     }
+    match state
+        .external_candidate_imports
+        .wake_recoverable(Arc::clone(&state.state_store), None)
+    {
+        Ok(recovered) if recovered != 0 => tracing::info!(
+            recovered,
+            "woke recoverable external candidate imports at startup"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            error = %error,
+            "initial external candidate import recovery failed; durable transcripts remain retryable"
+        ),
+    }
     if let Err(error) =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(&state).await
     {
@@ -2351,6 +2366,16 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
 }
 
 async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    let recovered_external_imports = state
+        .external_candidate_imports
+        .wake_recoverable(Arc::clone(&state.state_store), None)
+        .context("periodic external candidate import recovery")?;
+    if recovered_external_imports != 0 {
+        tracing::info!(
+            recovered_external_imports,
+            "periodic recovery woke external candidate imports"
+        );
+    }
     let recovered_activations =
         ryeos_api::handlers::external_content_activate::recover_durable_activations(state)
             .await
@@ -2691,6 +2716,7 @@ async fn drain_running_threads(state: &AppState) -> bool {
     // have no durable per-process row, so the pool itself is their only exact
     // shutdown owner. Exclusive workers are reaped through the same boundary,
     // then their durable identities are fenced below.
+    let external_candidate_imports_drained = drain_external_candidate_imports(state).await;
     let persistent_session_pool_drained = drain_persistent_session_pool(state).await;
 
     // Exclusive persistent-session workers are independent process groups,
@@ -2892,12 +2918,48 @@ async fn drain_running_threads(state: &AppState) -> bool {
             }
         }
     };
-    persistent_session_pool_drained
+    external_candidate_imports_drained
+        && persistent_session_pool_drained
         && persistent_session_workers_drained
         && attached_snapshot_clean
         && attached_drained
         && in_process_drained
         && in_process_authoritative_clean
+}
+
+async fn drain_external_candidate_imports(state: &AppState) -> bool {
+    let pool = Arc::clone(&state.external_candidate_imports);
+    match tokio::task::spawn_blocking(move || {
+        pool.shutdown_and_wait(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+    })
+    .await
+    {
+        Ok(Ok(drained)) => {
+            if drained != 0 {
+                tracing::info!(
+                    drained,
+                    "drained external candidate imports before daemon exit"
+                );
+            }
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                "external candidate import shutdown remains unproved"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "external candidate import shutdown task panicked"
+            );
+            false
+        }
+    }
 }
 
 async fn drain_persistent_session_pool(state: &AppState) -> bool {
@@ -3527,6 +3589,7 @@ async fn run_service_standalone(
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
         external_placement_backends: Arc::new(Default::default()),
+        external_candidate_imports: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)

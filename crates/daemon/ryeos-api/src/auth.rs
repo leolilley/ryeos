@@ -952,6 +952,7 @@ mod tests {
             service_descriptors: crate::handlers::ALL,
             node_config: Arc::new(snapshot.clone()),
             external_placement_backends: Arc::new(Default::default()),
+            external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),

@@ -1194,6 +1194,13 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             ExecutionChannelBudget::default(),
         ];
         let mut unsettled = [false; 2];
+        // The controller may atomically claim a complete export prefix only
+        // after its seal is retained. That batch is one idempotently
+        // reconstructible CAS application, not several independently
+        // replayable side effects. No other claimed-frame sequence may cross
+        // an unsettled predecessor.
+        let mut claimed_export_batch = [false; 2];
+        let mut claimed_export_sealed = [false; 2];
         let mut state = ChannelPhase::Prepared;
         let mut completion: Option<String> = None;
         let mut snapshot: Option<String> = None;
@@ -1229,6 +1236,13 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 ChannelDirection::SupervisorToOwner => 1,
             };
             let application: String = row.get(7)?;
+            let is_export = matches!(
+                frame.payload,
+                ExecutionChannelPayload::ExportObjectChunk { .. }
+                    | ExecutionChannelPayload::ExportSealed { .. }
+            );
+            let continues_claimed_export =
+                claimed_export_batch[index] && application == "claimed" && is_export;
             if row.get::<_, i64>(0)? != ordinal
                 || row.get::<_, String>(1)? != frame.direction.as_str()
                 || row.get::<_, i64>(2)? != i64::try_from(frame.sequence)?
@@ -1237,7 +1251,8 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 || row.get::<_, i64>(6)? != i64::try_from(frame.acknowledged_peer_sequence)?
                 || (unsettled[index]
                     && !matches!(application.as_str(), "pending" | "revoked")
-                    && !urgent_control(&frame.payload))
+                    && !urgent_control(&frame.payload)
+                    && !continues_claimed_export)
             {
                 bail!("retained external transcript ordering, application or identity mismatch");
             }
@@ -1289,6 +1304,11 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                     completion_request_digest,
                     writer_exclusion_evidence_hash,
                 )?;
+            }
+            if application == "claimed" && is_export {
+                claimed_export_batch[index] = true;
+                claimed_export_sealed[index] |=
+                    matches!(frame.payload, ExecutionChannelPayload::ExportSealed { .. });
             }
             if let ExecutionChannelPayload::Acknowledge {
                 peer_frame_sequence,
@@ -1366,6 +1386,13 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         }
         if pending_input && terminal_close_observed && owner.can_prove_pending_input_revoked() {
             bail!("closed external execution retained pending input");
+        }
+        if claimed_export_batch
+            .iter()
+            .zip(claimed_export_sealed)
+            .any(|(claimed, sealed)| *claimed && !sealed)
+        {
+            bail!("claimed external export prefix has no retained seal");
         }
         if state != ChannelPhase::parse(&stored_state)?
             || completion != stored_completion

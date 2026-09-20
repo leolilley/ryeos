@@ -4,6 +4,48 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Controller-owned durable candidate import checkpoint
+
+Runtime operator epoch 52 makes the controller's signed frame transcript the
+sole durable staging authority for imported candidate content. Export chunks
+remain Retained until the exact seal and the guest's signed Applied evidence for
+the matching owner Quiesce are both present. The controller then claims the
+complete authenticated export prefix atomically, reconstructs it beneath one
+pinned CAS/write guard, validates the exact B -> C closure and writer-exclusion
+evidence, and commits the GC roots together with every export-frame Applied
+transition. A transaction failure exposes neither roots nor Applied evidence.
+
+The process-local import pool is only a bounded wake/coalescing owner. Duplicate
+wakes cannot lose a prerequisite transition, competing seals for one placement
+are refused, and daemon shutdown fences new work and waits for live owners.
+Ingress discovers eligible work after every authenticated exchange because the
+seal normally precedes the guest's later Quiesce acknowledgement. Startup and
+periodic recovery discover the same pending or already-claimed seals from the
+durable transcript. A crash may therefore repeat deterministic content-addressed
+CAS writes, but never candidate execution. The next authenticated poll also
+authors the upgraded owner-signed Applied seal receipt from rooted durable
+facts; a prior Retained receipt or HTTP success cannot manufacture it.
+
+Focused source evidence on 2026-09-21 covers seven import-owner tests and all 31
+application external-execution tests. It includes exact-wake coalescing,
+competing-seal refusal, shutdown fencing/timeout, ownership release after an
+error, the production exchange-to-pool-to-StateStore path, seal-before-Quiesce-
+ACK discovery, claimed-prefix reconstruction after reopening with an existing
+partial CAS prefix, cancellation before versus after claim, malformed staged
+content refusal, atomic rollback between root insertion and frame application,
+exact replay of an already applied import, missing retained-content refusal on
+that replay, and publication of the upgraded Applied receipt. The state
+external-execution suite remains green at 51 tests. Independent architecture,
+security/recovery and testing reviews found no remaining blocker in this
+checkpoint. No external network, provider/model, lifecycle, credential, grant,
+installation or paid resource was contacted or changed.
+
+This checkpoint proves content retention only. It does not treat imported C as
+worker completion, writer qualification beyond the retained native evidence,
+evaluation, integration, publication, occurrence cleanup or capacity release.
+The persistent-session completion owner and composed B -> C -> evaluation -> D
+workflow remain outstanding.
+
 ## Cross-machine candidate export checkpoint
 
 Runtime operator epoch 51, guest-journal epoch 8, outer-supervisor journal

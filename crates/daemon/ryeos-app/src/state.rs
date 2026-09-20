@@ -101,6 +101,10 @@ pub struct AppState {
     /// state: external profiles cannot reserve or contact an allocator.
     pub external_placement_backends:
         Arc<crate::external_placement::ExternalPlacementBackendRegistry>,
+    /// Process-local coalescing for durable controller-side candidate import.
+    /// The signed transcript and CAS remain authoritative across restart.
+    pub external_candidate_imports:
+        Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
     /// Operator-secret store. Read at request-build time and merged

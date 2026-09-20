@@ -557,12 +557,12 @@ pub fn exchange_external_channel_frame(
             && verified.digest() == authenticated.frame_digest,
         "external channel frame changed after authentication"
     );
-    let exchanged = state.state_store.exchange_external_supervisor_frame(
+    let exchanged = exchange_external_supervisor_frame_and_wake_imports(
+        &state.state_store,
+        &state.external_candidate_imports,
         &authenticated.placement_thread_id,
         wire,
         authority.owner_signing_key(),
-        16,
-        1024 * 1024,
     )?;
     let acknowledgement_digest = exchanged
         .acknowledgement
@@ -602,6 +602,32 @@ pub fn exchange_external_channel_frame(
         outbound,
         urgent_revocation,
     })
+}
+
+/// Retain one already-authenticated supervisor frame and discover any import
+/// made eligible by that exact transcript transition. Keeping these actions at
+/// one boundary ensures Ready/export arrival, a later Quiesce acknowledgement,
+/// and idempotent reconnect polls all drive the same durable recovery path.
+pub(crate) fn exchange_external_supervisor_frame_and_wake_imports(
+    state_store: &Arc<crate::state_store::StateStore>,
+    imports: &Arc<crate::external_candidate_import::ExternalCandidateImportPool>,
+    placement: &str,
+    wire: &[u8],
+    owner_signing_key: &lillux::crypto::SigningKey,
+) -> Result<crate::runtime_db::external_execution::ExternalSupervisorExchange> {
+    let exchanged = state_store.exchange_external_supervisor_frame(
+        placement,
+        wire,
+        owner_signing_key,
+        16,
+        1024 * 1024,
+    )?;
+    // Every authenticated exchange may advance an import prerequisite. In
+    // particular, the guest exports before it later acknowledges owner
+    // Quiesce application. Discover from durable state instead of assuming
+    // that seal arrival itself is the only useful wake edge.
+    imports.wake_recoverable(Arc::clone(state_store), Some(placement))?;
+    Ok(exchanged)
 }
 
 /// Author one controller command from protected authority. This function is an

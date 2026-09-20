@@ -834,7 +834,7 @@ impl ImportedCandidateContent {
 
 /// Revalidate exact durable receiver-CAS retention during supervisor reopen.
 /// A retention row alone is never evidence that its bytes survived.
-pub(super) fn validate_retained_candidate_coordinates(
+pub fn validate_retained_candidate_coordinates(
     authority: &PinnedStateAuthority,
     guard: &CasMutationGuard,
     binding: &ExecutionChannelBinding,
