@@ -6,7 +6,7 @@ use std::io::{Read as _, Write as _};
 use anyhow::{Context as _, Result, ensure};
 use ryeos_state::external_execution::guest_journal::AuthenticatedLauncherReady;
 use ryeos_state::external_execution::guest_journal::{
-    LauncherOccurrenceEvidence, PreparedGuestJournal,
+    DurableNativeCandidateCapture, LauncherOccurrenceEvidence, PreparedGuestJournal,
 };
 use ryeos_state::external_execution::{
     AuthenticatedExecutionFrame, ExecutionChannelBinding, ExecutionChannelPayload,
@@ -33,6 +33,7 @@ enum LauncherMessage {
         schema: u32,
         binding: ExecutionChannelBinding,
         challenge: String,
+        occurrence_digest: String,
     },
     Ready {
         schema: u32,
@@ -47,6 +48,10 @@ enum LauncherMessage {
         schema: u32,
         frame_digest: String,
         written_bytes: Option<usize>,
+    },
+    Captured {
+        schema: u32,
+        capture: DurableNativeCandidateCapture,
     },
     AcknowledgeFinish {
         schema: u32,
@@ -76,6 +81,10 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     launcher_process: lillux::RunningProcess,
     process_identity: lillux::ExactProcessIdentity,
     occurrence_digest: String,
+    authority: ryeos_state::PinnedStateAuthority,
+    supervisor_signing_key: lillux::crypto::SigningKey,
+    bootstrap_digest: String,
+    ready_frame: String,
 }
 
 impl LiveInheritedExternalCandidateSupervisor {
@@ -85,6 +94,10 @@ impl LiveInheritedExternalCandidateSupervisor {
 
     pub fn occurrence_digest(&self) -> &str {
         &self.occurrence_digest
+    }
+
+    pub fn ready_frame(&self) -> &str {
+        &self.ready_frame
     }
 
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -99,6 +112,19 @@ impl LiveInheritedExternalCandidateSupervisor {
         self.supervisor.dispatch_cancel(wire)
     }
 
+    pub fn dispatch_quiesce(
+        &mut self,
+        wire: &[u8],
+    ) -> Result<super::external_candidate_supervisor::SupervisorCaptureOutcome> {
+        self.supervisor.dispatch_quiesce(
+            wire,
+            &self.authority,
+            &self.supervisor_signing_key,
+            &self.occurrence_digest,
+            &self.bootstrap_digest,
+        )
+    }
+
     /// Authoritative local cleanup. Returning `Ok` proves the exact launcher
     /// wrapper and all descendants owned by Lillux were reaped.
     pub fn abort_and_reap(self) -> Result<()> {
@@ -111,11 +137,18 @@ impl LiveInheritedExternalCandidateSupervisor {
 pub fn launch_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     mut request: lillux::SubprocessRequest,
+    authority: ryeos_state::PinnedStateAuthority,
+    bootstrap_digest: String,
+    supervisor_signing_key: lillux::crypto::SigningKey,
     launcher_artifact_digest: &str,
     channel_env_name: &str,
     channel_target_fd: u32,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
+    ensure!(
+        prepared_journal.bootstrap_digest() == bootstrap_digest,
+        "launcher request changed guest bootstrap identity"
+    );
     let binding = prepared_journal.binding().clone();
     let challenge = lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>());
     let challenge_digest = lillux::sha256_hex(challenge.as_bytes());
@@ -152,6 +185,7 @@ pub fn launch_external_candidate_supervisor(
         parent_channel,
         binding,
         &challenge,
+        &occurrence_digest,
         deadline,
     ) {
         Ok(result) => result,
@@ -171,23 +205,41 @@ pub fn launch_external_candidate_supervisor(
             )));
         }
     };
+    let supervisor = SerializedExternalCandidateSupervisor::new(live_journal, client);
+    let ready_frame = match supervisor.publish_ready(&supervisor_signing_key) {
+        Ok(ready) => ready.canonical().to_owned(),
+        Err(error) => {
+            let cleanup = running.abort_and_reap_checked();
+            return Err(error.context(format!(
+                "publish dedicated launcher readiness; cleanup={cleanup:?}"
+            )));
+        }
+    };
     Ok(LiveInheritedExternalCandidateSupervisor {
-        supervisor: SerializedExternalCandidateSupervisor::new(live_journal, client),
+        supervisor,
         launcher_process: running,
         process_identity,
         occurrence_digest,
+        authority,
+        supervisor_signing_key,
+        bootstrap_digest,
+        ready_frame,
     })
 }
 
 pub fn launch_prepared_external_candidate_supervisor(
     prepared_journal: PreparedGuestJournal,
     prepared: PreparedExternalCandidateLauncherRequest,
+    supervisor_signing_key: lillux::crypto::SigningKey,
     launcher_artifact_digest: &str,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<LiveInheritedExternalCandidateSupervisor> {
     launch_external_candidate_supervisor(
         prepared_journal,
         prepared.request,
+        prepared.authority,
+        prepared.bootstrap_digest,
+        supervisor_signing_key,
         launcher_artifact_digest,
         "RYEOS_EXTERNAL_CANDIDATE_CONTROL_FD",
         LAUNCHER_CONTROL_FD,
@@ -200,6 +252,7 @@ impl InheritedExternalCandidateLauncherClient {
         mut channel: lillux::InheritedDuplexChannel,
         binding: ExecutionChannelBinding,
         challenge: &str,
+        occurrence_digest: &str,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<(Self, AuthenticatedLauncherReady)> {
         ensure!(
@@ -210,10 +263,18 @@ impl InheritedExternalCandidateLauncherClient {
             "launcher challenge is not a canonical 256-bit value"
         );
         binding.validate()?;
+        ensure!(
+            occurrence_digest.len() == 64
+                && occurrence_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "launcher occurrence digest is not canonical"
+        );
         let bootstrap = LauncherMessage::Bootstrap {
             schema: PROTOCOL_SCHEMA,
             binding: binding.clone(),
             challenge: challenge.to_owned(),
+            occurrence_digest: occurrence_digest.to_owned(),
         };
         write_message(&mut channel, deadline, &bootstrap)?;
         let ready = read_message(&mut channel, deadline)?;
@@ -297,6 +358,39 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
         Ok(())
     }
 
+    fn capture(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<DurableNativeCandidateCapture> {
+        ensure!(
+            frame.frame().binding_digest == self.binding.digest()?,
+            "launcher capture changed its bound occurrence"
+        );
+        write_message(
+            &mut self.channel,
+            self.deadline,
+            &LauncherMessage::Apply {
+                schema: PROTOCOL_SCHEMA,
+                frame_json: frame.canonical().to_owned(),
+            },
+        )?;
+        match read_message(&mut self.channel, self.deadline)? {
+            LauncherMessage::Captured { schema, capture }
+                if schema == PROTOCOL_SCHEMA && capture.quiesce_frame_digest == frame.digest() =>
+            {
+                Ok(capture)
+            }
+            LauncherMessage::Failed {
+                schema,
+                frame_digest,
+                detail,
+            } if schema == PROTOCOL_SCHEMA && frame_digest == frame.digest() => {
+                anyhow::bail!("dedicated launcher capture failed: {detail}")
+            }
+            _ => anyhow::bail!("dedicated launcher returned a mismatched capture response"),
+        }
+    }
+
     fn acknowledge_finish(&mut self, frame_digest: &str) -> Result<()> {
         let request = LauncherMessage::AcknowledgeFinish {
             schema: PROTOCOL_SCHEMA,
@@ -322,23 +416,30 @@ impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClien
 pub fn serve_native_candidate_launcher(
     mut channel: lillux::InheritedDuplexChannel,
     mut candidate: NativeExternalCandidate,
+    authority: ryeos_state::PinnedStateAuthority,
+    bootstrap_digest: String,
     expected_binding: ExecutionChannelBinding,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<()> {
     let bootstrap = read_message(&mut channel, deadline)?;
-    let challenge = match &bootstrap {
+    let (challenge, occurrence_digest) = match &bootstrap {
         LauncherMessage::Bootstrap {
             schema,
             binding,
             challenge,
+            occurrence_digest,
         } if *schema == PROTOCOL_SCHEMA
             && binding == &expected_binding
             && challenge.len() == 64
             && challenge
                 .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && occurrence_digest.len() == 64
+            && occurrence_digest
+                .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) =>
         {
-            challenge
+            (challenge, occurrence_digest)
         }
         _ => anyhow::bail!("dedicated launcher bootstrap changed exact authority"),
     };
@@ -360,6 +461,60 @@ pub fn serve_native_candidate_launcher(
                     lillux::time::timestamp_millis(),
                 )?;
                 let digest = decoded.digest().to_owned();
+                if matches!(
+                    decoded.frame().payload,
+                    ExecutionChannelPayload::Quiesce { .. }
+                ) {
+                    let guard = authority.acquire_shared_guard()?;
+                    let publication_key =
+                        ryeos_state::DurableCasPublicationKey::external_candidate_occurrence(
+                            &expected_binding.digest()?,
+                            occurrence_digest,
+                        )?;
+                    let mut stage = authority
+                        .require_recovery()?
+                        .begin_durable_cas_upload_admitted(
+                            &guard,
+                            &bootstrap_digest,
+                            "external-candidate-native-capture",
+                            &publication_key,
+                            None,
+                        )?;
+                    let export = candidate.capture(
+                        &decoded,
+                        &authority,
+                        &guard,
+                        &mut stage,
+                        occurrence_digest,
+                        deadline.remaining(),
+                    );
+                    let response = match export {
+                        Ok(export) => LauncherMessage::Captured {
+                            schema: PROTOCOL_SCHEMA,
+                            capture: DurableNativeCandidateCapture {
+                                quiesce_frame_digest: digest,
+                                occurrence_digest: export.occurrence_digest().to_owned(),
+                                durable_stage_id: export.durable_stage_id().to_owned(),
+                                snapshot_hash: export.snapshot_hash().to_owned(),
+                                completion_request_digest: export
+                                    .completion_request_digest()
+                                    .to_owned(),
+                                writer_exclusion_evidence_hash: export
+                                    .writer_exclusion_blob_hash()
+                                    .to_owned(),
+                            },
+                        },
+                        Err(error) => LauncherMessage::Failed {
+                            schema: PROTOCOL_SCHEMA,
+                            frame_digest: digest,
+                            detail: format!("{error:#}"),
+                        },
+                    };
+                    drop(stage);
+                    drop(guard);
+                    write_message(&mut channel, deadline, &response)?;
+                    continue;
+                }
                 let outcome = match &decoded.frame().payload {
                     ExecutionChannelPayload::Release => candidate.release(&decoded).map(|_| None),
                     ExecutionChannelPayload::ProtocolBytes { .. } => {
@@ -511,6 +666,7 @@ mod tests {
         };
         let binding: ExecutionChannelBinding = serde_json::from_str(&binding_json).unwrap();
         let challenge = std::env::var("RYEOS_TEST_LAUNCHER_CHALLENGE").unwrap();
+        let occurrence_digest = std::env::var("RYEOS_TEST_LAUNCHER_OCCURRENCE").unwrap();
         let mut channel =
             unsafe { lillux::take_inherited_duplex_channel_from_env("RYEOS_TEST_LAUNCHER_FD") }
                 .unwrap();
@@ -522,7 +678,10 @@ mod tests {
                 schema: PROTOCOL_SCHEMA,
                 binding: received,
                 challenge: received_challenge,
-            } if received == binding && received_challenge == challenge
+                occurrence_digest: received_occurrence,
+            } if received == binding
+                && received_challenge == challenge
+                && received_occurrence == occurrence_digest
         ));
         write_message(
             &mut channel,
@@ -579,6 +738,7 @@ mod tests {
         let (parent, child_authority) = lillux::inherited_duplex_channel_pair().unwrap();
         let (binding, owner) = binding();
         let challenge = "1".repeat(64);
+        let occurrence_digest = "2".repeat(64);
         let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(5));
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
@@ -590,7 +750,8 @@ mod tests {
                 "RYEOS_TEST_LAUNCHER_BINDING",
                 lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap(),
             )
-            .env("RYEOS_TEST_LAUNCHER_CHALLENGE", &challenge);
+            .env("RYEOS_TEST_LAUNCHER_CHALLENGE", &challenge)
+            .env("RYEOS_TEST_LAUNCHER_OCCURRENCE", &occurrence_digest);
         child_authority
             .bind_to_command(&mut command, "RYEOS_TEST_LAUNCHER_FD")
             .unwrap();
@@ -599,6 +760,7 @@ mod tests {
             parent,
             binding.clone(),
             &challenge,
+            &occurrence_digest,
             deadline,
         )
         .unwrap();

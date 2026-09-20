@@ -36,6 +36,8 @@ pub struct ExternalCandidateLauncherSpec {
     pub cwd: String,
     pub environment: BTreeMap<String, String>,
     pub runtime_mounts: Vec<ExternalCandidateRuntimeMountSpec>,
+    pub max_stdout_bytes: u64,
+    pub max_stderr_bytes: u64,
     pub proc_filesystem: ExternalCandidateProcFilesystem,
     pub contain_process_group: bool,
     pub nested_sandbox: bool,
@@ -81,6 +83,11 @@ impl ExternalCandidateLauncherSpec {
         ensure!(
             self.runtime_mounts.len() <= MAX_LAUNCHER_RUNTIME_MOUNTS,
             "external launcher has too many runtime mounts"
+        );
+        ensure!(
+            (1..=64 * 1024 * 1024).contains(&self.max_stdout_bytes)
+                && (1..=64 * 1024 * 1024).contains(&self.max_stderr_bytes),
+            "external launcher output bounds are invalid"
         );
         require_absolute_normalized(Path::new(&self.executable), "executable")?;
         require_absolute_normalized(Path::new(&self.cwd), "cwd")?;
@@ -131,6 +138,7 @@ fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
 pub struct PreparedExternalCandidateLauncherRequest {
     pub request: lillux::SubprocessRequest,
     pub bootstrap_digest: String,
+    pub authority: ryeos_state::PinnedStateAuthority,
 }
 
 /// Bind exact node-owned descriptors into a credential-free dedicated
@@ -157,6 +165,8 @@ pub fn prepare_launcher_subprocess_request(
     let bootstrap_digest = lillux::sha256_hex(&bytes);
     let bootstrap = lillux::sealed_memfd(c"ryeos-external-candidate-bootstrap", &bytes)
         .map_err(anyhow::Error::msg)?;
+    let authority =
+        ryeos_state::PinnedStateAuthority::from_external_candidate_runtime(runtime.try_clone()?)?;
     let runtime = runtime.inherited_descriptor_authority()?;
     let private_parent = private_parent.inherited_descriptor_authority()?;
     let mut request = lillux::SubprocessRequest {
@@ -195,6 +205,7 @@ pub fn prepare_launcher_subprocess_request(
     Ok(PreparedExternalCandidateLauncherRequest {
         request,
         bootstrap_digest,
+        authority,
     })
 }
 
@@ -344,6 +355,8 @@ mod tests {
                 destination: "/runtime".into(),
                 layer: 0,
             }],
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
             proc_filesystem: ExternalCandidateProcFilesystem::PidNamespace,
             contain_process_group: true,
             nested_sandbox: true,
@@ -396,6 +409,16 @@ mod tests {
                 .to_string()
                 .contains("duplicated")
         );
+
+        let mut changed = valid;
+        changed.max_stdout_bytes = 0;
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("output bounds")
+        );
     }
 
     #[test]
@@ -432,9 +455,14 @@ mod tests {
         let runtime_path = temporary.path().join("runtime");
         let private_path = temporary.path().join("private");
         let mount_path = temporary.path().join("mount");
-        std::fs::create_dir(&runtime_path).unwrap();
         std::fs::create_dir(&private_path).unwrap();
         std::fs::create_dir(&mount_path).unwrap();
+        let state = ryeos_state::StateDb::open(
+            &runtime_path,
+            std::sync::Arc::new(ryeos_state::TrustStore::new()),
+        )
+        .unwrap();
+        drop(state);
 
         let root = lillux::PinnedDirectory::open(temporary.path())
             .unwrap()

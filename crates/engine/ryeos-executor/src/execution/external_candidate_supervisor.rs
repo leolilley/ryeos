@@ -6,11 +6,18 @@
 //! launcher request and waits for the exact durable-finish acknowledgement
 //! before permitting a later action.
 
-use anyhow::{Result, ensure};
-use ryeos_state::external_execution::AuthenticatedExecutionFrame;
+use anyhow::{Context as _, Result, ensure};
+use ryeos_state::external_execution::export::CandidateExportAssembler;
 use ryeos_state::external_execution::guest_journal::{
-    GuestApplicationClaim, GuestApplicationToken, GuestProtocolApplication,
-    GuestTerminalApplicationClaim, LiveGuestJournal, RevocationAppendOutcome,
+    DurableNativeCandidateCapture, GuestApplicationClaim, GuestApplicationToken,
+    GuestProtocolApplication, GuestTerminalApplicationClaim, LiveGuestJournal,
+    RevocationAppendOutcome,
+};
+use ryeos_state::external_execution::{
+    AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelPayload,
+};
+use ryeos_state::{
+    DurableCasPublicationKey, DurableExternalCandidateReceipt, PinnedStateAuthority,
 };
 
 /// Narrow live-launcher capability. Implementations must represent one exact
@@ -20,6 +27,10 @@ pub trait ExternalCandidateLauncherClient {
     fn release(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize>;
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
+    fn capture(
+        &mut self,
+        frame: &AuthenticatedExecutionFrame,
+    ) -> Result<DurableNativeCandidateCapture>;
     fn acknowledge_finish(&mut self, frame_digest: &str) -> Result<()>;
 }
 
@@ -31,6 +42,11 @@ pub enum SupervisorApplicationOutcome {
     ClaimedUnknown,
     Revoked,
     RevokedAwaitingCleanup,
+}
+
+pub struct SupervisorCaptureOutcome {
+    pub receipt: DurableExternalCandidateReceipt,
+    pub sealed_frame: String,
 }
 
 pub struct SerializedExternalCandidateSupervisor<L> {
@@ -50,6 +66,31 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
 
     pub fn journal(&self) -> &LiveGuestJournal {
         &self.journal
+    }
+
+    pub fn publish_ready(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        let binding = self.journal.binding();
+        let ready = self.journal.author_supervisor_frame(
+            signing_key,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+        )?;
+        let GuestApplicationClaim::New(token) = self.journal.claim(
+            ChannelDirection::SupervisorToOwner,
+            ready.frame().sequence,
+            ready.digest(),
+        )?
+        else {
+            anyhow::bail!("fresh supervisor readiness was not claimable")
+        };
+        let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
+        self.journal.finish(performed)?;
+        Ok(ready)
     }
 
     pub fn dispatch_release(&mut self, wire: &[u8]) -> Result<SupervisorApplicationOutcome> {
@@ -152,6 +193,102 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 Ok(SupervisorApplicationOutcome::RevokedAwaitingCleanup)
             }
         }
+    }
+
+    pub fn dispatch_quiesce(
+        &mut self,
+        wire: &[u8],
+        authority: &PinnedStateAuthority,
+        signing_key: &lillux::crypto::SigningKey,
+        occurrence_digest: &str,
+        bootstrap_digest: &str,
+    ) -> Result<SupervisorCaptureOutcome> {
+        ensure!(
+            self.pending_protocol.is_none(),
+            "quiescence cannot overtake pending protocol input"
+        );
+        let quiesce = ryeos_state::external_execution::SignedExecutionFrame::decode_and_verify(
+            wire,
+            self.journal.binding(),
+            lillux::time::timestamp_millis(),
+        )?;
+        let token = match self.journal.record_and_claim(wire)? {
+            GuestApplicationClaim::New(token) => token,
+            GuestApplicationClaim::AlreadyClaimed => {
+                anyhow::bail!("external quiescence is claimed with an uncertain native outcome")
+            }
+            GuestApplicationClaim::AlreadyApplied => {
+                anyhow::bail!("external quiescence replay requires durable export reconciliation")
+            }
+            GuestApplicationClaim::Revoked => {
+                anyhow::bail!("external quiescence was durably revoked")
+            }
+        };
+        let (capture, performed) = self
+            .journal
+            .apply_once(token, |frame| self.launcher.capture(frame))?;
+        ensure!(
+            capture.occurrence_digest == occurrence_digest,
+            "launcher capture changed its exact occurrence"
+        );
+        self.journal
+            .record_native_capture(authority, &quiesce, &capture)?;
+        let acknowledged = self.journal.finish(performed)?;
+        self.launcher
+            .acknowledge_finish(acknowledged.frame_digest())?;
+
+        let sealed = self.journal.author_supervisor_frame(
+            signing_key,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: capture.snapshot_hash.clone(),
+                completion_request_digest: capture.completion_request_digest.clone(),
+                writer_exclusion_evidence_hash: capture.writer_exclusion_evidence_hash.clone(),
+            },
+        )?;
+        let guard = authority.acquire_shared_guard()?;
+        let mut assembler = CandidateExportAssembler::new(
+            authority,
+            &guard,
+            self.journal.binding().clone(),
+            &quiesce,
+        )?;
+        let imported = assembler
+            .accept(&sealed)?
+            .context("sealed external candidate did not complete validation")?;
+        let retained = imported.validate_retention(authority, &guard, self.journal.binding())?;
+        let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
+            &self.journal.binding().digest()?,
+            occurrence_digest,
+        )?;
+        let mut stage = authority
+            .require_recovery()?
+            .open_durable_cas_upload_admitted(
+                &guard,
+                &capture.durable_stage_id,
+                bootstrap_digest,
+            )?;
+        stage.ensure_publication_contract(&publication_key, None)?;
+        let receipt = self.journal.retain_export(
+            authority,
+            &retained,
+            &sealed,
+            occurrence_digest,
+            &mut stage,
+        )?;
+        let GuestApplicationClaim::New(token) = self.journal.claim(
+            ChannelDirection::SupervisorToOwner,
+            sealed.frame().sequence,
+            sealed.digest(),
+        )?
+        else {
+            anyhow::bail!("fresh sealed export was not claimable")
+        };
+        let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
+        self.journal.finish(performed)?;
+        Ok(SupervisorCaptureOutcome {
+            receipt,
+            sealed_frame: sealed.canonical().to_owned(),
+        })
     }
 
     pub fn into_parts(self) -> (LiveGuestJournal, L) {

@@ -18,7 +18,7 @@ use super::export::{ValidatedCandidateRetention, validated_retained_candidate_ro
 use super::journal::{self, ApplicationClaim, JournalOwner};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding,
-    ExecutionChannelPayload, SignedExecutionFrame,
+    ExecutionChannelPayload, ExecutionFrame, SignedExecutionFrame,
 };
 use crate::{
     DurableCasPublicationKey, DurableCasUploadStage, DurableExternalCandidateReceipt,
@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 3;
+const SCHEMA_EPOCH: i64 = 4;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=3),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=4),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -64,6 +64,16 @@ CREATE TABLE external_guest_export_retention (
     sealed_frame_digest TEXT NOT NULL UNIQUE,
     occurrence_digest TEXT NOT NULL UNIQUE,
     durable_receipt_id TEXT NOT NULL UNIQUE,
+    snapshot_hash TEXT NOT NULL,
+    completion_request_digest TEXT NOT NULL,
+    writer_exclusion_evidence_hash TEXT NOT NULL,
+    FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
+);
+CREATE TABLE external_guest_native_capture (
+    binding_digest TEXT PRIMARY KEY,
+    quiesce_frame_digest TEXT NOT NULL UNIQUE,
+    occurrence_digest TEXT NOT NULL UNIQUE,
+    durable_stage_id TEXT NOT NULL UNIQUE,
     snapshot_hash TEXT NOT NULL,
     completion_request_digest TEXT NOT NULL,
     writer_exclusion_evidence_hash TEXT NOT NULL,
@@ -124,6 +134,12 @@ BEGIN SELECT RAISE(ABORT, 'external guest export retention is immutable'); END;
 CREATE TRIGGER external_guest_retention_no_delete
 BEFORE DELETE ON external_guest_export_retention
 BEGIN SELECT RAISE(ABORT, 'external guest export retention requires disposition'); END;
+CREATE TRIGGER external_guest_native_capture_no_update
+BEFORE UPDATE ON external_guest_native_capture
+BEGIN SELECT RAISE(ABORT, 'external guest native capture is immutable'); END;
+CREATE TRIGGER external_guest_native_capture_no_delete
+BEFORE DELETE ON external_guest_native_capture
+BEGIN SELECT RAISE(ABORT, 'external guest native capture requires reconciliation'); END;
 "#;
 
 fn complete_schema() -> String {
@@ -217,6 +233,17 @@ impl LauncherOccurrenceEvidence {
 
 pub struct AuthenticatedLauncherReady {
     handshake_transcript_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableNativeCandidateCapture {
+    pub quiesce_frame_digest: String,
+    pub occurrence_digest: String,
+    pub durable_stage_id: String,
+    pub snapshot_hash: String,
+    pub completion_request_digest: String,
+    pub writer_exclusion_evidence_hash: String,
 }
 
 impl AuthenticatedLauncherReady {
@@ -335,6 +362,10 @@ impl PreparedGuestJournal {
 
     pub fn store_identity(&self) -> &GuestJournalStoreIdentity {
         &self.0.store_identity
+    }
+
+    pub fn bootstrap_digest(&self) -> &str {
+        &self.0.bootstrap_digest
     }
 
     pub fn create(
@@ -547,6 +578,74 @@ impl LiveGuestJournal {
         )?;
         tx.commit()?;
         Ok(result)
+    }
+
+    /// Author one exact supervisor observation from the retained directional
+    /// frontiers and append it in the same SQLite writer transaction. A commit
+    /// error is uncertain publication and must never be retried by guessing a
+    /// successor; recovery reads the journal instead.
+    pub fn author_supervisor_frame(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+        payload: ExecutionChannelPayload,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let binding_digest = self.0.binding.digest()?;
+        let prior: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT sequence,frame_digest FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                 ORDER BY sequence DESC LIMIT 1",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (sequence, previous_frame_digest) = match prior {
+            Some((sequence, digest)) => (
+                u64::try_from(sequence)?
+                    .checked_add(1)
+                    .context("supervisor frame sequence overflow")?,
+                Some(digest),
+            ),
+            None => (1, None),
+        };
+        let acknowledged_peer_sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'",
+            [&binding_digest],
+            |row| row.get(0),
+        )?;
+        let signed = SignedExecutionFrame::sign(
+            ExecutionFrame {
+                schema: 1,
+                binding_digest,
+                direction: ChannelDirection::SupervisorToOwner,
+                sequence,
+                previous_frame_digest,
+                acknowledged_peer_sequence: u64::try_from(acknowledged_peer_sequence)?,
+                payload,
+            },
+            &self.0.binding,
+            signing_key,
+        )?;
+        let wire = lillux::canonical_json(&serde_json::to_value(signed)?)?.into_bytes();
+        ensure!(
+            journal::append_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                &wire,
+            )?,
+            "fresh supervisor observation unexpectedly duplicated"
+        );
+        tx.commit()?;
+        SignedExecutionFrame::decode_and_verify(
+            &wire,
+            &self.0.binding,
+            lillux::time::timestamp_millis(),
+        )
     }
 
     pub fn claim(
@@ -953,6 +1052,127 @@ impl LiveGuestJournal {
     pub fn validate(&self) -> Result<()> {
         self.0.validate()
     }
+
+    /// Join the exact native capture response to its authenticated quiesce
+    /// command and already-durable occurrence roots. This does not seal or
+    /// publish the candidate; it makes a launcher response restart-auditable.
+    pub fn record_native_capture(
+        &self,
+        authority: &PinnedStateAuthority,
+        quiesce: &AuthenticatedExecutionFrame,
+        capture: &DurableNativeCandidateCapture,
+    ) -> Result<()> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        for (value, label) in [
+            (&capture.quiesce_frame_digest, "quiesce frame digest"),
+            (&capture.occurrence_digest, "launcher occurrence digest"),
+            (&capture.snapshot_hash, "candidate snapshot hash"),
+            (
+                &capture.completion_request_digest,
+                "completion request digest",
+            ),
+            (
+                &capture.writer_exclusion_evidence_hash,
+                "writer exclusion evidence hash",
+            ),
+        ] {
+            hash(value, label)?;
+        }
+        ensure!(
+            quiesce.digest() == capture.quiesce_frame_digest
+                && quiesce.frame().binding_digest == self.0.binding.digest()?
+                && quiesce.frame().direction == ChannelDirection::OwnerToSupervisor
+                && matches!(
+                    &quiesce.frame().payload,
+                    ExecutionChannelPayload::Quiesce { completion_request_digest }
+                        if completion_request_digest == &capture.completion_request_digest
+                ),
+            "native capture changed its authenticated quiesce authority"
+        );
+        ensure!(
+            self.0.state_runtime_identity_json
+                == lillux::canonical_json(&serde_json::to_value(
+                    authority.runtime_directory().identity()?
+                )?)?,
+            "native capture changed receiver CAS authority"
+        );
+        let guard = authority.acquire_shared_guard()?;
+        let (objects, blobs) = validated_retained_candidate_root_sets(
+            authority,
+            &guard,
+            &self.0.binding,
+            &capture.snapshot_hash,
+            &capture.completion_request_digest,
+            &capture.writer_exclusion_evidence_hash,
+        )?;
+        let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
+            &self.0.binding.digest()?,
+            &capture.occurrence_digest,
+        )?;
+        let stage = authority
+            .require_recovery()?
+            .open_durable_cas_upload_admitted(
+                &guard,
+                &capture.durable_stage_id,
+                &self.0.bootstrap_digest,
+            )?;
+        stage.ensure_publication_contract(&publication_key, None)?;
+        ensure!(
+            stage.admitted_target_hash().is_none()
+                && stage.protected_object_hashes() == &objects
+                && stage.protected_blob_hashes() == &blobs
+                && stage.protected_large_object_hashes().is_empty(),
+            "native capture changed its exact durable occurrence roots"
+        );
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let application: String = tx.query_row(
+            "SELECT application FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+             AND frame_digest=?2
+             AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
+            params![self.0.binding.digest()?, capture.quiesce_frame_digest],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            application == "claimed",
+            "native capture has no exact claimed quiesce application"
+        );
+        let changed = tx.execute(
+            "INSERT OR IGNORE INTO external_guest_native_capture VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                self.0.binding.digest()?,
+                capture.quiesce_frame_digest,
+                capture.occurrence_digest,
+                capture.durable_stage_id,
+                capture.snapshot_hash,
+                capture.completion_request_digest,
+                capture.writer_exclusion_evidence_hash
+            ],
+        )?;
+        if changed == 0 {
+            let exact: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_guest_native_capture
+                 WHERE binding_digest=?1 AND quiesce_frame_digest=?2
+                 AND occurrence_digest=?3 AND durable_stage_id=?4
+                 AND snapshot_hash=?5 AND completion_request_digest=?6
+                 AND writer_exclusion_evidence_hash=?7)",
+                params![
+                    self.0.binding.digest()?,
+                    capture.quiesce_frame_digest,
+                    capture.occurrence_digest,
+                    capture.durable_stage_id,
+                    capture.snapshot_hash,
+                    capture.completion_request_digest,
+                    capture.writer_exclusion_evidence_hash
+                ],
+                |row| row.get(0),
+            )?;
+            ensure!(exact, "native capture conflicts with its durable record");
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 impl GuestStore {
@@ -1114,6 +1334,66 @@ impl GuestStore {
             "external guest recovery changed receiver CAS authority"
         );
         let guard = authority.acquire_shared_guard()?;
+        let mut captures = self.conn.prepare(
+            "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
+                    snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
+             FROM external_guest_native_capture ORDER BY binding_digest",
+        )?;
+        let captures = captures
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (quiesce, occurrence, stage_id, snapshot, completion, evidence) in captures {
+            let application: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT application FROM external_execution_frame
+                     WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                     AND frame_digest=?2
+                     AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'
+                     AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?3",
+                    params![self.binding.digest()?, quiesce, completion],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                matches!(application.as_deref(), Some("claimed" | "applied")),
+                "guest native capture lost its authenticated quiesce application"
+            );
+            let (objects, blobs) = validated_retained_candidate_root_sets(
+                authority,
+                &guard,
+                &self.binding,
+                &snapshot,
+                &completion,
+                &evidence,
+            )?;
+            let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
+                &self.binding.digest()?,
+                &occurrence,
+            )?;
+            let stage = authority
+                .require_recovery()?
+                .open_durable_cas_upload_admitted(&guard, &stage_id, &self.bootstrap_digest)?;
+            stage.ensure_publication_contract(&publication_key, None)?;
+            ensure!(
+                stage
+                    .admitted_target_hash()
+                    .is_none_or(|target| target == snapshot)
+                    && stage.protected_object_hashes() == &objects
+                    && stage.protected_blob_hashes() == &blobs
+                    && stage.protected_large_object_hashes().is_empty(),
+                "guest native capture changed its exact durable occurrence roots"
+            );
+        }
         let mut rows = self.conn.prepare(
             "SELECT sealed_frame_digest,occurrence_digest,durable_receipt_id,
                     snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
@@ -1366,7 +1646,11 @@ fn journal_name() -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_execution::{ExecutionFrame, SignedExecutionFrame};
+    use crate::external_execution::{
+        ExecutionFrame, NativeNamespaceExit, NativeWriterExclusionMechanism,
+        NativeWriterExclusionObservation, SignedExecutionFrame,
+    };
+    use crate::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
 
@@ -1656,6 +1940,264 @@ mod tests {
             GuestApplicationClaim::New(_)
         ));
         live.validate().unwrap();
+    }
+
+    #[test]
+    fn supervisor_authoring_uses_retained_frontiers_and_exact_role_key() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (live, binding, owner, supervisor, _bootstrap, _store_identity) =
+            live_store(&root, &authority);
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        live.record_frame(&release).unwrap();
+        let GuestApplicationClaim::New(token) = live
+            .claim(ChannelDirection::OwnerToSupervisor, 1, &release_digest)
+            .unwrap()
+        else {
+            panic!("release must be newly claimed")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+
+        assert!(
+            live.author_supervisor_frame(&owner, ExecutionChannelPayload::Acknowledge)
+                .is_err()
+        );
+        let observation = live
+            .author_supervisor_frame(&supervisor, ExecutionChannelPayload::Acknowledge)
+            .unwrap();
+        assert_eq!(observation.frame().sequence, 2);
+        assert_eq!(observation.frame().acknowledged_peer_sequence, 1);
+        assert!(observation.frame().previous_frame_digest.is_some());
+        let GuestApplicationClaim::New(token) = live
+            .claim(
+                ChannelDirection::SupervisorToOwner,
+                observation.frame().sequence,
+                observation.digest(),
+            )
+            .unwrap()
+        else {
+            panic!("authored observation must be freshly claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        live.validate().unwrap();
+    }
+
+    #[test]
+    fn native_capture_is_rooted_and_reopen_validates_exact_quiesce_coordinates() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let cas = authority.cas_store().unwrap();
+        let policy = ProjectSnapshotPolicy::new(
+            crate::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let bytes = b"external-candidate-base";
+        let file = ProjectFile {
+            blob_hash: cas.store_blob(bytes).unwrap(),
+            size: bytes.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let file_hash = cas.store_object(&file.to_value()).unwrap();
+        let tree = ProjectTree {
+            files: [("main.py".to_owned(), file_hash.clone())]
+                .into_iter()
+                .collect(),
+        };
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let base = ProjectSnapshot {
+            project_tree_hash: tree_hash.clone(),
+            effective_policy_hash: policy_hash.clone(),
+            parent_hashes: vec![],
+            created_at: "2026-09-20T00:00:00Z".into(),
+            message: None,
+            source: "external-native-capture-test".into(),
+        };
+        let base_hash = cas.store_object(&base.to_value()).unwrap();
+        let (mut binding, owner, supervisor) = binding();
+        binding.base_snapshot_hash = base_hash.clone();
+        let bootstrap = "9".repeat(64);
+        let directory = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        directory.tighten_owner_private_directory().unwrap();
+        let prepared =
+            PreparedGuestJournal::create(directory, &authority, &bootstrap, binding.clone())
+                .unwrap();
+        let store_identity = prepared.store_identity().clone();
+        let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
+            lillux::ExactProcessIdentity {
+                boot_id: "native-capture-boot".into(),
+                target_pid: 200,
+                target_start_time_ticks: 300,
+                group_leader_pid: 200,
+                group_leader_start_time_ticks: 300,
+            },
+            &"7".repeat(64),
+            &"6".repeat(64),
+        )
+        .unwrap();
+        let occurrence_digest = occurrence.digest().unwrap();
+        let live = prepared
+            .bind_launcher(occurrence)
+            .unwrap()
+            .mark_launcher_ready(
+                AuthenticatedLauncherReady::from_handshake_transcript(&"5".repeat(64)).unwrap(),
+            )
+            .unwrap();
+        let ready = live
+            .author_supervisor_frame(
+                &supervisor,
+                ExecutionChannelPayload::Ready {
+                    supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                    base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                },
+            )
+            .unwrap();
+        let GuestApplicationClaim::New(token) = live
+            .claim(
+                ChannelDirection::SupervisorToOwner,
+                ready.frame().sequence,
+                ready.digest(),
+            )
+            .unwrap()
+        else {
+            panic!("ready observation must be freshly claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        let GuestApplicationClaim::New(token) = live.record_and_claim(&release).unwrap() else {
+            panic!("release must be freshly claimable")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        let completion = "8".repeat(64);
+        let (quiesce_wire, quiesce_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            1,
+            ExecutionChannelPayload::Quiesce {
+                completion_request_digest: completion.clone(),
+            },
+        );
+        let quiesce = SignedExecutionFrame::decode_and_verify(
+            &quiesce_wire,
+            &binding,
+            lillux::time::timestamp_millis(),
+        )
+        .unwrap();
+        let GuestApplicationClaim::New(quiesce_token) =
+            live.record_and_claim(&quiesce_wire).unwrap()
+        else {
+            panic!("quiesce must be freshly claimable")
+        };
+
+        let candidate = ProjectSnapshot {
+            project_tree_hash: tree_hash,
+            effective_policy_hash: policy_hash,
+            parent_hashes: vec![base_hash],
+            created_at: "2026-09-20T00:00:01Z".into(),
+            message: None,
+            source: "external_candidate_terminal_capture".into(),
+        };
+        let snapshot_hash = cas.store_object(&candidate.to_value()).unwrap();
+        let observation = NativeWriterExclusionObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            completion_request_digest: completion.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Code(0),
+        };
+        let evidence_hash = cas
+            .store_blob(
+                lillux::canonical_json(&serde_json::to_value(observation).unwrap())
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let (objects, blobs) = validated_retained_candidate_root_sets(
+            &authority,
+            &guard,
+            &binding,
+            &snapshot_hash,
+            &completion,
+            &evidence_hash,
+        )
+        .unwrap();
+        let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
+            &binding.digest().unwrap(),
+            &occurrence_digest,
+        )
+        .unwrap();
+        let mut stage = authority
+            .require_recovery()
+            .unwrap()
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &bootstrap,
+                "external-candidate-native-capture",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        stage
+            .protect_cas_closure(
+                &guard,
+                objects.iter().map(String::as_str),
+                blobs.iter().map(String::as_str),
+            )
+            .unwrap();
+        let stage_id = stage.staging_id().to_owned();
+        drop(stage);
+        drop(guard);
+        let capture = DurableNativeCandidateCapture {
+            quiesce_frame_digest: quiesce_digest,
+            occurrence_digest,
+            durable_stage_id: stage_id,
+            snapshot_hash,
+            completion_request_digest: completion,
+            writer_exclusion_evidence_hash: evidence_hash,
+        };
+        let (_, performed) = live.apply_once(quiesce_token, |_| Ok(())).unwrap();
+        live.record_native_capture(&authority, &quiesce, &capture)
+            .unwrap();
+        live.finish(performed).unwrap();
+        drop(live);
+        RecoveredGuestJournal::open(
+            lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
+            &authority,
+            &store_identity,
+            &bootstrap,
+            &binding,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
     }
 
     #[test]

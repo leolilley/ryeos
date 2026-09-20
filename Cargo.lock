@@ -2821,6 +2821,7 @@ dependencies = [
  "anyhow",
  "lillux",
  "ryeos-executor",
+ "tempfile",
 ]
 
 [[package]]

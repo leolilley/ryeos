@@ -426,6 +426,20 @@ impl DurableCasUploadStage {
         self.record.admitted_target_hash.as_deref()
     }
 
+    /// Exact currently protected roots. These are recovery evidence only;
+    /// callers must still validate the referenced CAS closure independently.
+    pub fn protected_object_hashes(&self) -> &BTreeSet<String> {
+        &self.record.object_hashes
+    }
+
+    pub fn protected_blob_hashes(&self) -> &BTreeSet<String> {
+        &self.record.blob_hashes
+    }
+
+    pub fn protected_large_object_hashes(&self) -> &BTreeSet<String> {
+        &self.record.large_object_hashes
+    }
+
     pub fn ensure_publication_contract(
         &self,
         publication_key: &DurableCasPublicationKey,
