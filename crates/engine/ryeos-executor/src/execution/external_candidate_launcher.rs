@@ -429,7 +429,7 @@ mod tests {
         let now = lillux::time::timestamp_millis();
         let program = program();
         ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: "T-external-launcher-bootstrap".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-external-launcher-bootstrap".into(),
@@ -444,6 +444,7 @@ mod tests {
             issued_at_ms: now - 1_000,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 512 * 1024,
             max_frames: 16,
             max_bytes: 1024 * 1024,
         }

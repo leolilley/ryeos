@@ -686,6 +686,31 @@ pub fn pending_transport_frames(
     frame_limit: usize,
     byte_limit: usize,
 ) -> Result<Vec<PendingExecutionFrame>> {
+    pending_transport_frames_after(
+        conn,
+        owner,
+        placement,
+        direction,
+        0,
+        frame_limit,
+        byte_limit,
+    )
+}
+
+/// Return pending frames after a process-local transport cursor while still
+/// validating every retained predecessor from the peer's signed cumulative
+/// frontier. The cursor grants no application or replay authority; callers may
+/// advance it only across exact acknowledgement frames whose HTTP delivery they
+/// observed, because the protocol intentionally suppresses ack-of-ack.
+pub fn pending_transport_frames_after(
+    conn: &Connection,
+    owner: &impl JournalOwner,
+    placement: &str,
+    direction: ChannelDirection,
+    after_sequence: u64,
+    frame_limit: usize,
+    byte_limit: usize,
+) -> Result<Vec<PendingExecutionFrame>> {
     if frame_limit == 0 || frame_limit > 256 || byte_limit == 0 || byte_limit > 16 * 1024 * 1024 {
         bail!("external transport response bounds are invalid");
     }
@@ -757,6 +782,9 @@ pub fn pending_transport_frames(
             // bytes are not replayed, while later signed Claimed/Applied proof
             // remains admissible as historical evidence.
             break;
+        }
+        if sequence <= after_sequence {
+            continue;
         }
         let next_bytes = bytes
             .checked_add(canonical.len())
@@ -1537,7 +1565,7 @@ mod tests {
         let owner = lillux::crypto::generate_signing_key();
         let supervisor = lillux::crypto::generate_signing_key();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: "T-shared-journal".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -1552,6 +1580,7 @@ mod tests {
             issued_at_ms,
             execution_deadline_ms,
             expires_at_ms,
+            candidate_export_max_bytes: 512 * 1024,
             max_frames: 64,
             max_bytes: 1024 * 1024,
         };

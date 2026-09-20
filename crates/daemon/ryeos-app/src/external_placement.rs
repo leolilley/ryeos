@@ -739,6 +739,7 @@ pub fn attach_external_execution_channel(
         )
         .context("external channel expiry overflow")?;
     let max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+    let candidate_export_max_bytes = contract.max_export_bytes.min(max_bytes);
     let max_frames = u32::try_from(
         max_bytes
             .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
@@ -748,7 +749,7 @@ pub fn attach_external_execution_channel(
     let mut nonce = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let binding = ryeos_state::external_execution::ExecutionChannelBinding {
-        schema: 2,
+        schema: 3,
         placement_thread_id: authenticated.placement_thread_id.clone(),
         allocation_request_digest: allocation.reservation.request_digest,
         occurrence_id: occurrence.occurrence_id.clone(),
@@ -763,6 +764,7 @@ pub fn attach_external_execution_channel(
         issued_at_ms,
         execution_deadline_ms,
         expires_at_ms,
+        candidate_export_max_bytes,
         max_frames,
         max_bytes,
     };
@@ -1418,7 +1420,7 @@ fn supervisor_activation(
         "external supervisor program contradicts its protected lifecycle binding"
     );
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
-        schema: 2,
+        schema: 3,
         controller: contract.controller_transport.clone(),
         tls_root_certificates_der_base64: contract
             .controller_tls_root_certificates_der_base64
@@ -1436,6 +1438,7 @@ fn supervisor_activation(
         attachment_deadline_ms,
         execution_timeout_seconds: reservation.timeout_seconds,
         post_execution_timeout_seconds,
+        candidate_export_max_bytes: contract.max_export_bytes.min(channel_max_bytes),
         channel_max_bytes,
     };
     bootstrap.validate()?;
@@ -2007,7 +2010,7 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ryeos_state::external_execution::ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -2025,6 +2028,7 @@ mod tests {
             issued_at_ms: now,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 512,
             max_frames: 64,
             max_bytes: 1024,
         };

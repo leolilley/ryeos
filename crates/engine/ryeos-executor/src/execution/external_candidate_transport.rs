@@ -53,6 +53,7 @@ pub trait ExternalSupervisorRuntime {
     fn ready_frame(&self) -> &str;
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
     fn poll_protocol_output(&mut self) -> Result<Option<String>>;
+    fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>>;
 }
 
 impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
@@ -70,6 +71,13 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
 
     fn poll_protocol_output(&mut self) -> Result<Option<String>> {
         LiveInheritedExternalCandidateSupervisor::poll_protocol_output(self)
+    }
+
+    fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>> {
+        LiveInheritedExternalCandidateSupervisor::next_pending_transport_frame_after(
+            self,
+            after_sequence,
+        )
     }
 }
 
@@ -166,6 +174,7 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     /// presented. The method never sleeps and never converts a timeout into
     /// evidence about remote execution.
     pub fn step(&mut self) -> Result<ExternalTransportProgress> {
+        self.enqueue_next_durable_supervisor_frame()?;
         if self.pending_supervisor.is_empty()
             && self.revocation_progress.is_none()
             && !self.export_applied
@@ -425,9 +434,6 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
 
     fn enqueue_dispatch(&mut self, dispatched: ExternalOwnerFrameDispatch) -> Result<()> {
         let mut frames = vec![dispatched.acknowledgement_frame.into_bytes()];
-        if let ExternalOwnerFrameOutcome::Capture(capture) = dispatched.outcome {
-            frames.push(capture.sealed_frame.into_bytes());
-        }
         frames.sort_by_key(|wire| {
             SignedExecutionFrame::decode_and_verify(
                 wire,
@@ -444,6 +450,63 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     }
 
     fn enqueue_supervisor_wire(&mut self, wire: Vec<u8>) -> Result<()> {
+        self.enqueue_supervisor_wire_inner(wire, false)
+    }
+
+    /// Merge the durable journal backlog with process-local output. Signed
+    /// application/data observations remain at the head until peer evidence
+    /// advances the journal. Acknowledgements are different: the controller
+    /// intentionally suppresses ack-of-ack, so one whose exact bytes received
+    /// a successful HTTP response may be crossed by this process-local cursor.
+    /// The journal query still validates every skipped predecessor and the
+    /// cursor never crosses an unsent or forked sequence.
+    fn enqueue_next_durable_supervisor_frame(&mut self) -> Result<()> {
+        let mut after_sequence = 0_u64;
+        for _ in 0..self.runtime.binding().max_frames {
+            let Some(wire) = self
+                .runtime
+                .next_pending_transport_frame_after(after_sequence)?
+            else {
+                return Ok(());
+            };
+            let verified = SignedExecutionFrame::decode_and_verify(
+                &wire,
+                self.runtime.binding(),
+                lillux::time::timestamp_millis(),
+            )?;
+            if let Some(delivered_digest) =
+                self.delivered_supervisor.get(&verified.frame().sequence)
+            {
+                ensure!(
+                    delivered_digest == verified.digest(),
+                    "external journal forked a delivered supervisor sequence"
+                );
+                if matches!(
+                    verified.frame().payload,
+                    ExecutionChannelPayload::Acknowledge { .. }
+                ) {
+                    after_sequence = verified.frame().sequence;
+                    continue;
+                }
+            }
+            return self.enqueue_durable_supervisor_wire(wire);
+        }
+        bail!("external durable transport cursor exceeds the admitted frame bound")
+    }
+
+    /// A successful exchange is not a signed cumulative receipt. If the
+    /// journal still reports an exact frame as pending, retain it for replay
+    /// even when this process observed an earlier HTTP delivery. Only peer
+    /// evidence advancing the journal frontier permits a later sequence.
+    fn enqueue_durable_supervisor_wire(&mut self, wire: Vec<u8>) -> Result<()> {
+        self.enqueue_supervisor_wire_inner(wire, true)
+    }
+
+    fn enqueue_supervisor_wire_inner(
+        &mut self,
+        wire: Vec<u8>,
+        retry_if_delivered: bool,
+    ) -> Result<()> {
         let verified = SignedExecutionFrame::decode_and_verify(
             &wire,
             self.runtime.binding(),
@@ -465,7 +528,9 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 delivered_digest == verified.digest(),
                 "external dispatcher forked a delivered supervisor sequence"
             );
-            return Ok(());
+            if !retry_if_delivered {
+                return Ok(());
+            }
         }
         match self.pending_supervisor.entry(verified.frame().sequence) {
             std::collections::btree_map::Entry::Vacant(entry) => {
@@ -493,11 +558,17 @@ fn validate_digest(value: &str, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Arc;
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use ryeos_state::external_execution::guest_journal::{
+        AuthenticatedLauncherReady, GuestApplicationClaim, LauncherOccurrenceEvidence,
+        LiveGuestJournal, PreparedGuestJournal,
+    };
     use ryeos_state::external_execution::{
-        AuthenticatedExecutionFrame, ExecutionFrame, ExecutionFrameApplication,
+        AuthenticatedExecutionFrame, ExecutionFrame, ExecutionFrameApplication, ExportContentKind,
     };
 
     use super::*;
@@ -516,6 +587,7 @@ mod tests {
         fail_next_dispatch: bool,
         protocol_outputs: VecDeque<Vec<u8>>,
         protocol_output_polls: usize,
+        pending_transport: RefCell<VecDeque<Vec<u8>>>,
         last_acknowledgement: Option<(u64, String, ExecutionFrameApplication, String)>,
     }
 
@@ -550,6 +622,7 @@ mod tests {
                 fail_next_dispatch: false,
                 protocol_outputs: VecDeque::new(),
                 protocol_output_polls: 0,
+                pending_transport: RefCell::new(VecDeque::new()),
                 last_acknowledgement: None,
             }
         }
@@ -705,6 +778,340 @@ mod tests {
             self.previous_digest = frame.digest().to_owned();
             Ok(Some(frame.canonical().to_owned()))
         }
+
+        fn next_pending_transport_frame_after(
+            &self,
+            _after_sequence: u64,
+        ) -> Result<Option<Vec<u8>>> {
+            Ok(self.pending_transport.borrow_mut().pop_front())
+        }
+    }
+
+    struct JournalFixtureRuntime {
+        binding: ExecutionChannelBinding,
+        supervisor_key: lillux::crypto::SigningKey,
+        ready: String,
+        journal: LiveGuestJournal,
+        owner_predecessor_digest: String,
+        protocol_outputs: VecDeque<Vec<u8>>,
+        _state_root: tempfile::TempDir,
+        _journal_root: tempfile::TempDir,
+        _authority: ryeos_state::PinnedStateAuthority,
+    }
+
+    impl JournalFixtureRuntime {
+        fn with_export_batch(
+            binding: ExecutionChannelBinding,
+            owner_key: &lillux::crypto::SigningKey,
+            supervisor_key: lillux::crypto::SigningKey,
+        ) -> Self {
+            let state_root = tempfile::tempdir().unwrap();
+            let state = ryeos_state::StateDb::open(
+                state_root.path(),
+                Arc::new(ryeos_state::TrustStore::new()),
+            )
+            .unwrap();
+            let authority = state.pinned_authority().unwrap();
+            drop(state);
+            let journal_root = tempfile::tempdir().unwrap();
+            let directory = lillux::PinnedDirectory::open(journal_root.path())
+                .unwrap()
+                .unwrap();
+            directory.tighten_owner_private_directory().unwrap();
+            let prepared = PreparedGuestJournal::create(
+                directory,
+                &authority,
+                &"9".repeat(64),
+                binding.clone(),
+            )
+            .unwrap();
+            let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
+                lillux::ExactProcessIdentity {
+                    boot_id: "transport-ordering-boot".into(),
+                    target_pid: 101,
+                    target_start_time_ticks: 202,
+                    group_leader_pid: 101,
+                    group_leader_start_time_ticks: 202,
+                },
+                &"8".repeat(64),
+                &"7".repeat(64),
+            )
+            .unwrap();
+            let journal = prepared
+                .bind_launcher(occurrence)
+                .unwrap()
+                .mark_launcher_ready(
+                    AuthenticatedLauncherReady::from_handshake_transcript(&"6".repeat(64)).unwrap(),
+                )
+                .unwrap();
+            let ready = journal
+                .author_supervisor_frame(
+                    &supervisor_key,
+                    ExecutionChannelPayload::Ready {
+                        supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                        base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    },
+                )
+                .unwrap();
+            let release = sign(
+                &binding,
+                owner_key,
+                ChannelDirection::OwnerToSupervisor,
+                1,
+                None,
+                ready.frame().sequence,
+                ExecutionChannelPayload::Release,
+            );
+            assert!(
+                journal
+                    .record_frame(release.canonical().as_bytes())
+                    .unwrap()
+            );
+            let GuestApplicationClaim::New(release_token) = journal
+                .claim(
+                    ChannelDirection::OwnerToSupervisor,
+                    release.frame().sequence,
+                    release.digest(),
+                )
+                .unwrap()
+            else {
+                panic!("release must be newly claimed")
+            };
+            let (_, release_performed) = journal.apply_once(release_token, |_| Ok(())).unwrap();
+            journal.finish(release_performed).unwrap();
+            let quiesce = sign(
+                &binding,
+                owner_key,
+                ChannelDirection::OwnerToSupervisor,
+                2,
+                Some(release.digest().to_owned()),
+                ready.frame().sequence,
+                ExecutionChannelPayload::Quiesce {
+                    completion_request_digest: "2".repeat(64),
+                },
+            );
+            assert!(
+                journal
+                    .record_frame(quiesce.canonical().as_bytes())
+                    .unwrap()
+            );
+            let GuestApplicationClaim::New(quiesce_token) = journal
+                .claim(
+                    ChannelDirection::OwnerToSupervisor,
+                    quiesce.frame().sequence,
+                    quiesce.digest(),
+                )
+                .unwrap()
+            else {
+                panic!("quiesce must be newly claimed")
+            };
+            let (_, quiesce_performed) = journal.apply_once(quiesce_token, |_| Ok(())).unwrap();
+            journal.finish(quiesce_performed).unwrap();
+            let object_hash = lillux::sha256_hex(b"two durable export chunks");
+            let export = journal
+                .author_supervisor_frames(
+                    &supervisor_key,
+                    [
+                        ExecutionChannelPayload::ExportObjectChunk {
+                            content_kind: ExportContentKind::Blob,
+                            object_hash: object_hash.clone(),
+                            offset: 0,
+                            bytes_base64: STANDARD.encode(b"two durable "),
+                            final_chunk: false,
+                        },
+                        ExecutionChannelPayload::ExportObjectChunk {
+                            content_kind: ExportContentKind::Blob,
+                            object_hash,
+                            offset: 12,
+                            bytes_base64: STANDARD.encode(b"export chunks"),
+                            final_chunk: true,
+                        },
+                        ExecutionChannelPayload::ExportSealed {
+                            candidate_snapshot_hash: "1".repeat(64),
+                            completion_request_digest: "2".repeat(64),
+                            writer_exclusion_evidence_hash: "3".repeat(64),
+                        },
+                    ],
+                )
+                .unwrap();
+            assert_eq!(export.len(), 3);
+            Self {
+                binding,
+                supervisor_key,
+                ready: ready.canonical().to_owned(),
+                journal,
+                owner_predecessor_digest: quiesce.digest().to_owned(),
+                protocol_outputs: VecDeque::new(),
+                _state_root: state_root,
+                _journal_root: journal_root,
+                _authority: authority,
+            }
+        }
+
+        fn running(
+            binding: ExecutionChannelBinding,
+            owner_key: &lillux::crypto::SigningKey,
+            supervisor_key: lillux::crypto::SigningKey,
+            output: Vec<u8>,
+        ) -> Self {
+            let state_root = tempfile::tempdir().unwrap();
+            let state = ryeos_state::StateDb::open(
+                state_root.path(),
+                Arc::new(ryeos_state::TrustStore::new()),
+            )
+            .unwrap();
+            let authority = state.pinned_authority().unwrap();
+            drop(state);
+            let journal_root = tempfile::tempdir().unwrap();
+            let directory = lillux::PinnedDirectory::open(journal_root.path())
+                .unwrap()
+                .unwrap();
+            directory.tighten_owner_private_directory().unwrap();
+            let prepared = PreparedGuestJournal::create(
+                directory,
+                &authority,
+                &"5".repeat(64),
+                binding.clone(),
+            )
+            .unwrap();
+            let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
+                lillux::ExactProcessIdentity {
+                    boot_id: "transport-output-boot".into(),
+                    target_pid: 303,
+                    target_start_time_ticks: 404,
+                    group_leader_pid: 303,
+                    group_leader_start_time_ticks: 404,
+                },
+                &"4".repeat(64),
+                &"3".repeat(64),
+            )
+            .unwrap();
+            let journal = prepared
+                .bind_launcher(occurrence)
+                .unwrap()
+                .mark_launcher_ready(
+                    AuthenticatedLauncherReady::from_handshake_transcript(&"2".repeat(64)).unwrap(),
+                )
+                .unwrap();
+            let ready = journal
+                .author_supervisor_frame(
+                    &supervisor_key,
+                    ExecutionChannelPayload::Ready {
+                        supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                        base_snapshot_hash: binding.base_snapshot_hash.clone(),
+                    },
+                )
+                .unwrap();
+            let release = sign(
+                &binding,
+                owner_key,
+                ChannelDirection::OwnerToSupervisor,
+                1,
+                None,
+                ready.frame().sequence,
+                ExecutionChannelPayload::Release,
+            );
+            assert!(
+                journal
+                    .record_frame(release.canonical().as_bytes())
+                    .unwrap()
+            );
+            let GuestApplicationClaim::New(release_token) = journal
+                .claim(
+                    ChannelDirection::OwnerToSupervisor,
+                    release.frame().sequence,
+                    release.digest(),
+                )
+                .unwrap()
+            else {
+                panic!("release must be newly claimed")
+            };
+            let (_, release_performed) = journal.apply_once(release_token, |_| Ok(())).unwrap();
+            journal.finish(release_performed).unwrap();
+            Self {
+                binding,
+                supervisor_key,
+                ready: ready.canonical().to_owned(),
+                journal,
+                owner_predecessor_digest: release.digest().to_owned(),
+                protocol_outputs: VecDeque::from([output]),
+                _state_root: state_root,
+                _journal_root: journal_root,
+                _authority: authority,
+            }
+        }
+    }
+
+    impl ExternalSupervisorRuntime for JournalFixtureRuntime {
+        fn binding(&self) -> &ExecutionChannelBinding {
+            &self.binding
+        }
+
+        fn ready_frame(&self) -> &str {
+            &self.ready
+        }
+
+        fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
+            let peer = SignedExecutionFrame::decode_and_verify(
+                wire,
+                &self.binding,
+                lillux::time::timestamp_millis(),
+            )?;
+            ensure!(
+                peer.frame().direction == ChannelDirection::OwnerToSupervisor
+                    && matches!(
+                        peer.frame().payload,
+                        ExecutionChannelPayload::Acknowledge { .. }
+                    ),
+                "journal fixture admits only controller acknowledgements"
+            );
+            self.journal.record_owner_acknowledgement(wire)?;
+            let acknowledgement = self
+                .journal
+                .ensure_supervisor_acknowledgement(
+                    &self.supervisor_key,
+                    peer.frame().sequence,
+                    peer.digest(),
+                )?
+                .context("journal fixture did not author its exact acknowledgement")?;
+            Ok(ExternalOwnerFrameDispatch {
+                outcome: ExternalOwnerFrameOutcome::Acknowledgement,
+                acknowledgement_frame: acknowledgement.canonical().to_owned(),
+            })
+        }
+
+        fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+            let Some(bytes) = self.protocol_outputs.pop_front() else {
+                return Ok(None);
+            };
+            Ok(Some(
+                self.journal
+                    .author_supervisor_frame(
+                        &self.supervisor_key,
+                        ExecutionChannelPayload::ProtocolBytes {
+                            bytes_base64: STANDARD.encode(bytes),
+                        },
+                    )?
+                    .canonical()
+                    .to_owned(),
+            ))
+        }
+
+        fn next_pending_transport_frame_after(
+            &self,
+            after_sequence: u64,
+        ) -> Result<Option<Vec<u8>>> {
+            Ok(self
+                .journal
+                .pending_supervisor_transport_frames_after(
+                    after_sequence,
+                    1,
+                    ryeos_state::external_execution::MAX_FRAME_BYTES,
+                )?
+                .into_iter()
+                .next()
+                .map(|frame| frame.wire().to_vec()))
+        }
     }
 
     enum TransportAction {
@@ -743,6 +1150,99 @@ mod tests {
         }
     }
 
+    struct AppliedAckTransport {
+        binding: ExecutionChannelBinding,
+        owner_key: lillux::crypto::SigningKey,
+        next_owner_sequence: u64,
+        previous_owner_digest: Option<String>,
+        cached: BTreeMap<u64, Vec<u8>>,
+        fail_once_at_supervisor_sequence: Option<u64>,
+        omit_ack_once_at_supervisor_sequence: Option<u64>,
+        suppress_ack_of_ack: bool,
+        calls: Vec<Vec<u8>>,
+    }
+
+    impl AppliedAckTransport {
+        fn new(
+            binding: ExecutionChannelBinding,
+            owner_key: lillux::crypto::SigningKey,
+            next_owner_sequence: u64,
+            previous_owner_digest: Option<String>,
+            fail_once_at_supervisor_sequence: u64,
+        ) -> Self {
+            Self {
+                binding,
+                owner_key,
+                next_owner_sequence,
+                previous_owner_digest,
+                cached: BTreeMap::new(),
+                fail_once_at_supervisor_sequence: Some(fail_once_at_supervisor_sequence),
+                omit_ack_once_at_supervisor_sequence: None,
+                suppress_ack_of_ack: false,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl ExternalExecutionChannelTransport for AppliedAckTransport {
+        fn exchange(
+            &mut self,
+            canonical_supervisor_frame: &[u8],
+        ) -> Result<ExternalTransportExchange> {
+            self.calls.push(canonical_supervisor_frame.to_vec());
+            let sent = SignedExecutionFrame::decode_and_verify(
+                canonical_supervisor_frame,
+                &self.binding,
+                lillux::time::timestamp_millis(),
+            )?;
+            if self.suppress_ack_of_ack
+                && matches!(
+                    sent.frame().payload,
+                    ExecutionChannelPayload::Acknowledge { .. }
+                )
+            {
+                return Ok(response(&sent, vec![], None));
+            }
+            if self.omit_ack_once_at_supervisor_sequence == Some(sent.frame().sequence) {
+                self.omit_ack_once_at_supervisor_sequence = None;
+                return Ok(response(&sent, vec![], None));
+            }
+            let owner_ack = if let Some(cached) = self.cached.get(&sent.frame().sequence) {
+                SignedExecutionFrame::decode_and_verify(
+                    cached,
+                    &self.binding,
+                    lillux::time::timestamp_millis(),
+                )?
+            } else {
+                let acknowledgement = sign(
+                    &self.binding,
+                    &self.owner_key,
+                    ChannelDirection::OwnerToSupervisor,
+                    self.next_owner_sequence,
+                    self.previous_owner_digest.clone(),
+                    sent.frame().sequence,
+                    ExecutionChannelPayload::Acknowledge {
+                        peer_frame_sequence: sent.frame().sequence,
+                        peer_frame_digest: sent.digest().to_owned(),
+                        application: ExecutionFrameApplication::Applied,
+                    },
+                );
+                self.next_owner_sequence += 1;
+                self.previous_owner_digest = Some(acknowledgement.digest().to_owned());
+                self.cached.insert(
+                    sent.frame().sequence,
+                    acknowledgement.canonical().as_bytes().to_vec(),
+                );
+                acknowledgement
+            };
+            if self.fail_once_at_supervisor_sequence == Some(sent.frame().sequence) {
+                self.fail_once_at_supervisor_sequence = None;
+                bail!("ambiguous response after controller applied export chunk")
+            }
+            Ok(response(&sent, vec![envelope(&owner_ack)], None))
+        }
+    }
+
     fn fixture() -> (
         ExecutionChannelBinding,
         lillux::crypto::SigningKey,
@@ -752,7 +1252,7 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[12; 32]);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: "T-external-transport".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -773,6 +1273,7 @@ mod tests {
             issued_at_ms: now - 1_000,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 512 * 1024,
             max_frames: 64,
             max_bytes: 1024 * 1024,
         };
@@ -1127,6 +1628,211 @@ mod tests {
             .dispatch_ordinary(applied.canonical().as_bytes())
             .unwrap();
         assert!(driver.is_export_applied());
+    }
+
+    #[test]
+    fn journal_recovered_sealed_export_retains_exact_terminal_identity() {
+        let (binding, owner, supervisor) = fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor.clone());
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let transport = FixtureTransport::new(vec![TransportAction::Respond(response(
+            &ready,
+            vec![],
+            None,
+        ))]);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+
+        let sealed = sign(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready.digest().to_owned()),
+            0,
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: "1".repeat(64),
+                completion_request_digest: "2".repeat(64),
+                writer_exclusion_evidence_hash: "3".repeat(64),
+            },
+        );
+        driver
+            .runtime
+            .pending_transport
+            .borrow_mut()
+            .push_back(sealed.canonical().as_bytes().to_vec());
+        driver.runtime.next_sequence = 3;
+        driver.runtime.previous_digest = sealed.digest().to_owned();
+        let applied = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            sealed.frame().sequence,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: sealed.frame().sequence,
+                peer_frame_digest: sealed.digest().to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        driver
+            .transport
+            .actions
+            .push_back(TransportAction::Respond(response(
+                &sealed,
+                vec![envelope(&applied)],
+                None,
+            )));
+
+        assert_eq!(
+            driver.step().unwrap(),
+            ExternalTransportProgress::ExportApplied
+        );
+        assert!(driver.is_export_applied());
+    }
+
+    #[test]
+    fn real_journal_export_prefix_precedes_later_acks_and_retries_exact_chunk() {
+        let (binding, owner, supervisor) = fixture();
+        let runtime = JournalFixtureRuntime::with_export_batch(binding.clone(), &owner, supervisor);
+        let owner_predecessor_digest = runtime.owner_predecessor_digest.clone();
+        let transport =
+            AppliedAckTransport::new(binding.clone(), owner, 3, Some(owner_predecessor_digest), 2);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert!(driver.step().is_err(), "first chunk response is ambiguous");
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(
+            driver.step().unwrap(),
+            ExternalTransportProgress::ExportApplied
+        );
+
+        let (_runtime, transport) = driver.into_parts();
+        let sent = transport
+            .calls
+            .iter()
+            .map(|wire| {
+                SignedExecutionFrame::decode_and_verify(wire, &binding, binding.issued_at_ms)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent.iter()
+                .map(|frame| frame.frame().sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 2, 3, 4],
+            "later acknowledgement frames must not overtake the durable export prefix"
+        );
+        assert_eq!(transport.calls[1], transport.calls[2]);
+        assert!(matches!(
+            sent[1].frame().payload,
+            ExecutionChannelPayload::ExportObjectChunk {
+                offset: 0,
+                final_chunk: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sent[3].frame().payload,
+            ExecutionChannelPayload::ExportObjectChunk {
+                offset: 12,
+                final_chunk: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            sent[4].frame().payload,
+            ExecutionChannelPayload::ExportSealed { .. }
+        ));
+    }
+
+    #[test]
+    fn journal_pending_chunk_replays_until_delayed_signed_receipt_advances_frontier() {
+        let (binding, owner, supervisor) = fixture();
+        let runtime = JournalFixtureRuntime::with_export_batch(binding.clone(), &owner, supervisor);
+        let owner_predecessor_digest = runtime.owner_predecessor_digest.clone();
+        let mut transport =
+            AppliedAckTransport::new(binding.clone(), owner, 3, Some(owner_predecessor_digest), 0);
+        transport.omit_ack_once_at_supervisor_sequence = Some(2);
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(
+            driver.step().unwrap(),
+            ExternalTransportProgress::Advanced,
+            "HTTP delivery without a signed receipt cannot advance durable order"
+        );
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(
+            driver.step().unwrap(),
+            ExternalTransportProgress::ExportApplied
+        );
+
+        let (_runtime, transport) = driver.into_parts();
+        let sequences = transport
+            .calls
+            .iter()
+            .map(|wire| {
+                SignedExecutionFrame::decode_and_verify(wire, &binding, binding.issued_at_ms)
+                    .unwrap()
+                    .frame()
+                    .sequence
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![1, 2, 2, 3, 4]);
+        assert_eq!(transport.calls[1], transport.calls[2]);
+    }
+
+    #[test]
+    fn delivered_ack_without_ack_of_ack_does_not_starve_candidate_output() {
+        let (binding, owner, supervisor) = fixture();
+        let expected_output = b"candidate response after applied input".to_vec();
+        let runtime = JournalFixtureRuntime::running(
+            binding.clone(),
+            &owner,
+            supervisor,
+            expected_output.clone(),
+        );
+        let owner_predecessor_digest = runtime.owner_predecessor_digest.clone();
+        let mut transport =
+            AppliedAckTransport::new(binding.clone(), owner, 2, Some(owner_predecessor_digest), 0);
+        transport.suppress_ack_of_ack = true;
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+        assert_eq!(driver.step().unwrap(), ExternalTransportProgress::Advanced);
+
+        let (runtime, transport) = driver.into_parts();
+        assert!(runtime.protocol_outputs.is_empty());
+        let sent = transport
+            .calls
+            .iter()
+            .map(|wire| {
+                SignedExecutionFrame::decode_and_verify(wire, &binding, binding.issued_at_ms)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent.iter()
+                .map(|frame| frame.frame().sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(matches!(
+            sent[1].frame().payload,
+            ExecutionChannelPayload::Acknowledge { .. }
+        ));
+        assert_eq!(sent[2].protocol_bytes().unwrap(), expected_output);
     }
 
     #[test]

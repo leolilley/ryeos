@@ -236,7 +236,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ExternalSupervisorBootstrap {
-            schema: 2,
+            schema: 3,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
                     schema: 1,
@@ -283,6 +283,7 @@ mod tests {
                 + 60_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
+            candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
         }
     }
@@ -419,7 +420,7 @@ mod tests {
         assert_eq!(attach.bootstrap_capability, bootstrap.bootstrap_capability);
         let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -438,6 +439,7 @@ mod tests {
                 + i64::from(
                     bootstrap.execution_timeout_seconds + bootstrap.post_execution_timeout_seconds,
                 ) * 1_000,
+            candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
             max_frames: bootstrap.binding_max_frames().unwrap(),
             max_bytes: bootstrap.channel_max_bytes,
         };

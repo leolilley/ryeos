@@ -687,7 +687,7 @@ mod tests {
         let supervisor = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -702,6 +702,7 @@ mod tests {
             issued_at_ms: now,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: max_bytes.min(512 * 1024),
             max_frames,
             max_bytes,
         };
@@ -747,7 +748,7 @@ mod tests {
         // mutable clock is part of the authority contract.
         let now = reservation.contact_deadline_ms + 60_000;
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest,
             occurrence_id: "external-expired".into(),
@@ -762,6 +763,7 @@ mod tests {
             issued_at_ms: now,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 512 * 1024,
             max_frames: 100,
             max_bytes: 1024 * 1024,
         };

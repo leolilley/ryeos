@@ -7,7 +7,7 @@
 //! before permitting a later action.
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_state::external_execution::export::CandidateExportAssembler;
+use ryeos_state::external_execution::export::CandidateExportSource;
 use ryeos_state::external_execution::guest_journal::{
     DurableNativeCandidateCapture, GuestApplicationClaim, GuestApplicationToken,
     GuestProtocolApplication, GuestTerminalApplicationClaim, LiveGuestJournal,
@@ -331,28 +331,35 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
                 anyhow::bail!("external quiescence was durably revoked")
             }
         };
-        let sealed = match self.journal.supervisor_export_for_capture(&capture)? {
-            Some(sealed) => sealed,
-            None => self.journal.author_supervisor_frame(
-                signing_key,
-                ExecutionChannelPayload::ExportSealed {
-                    candidate_snapshot_hash: capture.snapshot_hash.clone(),
-                    completion_request_digest: capture.completion_request_digest.clone(),
-                    writer_exclusion_evidence_hash: capture.writer_exclusion_evidence_hash.clone(),
-                },
-            )?,
-        };
         let guard = authority.acquire_shared_guard()?;
-        let mut assembler = CandidateExportAssembler::new(
+        let source = CandidateExportSource::new(
             authority,
             &guard,
             self.journal.binding().clone(),
-            &quiesce,
+            &capture.snapshot_hash,
+            &capture.completion_request_digest,
+            &capture.writer_exclusion_evidence_hash,
         )?;
-        let imported = assembler
-            .accept(&sealed)?
-            .context("sealed external candidate did not complete validation")?;
-        let retained = imported.validate_retention(authority, &guard, self.journal.binding())?;
+        let sealed = match self.journal.supervisor_export_for_capture(&capture)? {
+            Some(sealed) => sealed,
+            None => {
+                let mut payloads = Vec::new();
+                source.emit_chunks(|payload| {
+                    payloads.push(payload);
+                    Ok(())
+                })?;
+                payloads.push(ExecutionChannelPayload::ExportSealed {
+                    candidate_snapshot_hash: capture.snapshot_hash.clone(),
+                    completion_request_digest: capture.completion_request_digest.clone(),
+                    writer_exclusion_evidence_hash: capture.writer_exclusion_evidence_hash.clone(),
+                });
+                self.journal
+                    .author_supervisor_frames(signing_key, payloads)?
+                    .pop()
+                    .context("external export batch lost its sealed terminator")?
+            }
+        };
+        let retained = source.validate_retention()?;
         let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
             &self.journal.binding().digest()?,
             occurrence_digest,
@@ -534,7 +541,7 @@ mod tests {
         let supervisor_key = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: "T-external-supervisor-replay".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-external-supervisor-replay".into(),
@@ -549,6 +556,7 @@ mod tests {
             issued_at_ms: now - 1_000,
             execution_deadline_ms: now + 60_000,
             expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 1024 * 1024,
             max_frames: 32,
             max_bytes: 2 * 1024 * 1024,
         };

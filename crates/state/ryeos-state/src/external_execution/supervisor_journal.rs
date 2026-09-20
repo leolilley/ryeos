@@ -24,12 +24,12 @@ use super::{ExecutionChannelBinding, encode_channel_public_key};
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-const SCHEMA_EPOCH: i64 = 1;
+const SCHEMA_EPOCH: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=1),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=2),
     journal_nonce TEXT NOT NULL UNIQUE,
     directory_identity_json TEXT NOT NULL,
     database_identity_json TEXT NOT NULL,
@@ -802,7 +802,7 @@ mod tests {
         let recipe_digest = recipe.digest().unwrap();
         let roots = vec![STANDARD.encode(b"fixture root")];
         ExternalSupervisorBootstrap {
-            schema: 2,
+            schema: 3,
             controller: ExternalControllerTransportContract {
                 schema: 1,
                 https_origin: "https://controller.example".into(),
@@ -842,6 +842,7 @@ mod tests {
                 + 60_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
+            candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
         }
     }
@@ -852,7 +853,7 @@ mod tests {
     ) -> ExecutionChannelBinding {
         let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -867,6 +868,7 @@ mod tests {
             issued_at_ms,
             execution_deadline_ms: issued_at_ms + 60_000,
             expires_at_ms: issued_at_ms + 180_000,
+            candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
             max_frames: bootstrap.binding_max_frames().unwrap(),
             max_bytes: bootstrap.channel_max_bytes,
         }

@@ -4,6 +4,47 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Cross-machine candidate export checkpoint
+
+Runtime operator epoch 51, guest-journal epoch 8, outer-supervisor journal
+epoch 2, and external channel/supervisor-bootstrap schema 3 separate the raw
+candidate-content ceiling from the authenticated wire-byte ceiling. A pinned
+guest CAS now derives the exact candidate object/blob closure itself, verifies
+every complete member before emission, and emits deterministic bounded
+`export_object_chunk` frames. It accepts no pathname, archive, peer manifest or
+live project reconstruction. Empty blobs and members larger than one chunk
+retain exact hashes, offsets and final-chunk boundaries.
+
+All export chunks and the exact `export_sealed` terminator are authored in one
+SQLite immediate transaction. A frame-count, encoded-byte, signing or storage
+failure therefore retains no partial export prefix. Reconnect reads the earliest
+unacknowledged canonical frame from the durable guest journal on every exchange;
+a later locally generated acknowledgement cannot overtake export predecessors.
+An ambiguous response retries the same chunk bytes and advances only after the
+controller's signed cumulative acknowledgement.
+
+Focused source evidence on 2026-09-21: 51 state external-execution tests and 13
+executor transport tests passed with one Cargo job, including separate guest and
+controller CAS stores, multi-chunk and empty-blob reconstruction, raw-budget
+refusal before the first frame, atomic batch rollback, a real-journal ordered
+chunk/seal stream, byte-identical retry after a lost response, and replay of a
+delivered chunk until a delayed signed receipt advances the durable frontier.
+The live-journal transport also crosses only an exact process-locally delivered
+acknowledgement when the controller intentionally emits no acknowledgement of
+that acknowledgement; the later candidate output remains ordered and makes
+progress without weakening durable replay for data or export frames. No external
+network, provider/model, lifecycle, credential, grant, installation or paid
+resource was contacted or changed.
+
+Independent architecture, durable ownership/recovery, and tests/documentation
+reviews found no remaining blocker after the ordering, delayed-receipt, and
+acknowledgement-of-acknowledgement regressions were corrected.
+
+This checkpoint proves the guest export source and reconnectable outbound
+transport. Controller-owned durable assembly/application, production lifecycle
+attachment, executable/provider qualification, and the complete
+B -> C -> evaluation -> D workflow remain unqualified.
+
 ## Durable external supervisor authority checkpoint
 
 The protected external supervisor now has an occurrence-private rollback-delete
@@ -75,9 +116,10 @@ recipe ceiling and direct path/budget plus complete projection mutation tests.
 No installation, lifecycle, provider/model, Render, credential, grant, or paid
 resource was contacted or changed.
 
-This checkpoint still does not provide the production supervisor executable,
-cross-machine object-chunk export, production lifecycle adapter,
-structured-session connector, or complete B -> C -> evaluation -> D proof.
+This historical checkpoint did not provide the production supervisor executable,
+production lifecycle adapter, structured-session connector, or complete
+B -> C -> evaluation -> D proof. The later cross-machine export checkpoint above
+supersedes its object-transfer limitation.
 
 ## Bidirectional candidate transport checkpoint
 

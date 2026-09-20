@@ -161,6 +161,34 @@ mod tests {
         let (mut binding, owner, supervisor) = super::super::tests::binding();
         binding.base_snapshot_hash = base_hash.clone();
         candidate.parent_hashes = vec![base_hash];
+        let large_blob = vec![0x5a; MAX_CHUNK_BYTES + 17];
+        let large_blob_hash = cas.store_blob(&large_blob).unwrap();
+        let empty_blob_hash = cas.store_blob(&[]).unwrap();
+        let large_file = ProjectFile {
+            blob_hash: large_blob_hash.clone(),
+            size: large_blob.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let empty_file = ProjectFile {
+            blob_hash: empty_blob_hash.clone(),
+            size: 0,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let candidate_tree = ProjectTree {
+            files: [
+                (
+                    "large.bin".to_owned(),
+                    cas.store_object(&large_file.to_value()).unwrap(),
+                ),
+                (
+                    "empty.bin".to_owned(),
+                    cas.store_object(&empty_file.to_value()).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        candidate.project_tree_hash = cas.store_object(&candidate_tree.to_value()).unwrap();
         let candidate_bytes = lillux::canonical_json(&candidate.to_value()).unwrap();
         let candidate_hash = lillux::sha256_hex(candidate_bytes.as_bytes());
         let completion = "9".repeat(64);
@@ -217,12 +245,142 @@ mod tests {
             ChannelDirection::SupervisorToOwner,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: candidate_hash.clone(),
-                completion_request_digest: completion,
+                completion_request_digest: completion.clone(),
                 writer_exclusion_evidence_hash: evidence_hash,
             },
         );
         let imported = assembler.accept(&sealed).unwrap().unwrap();
         assert_eq!(imported.snapshot_hash(), candidate_hash);
+        assert!(assembler.accept(&sealed).is_err());
+
+        // A real external supervisor and controller do not share a CAS. Seed
+        // only the independently admitted base B in a second store, emit the
+        // candidate closure from the guest source, and prove that the receiver
+        // reconstructs C without consulting the guest namespace.
+        let source = CandidateExportSource::new(
+            &authority,
+            &guard,
+            binding.clone(),
+            imported.snapshot_hash(),
+            imported.completion_request_digest(),
+            imported.claimed_writer_exclusion_evidence_hash(),
+        )
+        .unwrap();
+        let mut transferred = Vec::new();
+        source
+            .emit_chunks(|payload| {
+                transferred.push(payload);
+                Ok(())
+            })
+            .unwrap();
+        let large_chunks = transferred
+            .iter()
+            .filter_map(|payload| match payload {
+                ExecutionChannelPayload::ExportObjectChunk {
+                    content_kind: ExportContentKind::Blob,
+                    object_hash,
+                    offset,
+                    bytes_base64,
+                    final_chunk,
+                } if object_hash == &large_blob_hash => Some((
+                    *offset,
+                    STANDARD.decode(bytes_base64).unwrap(),
+                    *final_chunk,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(large_chunks.len(), 2);
+        assert_eq!(large_chunks[0].0, 0);
+        assert_eq!(large_chunks[0].1.len(), MAX_CHUNK_BYTES);
+        assert!(!large_chunks[0].2);
+        assert_eq!(large_chunks[1].0, MAX_CHUNK_BYTES as u64);
+        assert_eq!(large_chunks[1].1.len(), 17);
+        assert!(large_chunks[1].2);
+        assert_eq!(
+            large_chunks
+                .iter()
+                .flat_map(|(_, bytes, _)| bytes.iter().copied())
+                .collect::<Vec<_>>(),
+            large_blob
+        );
+        assert!(transferred.iter().any(|payload| matches!(
+            payload,
+            ExecutionChannelPayload::ExportObjectChunk {
+                content_kind: ExportContentKind::Blob,
+                object_hash,
+                offset: 0,
+                bytes_base64,
+                final_chunk: true,
+            } if object_hash == &empty_blob_hash && bytes_base64.is_empty()
+        )));
+
+        let mut limited_binding = binding.clone();
+        limited_binding.candidate_export_max_bytes = 1;
+        let limited_evidence = NativeWriterExclusionObservation {
+            schema: 1,
+            binding_digest: limited_binding.digest().unwrap(),
+            base_snapshot_hash: limited_binding.base_snapshot_hash.clone(),
+            completion_request_digest: completion.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Signal(9),
+        };
+        let limited_evidence_bytes =
+            lillux::canonical_json(&serde_json::to_value(limited_evidence).unwrap()).unwrap();
+        let limited_evidence_hash = cas.store_blob(limited_evidence_bytes.as_bytes()).unwrap();
+        let limited_source = CandidateExportSource::new(
+            &authority,
+            &guard,
+            limited_binding,
+            imported.snapshot_hash(),
+            &completion,
+            &limited_evidence_hash,
+        )
+        .unwrap();
+        let mut emitted = 0_u64;
+        assert!(
+            limited_source
+                .emit_chunks(|_| {
+                    emitted += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(emitted, 0, "raw export budget must fail before first frame");
+        drop(limited_source);
+        drop(source);
+        drop(assembler);
+        drop(guard);
+
+        let foreign_authority = foreign_db.pinned_authority().unwrap();
+        let foreign_guard = foreign_authority.acquire_shared_guard().unwrap();
+        let foreign_cas = foreign_authority.cas_store().unwrap();
+        let (foreign_base_hash, _) = base(&foreign_cas);
+        assert_eq!(foreign_base_hash, binding.base_snapshot_hash);
+        let mut remote = CandidateExportAssembler::new(
+            &foreign_authority,
+            &foreign_guard,
+            binding.clone(),
+            &quiesce,
+        )
+        .unwrap();
+        for payload in transferred {
+            let frame = authenticated(
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                payload,
+            );
+            assert!(remote.accept(&frame).unwrap().is_none());
+        }
+        let remote_imported = remote.accept(&sealed).unwrap().unwrap();
+        assert_eq!(remote_imported.snapshot_hash(), imported.snapshot_hash());
+        remote_imported
+            .validate_retention(&foreign_authority, &foreign_guard, &binding)
+            .unwrap();
+        drop(foreign_guard);
+
+        let guard = authority.acquire_shared_guard().unwrap();
         let retained = imported
             .validate_retention(&authority, &guard, &binding)
             .unwrap();
@@ -245,7 +403,6 @@ mod tests {
                 .validate_retention(&authority, &guard, &other_binding)
                 .is_err()
         );
-        assert!(assembler.accept(&sealed).is_err());
         let retention_owner = "7".repeat(64);
         let occurrence_digest = "8".repeat(64);
         let publication_key = crate::DurableCasPublicationKey::external_candidate_occurrence(
@@ -269,7 +426,6 @@ mod tests {
             .unwrap();
         let staging_id = receipt.staging_id().to_owned();
         let unused = cas.store_blob(b"unretained-transfer-fragment").unwrap();
-        drop(assembler);
         drop(guard);
         // Exercise the production GC root traversal, not a test-only supplied
         // AdditionalCasRoots list. The retained receipt survives while an
@@ -430,6 +586,147 @@ pub struct ImportedCandidateContent {
     claimed_writer_exclusion_evidence_hash: String,
 }
 
+/// Descriptor-pinned, independently validated source for one candidate export.
+///
+/// Construction proves the exact candidate closure and writer-exclusion
+/// observation already exist beneath the guest's pinned CAS authority. The
+/// source emits only content-addressed project objects/blobs and never accepts
+/// a pathname, archive, candidate-authored manifest or peer-supplied member
+/// list. Signing and durable transcript ownership remain with the supervisor.
+pub struct CandidateExportSource<'a> {
+    authority: &'a PinnedStateAuthority,
+    guard: &'a CasMutationGuard,
+    binding: ExecutionChannelBinding,
+    imported: ImportedCandidateContent,
+    objects: BTreeSet<String>,
+    blobs: BTreeSet<String>,
+}
+
+impl<'a> CandidateExportSource<'a> {
+    pub fn new(
+        authority: &'a PinnedStateAuthority,
+        guard: &'a CasMutationGuard,
+        binding: ExecutionChannelBinding,
+        snapshot_hash: &str,
+        completion_request_digest: &str,
+        writer_exclusion_evidence_hash: &str,
+    ) -> Result<Self> {
+        authority.ensure_guard(guard)?;
+        let (imported, objects, blobs) = load_validated_candidate_coordinates(
+            authority,
+            guard,
+            &binding,
+            snapshot_hash,
+            completion_request_digest,
+            writer_exclusion_evidence_hash,
+        )?;
+        Ok(Self {
+            authority,
+            guard,
+            binding,
+            imported,
+            objects,
+            blobs,
+        })
+    }
+
+    pub fn validate_retention(&self) -> Result<ValidatedCandidateRetention<'_>> {
+        self.imported
+            .validate_retention(self.authority, self.guard, &self.binding)
+    }
+
+    /// Emit the complete deterministic member stream. All member sizes are
+    /// preflighted before the first frame is authored, and each member's exact
+    /// bytes are verified before any chunk for that member leaves the guest.
+    pub fn emit_chunks(
+        &self,
+        mut emit: impl FnMut(ExecutionChannelPayload) -> Result<()>,
+    ) -> Result<()> {
+        self.authority.ensure_guard(self.guard)?;
+        let cas = self.authority.cas_store()?;
+        let mut total = 0_u64;
+        for (kind, hashes) in [
+            (ExportContentKind::Object, &self.objects),
+            (ExportContentKind::Blob, &self.blobs),
+        ] {
+            for hash in hashes {
+                let (_, size) = open_member(&cas, kind, hash)?;
+                ensure!(
+                    size <= MAX_SINGLE_MEMBER_BYTES,
+                    "candidate export member exceeds memory bound"
+                );
+                total = total
+                    .checked_add(size)
+                    .context("candidate export source byte overflow")?;
+            }
+        }
+        ensure!(
+            total <= self.binding.candidate_export_max_bytes,
+            "candidate export exceeds its admitted raw-content bound"
+        );
+
+        for (kind, hashes) in [
+            (ExportContentKind::Object, &self.objects),
+            (ExportContentKind::Blob, &self.blobs),
+        ] {
+            for hash in hashes {
+                let (file, size) = open_member(&cas, kind, hash)?;
+                let mut bytes = Vec::with_capacity(usize::try_from(size)?);
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(file, MAX_SINGLE_MEMBER_BYTES + 1),
+                    &mut bytes,
+                )?;
+                ensure!(
+                    bytes.len() as u64 == size && lillux::sha256_hex(&bytes) == *hash,
+                    "candidate export source member changed content"
+                );
+                if kind == ExportContentKind::Object {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    ensure!(
+                        lillux::canonical_json(&value)?.as_bytes() == bytes,
+                        "candidate export source object is noncanonical"
+                    );
+                }
+                if bytes.is_empty() {
+                    emit(ExecutionChannelPayload::ExportObjectChunk {
+                        content_kind: kind,
+                        object_hash: hash.clone(),
+                        offset: 0,
+                        bytes_base64: String::new(),
+                        final_chunk: true,
+                    })?;
+                    continue;
+                }
+                for (index, chunk) in bytes.chunks(MAX_CHUNK_BYTES).enumerate() {
+                    let offset = u64::try_from(index)?
+                        .checked_mul(MAX_CHUNK_BYTES as u64)
+                        .context("candidate export chunk offset overflow")?;
+                    emit(ExecutionChannelPayload::ExportObjectChunk {
+                        content_kind: kind,
+                        object_hash: hash.clone(),
+                        offset,
+                        bytes_base64: STANDARD.encode(chunk),
+                        final_chunk: usize::try_from(offset)? + chunk.len() == bytes.len(),
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn open_member(
+    cas: &lillux::CasStore,
+    kind: ExportContentKind,
+    hash: &str,
+) -> Result<(std::fs::File, u64)> {
+    match kind {
+        ExportContentKind::Object => cas.open_object(hash)?,
+        ExportContentKind::Blob => cas.open_blob(hash)?,
+    }
+    .with_context(|| format!("candidate export lost retained {kind:?} member {hash}"))
+}
+
 /// A completed receiving-store verification while that exact CAS namespace
 /// remains pinned. It cannot be deserialized or constructed by a peer. The
 /// application may verify outside its global lock, then commit exact roots
@@ -564,6 +861,25 @@ pub(super) fn validated_retained_candidate_root_sets(
     completion_request_digest: &str,
     writer_exclusion_evidence_hash: &str,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let (_, objects, blobs) = load_validated_candidate_coordinates(
+        authority,
+        guard,
+        binding,
+        snapshot_hash,
+        completion_request_digest,
+        writer_exclusion_evidence_hash,
+    )?;
+    Ok((objects, blobs))
+}
+
+fn load_validated_candidate_coordinates(
+    authority: &PinnedStateAuthority,
+    guard: &CasMutationGuard,
+    binding: &ExecutionChannelBinding,
+    snapshot_hash: &str,
+    completion_request_digest: &str,
+    writer_exclusion_evidence_hash: &str,
+) -> Result<(ImportedCandidateContent, BTreeSet<String>, BTreeSet<String>)> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
     let base = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
@@ -596,7 +912,8 @@ pub(super) fn validated_retained_candidate_root_sets(
         completion_request_digest: completion_request_digest.to_owned(),
         claimed_writer_exclusion_evidence_hash: writer_exclusion_evidence_hash.to_owned(),
     };
-    Ok(candidate_retention_roots(&imported))
+    let (objects, blobs) = candidate_retention_roots(&imported);
+    Ok((imported, objects, blobs))
 }
 
 impl<'a> CandidateExportAssembler<'a> {
@@ -671,8 +988,8 @@ impl<'a> CandidateExportAssembler<'a> {
                     .checked_add(bytes.len() as u64)
                     .context("candidate export byte overflow")?;
                 ensure!(
-                    self.bytes <= self.binding.max_bytes,
-                    "candidate export exceeds byte budget"
+                    self.bytes <= self.binding.candidate_export_max_bytes,
+                    "candidate export exceeds admitted raw-content bound"
                 );
                 ensure!(
                     !self

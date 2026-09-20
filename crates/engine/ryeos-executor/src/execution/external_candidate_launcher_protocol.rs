@@ -205,6 +205,26 @@ impl LiveInheritedExternalCandidateSupervisor {
             .map(|frame| frame.canonical().to_owned()))
     }
 
+    /// Recover the next exact journal-authored frame rather than relying on a
+    /// process-local queue. This is what makes a multi-frame candidate export
+    /// reconnectable without rebuilding or rereading candidate content.
+    pub fn next_pending_transport_frame_after(
+        &self,
+        after_sequence: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .supervisor
+            .journal()
+            .pending_supervisor_transport_frames_after(
+                after_sequence,
+                1,
+                ryeos_state::external_execution::MAX_FRAME_BYTES,
+            )?
+            .into_iter()
+            .next()
+            .map(|frame| frame.wire().to_vec()))
+    }
+
     /// Authoritative local cleanup. Returning `Ok` proves the exact launcher
     /// wrapper and all descendants owned by Lillux were reaped.
     pub fn abort_and_reap(self) -> Result<()> {
@@ -819,7 +839,7 @@ mod tests {
         let now = lillux::time::timestamp_millis();
         (
             ExecutionChannelBinding {
-                schema: 2,
+                schema: 3,
                 placement_thread_id: "T-launcher-protocol".into(),
                 allocation_request_digest: "a".repeat(64),
                 occurrence_id: "occurrence-launcher-protocol".into(),
@@ -834,6 +854,7 @@ mod tests {
                 issued_at_ms: now - 1_000,
                 execution_deadline_ms: now + 60_000,
                 expires_at_ms: now + 120_000,
+                candidate_export_max_bytes: 512 * 1024,
                 max_frames: 16,
                 max_bytes: 1024 * 1024,
             },

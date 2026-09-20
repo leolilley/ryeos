@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 7;
+const SCHEMA_EPOCH: i64 = 8;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=7),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=8),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -847,6 +847,35 @@ impl LiveGuestJournal {
         Ok(verified)
     }
 
+    /// Author one ordered supervisor batch atomically. Candidate export uses
+    /// this boundary so a late frame-count, encoded-byte, signing, or storage
+    /// failure cannot retain a prefix without its exact sealed terminator.
+    pub fn author_supervisor_frames(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+        payloads: impl IntoIterator<Item = ExecutionChannelPayload>,
+    ) -> Result<Vec<AuthenticatedExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        let mut frames = Vec::new();
+        for payload in payloads {
+            frames.push(journal::author_frame(
+                &tx,
+                &self.0.owner(),
+                &self.0.binding.placement_thread_id,
+                ChannelDirection::SupervisorToOwner,
+                signing_key,
+                payload,
+            )?);
+        }
+        ensure!(
+            !frames.is_empty(),
+            "external supervisor frame batch is empty"
+        );
+        tx.commit()?;
+        Ok(frames)
+    }
+
     /// Recover or author a signed supervisor acknowledgement of the peer
     /// frame's current durable guest application state. Unlike node ingress,
     /// the outbound supervisor may acknowledge an owner acknowledgement once
@@ -934,6 +963,24 @@ impl LiveGuestJournal {
             &self.0.owner(),
             &self.0.binding.placement_thread_id,
             ChannelDirection::SupervisorToOwner,
+            frame_limit,
+            byte_limit,
+        )
+    }
+
+    pub fn pending_supervisor_transport_frames_after(
+        &self,
+        after_sequence: u64,
+        frame_limit: usize,
+        byte_limit: usize,
+    ) -> Result<Vec<journal::PendingExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        journal::pending_transport_frames_after(
+            &self.0.conn,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            after_sequence,
             frame_limit,
             byte_limit,
         )
@@ -2016,7 +2063,7 @@ mod tests {
         let now = lillux::time::timestamp_millis();
         (
             ExecutionChannelBinding {
-                schema: 2,
+                schema: 3,
                 placement_thread_id: "T-guest".into(),
                 allocation_request_digest: "a".repeat(64),
                 occurrence_id: "occurrence-guest".into(),
@@ -2031,6 +2078,7 @@ mod tests {
                 issued_at_ms: now - 1_000,
                 execution_deadline_ms: now + 60_000,
                 expires_at_ms: now + 120_000,
+                candidate_export_max_bytes: 512 * 1024,
                 max_frames: 100,
                 max_bytes: 1024 * 1024,
             },
@@ -2508,6 +2556,67 @@ mod tests {
                     crate::external_execution::ExecutionFrameApplication::Applied,
             } if peer_frame_digest == &owner_ack_digest
         ));
+        live.validate().unwrap();
+    }
+
+    #[test]
+    fn supervisor_batch_budget_failure_retains_no_partial_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (live, binding, owner, supervisor, _bootstrap, _store_identity) =
+            live_store(&root, &authority);
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        live.record_frame(&release).unwrap();
+        let GuestApplicationClaim::New(release_token) = live
+            .claim(ChannelDirection::OwnerToSupervisor, 1, &release_digest)
+            .unwrap()
+        else {
+            panic!("release must be newly claimed")
+        };
+        let (_, release_performed) = live.apply_once(release_token, |_| Ok(())).unwrap();
+        live.finish(release_performed).unwrap();
+        let payloads = (0..binding.max_frames).map(|_| ExecutionChannelPayload::ProtocolBytes {
+            bytes_base64: STANDARD.encode(b"bounded-export-frame"),
+        });
+        assert!(
+            live.author_supervisor_frames(&supervisor, payloads)
+                .is_err(),
+            "ready plus a full frame-budget batch must exceed the bound"
+        );
+
+        let after = live
+            .author_supervisor_frame(
+                &supervisor,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"after-rollback"),
+                },
+            )
+            .unwrap();
+        let (_, ready_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+        );
+        assert_eq!(after.frame().sequence, 2);
+        assert_eq!(
+            after.frame().previous_frame_digest.as_deref(),
+            Some(ready_digest.as_str())
+        );
         live.validate().unwrap();
     }
 

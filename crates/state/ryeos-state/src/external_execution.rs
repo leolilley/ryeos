@@ -52,6 +52,11 @@ pub struct ExecutionChannelBinding {
     pub issued_at_ms: i64,
     pub execution_deadline_ms: i64,
     pub expires_at_ms: i64,
+    /// Maximum raw candidate bytes that may cross the export protocol. This is
+    /// distinct from `max_bytes`, which bounds the larger authenticated wire
+    /// transcript after JSON, base64, signatures, acknowledgements and control
+    /// frames are included.
+    pub candidate_export_max_bytes: u64,
     /// Per-direction ordinary journal bounds including acknowledged frames.
     /// One bounded Cancel/Stopped frame is reserved independently.
     pub max_frames: u32,
@@ -60,7 +65,7 @@ pub struct ExecutionChannelBinding {
 
 impl ExecutionChannelBinding {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 2, "unsupported external channel schema");
+        ensure!(self.schema == 3, "unsupported external channel schema");
         text(&self.placement_thread_id, 256)?;
         text(&self.occurrence_id, 512)?;
         for digest in [
@@ -87,7 +92,8 @@ impl ExecutionChannelBinding {
         );
         ensure!(
             (1..=65_536).contains(&self.max_frames)
-                && (1..=64 * 1024 * 1024).contains(&self.max_bytes),
+                && (1..=64 * 1024 * 1024).contains(&self.max_bytes)
+                && (1..=self.max_bytes).contains(&self.candidate_export_max_bytes),
             "external channel journal exceeds bounds"
         );
         Ok(())
@@ -638,7 +644,7 @@ mod tests {
         let supervisor = lillux::crypto::generate_signing_key();
         (
             ExecutionChannelBinding {
-                schema: 2,
+                schema: 3,
                 placement_thread_id: "T-external".into(),
                 occurrence_id: "occurrence".into(),
                 allocation_request_digest: "a".repeat(64),
@@ -653,6 +659,7 @@ mod tests {
                 issued_at_ms: 1,
                 execution_deadline_ms: 100,
                 expires_at_ms: 200,
+                candidate_export_max_bytes: 512 * 1024,
                 max_frames: 100,
                 max_bytes: 1024 * 1024,
             },

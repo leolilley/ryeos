@@ -153,13 +153,16 @@ pub struct ExternalSupervisorBootstrap {
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
+    /// Raw candidate-content ceiling. The separate channel ceiling includes
+    /// authenticated framing and transfer encoding overhead.
+    pub candidate_export_max_bytes: u64,
     pub channel_max_bytes: u64,
 }
 
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 2,
+            self.schema == 3,
             "unsupported external supervisor bootstrap schema"
         );
         self.controller.validate()?;
@@ -207,7 +210,8 @@ impl ExternalSupervisorBootstrap {
             "external supervisor lifecycle deadlines exceed bounds"
         );
         ensure!(
-            (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
+            (1..=self.channel_max_bytes).contains(&self.candidate_export_max_bytes)
+                && self.channel_max_bytes <= 64 * 1024 * 1024,
             "external supervisor channel byte bound is invalid"
         );
         Ok(())
@@ -295,6 +299,7 @@ impl ExternalSupervisorBootstrap {
                     .checked_sub(binding.execution_deadline_ms)
                     == Some(post_ms)
                 && binding.max_bytes == self.channel_max_bytes
+                && binding.candidate_export_max_bytes == self.candidate_export_max_bytes
                 && binding.max_frames == self.binding_max_frames()?,
             "external attachment response changed its signed lifecycle bounds"
         );
@@ -614,7 +619,7 @@ mod tests {
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ExternalSupervisorBootstrap {
-            schema: 2,
+            schema: 3,
             controller: controller(&roots),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -645,6 +650,7 @@ mod tests {
             attachment_deadline_ms: 2_000_000,
             execution_timeout_seconds: 60,
             post_execution_timeout_seconds: 120,
+            candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
         }
     }
@@ -693,7 +699,7 @@ mod tests {
         )
         .unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 2,
+            schema: 3,
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -708,6 +714,7 @@ mod tests {
             issued_at_ms: 1_000_000,
             execution_deadline_ms: 1_060_000,
             expires_at_ms: 1_180_000,
+            candidate_export_max_bytes: bootstrap.candidate_export_max_bytes,
             max_frames: bootstrap.binding_max_frames().unwrap(),
             max_bytes: bootstrap.channel_max_bytes,
         };
