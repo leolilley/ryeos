@@ -9,6 +9,21 @@ SERVICES = ROOT / "bundles/bundle-release/.ai/services/bundle-release"
 
 
 class NativeBundleProducerSurfaceTests(unittest.TestCase):
+    def test_tool_invocation_schemas_are_inventory_not_runtime_blocks(self):
+        tool_kind = (
+            ROOT / "bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"
+        ).read_text()
+        ignored = tool_kind[tool_kind.index("  ignored_keys:") :]
+        self.assertIn("    - input_schema", ignored)
+        self.assertIn("    - parameters", ignored)
+        for name in ("native-build", "core-seed-build"):
+            tool = (
+                ROOT
+                / "bundles/bundle-release/.ai/tools/ryeos/bundle-release"
+                / f"{name}.yaml"
+            ).read_text()
+            self.assertIn("input_schema:", tool)
+
     def test_catalog_transport_does_not_require_publisher_private_custody(self):
         policy = (ROOT / "crates/daemon/ryeos-app/src/node_policy/sections/bundle_publication.rs").read_text()
         catalog = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/catalog.rs").read_text()
