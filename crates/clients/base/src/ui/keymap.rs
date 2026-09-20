@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::model::RyeOsDockEdge;
-use crate::workspace::FocusDirection;
+use crate::view_set::FocusDirection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,7 +175,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
     }
 
     match event.key {
-        RyeOsKey::Char('n') if event.modifiers.alt_only() => intent(RyeOsUiIntent::NewWorkspace),
+        RyeOsKey::Char('n') if event.modifiers.alt_only() => intent(RyeOsUiIntent::NewViewSet),
         // Ctrl+K is the reliable view-overlay binding: a control char that
         // terminals and tmux pass straight through. Alt+K is kept for
         // environments that deliver it, but Alt/ESC combos are eaten by
@@ -681,18 +681,18 @@ impl super::model::RyeOsCore {
                 let Some(instance_key) = focused_field_instance(self) else {
                     return Vec::new();
                 };
-                if self.workspaces[self.active_workspace]
+                if self.view_sets[self.active_view_set]
                     .field_query_editing
                     .as_ref()
                     != Some(&instance_key)
                 {
-                    self.workspaces[self.active_workspace].field_query_editing = Some(instance_key);
+                    self.view_sets[self.active_view_set].field_query_editing = Some(instance_key);
                     self.bump_generation();
                 }
                 Vec::new()
             }
             RyeOsKeyCommand::EndFocusedFieldQuery => {
-                if self.workspaces[self.active_workspace]
+                if self.view_sets[self.active_view_set]
                     .field_query_editing
                     .take()
                     .is_some()
@@ -775,7 +775,7 @@ impl super::model::RyeOsCore {
         let Some((instance_key, field)) = focused_field(self) else {
             return Vec::new();
         };
-        if self.workspaces[self.active_workspace]
+        if self.view_sets[self.active_view_set]
             .field_query_editing
             .as_ref()
             != Some(&instance_key)
@@ -821,33 +821,36 @@ impl super::model::RyeOsCore {
         // START with the input focused.
         let dock_target = match self.focus_target() {
             super::model::RyeOsFocusTarget::Dock { edge } => {
-                dock_vm_for_edge(&vm.workspace.docks, edge)
+                dock_vm_for_edge(&vm.view_set.docks, edge)
                     .map(|dock| FocusedRowsTarget {
-                        instance_key: super::model::dock_view_instance_key(edge),
+                        instance_key: super::model::dock_view_instance_key(
+                            self.view_sets[self.active_view_set].id,
+                            edge,
+                        ),
                         count_and_feed: selectable_of(&dock.view),
                     })
                     .filter(|target| target.count_and_feed.0 > 0)
             }
-            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => None,
+            super::model::RyeOsFocusTarget::ViewSetTile { .. } => None,
         };
         let target = match self.focus_target() {
             super::model::RyeOsFocusTarget::Dock { .. } if dock_target.is_some() => {
                 dock_target.unwrap()
             }
             _ => {
-                let focused = vm.workspace.focused_tile;
-                let Some(root) = vm.workspace.root.as_ref() else {
+                let focused = vm.view_set.focused_tile;
+                let Some(root) = vm.view_set.root.as_ref() else {
                     return (false, Vec::new());
                 };
                 let Some(count_and_feed) = focused_selectable(root, &focused) else {
                     return (false, Vec::new());
                 };
                 FocusedRowsTarget {
-                    instance_key: self.workspaces[self.active_workspace]
+                    instance_key: self.view_sets[self.active_view_set]
                         .tiles
-                        .get(&self.workspaces[self.active_workspace].focused_tile)
+                        .get(&self.view_sets[self.active_view_set].focused_tile)
                         .map(|tile| tile.instance_key.clone())
-                        .expect("focused VM tile has workspace state"),
+                        .expect("focused VM tile has view_set state"),
                     count_and_feed,
                 }
             }
@@ -858,7 +861,7 @@ impl super::model::RyeOsCore {
         }
         if matches!(
             view_local_for_instance(self, &target.instance_key),
-            Some(crate::workspace::ViewLocalState::Field(_))
+            Some(crate::view_set::ViewLocalState::Field(_))
         ) {
             let effects = self.dispatch(super::RyeOsEvent::Ui {
                 event: super::RyeOsUiEvent::MoveFieldSelection {
@@ -895,7 +898,7 @@ impl super::model::RyeOsCore {
     /// is per-widget.
     fn stored_cursor_for(&self, instance_key: &crate::ids::RyeOsViewInstanceKey) -> usize {
         match view_local_for_instance(self, instance_key) {
-            Some(crate::workspace::ViewLocalState::GenericList { cursor, .. }) => *cursor,
+            Some(crate::view_set::ViewLocalState::GenericList { cursor, .. }) => *cursor,
             _ => 0,
         }
     }
@@ -904,7 +907,7 @@ impl super::model::RyeOsCore {
         let Some(local) = view_local_for_instance_mut(self, instance_key) else {
             return;
         };
-        let crate::workspace::ViewLocalState::GenericList { cursor, .. } = local else {
+        let crate::view_set::ViewLocalState::GenericList { cursor, .. } = local else {
             return;
         };
         if *cursor != index {
@@ -946,7 +949,7 @@ pub(crate) fn focused_field_key_context(
             .is_none_or(|item| item.can_continue)
     });
     Some(RyeOsFieldKeyContext {
-        query_editing: core.workspaces[core.active_workspace]
+        query_editing: core.view_sets[core.active_view_set]
             .field_query_editing
             .as_ref()
             == Some(&instance_key),
@@ -987,15 +990,18 @@ fn focused_field_instance(
 ) -> Option<crate::ids::RyeOsViewInstanceKey> {
     use super::model::RyeOsFocusTarget;
     let instance_key = match core.focus_target() {
-        RyeOsFocusTarget::WorkspaceTile { .. } => core.workspaces[core.active_workspace]
+        RyeOsFocusTarget::ViewSetTile { .. } => core.view_sets[core.active_view_set]
             .tiles
-            .get(&core.workspaces[core.active_workspace].focused_tile)
+            .get(&core.view_sets[core.active_view_set].focused_tile)
             .map(|tile| tile.instance_key.clone()),
-        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(edge)),
+        RyeOsFocusTarget::Dock { edge } => Some(super::model::dock_view_instance_key(
+            core.view_sets[core.active_view_set].id,
+            edge,
+        )),
     }?;
     matches!(
         view_local_for_instance(core, &instance_key),
-        Some(crate::workspace::ViewLocalState::Field(_))
+        Some(crate::view_set::ViewLocalState::Field(_))
     )
     .then_some(instance_key)
 }
@@ -1008,14 +1014,14 @@ struct FocusedRowsTarget {
 fn view_local_for_instance<'a>(
     core: &'a super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
-) -> Option<&'a crate::workspace::ViewLocalState> {
-    core.workspaces[core.active_workspace]
+) -> Option<&'a crate::view_set::ViewLocalState> {
+    core.view_sets[core.active_view_set]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| &tile.local)
         .or_else(|| {
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .dock_local
                 .get(instance_key)
         })
@@ -1024,13 +1030,13 @@ fn view_local_for_instance<'a>(
 fn view_local_for_instance_mut<'a>(
     core: &'a mut super::model::RyeOsCore,
     instance_key: &crate::ids::RyeOsViewInstanceKey,
-) -> Option<&'a mut crate::workspace::ViewLocalState> {
-    let tile_id = core.workspaces[core.active_workspace]
+) -> Option<&'a mut crate::view_set::ViewLocalState> {
+    let tile_id = core.view_sets[core.active_view_set]
         .tiles
         .iter()
         .find_map(|(tile_id, tile)| (&tile.instance_key == instance_key).then_some(*tile_id));
     if let Some(tile_id) = tile_id {
-        return core.workspaces[core.active_workspace]
+        return core.view_sets[core.active_view_set]
             .tiles
             .get_mut(&tile_id)
             .map(|tile| &mut tile.local);
@@ -1041,7 +1047,7 @@ fn view_local_for_instance_mut<'a>(
         .any(|(key, _)| key == instance_key)
     {
         return Some(
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .dock_local
                 .entry(instance_key.clone())
                 .or_insert_with(initial_list_local_state),
@@ -1050,8 +1056,8 @@ fn view_local_for_instance_mut<'a>(
     None
 }
 
-fn initial_list_local_state() -> crate::workspace::ViewLocalState {
-    crate::workspace::ViewLocalState::GenericList {
+fn initial_list_local_state() -> crate::view_set::ViewLocalState {
+    crate::view_set::ViewLocalState::GenericList {
         cursor: 0,
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),

@@ -4,7 +4,7 @@ use super::effect::{RyeOsEffectResult, RyeOsUiError};
 use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::ids::RyeOsViewInstanceKey;
-use crate::workspace::{FieldCursorState, FocusDirection, ViewSpec};
+use crate::view_set::{FieldCursorState, FocusDirection, ViewSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +23,7 @@ pub enum RyeOsUiIntent {
     /// affordance, substitutes row fields, and applies its plane (ui
     /// facet write or rye token dispatch). No product verbs in code.
     InvokeAffordance {
+        instance_key: RyeOsViewInstanceKey,
         view_ref: String,
         affordance_id: String,
         record: serde_json::Value,
@@ -45,7 +46,16 @@ pub enum RyeOsUiIntent {
     CloseTile {
         tile_id: String,
     },
+    ToggleTileMaximized {
+        tile_id: String,
+    },
     ToggleFocusedMaster,
+    /// Promote one exact mounted tile in an authored master-and-stack set.
+    /// Pointer clients must not rely on focus changing before this arrives.
+    PromoteTileToMaster {
+        layout_guard: String,
+        tile_id: String,
+    },
     MoveFocusedTile {
         direction: RyeOsStackMoveDirection,
     },
@@ -72,21 +82,43 @@ pub enum RyeOsUiIntent {
     SwitchTab {
         index: usize,
     },
-    NewWorkspace,
-    SelectWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    NewViewSet,
+    SelectViewSet {
+        view_set_id: crate::ids::ViewSetId,
     },
-    RenameWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    RenameViewSet {
+        view_set_id: crate::ids::ViewSetId,
         title: String,
     },
-    CloseWorkspace {
-        workspace_id: crate::ids::WorkspaceId,
+    DuplicateViewSet {
+        view_set_id: crate::ids::ViewSetId,
     },
-    MoveTileToWorkspace {
+    CloseViewSet {
+        view_set_id: crate::ids::ViewSetId,
+    },
+    MoveTileToViewSet {
         layout_guard: String,
         tile_id: String,
-        workspace_id: crate::ids::WorkspaceId,
+        view_set_id: crate::ids::ViewSetId,
+    },
+    PinViewSelection {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    OpenPinnedViewAlongside {
+        instance_key: RyeOsViewInstanceKey,
+    },
+    FollowViewSetSelection {
+        instance_key: RyeOsViewInstanceKey,
+        view_set_id: crate::ids::ViewSetId,
+    },
+    SupplyRequiredSubject {
+        instance_key: RyeOsViewInstanceKey,
+        source_view_set_id: crate::ids::ViewSetId,
+    },
+    ReleaseBindingAttachment {
+        binding_attachment_id: String,
+        binding_generation: u64,
+        binding_digest: String,
     },
     ResizeSplit {
         layout_guard: String,
@@ -370,6 +402,14 @@ pub enum RyeOsUiEvent {
         instance_key: RyeOsViewInstanceKey,
         item_id: String,
         activate: bool,
+    },
+    /// Expand or collapse one exact projected item in one mounted view.
+    /// The reducer resolves the current cursor and expansion key from the
+    /// semantic item id, so a stale renderer cannot affect a replacement row.
+    ToggleViewItemExpansion {
+        instance_key: RyeOsViewInstanceKey,
+        item_id: String,
+        expand: bool,
     },
     /// Dismiss one exact transient notice. Unknown/already-dismissed ids are
     /// idempotent no-ops so stale renderer frames cannot remove another one.

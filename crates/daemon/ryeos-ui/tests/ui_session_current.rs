@@ -1,7 +1,7 @@
 // Tests for `ui.session.current` handler.
 
 mod test_state;
-use test_state::{build_test_state, launch_context};
+use test_state::{build_test_state, launch_context, mint_launch};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::state::get_ui_state;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 fn test_context() -> ryeos_ui::browser_session::LaunchContext {
     launch_context(
         "surface:ryeos/ui/base",
-        Some("/tmp/project"),
+        None,
         ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
         None,
     )
@@ -20,10 +20,7 @@ fn test_context() -> ryeos_ui::browser_session::LaunchContext {
 async fn session_current_returns_session_fields() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(test_context());
+    let (session_id, token) = mint_launch(&state, test_context());
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -48,10 +45,17 @@ async fn session_current_returns_session_fields() {
     .expect("should succeed");
 
     assert_eq!(result["session_id"], session_id);
-    assert_eq!(result["surface_ref"], "surface:ryeos/ui/base");
-    assert_eq!(result["project_path"], "/tmp/project");
-    assert_eq!(result["posture"], "interactive");
-    assert_eq!(result["binding_digest"], "11".repeat(32));
+    let surface_attachment_id = result["surface_attachment_id"].as_str().unwrap();
+    let attachments = result["binding_attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    let attachment = &attachments[0];
+    assert_eq!(attachment["binding_attachment_id"], surface_attachment_id);
+    assert_eq!(attachment["surface_ref"], "surface:ryeos/ui/base");
+    assert_eq!(attachment["project_path"], serde_json::Value::Null);
+    assert_eq!(attachment["posture"], "interactive");
+    assert_eq!(attachment["binding_digest"], "11".repeat(32));
+    assert!(result.get("surface_ref").is_none());
+    assert!(result.get("binding_digest").is_none());
     assert!(result["events_url"].as_str().unwrap().contains(&session_id));
 }
 
@@ -79,7 +83,9 @@ async fn session_current_with_expired_session_rejected() {
         std::time::Duration::from_millis(1),
     );
 
-    let (session_id, _token) = short_store.mint_token(test_context());
+    let (session_id, _token, _) = short_store
+        .mint_token(test_context(), 16, &"22".repeat(32))
+        .expect("mint short-lived session");
 
     std::thread::sleep(std::time::Duration::from_millis(5));
 
@@ -103,10 +109,7 @@ async fn session_current_reports_observation_only_posture() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::ObservationOnly,
         None,
     );
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(ctx);
+    let (session_id, token) = mint_launch(&state, ctx);
     assert_eq!(
         get_ui_state(&state)
             .unwrap()
@@ -125,8 +128,14 @@ async fn session_current_reports_observation_only_posture() {
     .await
     .expect("should succeed");
 
-    assert_eq!(result["posture"], "observation_only");
-    assert_eq!(result["project_path"], serde_json::Value::Null);
+    assert_eq!(
+        result["binding_attachments"][0]["posture"],
+        "observation_only"
+    );
+    assert_eq!(
+        result["binding_attachments"][0]["project_path"],
+        serde_json::Value::Null
+    );
 }
 
 #[tokio::test]
@@ -139,10 +148,7 @@ async fn session_current_returns_durable_user_principal_when_present() {
         ryeos_ui::compiled_binding::EffectiveUiPosture::Interactive,
         Some(user_principal_id.clone()),
     );
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(ctx);
+    let (session_id, token) = mint_launch(&state, ctx);
     assert_eq!(
         get_ui_state(&state)
             .unwrap()

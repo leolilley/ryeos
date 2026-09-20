@@ -1,0 +1,9 @@
+# ryeos:signed:2026-09-19T07:22:30Z:03764ab2209cb8843e0f99a96c7990f45f3b56932178b289fb852a3f4445c4f4:2gNlADDymPoM/Ecv5KCIoLyNDppFl+YrhLCYMBSIj9xjpmZmgD92m2xIY4X1hUKDfNSg4vA4nIn9lLMv6kGNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/view-sets/resume
+version: "1.0.0"
+description: Re-resolve and resume one durable particular view set without restoring session authority.
+endpoint: ui.ryeos.view-sets.resume
+availability: daemon_only
+ui_dispatch: session_local
+ui_result_effect: resume_particular_view_set

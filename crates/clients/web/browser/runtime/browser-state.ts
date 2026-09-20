@@ -55,6 +55,10 @@ export function restoreBrowserPresentation(root: Element, snapshot: BrowserPrese
   let focus = snapshot.focus ?? modalReturnFocus.get(root) ?? null;
   if (!focus) return;
   let target = root.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(focus.key)}"]`);
+  if (!target && focus.key.includes(":required-subject:")) {
+    const instance = focus.key.slice("view:".length, focus.key.lastIndexOf(":required-subject:"));
+    target = root.querySelector<HTMLElement>(`[data-focus-key="${cssEscape(`view:${instance}:header`)}"]`);
+  }
   if (!target) {
     focus = modalReturnFocus.get(root) ?? null;
     if (!focus) return;

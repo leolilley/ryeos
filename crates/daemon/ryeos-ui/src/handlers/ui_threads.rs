@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
+use base64::Engine;
+use lillux::crypto::Signature;
 use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
@@ -263,13 +265,12 @@ pub async fn handle_inspect(
     // chip without a separate service call.
     let pending = state.live_input.pending_len(&req.thread_id);
 
-    // Durable execution posture (05b.v2): the signed `thread.json` audit record
-    // (capabilities minted, hard limits, effective trust class, model) written at
-    // launch. Absent when the thread carries no live-path launch metadata or the
-    // file is gone — then `thread_meta` is omitted and the Execution section
-    // reads empty.
+    // Durable execution posture (05b.v2): preserve an explicit coverage result;
+    // an absent, unreadable, or corrupt audit record is not a successful empty
+    // projection.
     let thread_meta = read_thread_meta(&state, &req.thread_id);
-    let execution = execution_meta_rows(thread_meta.as_ref(), &thread.thread.executor_ref);
+    let execution = execution_meta_rows(thread_meta.value(), &thread.thread.executor_ref);
+    let execution_coverage = thread_meta.coverage();
 
     // Graph `follow:` lineage as labeled `{label, value}` rows (same projectable
     // shape as `usage` / `execution_meta`), so the detail lens's Follow section
@@ -289,9 +290,10 @@ pub async fn handle_inspect(
         "usage": usage,
         "pending": pending,
         "execution_meta": execution,
+        "execution_coverage": [execution_coverage],
         "follow": follow,
     });
-    if let Some(meta) = thread_meta {
+    if let Some(meta) = thread_meta.into_value() {
         response
             .as_object_mut()
             .expect("inspect response is an object")
@@ -300,17 +302,53 @@ pub async fn handle_inspect(
     Ok(response)
 }
 
-/// Read the thread's signed `thread.json` audit record from its project and
-/// return the parsed (signature-stripped) JSON. `None` when the thread has no
-/// live-path launch metadata, its project context is not a local path, or the
-/// file is absent/unreadable — all of which mean "no durable posture to show",
-/// so the caller omits the field rather than surfacing an error.
-fn read_thread_meta(state: &AppState, thread_id: &str) -> Option<Value> {
-    let meta = state.state_store.get_launch_metadata(thread_id).ok()??;
-    let ctx = meta.resume_context.as_ref()?;
+#[derive(Debug)]
+enum ThreadMetaRead {
+    Available(Value),
+    Unavailable(&'static str),
+}
+
+impl ThreadMetaRead {
+    fn value(&self) -> Option<&Value> {
+        match self {
+            Self::Available(value) => Some(value),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    fn into_value(self) -> Option<Value> {
+        match self {
+            Self::Available(value) => Some(value),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    fn coverage(&self) -> Value {
+        match self {
+            Self::Available(_) => {
+                serde_json::json!({"state":"available","reason":"audit_record_retained"})
+            }
+            Self::Unavailable(reason) => {
+                serde_json::json!({"state":"unavailable","reason":reason})
+            }
+        }
+    }
+}
+
+/// Read the thread's signed `thread.json` audit record while retaining why its
+/// durable posture cannot be projected.
+fn read_thread_meta(state: &AppState, thread_id: &str) -> ThreadMetaRead {
+    let meta = match state.state_store.get_launch_metadata(thread_id) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => return ThreadMetaRead::Unavailable("launch_metadata_absent"),
+        Err(_) => return ThreadMetaRead::Unavailable("launch_metadata_unreadable"),
+    };
+    let Some(ctx) = meta.resume_context.as_ref() else {
+        return ThreadMetaRead::Unavailable("resume_context_absent");
+    };
     let project_root = match &ctx.project_context {
         ProjectContext::LocalPath { path } => path,
-        _ => return None,
+        _ => return ThreadMetaRead::Unavailable("project_context_not_local"),
     };
     let path = project_root
         .join(ryeos_engine::AI_DIR)
@@ -318,9 +356,44 @@ fn read_thread_meta(state: &AppState, thread_id: &str) -> Option<Value> {
         .join("threads")
         .join(thread_id)
         .join("thread.json");
-    let signed = std::fs::read_to_string(&path).ok()?;
-    let stripped = lillux::signature::strip_signature_lines(&signed);
-    serde_json::from_str::<Value>(&stripped).ok()
+    let signed = match std::fs::read_to_string(&path) {
+        Ok(signed) => signed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ThreadMetaRead::Unavailable("audit_record_missing");
+        }
+        Err(_) => return ThreadMetaRead::Unavailable("audit_record_unreadable"),
+    };
+    match verify_thread_meta_document(&signed, &state.identity) {
+        Ok(value) => ThreadMetaRead::Available(value),
+        Err(reason) => ThreadMetaRead::Unavailable(reason),
+    }
+}
+
+/// Verify the exact node-signed audit document before its body contributes
+/// execution posture. Merely parsing the body would let a tampered or
+/// predecessor-node record masquerade as current durable evidence.
+fn verify_thread_meta_document(
+    signed: &str,
+    identity: &ryeos_app::identity::NodeIdentity,
+) -> std::result::Result<Value, &'static str> {
+    let (body, header) =
+        lillux::signature::strip_canonical_signature_with_envelope(signed, "#", None, false)
+            .map_err(|_| "audit_record_signature_invalid")?;
+    let header = header.ok_or("audit_record_signature_missing")?;
+    if header.signer_fingerprint != identity.fingerprint()
+        || lillux::sha256_hex(body.as_bytes()) != header.content_hash
+    {
+        return Err("audit_record_signature_invalid");
+    }
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&header.signature_b64)
+        .map_err(|_| "audit_record_signature_invalid")?;
+    let signature =
+        Signature::from_slice(&signature_bytes).map_err(|_| "audit_record_signature_invalid")?;
+    identity
+        .verify_hash(&header.content_hash, &signature)
+        .map_err(|_| "audit_record_signature_invalid")?;
+    serde_json::from_str::<Value>(&body).map_err(|_| "audit_record_corrupt")
 }
 
 /// Build the Execution section's labeled-metric rows (the same `{label, value}`
@@ -495,6 +568,37 @@ mod tests {
         // (the section reads empty rather than showing a blank runtime line).
         let rows = execution_meta_rows(None, "");
         assert!(rows.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn execution_posture_coverage_preserves_failure_reason() {
+        let available = ThreadMetaRead::Available(serde_json::json!({}));
+        assert_eq!(available.coverage()["state"], "available");
+        let missing = ThreadMetaRead::Unavailable("audit_record_missing");
+        assert_eq!(missing.coverage()["state"], "unavailable");
+        assert_eq!(missing.coverage()["reason"], "audit_record_missing");
+        let corrupt = ThreadMetaRead::Unavailable("audit_record_corrupt");
+        assert_eq!(corrupt.coverage()["reason"], "audit_record_corrupt");
+    }
+
+    #[test]
+    fn thread_meta_requires_the_current_node_signature() {
+        let directory = tempfile::tempdir().unwrap();
+        let current =
+            ryeos_app::identity::NodeIdentity::create(&directory.path().join("node.pem")).unwrap();
+        let predecessor =
+            ryeos_app::identity::NodeIdentity::create(&directory.path().join("old-node.pem"))
+                .unwrap();
+        let body = serde_json::json!({"thread_id":"T-signed"}).to_string();
+        let signed = lillux::signature::sign_content(&body, predecessor.signing_key(), "#", None);
+        assert_eq!(
+            verify_thread_meta_document(&signed, &current),
+            Err("audit_record_signature_invalid")
+        );
+        assert_eq!(
+            verify_thread_meta_document(&body, &current),
+            Err("audit_record_signature_missing")
+        );
     }
 
     #[test]

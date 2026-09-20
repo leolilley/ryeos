@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:18:42Z:b425284c35c40dd84f7bca913d6ee8886e6f6c90fa396aa509cd64f05acde43d:rSjOwEVraWoEyMxodjjocKzucLutEaOlcslEQ4Iv+k/oubC9FqIFu2wxQlTddjY0A9PCbTtnD64bUcHqF+aDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T07:22:30Z:171b675d4f705356491278e4486c19711410a43b161b9bafe1d4a2a75f4ecc96:NpJ5T1//yoaY8skJ+7jVz1M6h2zNiOtCSrcYCU5sckQMBbtuwyaVYlnK/adVOg4ej+uvFeeX5SR7V7WyYzACAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-candidate
 title: Candidate
 version: "1.0.0"
@@ -12,6 +12,16 @@ sources:
       thread_id: "@facet:selection.work.thread"
 
 sections:
+  - title: Availability
+    source_channel: detail
+    collection: availability
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map: { available: good, pending: accent, unavailable: warn }
+        default: neutral
   - title: Candidate
     source_channel: detail
     collection: candidates

@@ -113,7 +113,7 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
             .browser_sessions
             .get_session(session_id)
             .ok_or(RouteDispatchError::Unauthorized)?;
-        principal.id = session.compiled_binding.binding.principal_id.clone();
+        principal.id = session.principal_id.clone();
         principal.scopes = session.granted_caps;
 
         let upstream = CompiledChainTailInvocation {

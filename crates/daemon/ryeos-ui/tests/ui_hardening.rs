@@ -21,10 +21,7 @@ fn mint_session(
     state: &ryeos_app::state::AppState,
     project_path: Option<String>,
 ) -> HandlerContext {
-    let (session_id, token) = get_ui_state(state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(session_launch_context(project_path));
+    let (session_id, token) = test_state::mint_launch(state, session_launch_context(project_path));
     assert_eq!(
         get_ui_state(state)
             .unwrap()

@@ -32,6 +32,7 @@ export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   const wasm = await loadWasm();
   await wasm.default({ module_or_path: "/ui/assets/ryeos_web_bg.wasm" });
   const sessionUnknown = await getJson("/ui/api/session/current");
+  const surfaceAttachment = sessionSurfaceAttachment(sessionUnknown);
   const initial = wasm.ryeos_start(sessionUnknown, viewport(), BigInt(Date.now()));
 
   let runtime: UiRuntime;
@@ -68,6 +69,7 @@ export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   sessionRuntime = createSessionRuntime({
     sessionId: sessionId(sessionUnknown),
     eventsUrl: sessionEventsUrl(sessionUnknown),
+    surfaceAttachment,
     seatEvents: () => wasm.ryeos_seat_events(),
     commitEvent: (event) => runtime.enqueueEvent(event),
     replaySeatEvents: (events) => runtime.commitMutation(() => wasm.ryeos_replay_seat_events(events)),
@@ -93,6 +95,53 @@ export async function bootRyeOs(root: Element): Promise<RunningRyeOs> {
   };
 }
 
+export interface SessionBindingCoordinate {
+  readonly binding_attachment_id: string;
+  readonly binding_generation: number;
+  readonly binding_digest: string;
+}
+
+/** Resolve the immutable authored launch attachment without treating array order as authority. */
+export function sessionSurfaceAttachment(session: unknown): SessionBindingCoordinate {
+  const record = sessionRecord(session);
+  const surfaceAttachmentId = requiredNonEmptyString(record, "surface_attachment_id");
+  if (!Array.isArray(record.binding_attachments)) {
+    throw new Error("authenticated browser session binding_attachments is invalid");
+  }
+  const matches = record.binding_attachments.filter((attachment) =>
+    typeof attachment === "object" && attachment !== null && !Array.isArray(attachment)
+      && (attachment as Record<string, unknown>).binding_attachment_id === surfaceAttachmentId
+  );
+  if (matches.length !== 1) {
+    throw new Error("authenticated browser session does not contain exactly one surface attachment");
+  }
+  const attachment = matches[0] as Record<string, unknown>;
+  const generation = attachment.binding_generation;
+  if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error("authenticated browser session surface attachment generation is invalid");
+  }
+  return {
+    binding_attachment_id: requiredNonEmptyString(attachment, "binding_attachment_id"),
+    binding_generation: generation,
+    binding_digest: requiredNonEmptyString(attachment, "binding_digest"),
+  };
+}
+
+function sessionRecord(session: unknown): Record<string, unknown> {
+  if (typeof session !== "object" || session === null || Array.isArray(session)) {
+    throw new Error("authenticated browser session is not an object");
+  }
+  return session as Record<string, unknown>;
+}
+
+function requiredNonEmptyString(record: Record<string, unknown>, field: string): string {
+  const value = record[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`authenticated browser session ${field} is invalid`);
+  }
+  return value;
+}
+
 function sessionEventsUrl(session: unknown): string | null {
   if (typeof session !== "object" || session === null || Array.isArray(session)) {
     throw new Error("authenticated browser session is not an object");
@@ -104,10 +153,7 @@ function sessionEventsUrl(session: unknown): string | null {
 }
 
 function sessionId(session: unknown): string {
-  if (typeof session !== "object" || session === null || Array.isArray(session)) {
-    throw new Error("authenticated browser session is not an object");
-  }
-  const value = (session as Record<string, unknown>).session_id;
+  const value = sessionRecord(session).session_id;
   if (typeof value !== "string" || value.length === 0) {
     throw new Error("authenticated browser session has no session_id");
   }
@@ -148,7 +194,7 @@ function attachBrowserEvents(wasm: RyeOsWasmApi, runtime: UiRuntime): () => void
     if (isTypingTarget(event.target)) return;
     const key = keyEvent(event);
     if (!key) return;
-    if (key.key === "enter" && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
+    if ((event.key === "Enter" || event.key === " ") && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
     let handled = false;
     runtime.commitMutation(() => {
       const outcome = wasm.ryeos_key(key);

@@ -20,14 +20,14 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // own label (the cognition stepped into, e.g. `study`) when known, else the
     // focused view's title.
     let current = vm
-        .workspace
+        .view_set
         .lens_label
         .clone()
         .unwrap_or_else(|| vm.presentation.chrome.top_bar.focused_title.clone());
-    let crumb = if vm.workspace.lens_trail.is_empty() {
+    let crumb = if vm.view_set.lens_trail.is_empty() {
         current
     } else {
-        format!("{} ▸ {}", vm.workspace.lens_trail.join(" ▸ "), current)
+        format!("{} ▸ {}", vm.view_set.lens_trail.join(" ▸ "), current)
     };
     let navigation = vm
         .navigation
@@ -134,7 +134,7 @@ fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
 pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) -> Rect {
     let border = border_for(&vm.presentation.chrome.border);
     let project_path = vm.session.project_path.as_deref();
-    let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
+    let (dock_rects, center) = carve_docks(body, &vm.view_set.docks);
     for (dock, rect) in dock_rects {
         draw_dock_tile(surface, rect, dock, project_path, border, vm.now_ms);
     }
@@ -235,7 +235,17 @@ fn draw_dock_tile(
     surface.draw_text(
         x + 2,
         y,
-        &truncate(&format!(" {} ", dock.title), w.saturating_sub(4)),
+        &truncate(
+            &format!(
+                " {}{} ",
+                dock.title,
+                dock.attachment_label
+                    .as_ref()
+                    .map(|label| format!(" · {label}"))
+                    .unwrap_or_default()
+            ),
+            w.saturating_sub(4),
+        ),
         Style::new().fg(ACCENT).bg(BG).bold(),
     );
     // Dock content renders through the SAME widget dispatch as center
@@ -384,6 +394,7 @@ fn view_chrome(view: &RyeOsViewVm) -> Option<(&str, &[String])> {
         } => provenance
             .as_deref()
             .map(|provenance| (provenance, affordance_hints.as_slice())),
+        RyeOsViewVm::Document { provenance, .. } => Some((provenance.as_str(), &[])),
         _ => None,
     }
 }
@@ -395,9 +406,13 @@ mod tests {
 
     fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
         RyeOsDockTileVm {
-            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(edge),
+            instance_key: ryeos_client_base::ui::model::dock_view_instance_key(
+                ryeos_client_base::ids::ViewSetId::new(1),
+                edge,
+            ),
             edge,
             title: "t".into(),
+            attachment_label: None,
             heading: None,
             supplement: None,
             size,
@@ -480,10 +495,9 @@ mod tests {
             address: ryeos_client_base::ui::model::RyeOsInputAddress {
                 session_id: "fixture".into(),
                 binding_digest: "fixture".into(),
-                workspace_index: 0,
-                workspace_id: ryeos_client_base::ids::WorkspaceId::new(1),
+                view_set_id: ryeos_client_base::ids::ViewSetId::new(1),
                 buffer: ryeos_client_base::ui::model::InputBufferKey::new(
-                    ryeos_client_base::ids::RyeOsViewInstanceKey::workspace_tile(
+                    ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(
                         ryeos_client_base::ids::TileId::new(1),
                     ),
                     "view:test/input",
@@ -504,7 +518,7 @@ mod tests {
         draw_tile(
             &mut surface,
             Rect::new(0, 0, 40, 10),
-            &ryeos_client_base::ids::RyeOsViewInstanceKey::workspace_tile(
+            &ryeos_client_base::ids::RyeOsViewInstanceKey::view_set_tile(
                 ryeos_client_base::ids::TileId::new(1),
             ),
             "t",

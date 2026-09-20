@@ -62,10 +62,10 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    // There is no "home" mode. The bars, docks (incl. the real bottom
-    // input slot), and overlays render in EVERY state. The only branch is
-    // backdrop-vs-tiles in the center: an empty center draws the backdrop
-    // scene; tiles fill it otherwise.
+    // There is no "home" mode. Bars, ordinary docks and overlays render in
+    // every state. A maximized tile is the one deliberate exception: the
+    // shared presentation layout projects it as the sole root and all clients
+    // give it the complete body rather than retaining supporting docks.
     let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
         chrome::draw_top_bar(&mut surface, vm);
         1
@@ -80,16 +80,27 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     };
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
-    let center = chrome::draw_docks(&mut surface, body, vm);
-    let draw_backdrop_underlay = vm.workspace.root.is_some()
+    let maximized = matches!(
+        vm.view_set.root.as_ref(),
+        Some(RyeOsLayoutNodeVm::Tile {
+            maximized: true,
+            ..
+        })
+    );
+    let center = if maximized {
+        body
+    } else {
+        chrome::draw_docks(&mut surface, body, vm)
+    };
+    let draw_backdrop_underlay = vm.view_set.root.is_some()
         && vm.session.ambient.show_background
         && vm
             .session
             .ambient
             .opacity
             .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
-    if let Some(root) = &vm.workspace.root {
-        if draw_backdrop_underlay && let Some(backdrop) = &vm.workspace.backdrop {
+    if let Some(root) = &vm.view_set.root {
+        if draw_backdrop_underlay && let Some(backdrop) = &vm.view_set.backdrop {
             widgets::scene::draw_scene(&mut surface, center, backdrop);
         }
         let border = theme::border_for(&vm.presentation.chrome.border);
@@ -101,7 +112,7 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
             vm.now_ms,
             draw_backdrop_underlay,
         );
-    } else if let Some(backdrop) = &vm.workspace.backdrop {
+    } else if let Some(backdrop) = &vm.view_set.backdrop {
         // Empty center: the backdrop is content — the ONE generic scene
         // renderer draws it (particles twinkle by generation). No
         // per-art code, no background enum.
@@ -132,7 +143,9 @@ fn draw_layout_node(
             instance_key,
             tile_id,
             focused,
+            group_label,
             title,
+            attachment_label,
             intents,
             view,
             chrome_hidden,
@@ -169,13 +182,19 @@ fn draw_layout_node(
                 }
                 draw_view(surface, rect, view, now_ms);
             } else {
+                let title = match attachment_label {
+                    Some(attachment) => {
+                        format!("{} · {attachment}", group_label.as_deref().unwrap_or(title))
+                    }
+                    None => group_label.as_deref().unwrap_or(title).to_string(),
+                };
                 chrome::draw_tile(
                     surface,
                     rect,
                     instance_key,
                     tile_id,
                     *focused,
-                    title,
+                    &title,
                     intents.len(),
                     view,
                     input.as_ref(),
@@ -304,10 +323,26 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         draw_text_view(surface, rect, lines, *position);
         return;
     }
+    if let RyeOsViewVm::Document {
+        path,
+        content,
+        truncated,
+        ..
+    } = view
+    {
+        let mut lines = vec![path.clone()];
+        if *truncated {
+            lines.push("[bounded preview]".to_string());
+        }
+        lines.extend(content.lines().map(str::to_owned));
+        draw_lines(surface, rect, &lines);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
         RyeOsViewVm::Field { .. } => unreachable!("field views return above"),
         RyeOsViewVm::Text { .. } => unreachable!("text views return above"),
+        RyeOsViewVm::Document { .. } => unreachable!("document views return above"),
         RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
         RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
         RyeOsViewVm::Map { .. } | RyeOsViewVm::Atlas { .. } => {
@@ -318,6 +353,16 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         RyeOsViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
             lines.push(message.clone());
+        }
+        RyeOsViewVm::RequiredSubject {
+            title,
+            input,
+            facets,
+            actions,
+        } => {
+            lines.push(title.clone());
+            lines.push(format!("{input}: {}", facets.join(", ")));
+            lines.extend(actions.iter().map(|action| format!("• {}", action.label)));
         }
     }
     draw_lines(surface, rect, &lines);
@@ -423,8 +468,21 @@ mod tests {
     fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
             session_id: "S-backdrop".to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
+            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
+            surface_attachment_id: "backdrop-attachment".into(),
+            binding_attachments: vec![ryeos_client_base::ui::UiBindingAttachment {
+                binding_attachment_id: "backdrop-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "backdrop-binding".into(),
+                surface_ref: "surface:ryeos/ryeos/base".to_string(),
+                surface_generation: "backdrop-generation".into(),
+                project_path: None,
+                posture: Default::default(),
+                binding_request_bounds: ryeos_client_base::ui::UiBindingRequestBounds {
+                    max_request_bytes: 4096,
+                    max_input_bytes: 1024,
+                },
+                effective_surface: json!({
                 "name": "ryeos-base",
                 "version": "1.0.0",
                 "backdrop": "view:test/backdrop",
@@ -446,7 +504,8 @@ mod tests {
                         ] }
                     }
                 }
-            })),
+                }),
+            }],
             ..Default::default()
         };
         RyeOsCore::new(session, BrowserViewport::default(), 0)
@@ -456,8 +515,8 @@ mod tests {
     fn empty_center_draws_backdrop_scene_and_bottom_input() {
         let vm = build_view_model(&empty_center_core());
         // The backdrop scene resolved on an empty center.
-        assert!(vm.workspace.center_is_empty);
-        assert!(vm.workspace.backdrop.is_some());
+        assert!(vm.view_set.center_is_empty);
+        assert!(vm.view_set.backdrop.is_some());
 
         let rendered = surface_text(&build_surface(&vm, 96, 28));
         // The backdrop scene draws its text objects + particles.
@@ -487,11 +546,7 @@ mod tests {
         // The bug's regression: on an empty center, the bottom slot is the
         // focused/active input instance carrying the prompt VM.
         let vm = build_view_model(&empty_center_core());
-        let bottom = vm
-            .workspace
-            .docks
-            .bottom
-            .expect("bottom input slot present");
+        let bottom = vm.view_set.docks.bottom.expect("bottom input slot present");
         let input = bottom.input.expect("bottom slot declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
     }

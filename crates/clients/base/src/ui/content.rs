@@ -49,8 +49,8 @@ pub struct ViewBinding {
     /// resolves this ref itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
-    /// One of the closed widget primitives: rows | text | key_value |
-    /// timeline | scene. Unknown widgets degrade (raw + provenance).
+    /// One of the closed widget primitives: rows | text | document |
+    /// key_value | timeline | scene. Unknown widgets degrade visibly.
     #[serde(default)]
     pub widget: String,
     /// The view item's authored `name:` (content, like `description`). Used
@@ -1541,15 +1541,16 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
 
 /// The closed set of `refresh:` rule keys a view may declare. A view refetches
 /// on a facet write (`on_facet`) or a hint (`on_hint`). `on_hint` may be a
-/// single hint kind or a list of hint kinds.
-pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
+/// single hint kind or a list of hint kinds. View-level `after_invoke`
+/// re-observes sources after settlement; it never retries the invocation.
+pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint", "after_invoke"];
 
 /// Returns a degradation reason when a `refresh:` rule is not the closed
 /// mapping grammar. Shape, keys, and values all fail visibly; an authored
 /// scalar or malformed trigger must never become a silently inert liveness
 /// policy.
 pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
-    let rule_error = |scope: &str, refresh: &Value| {
+    let rule_error = |scope: &str, refresh: &Value, view_level: bool| {
         if refresh.is_null() {
             return None;
         }
@@ -1567,6 +1568,13 @@ pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
                 unknown.join(", "),
                 REFRESH_KEYS.join(", ")
             ));
+        }
+        if let Some(value) = object.get("after_invoke") {
+            if !view_level || !value.is_boolean() {
+                return Some(format!(
+                    "invalid {scope} refresh.after_invoke: only a view-level boolean is supported"
+                ));
+            }
         }
         if object
             .get("on_facet")
@@ -1592,11 +1600,11 @@ pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
         }
         None
     };
-    if let Some(error) = rule_error("view binding", &binding.refresh) {
+    if let Some(error) = rule_error("view binding", &binding.refresh, true) {
         return Some(error);
     }
     for (channel, source) in &binding.sources {
-        if let Some(error) = rule_error(&format!("source '{channel}'"), &source.refresh) {
+        if let Some(error) = rule_error(&format!("source '{channel}'"), &source.refresh, false) {
             return Some(error);
         }
     }
@@ -1609,6 +1617,17 @@ pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
 /// the one daemon path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AffordanceInvoke {
+    OpenSavedViewSet {
+        template: Value,
+    },
+    SaveActiveViewSet {
+        context: Value,
+        persist_affordance: String,
+    },
+    SaveParticularViewSet {
+        context: Value,
+        persist_affordance: String,
+    },
     Ui {
         facet: String,
         value: Option<Value>,
@@ -1664,6 +1683,48 @@ pub fn resolve_affordance_invoke(
     let invoke = affordance.get("invoke")?;
     match invoke.get("plane").and_then(Value::as_str)? {
         "ui" => {
+            if let Some(operation) = invoke.get("operation") {
+                // Presence selects the closed composition-operation grammar.
+                // Malformed operations must not fall through to facet writes.
+                let operation = operation.as_str()?;
+                let template = invoke.get("value")?;
+                if has_unresolved_placeholder(template, payload) {
+                    return None;
+                }
+                let value = substitute_payload(template, payload);
+                return match operation {
+                    "open_saved_view_set" => {
+                        Some(AffordanceInvoke::OpenSavedViewSet { template: value })
+                    }
+                    "save_active_view_set" => {
+                        let companion = invoke.get("persist_affordance")?.as_str()?;
+                        if companion.is_empty()
+                            || companion.trim() != companion
+                            || companion.chars().any(char::is_control)
+                        {
+                            return None;
+                        }
+                        Some(AffordanceInvoke::SaveActiveViewSet {
+                            context: value,
+                            persist_affordance: companion.to_owned(),
+                        })
+                    }
+                    "save_particular_view_set" => {
+                        let companion = invoke.get("persist_affordance")?.as_str()?;
+                        if companion.is_empty()
+                            || companion.trim() != companion
+                            || companion.chars().any(char::is_control)
+                        {
+                            return None;
+                        }
+                        Some(AffordanceInvoke::SaveParticularViewSet {
+                            context: value,
+                            persist_affordance: companion.to_owned(),
+                        })
+                    }
+                    _ => None,
+                };
+            }
             // Facet writes are local state replacement/merge operations. A
             // missing runtime value must refuse the activation so it cannot
             // erase valid routing state with null. Service arguments differ:
@@ -3012,5 +3073,93 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(binding.selection.unwrap().activate.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn after_invoke_refresh_is_only_a_view_level_boolean() {
+        for enabled in [true, false] {
+            let binding: ViewBinding = serde_json::from_value(json!({
+                "widget": "rows", "refresh": {"after_invoke": enabled}
+            }))
+            .unwrap();
+            assert!(refresh_keys_error(&binding).is_none());
+        }
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows", "refresh": {"after_invoke": "true"}
+        }))
+        .unwrap();
+        assert!(refresh_keys_error(&binding).is_some());
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows", "sources": {"default": {
+                "ref": "service:test/get", "refresh": {"after_invoke": true}
+            }}
+        }))
+        .unwrap();
+        assert!(refresh_keys_error(&binding).is_some());
+    }
+
+    #[test]
+    fn saved_set_operations_require_resolved_payload_and_explicit_companion() {
+        let record = json!({"context": {"expected_revision": 4, "saved_view_sets": []}});
+        let mut affordance = json!({"invoke": {
+            "plane": "ui", "operation": "save_active_view_set",
+            "value": "{record.context}", "persist_affordance": "persist"
+        }});
+        assert!(matches!(resolve_affordance_invoke(
+            &affordance, Producer::Selection, &Payload::Selection(&record)
+        ), Some(AffordanceInvoke::SaveActiveViewSet { context, persist_affordance })
+            if context == record["context"] && persist_affordance == "persist"));
+        assert!(
+            resolve_affordance_invoke(
+                &affordance,
+                Producer::Selection,
+                &Payload::Selection(&json!({}))
+            )
+            .is_none()
+        );
+        affordance["invoke"]
+            .as_object_mut()
+            .unwrap()
+            .remove("persist_affordance");
+        assert!(
+            resolve_affordance_invoke(
+                &affordance,
+                Producer::Selection,
+                &Payload::Selection(&record)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn malformed_composition_operation_cannot_fall_through_to_facet_write() {
+        for operation in [Value::Null, json!(false), json!(42), json!("unknown")] {
+            let affordance = json!({"invoke": {
+                "plane": "ui", "operation": operation,
+                "facet": "selection", "value": {"thread_id": "T-other"}
+            }});
+            assert!(
+                resolve_affordance_invoke(
+                    &affordance,
+                    Producer::Selection,
+                    &Payload::Selection(&json!({}))
+                )
+                .is_none()
+            );
+        }
+        for companion in ["", " persist", "persist\n"] {
+            let affordance = json!({"invoke": {
+                "plane": "ui", "operation": "save_active_view_set",
+                "persist_affordance": companion, "value": {}
+            }});
+            assert!(
+                resolve_affordance_invoke(
+                    &affordance,
+                    Producer::Selection,
+                    &Payload::Selection(&json!({}))
+                )
+                .is_none()
+            );
+        }
     }
 }

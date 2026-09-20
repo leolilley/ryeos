@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-19T05:20:52Z:94dc515ec8764514d24f67cc642db1c83ac34aa998ffaf5fa5d186fd30c14bdb:BJOtXnlcHm2L9yX1YBug9VJ6Geu/7G/Advmx4If6ClLwVjeyHZgQf1304VwxBPV+0745zF9NGEsVWFyq0kEQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/execution/occurrence
+version: "1.0.0"
+description: Bounded exact occurrence and directly connected retained evidence for an authorized execution thread.
+endpoint: ui.ryeos.execution.occurrence
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

@@ -1,0 +1,42 @@
+# ryeos:signed:2026-09-19T05:18:21Z:3ade1d380b970dea43dbdc461980daa23dd053107dfbfd3a196fcdb0fff7e639:5oFOMvjj7Rg93RUFhQ95wNyfQnsSF8fxXpycGFNuo25vzD2m0mZvaY9IH8QYl0XY6prs1TXBcTk0uUKGiJQnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: development-explorer
+title: Explorer
+version: "1.0.0"
+description: Durable work navigator for the development view set
+
+widget: rows
+sources:
+  default:
+    ref: service:ui/ryeos-ui/work/list
+    params: { limit: 200 }
+    collection: work
+projections:
+  primary: item_ref
+  secondary: project.name
+  meta: phase.state_code
+  tone:
+    field: phase.state_code
+    map: { running: accent, failed: danger, killed: danger, timed_out: danger, cancelled: warn, completed: good }
+    default: neutral
+selection:
+  activate: inspect
+affordances:
+  - id: inspect
+    label: Inspect work
+    invoke:
+      plane: ui
+      facet: selection.work
+      merge:
+        thread: "{record.placement.thread_id}"
+        chain_root: "{record.coordinate.chain_root_id}"
+  - id: talk
+    label: Talk to work
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.placement.thread_id}"
+        chain_root: "{record.coordinate.chain_root_id}"
+      open_view: view:ryeos/thread/conversation
+refresh:
+  on_hint: [thread, activity]

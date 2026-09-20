@@ -26,7 +26,7 @@ because fake DOM objects cannot qualify those browser contracts.
 
 ## Shared-model visual preview
 
-`ryeos-client-base/examples/workspace_visual_fixture.rs` emits production
+`ryeos-client-base/examples/view_set_visual_fixture.rs` emits production
 `RyeOsCore` envelopes for a synthetic surface. The browser runner can render
 these with the real DOM adapter and CSS, without a daemon, seat attachment or
 execution dispatcher. This is different from the standalone design study.
@@ -34,7 +34,7 @@ execution dispatcher. This is different from the standalone design study.
 From the repository root, generate the fixture with:
 
 ```sh
-cargo run -p ryeos-client-base --example workspace_visual_fixture --offline -j1 --quiet > /tmp/ryeos-ui-visual-fixture.json
+cargo run -p ryeos-client-base --example view_set_visual_fixture --offline -j1 --quiet > /tmp/ryeos-ui-visual-fixture.json
 ```
 
 Then run the browser checks with `RYEOS_UI_VISUAL_FIXTURE` set to that file.
@@ -43,6 +43,13 @@ Then run the browser checks with `RYEOS_UI_VISUAL_FIXTURE` set to that file.
 overview and launcher arrangements at 1600×1000, plus work at 1024×768 and
 390×844. It checks narrow focus reachability, composer/content separation and
 reduced motion. External HTTPS requests are blocked for this preview.
+
+The runner reads those envelopes with the production exact-integer JSON decoder;
+it does not recreate or patch their semantics in JavaScript. The mounted root is
+marked `data-visual-fixture="synthetic"` and records the fixture filename in
+`data-fixture-source` for screenshot provenance. Keep a generated fixture only
+when its generating revision and command are recorded alongside it; never hand
+author a replacement envelope in the browser test.
 
 All projects, transcripts and evidence are synthetic. The preview intentionally
 has no executable input route; a disabled send control is not a live failure.

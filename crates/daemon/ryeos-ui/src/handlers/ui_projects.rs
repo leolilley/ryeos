@@ -14,13 +14,17 @@ use ryeos_app::principal::{
     HostedPrincipalResolver, LOCAL_PRINCIPAL_ID, LockedPrincipalStore, PrincipalStore,
 };
 use ryeos_app::state::AppState;
+use ryeos_client_base::surface::view_sets::{
+    ParticularViewSetResume, SavedViewSetTemplate, validate_particular_view_set_resumes,
+    validate_saved_view_set_templates,
+};
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
-const RYEOS_UI_CONFIG_VERSION: u32 = 2;
+const RYEOS_UI_CONFIG_VERSION: u32 = 4;
 const RECENT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,12 +55,18 @@ pub struct ProjectEntry {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RyeOsConfigFile {
     pub version: u32,
     pub theme: String,
     pub landing_view: String,
+    pub view_set_library_revision: u64,
+    #[serde(default)]
+    pub saved_view_sets: Vec<SavedViewSetTemplate>,
+    pub particular_view_set_library_revision: u64,
+    #[serde(default)]
+    pub particular_view_sets: Vec<ParticularViewSetResume>,
 }
 
 impl Default for RyeOsConfigFile {
@@ -65,6 +75,10 @@ impl Default for RyeOsConfigFile {
             version: RYEOS_UI_CONFIG_VERSION,
             theme: "system".into(),
             landing_view: "projects".into(),
+            view_set_library_revision: 0,
+            saved_view_sets: Vec::new(),
+            particular_view_set_library_revision: 0,
+            particular_view_sets: Vec::new(),
         }
     }
 }
@@ -137,19 +151,42 @@ pub struct UpdateConfigRequest {
     pub theme: Option<String>,
     #[serde(default)]
     pub landing_view: Option<String>,
+    #[serde(default)]
+    pub view_set_library: Option<ViewSetLibraryUpdate>,
+    #[serde(default)]
+    pub particular_view_set_library: Option<ParticularViewSetLibraryUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSetLibraryUpdate {
+    pub expected_revision: u64,
+    pub saved_view_sets: Vec<SavedViewSetTemplate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticularViewSetLibraryUpdate {
+    pub expected_revision: u64,
+    pub particular_view_sets: Vec<ParticularViewSetResume>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeParticularViewSetRequest {
+    pub id: String,
 }
 
 pub async fn handle_projects_list(
-    params: Value,
+    _params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = require_seat_caller(&ctx, &state)?;
-    let project_path = string_param(&params, "project_path");
     let retained_project = caller
         .project_query_identity()?
         .map(|path| path.to_string_lossy().into_owned());
-    let current_project = retained_project.as_deref().or(project_path.as_deref());
+    let current_project = retained_project.as_deref();
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let mut rows = projects.projects;
@@ -229,25 +266,36 @@ pub async fn handle_projects_forget(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: ForgetProjectRequest = parse_request(params)?;
-    if req.local_id.is_none() && req.root.is_none() {
-        return Err(HandlerError::BadRequest("local_id or root is required".into()).into());
-    }
-    let root = match (req.local_id.as_deref(), req.root.as_deref()) {
-        (Some(_), _) => None,
-        (None, Some(root)) => Some(project_root_locator_for_forget(root)?),
-        (None, None) => None,
-    };
+    let local_id = req.local_id.as_deref().ok_or_else(|| {
+        HandlerError::BadRequest("registered local_id is required for project forget".into())
+    })?;
 
     let store = locked_principal_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
-    let before = projects.projects.len();
-    projects.projects.retain(|p| {
-        if let Some(local_id) = req.local_id.as_deref() {
-            p.local_id != local_id
-        } else {
-            root.as_deref().is_none_or(|r| r != p.root)
+    if !projects
+        .projects
+        .iter()
+        .any(|project| project.local_id == local_id)
+    {
+        return Ok(json!({"removed": 0}));
+    }
+    let principal_id = retained_principal_id(&state)?;
+    if get_ui_state(&state)
+        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+        .browser_sessions
+        .has_retained_attachment_for_project(&principal_id, local_id)
+    {
+        return Err(HandlerError::Structured {
+            code: "project_in_use".into(),
+            status: 409,
+            body: json!({"code":"project_in_use","local_id":local_id}),
         }
-    });
+        .into());
+    }
+    let before = projects.projects.len();
+    projects
+        .projects
+        .retain(|project| project.local_id != local_id);
     let removed = before - projects.projects.len();
     store.write_projects(&projects)?;
 
@@ -285,25 +333,16 @@ pub async fn handle_projects_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let caller = require_seat_caller(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let req: OpenProjectRequest = parse_request(params)?;
-    let current_project = caller
-        .project_query_identity()?
-        .map(|path| path.to_string_lossy().into_owned());
-    let store = locked_principal_store(&ctx, &state).await?;
-    let projects = store.load_projects()?;
-    let project = if req.local_id == "current" {
-        let root = current_project.ok_or(HandlerError::NotFound)?;
-        let path = PathBuf::from(&root);
-        ProjectEntry {
-            local_id: "current".to_string(),
-            name: inferred_project_name(&path),
-            root,
-            added_at: String::new(),
-            tags: Vec::new(),
-        }
-    } else {
-        projects
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let origin = crate::seat_auth::compiled_ui_attachment()
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
+    let project = {
+        let store = locked_principal_store(&ctx, &state).await?;
+        store
+            .load_projects()?
             .projects
             .into_iter()
             .find(|p| p.local_id == req.local_id)
@@ -312,76 +351,299 @@ pub async fn handle_projects_open(
 
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
-    let active_session = if let Some(session_id) = session_id_from_context(&ctx) {
-        let session = get_ui_state(&state)
-            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-            .browser_sessions
-            .get_session(session_id)
-            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-        if session.project_root.as_deref() != Some(root.as_str()) {
-            // The selected root came from the already resolved principal
-            // store. Pin it here and carry that exact authority forward;
-            // replacement must not reconstruct ingress authorization.
-            let project_authority = Arc::new(
-                lillux::PinnedDirectory::open(&canonical)?
-                    .context("selected UI project root disappeared")?,
-            );
-            let replacement = super::ui_launch_mint::mint_project_replacement(
-                &session,
-                project_authority,
-                state.as_ref(),
-            )?;
-            let recent = if project.local_id == "current" {
-                RecentFile::default()
-            } else {
-                store.touch_recent_project(&project.local_id)?
-            };
-            return Ok(json!({
-                "project": project_view(
-                    ProjectEntry { root: root.clone(), ..project.clone() },
-                    Some(&root),
-                    project.local_id != "current"
-                ),
-                "recent": recent.recent_projects,
-                "ui_transition": {
-                    "kind": "replace_session",
-                    "launch_url": replacement.launch_url,
-                    "session_id": replacement.session_id,
-                }
-            }));
-        }
-        Some(session)
-    } else {
-        None
+    let project_authority = Arc::new(
+        lillux::PinnedDirectory::open(&canonical)?
+            .context("selected UI project root disappeared")?,
+    );
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+    let compile_context = HandlerContext::new(
+        session.principal_id.clone(),
+        session.granted_caps.clone(),
+        true,
+    );
+    let compile_request = super::ui_launch_mint::Request {
+        ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
+        surface_ref: origin.surface_ref.clone(),
+        project_path: Some(root.clone()),
+        user_principal_id: None,
     };
-    let recent = if project.local_id == "current" {
-        RecentFile::default()
-    } else {
-        store.touch_recent_project(&project.local_id)?
-    };
+    let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+        &compile_request,
+        &compile_context,
+        &state,
+        Some(project_authority.as_ref()),
+    )?;
 
-    let session = if let Some(active_session) = active_session {
-        json!({
-            "session_id": active_session.session_id,
-            "project_root": active_session.project_root,
-            "binding_digest": active_session.compiled_binding.binding_digest,
-            "posture": active_session.compiled_binding.posture,
-        })
-    } else {
-        json!({
-            "session_id": "",
-            "project_root": root.clone(),
-        })
+    // Reacquire the existing principal-registry gate after compilation. Both
+    // publish and forget take registry -> session-store in this order, making
+    // the live-attachment predicate atomic with registry mutation.
+    let store = locked_principal_store(&ctx, &state).await?;
+    let still_registered = store
+        .load_projects()?
+        .projects
+        .into_iter()
+        .any(|entry| entry.local_id == project.local_id && entry.root == project.root);
+    if !still_registered {
+        return Err(
+            HandlerError::Conflict("project registration changed during open".into()).into(),
+        );
+    }
+    let policy = state
+        .node_policy
+        .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+    )?;
+    let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+    let attachment = ui.browser_sessions.publish_attachment(
+        session_id,
+        &origin.coordinate(),
+        crate::browser_session::BindingAttachmentCandidate {
+            registered_project_id: Some(project.local_id.clone()),
+            compiled_binding: Arc::new(compiled_binding),
+            effective_surface,
+            project_authority: Some(project_authority),
+        },
+        usize::try_from(policy.max_live_binding_attachments_per_session)?,
+        state.node_policy.generation_digest(),
+    )?;
+    let descriptor = attachment.public_descriptor(request_bounds);
+    // Recent history is presentation metadata, not attachment authority. Once
+    // publication succeeds, a recent-file failure must not turn the admitted
+    // attachment into an unreturned/stranded capability.
+    let recent = match store.touch_recent_project(&project.local_id) {
+        Ok(recent) => recent,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                local_id = %project.local_id,
+                "binding attachment admitted but recent project history was not updated"
+            );
+            store.load_recent().unwrap_or_default()
+        }
     };
 
     Ok(json!({
         "project": project_view(
             ProjectEntry { root: root.clone(), ..project.clone() },
             Some(&root),
-            project.local_id != "current"
+            true
         ),
-        "session": session,
         "recent": recent.recent_projects,
+        "ui_transition": {
+            "kind": "admit_binding_attachment",
+            "attachment": descriptor,
+        }
+    }))
+}
+
+/// Resume one durable particular view set without reviving any prior session
+/// authority. Stable project/work identities are resolved again; a project
+/// context receives a freshly compiled retained attachment, while projectless
+/// work remains on the exact invoking attachment.
+pub async fn handle_particular_view_set_resume(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = require_seat_caller(&ctx, &state)?;
+    let req: ResumeParticularViewSetRequest = parse_request(params)?;
+    let session_id = session_id_from_context(&ctx)
+        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
+    let origin = crate::seat_auth::compiled_ui_attachment()
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))?;
+
+    let (resume, project) = {
+        let store = locked_principal_store(&ctx, &state).await?;
+        let config = store.load_ui_config()?;
+        let resume = config
+            .particular_view_sets
+            .into_iter()
+            .find(|candidate| candidate.id == req.id)
+            .ok_or(HandlerError::NotFound)?;
+        let projects = store.load_projects()?;
+        let project = resume
+            .context
+            .project
+            .as_ref()
+            .map(|project_ref| {
+                projects
+                    .projects
+                    .into_iter()
+                    .find(|candidate| candidate.local_id == project_ref.local_id)
+                    .ok_or(HandlerError::NotFound)
+            })
+            .transpose()?;
+        (resume, project)
+    };
+
+    let canonical_project = project
+        .as_ref()
+        .map(|project| canonical_project_root(&project.root))
+        .transpose()?;
+    if canonical_project.is_none()
+        && (origin.project_query_identity.is_some()
+            || origin.project_authority.is_some()
+            || origin.registered_project_id.is_some())
+    {
+        return Err(HandlerError::Forbidden(
+            "projectless particular view sets require a projectless invoking attachment".into(),
+        )
+        .into());
+    }
+    let resolved_work = resume
+        .context
+        .work
+        .as_ref()
+        .map(|work| {
+            resolve_particular_work(
+                &state,
+                caller.principal_id(),
+                canonical_project.as_deref(),
+                &work.chain_root_id,
+            )
+        })
+        .transpose()?;
+
+    let ui =
+        get_ui_state(&state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+    let session = ui
+        .browser_sessions
+        .get_session(session_id)
+        .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
+
+    let (attachment, insertion_attachment_id) = if let (Some(project), Some(canonical)) =
+        (project.as_ref(), canonical_project.as_ref())
+    {
+        let root = canonical.display().to_string();
+        let project_authority = Arc::new(
+            lillux::PinnedDirectory::open(canonical)?
+                .context("selected UI project root disappeared")?,
+        );
+        let compile_context = HandlerContext::new(
+            session.principal_id.clone(),
+            session.granted_caps.clone(),
+            true,
+        );
+        let compile_request = super::ui_launch_mint::Request {
+            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_owned(),
+            surface_ref: origin.surface_ref.clone(),
+            project_path: Some(root),
+            user_principal_id: None,
+        };
+        let (compiled_binding, effective_surface) = super::ui_launch_mint::compile_session_binding(
+            &compile_request,
+            &compile_context,
+            &state,
+            Some(project_authority.as_ref()),
+        )?;
+
+        // Compilation happens outside the principal-store gate. Reacquire and
+        // revalidate both durable records before publishing the new authority.
+        let store = locked_principal_store(&ctx, &state).await?;
+        let config_unchanged = store
+            .load_ui_config()?
+            .particular_view_sets
+            .into_iter()
+            .any(|candidate| candidate == resume);
+        let project_unchanged = store
+            .load_projects()?
+            .projects
+            .into_iter()
+            .any(|candidate| {
+                candidate.local_id == project.local_id && candidate.root == project.root
+            });
+        if !config_unchanged || !project_unchanged {
+            return Err(HandlerError::Conflict(
+                "particular view-set context changed during resume".into(),
+            )
+            .into());
+        }
+        let policy = state
+            .node_policy
+            .require::<ryeos_app::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>(
+            )?;
+        let request_bounds = super::ui_launch_mint::binding_request_bounds(&state)?;
+        let retained = ui.browser_sessions.publish_attachment(
+            session_id,
+            &origin.coordinate(),
+            crate::browser_session::BindingAttachmentCandidate {
+                registered_project_id: Some(project.local_id.clone()),
+                compiled_binding: Arc::new(compiled_binding),
+                effective_surface,
+                project_authority: Some(project_authority),
+            },
+            usize::try_from(policy.max_live_binding_attachments_per_session)?,
+            state.node_policy.generation_digest(),
+        )?;
+        let descriptor = retained.public_descriptor(request_bounds);
+        let insertion = descriptor.binding_attachment_id.clone();
+        (Some(descriptor), insertion)
+    } else {
+        // A projectless particular set cannot mint new authority. Its current
+        // compiled origin is the only valid insertion context.
+        let store = locked_principal_store(&ctx, &state).await?;
+        if !store
+            .load_ui_config()?
+            .particular_view_sets
+            .into_iter()
+            .any(|candidate| candidate == resume)
+        {
+            return Err(HandlerError::Conflict(
+                "particular view-set context changed during resume".into(),
+            )
+            .into());
+        }
+        (None, origin.binding_attachment_id.clone())
+    };
+
+    Ok(json!({
+        "particular_view_set": {
+            "id": resume.id,
+            "name": resume.name,
+            "composition": resume.composition,
+            "relationships": resume.relationships,
+            "resolved_selection_work": resolved_work,
+        },
+        "ui_transition": {
+            "kind": "resume_particular_view_set",
+            "attachment": attachment,
+            "insertion_attachment_id": insertion_attachment_id,
+        }
+    }))
+}
+
+fn resolve_particular_work(
+    state: &AppState,
+    principal_id: &str,
+    project_root: Option<&Path>,
+    chain_root_id: &str,
+) -> Result<Value> {
+    let lineage = state.threads.continuation_lineage(chain_root_id)?;
+    let root = lineage.first().ok_or(HandlerError::NotFound)?;
+    let head = lineage.last().ok_or(HandlerError::NotFound)?;
+    if root.thread.thread_id != chain_root_id {
+        return Err(HandlerError::NotFound.into());
+    }
+    for placement in &lineage {
+        if placement.thread.chain_root_id != chain_root_id
+            || placement.thread.requested_by.as_deref() != Some(principal_id)
+        {
+            return Err(HandlerError::NotFound.into());
+        }
+        match (project_root, placement.thread.project_root.as_deref()) {
+            (Some(expected), Some(actual))
+                if same_existing_dir(expected.to_string_lossy().as_ref(), actual) => {}
+            (None, None) => {}
+            _ => return Err(HandlerError::NotFound.into()),
+        }
+    }
+    Ok(json!({
+        "thread": head.thread.thread_id,
+        "chain_root": chain_root_id,
     }))
 }
 
@@ -421,7 +683,29 @@ pub async fn handle_config_get(
     require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_ui_config()?;
-    Ok(json!(config))
+    let registered_project_id = crate::seat_auth::compiled_ui_attachment()
+        .and_then(|attachment| attachment.registered_project_id.clone());
+    let mut response = json!(config);
+    // Response-only row for the ordinary sections renderer. The durable file
+    // remains the bounded config contract, with no duplicated library state.
+    response["view_set_save_context"] = json!([{
+        "label": "Save current view set",
+        "description": "Uses the current set name; rename it to save another composition",
+        "context": {
+            "expected_revision": config.view_set_library_revision,
+            "saved_view_sets": config.saved_view_sets
+        }
+    }]);
+    response["particular_view_set_save_context"] = json!([{
+        "label": "Retain this particular view set",
+        "description": "Stores stable project and logical-work references; authority and live placement are resolved again on resume",
+        "context": {
+            "expected_revision": config.particular_view_set_library_revision,
+            "particular_view_sets": config.particular_view_sets,
+            "project_local_id": registered_project_id
+        }
+    }]);
+    Ok(response)
 }
 
 pub async fn handle_config_update(
@@ -431,22 +715,65 @@ pub async fn handle_config_update(
 ) -> Result<Value> {
     require_seat_caller(&ctx, &state)?;
     let req: UpdateConfigRequest = parse_request(params)?;
+    let store = locked_principal_store(&ctx, &state).await?;
+    let mut config = store.load_ui_config()?;
+    apply_config_update(&mut config, req)?;
+    store.write_ui_config(&config)?;
+    Ok(json!(config))
+}
+
+fn apply_config_update(config: &mut RyeOsConfigFile, req: UpdateConfigRequest) -> Result<()> {
     if let Some(theme) = req.theme.as_deref() {
         validate_choice("theme", theme, &["system", "light", "dark"])?;
     }
     if let Some(landing_view) = req.landing_view.as_deref() {
         validate_choice("landing_view", landing_view, &["projects"])?;
     }
-    let store = locked_principal_store(&ctx, &state).await?;
-    let mut config = store.load_ui_config()?;
+    if let Some(update) = &req.view_set_library {
+        validate_saved_view_set_templates(&update.saved_view_sets)
+            .map_err(HandlerError::BadRequest)?;
+        if update.expected_revision != config.view_set_library_revision {
+            return Err(HandlerError::Conflict(format!(
+                "view-set library revision advanced: expected {}, current {}",
+                update.expected_revision, config.view_set_library_revision
+            ))
+            .into());
+        }
+    }
+    if let Some(update) = &req.particular_view_set_library {
+        validate_particular_view_set_resumes(&update.particular_view_sets)
+            .map_err(HandlerError::BadRequest)?;
+        if update.expected_revision != config.particular_view_set_library_revision {
+            return Err(HandlerError::Conflict(format!(
+                "particular-view-set library revision advanced: expected {}, current {}",
+                update.expected_revision, config.particular_view_set_library_revision
+            ))
+            .into());
+        }
+    }
     if let Some(theme) = req.theme {
         config.theme = theme;
     }
     if let Some(landing_view) = req.landing_view {
         config.landing_view = landing_view;
     }
-    store.write_ui_config(&config)?;
-    Ok(json!(config))
+    if let Some(update) = req.view_set_library {
+        config.view_set_library_revision = config
+            .view_set_library_revision
+            .checked_add(1)
+            .ok_or_else(|| HandlerError::Conflict("view-set library revision exhausted".into()))?;
+        config.saved_view_sets = update.saved_view_sets;
+    }
+    if let Some(update) = req.particular_view_set_library {
+        config.particular_view_set_library_revision = config
+            .particular_view_set_library_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                HandlerError::Conflict("particular-view-set library revision exhausted".into())
+            })?;
+        config.particular_view_sets = update.particular_view_sets;
+    }
+    validate_ui_config(config)
 }
 
 fn canonical_project_root(root: &str) -> Result<PathBuf> {
@@ -489,7 +816,7 @@ impl RyeOsPrincipalStoreExt for PrincipalStore {
 
     fn load_ui_config(&self) -> Result<RyeOsConfigFile> {
         let config: RyeOsConfigFile = self.load_yaml(&self.paths().ryeos_config())?;
-        ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+        validate_ui_config(&config)?;
         Ok(config)
     }
 
@@ -514,7 +841,7 @@ impl LockedRyeOsPrincipalStoreExt for LockedPrincipalStore {
     }
 
     fn write_ui_config(&self, config: &RyeOsConfigFile) -> Result<()> {
-        ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+        validate_ui_config(config)?;
         self.write_yaml(&self.paths().ryeos_config(), config)
     }
 
@@ -540,7 +867,7 @@ impl LockedRyeOsPrincipalStoreExt for LockedPrincipalStore {
 }
 
 fn resolve_principal_store(ctx: &HandlerContext, state: &AppState) -> Result<PrincipalStore> {
-    if let Some(user_principal_id) = compiled_user_principal_id() {
+    if let Some(user_principal_id) = compiled_user_principal_id(state)? {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::resolve_with(&resolver, &user_principal_id);
     }
@@ -552,7 +879,7 @@ async fn locked_principal_store(
     ctx: &HandlerContext,
     state: &AppState,
 ) -> Result<LockedPrincipalStore> {
-    if let Some(user_principal_id) = compiled_user_principal_id() {
+    if let Some(user_principal_id) = compiled_user_principal_id(state)? {
         let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
         return PrincipalStore::locked_with(&resolver, &user_principal_id).await;
     }
@@ -560,17 +887,21 @@ async fn locked_principal_store(
     PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await
 }
 
-fn compiled_user_principal_id() -> Option<String> {
-    crate::seat_auth::compiled_ui_session().and_then(|session| session.user_principal_id)
+fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
+    let Some(attachment) = crate::seat_auth::compiled_ui_attachment() else {
+        return Ok(None);
+    };
+    let operator =
+        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+    let principal_id = &attachment.compiled_binding.binding.principal_id;
+    Ok((principal_id != operator.principal_id()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
-    if let Some(session) = crate::seat_auth::compiled_ui_session() {
+    if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
         let operator =
             ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
-        if session.user_principal_id.is_some()
-            || session.compiled_binding.binding.principal_id != operator.principal_id()
-        {
+        if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
             return Err(HandlerError::Forbidden(
                 "UI session has no retained local-operator store authority".into(),
             )
@@ -583,6 +914,12 @@ fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Resu
     Ok(())
 }
 
+fn retained_principal_id(state: &AppState) -> Result<String> {
+    crate::seat_auth::compiled_ui_attachment()
+        .map(|attachment| attachment.compiled_binding.binding.principal_id.clone())
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()).into())
+}
+
 fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
     if found != expected {
         return Err(HandlerError::BadRequest(format!(
@@ -591,6 +928,15 @@ fn ensure_version(label: &str, found: u32, expected: u32) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+fn validate_ui_config(config: &RyeOsConfigFile) -> Result<()> {
+    ensure_version("ryeos-ui.yaml", config.version, RYEOS_UI_CONFIG_VERSION)?;
+    validate_choice("theme", &config.theme, &["system", "light", "dark"])?;
+    validate_choice("landing_view", &config.landing_view, &["projects"])?;
+    validate_saved_view_set_templates(&config.saved_view_sets).map_err(HandlerError::BadRequest)?;
+    validate_particular_view_set_resumes(&config.particular_view_sets)
+        .map_err(|error| HandlerError::BadRequest(error).into())
 }
 
 fn validate_choice(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
@@ -631,25 +977,23 @@ fn project_view(project: ProjectEntry, current_project: Option<&str>, registered
     })
 }
 
-fn string_param(params: &Value, key: &str) -> Option<String> {
-    params
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 pub(crate) fn authorize_launch_project(
     ctx: &HandlerContext,
     state: &AppState,
     requested_root: &str,
-) -> Result<lillux::PinnedDirectory> {
+) -> Result<(lillux::PinnedDirectory, Option<String>)> {
     let requested = canonical_project_root(requested_root)?;
     let authority = lillux::PinnedDirectory::open(&requested)?
         .context("authorized UI project root disappeared")?;
     if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
-        return Ok(authority);
+        let store = PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)?;
+        let registered_project_id = store
+            .load_projects()?
+            .projects
+            .into_iter()
+            .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+            .map(|project| project.local_id);
+        return Ok((authority, registered_project_id));
     }
 
     // Non-operator principals may select only a project already recorded in
@@ -658,18 +1002,47 @@ pub(crate) fn authorize_launch_project(
     let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
     let store = PrincipalStore::resolve_with(&resolver, &ctx.fingerprint)?;
     let projects = store.load_projects()?;
-    if projects
+    let registered_project_id = projects
         .projects
-        .iter()
-        .any(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
-    {
-        Ok(authority)
+        .into_iter()
+        .find(|project| same_existing_dir(&project.root, requested.to_string_lossy().as_ref()))
+        .map(|project| project.local_id);
+    if let Some(registered_project_id) = registered_project_id {
+        Ok((authority, Some(registered_project_id)))
     } else {
         Err(HandlerError::Forbidden(
             "requested UI project is not admitted by the caller's project registry".into(),
         )
         .into())
     }
+}
+
+/// Revalidate a registered launch project after binding compilation and keep
+/// the existing principal YAML gate held until the pending launch token is
+/// inserted. Forget takes this same gate before scanning retained attachment
+/// authority, so it cannot pass between revalidation and token publication.
+pub(crate) async fn lock_launch_project_registration(
+    ctx: &HandlerContext,
+    state: &AppState,
+    registered_project_id: &str,
+    canonical_root: &Path,
+) -> Result<LockedPrincipalStore> {
+    let store = if ryeos_app::operator_authority::require_admitted_operator(state, ctx).is_ok() {
+        PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await?
+    } else {
+        let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
+        PrincipalStore::locked_with(&resolver, &ctx.fingerprint).await?
+    };
+    let still_registered = store.load_projects()?.projects.into_iter().any(|project| {
+        project.local_id == registered_project_id
+            && same_existing_dir(&project.root, canonical_root.to_string_lossy().as_ref())
+    });
+    if !still_registered {
+        return Err(
+            HandlerError::Conflict("project registration changed during UI launch".into()).into(),
+        );
+    }
+    Ok(store)
 }
 
 fn same_existing_dir(left: &str, right: &str) -> bool {
@@ -810,6 +1183,12 @@ descriptor!(
     "ui.ryeos.config.update",
     handle_config_update
 );
+descriptor!(
+    PARTICULAR_VIEW_SET_RESUME_DESCRIPTOR,
+    "service:ui/ryeos-ui/view-sets/resume",
+    "ui.ryeos.view-sets.resume",
+    handle_particular_view_set_resume
+);
 
 #[cfg(test)]
 mod tests {
@@ -820,6 +1199,102 @@ mod tests {
         let file = ProjectsFile::default();
         assert_eq!(file.version, 1);
         assert!(file.projects.is_empty());
+    }
+
+    #[test]
+    fn ui_config_defaults_to_empty_revisioned_view_set_library() {
+        let config = RyeOsConfigFile::default();
+        assert_eq!(config.version, 4);
+        assert_eq!(config.view_set_library_revision, 0);
+        assert!(config.saved_view_sets.is_empty());
+        assert_eq!(config.particular_view_set_library_revision, 0);
+        assert!(config.particular_view_sets.is_empty());
+        validate_ui_config(&config).unwrap();
+    }
+
+    fn saved_view_set_update(expected_revision: u64) -> UpdateConfigRequest {
+        serde_json::from_value(json!({
+            "view_set_library": {
+                "expected_revision": expected_revision,
+                "saved_view_sets": [{
+                    "id": "development",
+                    "name": "Development",
+                    "composition": {
+                        "id": "development",
+                        "title": "Development",
+                        "root": {
+                            "type": "group",
+                            "views": ["view:ryeos/development"],
+                            "active": 0
+                        },
+                        "slots": {}
+                    },
+                    "relationships": [{
+                        "mount": {"kind": "tile", "index": 0},
+                        "source": {"mode": "follow_own_set"}
+                    }]
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn view_set_library_update_is_revision_fenced() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, saved_view_set_update(0)).unwrap();
+        assert_eq!(config.view_set_library_revision, 1);
+        assert_eq!(config.saved_view_sets.len(), 1);
+
+        let before = config.clone();
+        let error = apply_config_update(&mut config, saved_view_set_update(0)).unwrap_err();
+        assert!(error.to_string().contains("revision advanced"));
+        assert_eq!(config, before);
+    }
+
+    fn particular_view_set_update(expected_revision: u64) -> UpdateConfigRequest {
+        serde_json::from_value(json!({
+            "particular_view_set_library": {
+                "expected_revision": expected_revision,
+                "particular_view_sets": [{
+                    "id": "development-current",
+                    "name": "Development current",
+                    "composition": {
+                        "id": "development-current",
+                        "title": "Development current",
+                        "root": {
+                            "type": "group",
+                            "views": ["view:ryeos/development"],
+                            "active": 0
+                        },
+                        "slots": {}
+                    },
+                    "relationships": [{
+                        "mount": {"kind": "tile", "index": 0},
+                        "source": {"mode": "follow_own_set"}
+                    }],
+                    "context": {
+                        "project": {"local_id": "prj_example"},
+                        "work": {"chain_root_id": "T-root"}
+                    }
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn particular_view_set_library_has_independent_revision_fence() {
+        let mut config = RyeOsConfigFile::default();
+        apply_config_update(&mut config, particular_view_set_update(0)).unwrap();
+        assert_eq!(config.particular_view_set_library_revision, 1);
+        assert_eq!(config.particular_view_sets.len(), 1);
+        assert_eq!(config.view_set_library_revision, 0);
+
+        let before = config.clone();
+        let error = apply_config_update(&mut config, particular_view_set_update(0)).unwrap_err();
+        assert!(error.to_string().contains("revision advanced"));
+        assert_eq!(config, before);
     }
 
     #[test]

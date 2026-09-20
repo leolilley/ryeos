@@ -10,3 +10,4 @@ pub mod maintenance;
 pub mod object_closure;
 pub mod persistent_sessions;
 pub mod thread_history;
+pub mod ui_browser_sessions;

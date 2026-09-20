@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T01:11:43Z:521e2d6fe5cd60890f4a80eed558d03003e8a25dccd866ee1fe352f6b34bc6de:sRb3LBJZ9+eINn4/+C89nGfYTI7DIruc9ncYAATLrU/DoXfCIe+9f3WDUeuZ1v0WwL4E0jESGlRgXMKt1b1ACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T07:22:30Z:2a0d772a22a08463ac92804a1e457cacfcf22e2d60f98464934a8c5aec31c60d:BIVNccUbwjBaoeNkEEQYQmUKVlunKRxxzH5nf3i6KX6UALSw97Krsdh0osdknhzBxxtNI2RvSQ6sy5JLndA1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: assistant-work-evidence
 title: Evidence
 version: "1.0.0"
@@ -12,6 +12,16 @@ sources:
       thread_id: "@facet:selection.work.thread"
 
 sections:
+  - title: Execution posture coverage
+    source_channel: detail
+    collection: execution_coverage
+    projection:
+      primary: state
+      meta: reason
+      tone:
+        field: state
+        map: { available: good, unavailable: warn }
+        default: neutral
   - title: Execution
     source_channel: detail
     collection: execution_meta

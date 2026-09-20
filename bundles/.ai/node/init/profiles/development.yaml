@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:05:59Z:6f68548ec96ea35ac6e8ffb86c6ab7a3a5f44bdf193e01ea9918d9e73e8f6cf6:1IgsRKW5B4GpLAUSilY7iqkc5eu9t7VGgcrztfTc8tPv018isd1+aNchAD/z9p7RI0xnUpnU54wp+DYaOLPuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T02:47:07Z:f213000012d74b21a9f42ad0bccd7a7f949209bea6f58528e05bae445435c090:zXYVbwSC6PRzUtkkySL4mIXtqLjEyTvKD0xxKZTJVj2c2ydBILDLWCtEXzouJfY0BmLdXqmYpYiwvYz1KqRsAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -319,3 +319,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

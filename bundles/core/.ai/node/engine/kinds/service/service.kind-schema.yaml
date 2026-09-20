@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-14T10:03:08Z:d36dcd228da7c91f4c46aa3d9e0490b0c032b0e647ee004cf1ef1ae3894f7eb5:5Y6M7dAgbAefNyPa5Vx0StzXP3x3DiW5UO1XB26avpnJHz/myXcSUYBzqYHpXvimmgf8v/qXi9uoCnlrhcEUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:56:15Z:92a5e52e577fecc820f38fe407482ea41b0c7510a2ba1afed6127c2f1a06c68e:TN3yPZ6QlGruuqz3latI8b47GrzzUcU+nn23eFIYZpPvWr9rdcP7l7X3VzWBaDPoNk07EjIdS5IuhwWEnMWPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -86,7 +86,7 @@ composed_value_contract:
     ui_result_effect:
       type: single
       prim: string
-      enum: [replace_session]
+      enum: [admit_binding_attachment]
     schema: { type: single, prim: mapping }
 metadata:
   rules:

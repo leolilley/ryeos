@@ -225,8 +225,12 @@ RyeOS to validate and preserve the existing complete signed generation before st
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
 not infer trust from files baked into the image. The signed standard init profile
-explicitly owns isolation and every other required node policy. Keep `/data` on
-a named volume:
+explicitly owns isolation and every other required node policy, including the
+maximum number of live compiled-binding attachments retained by one UI browser
+session. The daemon has no fallback when that current policy member is absent;
+existing installed generations require an explicit stopped-node schema cut or
+complete policy replacement before a binary with the new registry can start.
+Keep `/data` on a named volume:
 
 ```bash
 docker volume create ryeos-data

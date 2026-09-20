@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-17T01:19:37Z:804e635b24dcc3f4f2207428217152b7de46b776d88ebf2fa74d0da1c1d445fb:+GZrc98YRuWJv7Aydukid9f15HvaJgFPai8NxK/Le423KNz4UsSoSmctCakExgaYxgt2IyhYrXU0nSqD4HYqAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T01:31:04Z:ba1d2160a7ed75b7ffd95c326bef24f497ed825cd594a695f76f6d4e0b843296:sRVHWotKEkua3XfU65zykqC8HSO0RUYaZ7xBRMJbIR7yxhNISwZ+Fc9Nhm04Q52u/HMj1AovgWZPbmQq1MqFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -43,10 +43,19 @@ cp "$stage/renderer/ryeos_three.js" "$stage/final/ryeos_three.js"
 cp "$stage/wasm/ryeos_web.js" "$stage/final/ryeos_web.js"
 cp "$stage/wasm/ryeos_web_bg.wasm" "$stage/final/ryeos_web_bg.wasm"
 
-expected=$'index.html\nryeos_three.js\nryeos_ui.css\nryeos_ui.js\nryeos_web.js\nryeos_web_bg.wasm'
-actual="$(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | sort)"
-if [[ "$actual" != "$expected" ]]; then
+expected=(
+  index.html
+  ryeos_three.js
+  ryeos_ui.css
+  ryeos_ui.js
+  ryeos_web.js
+  ryeos_web_bg.wasm
+)
+mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+if [[ "${actual[*]}" != "${expected[*]}" ]]; then
   echo "assembled browser asset inventory is not the closed generation" >&2
+  printf 'expected: %s\n' "${expected[*]}" >&2
+  printf 'actual:   %s\n' "${actual[*]}" >&2
   exit 1
 fi
 

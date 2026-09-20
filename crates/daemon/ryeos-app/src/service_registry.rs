@@ -240,7 +240,8 @@ pub enum UiDispatchMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiResultEffect {
-    ReplaceSession,
+    AdmitBindingAttachment,
+    ResumeParticularViewSet,
 }
 
 /// Renderer effect a signed service is allowed to return through compiled UI
@@ -251,11 +252,14 @@ pub fn extract_ui_result_effect(
 ) -> Result<Option<UiResultEffect>> {
     match metadata_extra.get("ui_result_effect") {
         None => Ok(None),
-        Some(Value::String(value)) if value == "replace_session" => {
-            Ok(Some(UiResultEffect::ReplaceSession))
+        Some(Value::String(value)) if value == "admit_binding_attachment" => {
+            Ok(Some(UiResultEffect::AdmitBindingAttachment))
+        }
+        Some(Value::String(value)) if value == "resume_particular_view_set" => {
+            Ok(Some(UiResultEffect::ResumeParticularViewSet))
         }
         Some(Value::String(other)) => anyhow::bail!(
-            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected replace_session"
+            "service YAML field 'ui_result_effect' has invalid value '{other}'; expected admit_binding_attachment or resume_particular_view_set"
         ),
         Some(_) => anyhow::bail!("service YAML field 'ui_result_effect' must be a string"),
     }

@@ -11,7 +11,7 @@ use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
 use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
-use crate::workspace::{TileState, ViewLocalState, ViewSpec};
+use crate::view_set::{TileState, ViewLocalState, ViewSpec};
 
 mod dialogs;
 mod execution;
@@ -45,7 +45,7 @@ pub struct RyeOsViewModel {
     pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
-    pub workspace: RyeOsWorkspaceVm,
+    pub view_set: RyeOsViewSetVm,
     pub overlays: Vec<RyeOsOverlayVm>,
     pub notices: Vec<RyeOsNoticeVm>,
     pub transport: RyeOsTransportVm,
@@ -134,14 +134,14 @@ pub struct RyeOsPresentationChromeVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTopBarVm {
     pub visible: bool,
-    pub tabs: Vec<RyeOsWorkspaceTabVm>,
+    pub tabs: Vec<RyeOsViewSetTabVm>,
     pub focused_title: String,
     pub layout_symbol: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsWorkspaceTabVm {
-    pub workspace_id: crate::ids::WorkspaceId,
+pub struct RyeOsViewSetTabVm {
+    pub view_set_id: crate::ids::ViewSetId,
     pub number: usize,
     pub title: String,
     pub active: bool,
@@ -197,12 +197,13 @@ pub enum RyeOsMotionEventVm {
         tile_id: String,
     },
     TabChanged {
-        workspace_number: usize,
+        view_set_number: usize,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsWorkspaceVm {
+pub struct RyeOsViewSetVm {
+    pub view_set_id: crate::ids::ViewSetId,
     pub layout_guard: String,
     pub split_min_ratio: f32,
     pub split_max_ratio: f32,
@@ -251,6 +252,7 @@ pub struct RyeOsDockTileVm {
     pub instance_key: RyeOsViewInstanceKey,
     pub edge: RyeOsDockEdge,
     pub title: String,
+    pub attachment_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heading: Option<RyeOsViewHeadingVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,11 +307,15 @@ pub enum RyeOsLayoutNodeVm {
     },
     Tile {
         group_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_label: Option<String>,
         tabs: Vec<RyeOsViewTabVm>,
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
         focused: bool,
+        maximized: bool,
         title: String,
+        attachment_label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<RyeOsViewHeadingVm>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,8 +361,12 @@ pub struct RyeOsViewHeadingVm {
     pub metadata: Vec<String>,
 }
 
-fn view_heading(core: &RyeOsCore, view_ref: &str) -> Option<RyeOsViewHeadingVm> {
-    let binding = core.views.get(view_ref)?;
+fn view_heading(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<RyeOsViewHeadingVm> {
+    let binding = core.binding_for_instance(instance, view_ref)?;
     let authored = binding.body.get("heading")?;
     Some(
         serde_json::from_value(authored.clone()).unwrap_or_else(|error| RyeOsViewHeadingVm {
@@ -390,8 +400,12 @@ pub struct RyeOsViewSupplementVm {
     pub scene: Option<RyeOsSceneModel>,
 }
 
-fn view_supplement(core: &RyeOsCore, view_ref: &str) -> Option<RyeOsViewSupplementVm> {
-    let body = &core.views.get(view_ref)?.body;
+fn view_supplement(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> Option<RyeOsViewSupplementVm> {
+    let body = &core.binding_for_instance(instance, view_ref)?.body;
     let value = body.get("supplement")?;
     let mut result: RyeOsViewSupplementVm =
         serde_json::from_value(value.clone()).unwrap_or_else(|error| RyeOsViewSupplementVm {
@@ -418,6 +432,16 @@ pub enum RyeOsViewVm {
         title: String,
         lines: Vec<RyeOsTextLineVm>,
         position: RyeOsTextPositionVm,
+    },
+    /// Bounded textual document content projected from an admitted source.
+    /// The view definition names the response fields; this primitive does not
+    /// know about files, knowledge items or any other product-specific owner.
+    Document {
+        title: String,
+        path: String,
+        content: String,
+        truncated: bool,
+        provenance: String,
     },
     /// The generic content widget surface: every bound view renders
     /// through rows (typed widget variants arrive with the render pass).
@@ -524,6 +548,12 @@ pub enum RyeOsViewVm {
     Placeholder {
         title: String,
         message: String,
+    },
+    RequiredSubject {
+        title: String,
+        input: String,
+        facets: Vec<String>,
+        actions: Vec<RyeOsTileIntentVm>,
     },
 }
 
@@ -673,14 +703,14 @@ pub enum RyeOsTone {
 pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
     let session = session_vm(core);
     let health = health_label(core);
-    let workspace = workspace_vm(core);
+    let view_set = view_set_vm(core);
     let chrome = RyeOsChromeVm {
         title: "RyeOS".to_string(),
         subtitle: subtitle(core),
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
     };
-    let route = core.seat.fold().input_route();
+    let route = core.focused_input_route();
     let tail_url = route
         .chain_root
         .as_ref()
@@ -692,11 +722,11 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_thread_id: route.thread,
         tail_chain_root_id: route.chain_root,
         tail_url,
-        presentation: presentation_vm(core, &session, &chrome, &workspace),
+        presentation: presentation_vm(core, &chrome, &view_set),
         session,
         navigation: navigation_vm(core),
         chrome,
-        workspace,
+        view_set,
         overlays: overlays(core),
         notices: core.notices_vm(),
         transport: transport_vm(core),
@@ -711,9 +741,9 @@ fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
         .get(super::seat::KEY_NAVIGATION_DESTINATION)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    let focused = core.workspaces[core.active_workspace]
+    let focused = core.view_sets[core.active_view_set]
         .tiles
-        .get(&core.workspaces[core.active_workspace].focused_tile)
+        .get(&core.view_sets[core.active_view_set].focused_tile)
         .map(|tile| tile.view.view_ref.as_str());
     let items = core
         .surface_navigation()
@@ -766,9 +796,8 @@ fn effect_failures_vm(core: &RyeOsCore) -> Vec<RyeOsEffectFailureVm> {
 
 fn presentation_vm(
     core: &RyeOsCore,
-    session: &RyeOsSessionVm,
     chrome: &RyeOsChromeVm,
-    workspace: &RyeOsWorkspaceVm,
+    view_set: &RyeOsViewSetVm,
 ) -> RyeOsPresentationVm {
     let version = ryeos_version(core);
     RyeOsPresentationVm {
@@ -782,9 +811,9 @@ fn presentation_vm(
             version_label: format!("RYE OS - {version}"),
             border: core.style.border.name().to_string(),
             top_bar: top_bar_vm(core),
-            status_bar: status_bar_vm(session, chrome, workspace, core, &version),
+            status_bar: status_bar_vm(chrome, core),
         },
-        metrics: presentation_metrics_vm(core, workspace),
+        metrics: presentation_metrics_vm(core, view_set),
         frame: RyeOsFrameVm {
             corners: RyeOsFrameCornersVm {
                 visible: true,
@@ -797,17 +826,17 @@ fn presentation_vm(
 
 fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
     RyeOsTopBarVm {
-        visible: core.style.workspace_tabs || core.ui.top_status_visible,
+        visible: core.style.view_set_tabs || core.ui.top_status_visible,
         tabs: core
-            .workspaces
+            .view_sets
             .iter()
             .enumerate()
-            .map(|(index, workspace)| RyeOsWorkspaceTabVm {
-                workspace_id: workspace.id,
+            .map(|(index, view_set)| RyeOsViewSetTabVm {
+                view_set_id: view_set.id,
                 number: index + 1,
-                title: workspace.title.clone(),
-                active: index == core.active_workspace,
-                tile_count: workspace.tile_ids().len(),
+                title: view_set.title.clone(),
+                active: index == core.active_view_set,
+                tile_count: view_set.tile_ids().len(),
             })
             .collect(),
         focused_title: focused_tile_title(core),
@@ -816,18 +845,21 @@ fn top_bar_vm(core: &RyeOsCore) -> RyeOsTopBarVm {
 }
 
 fn focused_tile_title(core: &RyeOsCore) -> String {
-    core.workspaces[core.active_workspace]
+    core.view_sets[core.active_view_set]
         .tiles
-        .get(&core.workspaces[core.active_workspace].focused_tile)
-        .map(|tile| tile_title(core, &tile.view))
+        .get(&core.view_sets[core.active_view_set].focused_tile)
+        .map(|tile| tile_title(core, tile))
         .unwrap_or_else(|| "home".to_string())
 }
 
 /// Human labels are authored content, not item identifiers. Use the same
 /// precedence for group tabs, slots and widget headings.
-fn view_title<'a>(core: &'a RyeOsCore, view_ref: &'a str) -> &'a str {
-    core.views
-        .get(view_ref)
+fn view_title<'a>(
+    core: &'a RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &'a str,
+) -> &'a str {
+    core.binding_for_instance(instance, view_ref)
         .and_then(|binding| {
             [binding.title.as_deref(), binding.name.as_deref()]
                 .into_iter()
@@ -838,13 +870,13 @@ fn view_title<'a>(core: &'a RyeOsCore, view_ref: &'a str) -> &'a str {
         .unwrap_or_else(|| view_ref.rsplit('/').next().unwrap_or(view_ref))
 }
 
-fn tile_title(core: &RyeOsCore, view: &crate::workspace::ViewSpec) -> String {
-    view_title(core, &view.view_ref).to_owned()
+fn tile_title(core: &RyeOsCore, tile: &crate::view_set::TileState) -> String {
+    view_title(core, &tile.instance_key, &tile.view.view_ref).to_owned()
 }
 
 fn layout_symbol(core: &RyeOsCore) -> String {
-    let total = core.workspaces[core.active_workspace].tile_ids().len();
-    let master = core.workspaces[core.active_workspace]
+    let total = core.view_sets[core.active_view_set].tile_ids().len();
+    let master = core.view_sets[core.active_view_set]
         .tiling
         .master
         .count
@@ -855,7 +887,7 @@ fn layout_symbol(core: &RyeOsCore) -> String {
 
 fn presentation_metrics_vm(
     core: &RyeOsCore,
-    workspace: &RyeOsWorkspaceVm,
+    view_set: &RyeOsViewSetVm,
 ) -> RyeOsPresentationMetricsVm {
     let item_count = core
         .data
@@ -903,7 +935,7 @@ fn presentation_metrics_vm(
         .objects
         .len();
     let activity_level = presentation_activity_level(
-        workspace.tile_count,
+        view_set.tile_count,
         core.ui.motion.len(),
         core.ui.loading.len(),
         active_thread_count,
@@ -911,7 +943,7 @@ fn presentation_metrics_vm(
     );
 
     RyeOsPresentationMetricsVm {
-        tile_count: workspace.tile_count,
+        tile_count: view_set.tile_count,
         scene_object_count,
         item_count,
         thread_count,
@@ -939,160 +971,29 @@ fn presentation_activity_level(
         .clamp(0.0, 1.0)
 }
 
-/// Cumulative token usage for the loaded conversation, read from the
-/// chain-replay source's `summary` block — the daemon's continuation-aware
-/// chain totals. Summing the braid's `thread_usage` events instead would
-/// over-count: each event carries the thread's cumulative-so-far totals
-/// (reseeded across continuations), not a per-turn delta. `(0, 0)` when no
-/// fetched source carries a usage summary.
-fn conversation_usage(core: &RyeOsCore) -> (u64, u64) {
-    let mut input = 0u64;
-    let mut output = 0u64;
-    for source in core.data.sources.values() {
-        let Some(summary) = source.get("summary") else {
-            continue;
-        };
-        input += summary
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        output += summary
-            .get("output_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-    }
-    (input, output)
-}
-
-/// Compact a token count for the status strip (`1234` → `1.2k`).
-fn compact_count(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-fn status_bar_vm(
-    session: &RyeOsSessionVm,
-    chrome: &RyeOsChromeVm,
-    workspace: &RyeOsWorkspaceVm,
-    core: &RyeOsCore,
-    version: &str,
-) -> RyeOsStatusBarVm {
-    let item_count = core
-        .data
-        .items
-        .as_ref()
-        .map(|items| items.items.len())
-        .unwrap_or_default();
-    let thread_count = core
-        .data
-        .threads
-        .as_ref()
-        .map(|threads| threads.threads.len())
-        .unwrap_or_default();
-    let (usage_in, usage_out) = conversation_usage(core);
-    let key_hint = if core.workspaces[core.active_workspace].lens_stack.is_empty() {
+fn status_bar_vm(chrome: &RyeOsChromeVm, core: &RyeOsCore) -> RyeOsStatusBarVm {
+    let key_hint = if core.view_sets[core.active_view_set].lens_stack.is_empty() {
         "ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
     } else {
         "⌫ back · alt+← back · ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
             .to_string()
     };
+    // This is quiet interaction chrome, not a second diagnostics dashboard.
+    // Root-session project and execution counters become actively misleading
+    // once exact mounted attachments span projects.
+    let segments = (chrome.health_label != "healthy")
+        .then(|| RyeOsStatusSegmentVm {
+            id: "connection".to_string(),
+            label: Some("node".to_string()),
+            value: chrome.health_label.clone(),
+            tone: chrome.health_tone,
+            grow: true,
+        })
+        .into_iter()
+        .collect();
     RyeOsStatusBarVm {
         visible: core.ui.bottom_status_visible,
-        segments: vec![
-            RyeOsStatusSegmentVm {
-                id: "brand".to_string(),
-                label: None,
-                value: "rye os".to_string(),
-                tone: RyeOsTone::Accent,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "version".to_string(),
-                label: None,
-                value: format!("v{version}"),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "health".to_string(),
-                label: None,
-                value: chrome.health_label.clone(),
-                tone: chrome.health_tone,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "mode".to_string(),
-                label: None,
-                value: match session.posture {
-                    crate::ui::binding::UiEffectivePosture::ObservationOnly => "observe",
-                    crate::ui::binding::UiEffectivePosture::Interactive => "operate",
-                }
-                .to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "tiles".to_string(),
-                label: Some("tiles".to_string()),
-                value: workspace.tile_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "items".to_string(),
-                label: Some("items".to_string()),
-                value: item_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "threads".to_string(),
-                label: Some("threads".to_string()),
-                value: thread_count.to_string(),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            // Always-visible budget: the conversation's cumulative tokens
-            // (input/output) summed from the braid's thread_usage events.
-            RyeOsStatusSegmentVm {
-                id: "usage".to_string(),
-                label: Some("tokens".to_string()),
-                value: format!("{}/{}", compact_count(usage_in), compact_count(usage_out)),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "principal".to_string(),
-                label: Some("principal".to_string()),
-                value: session
-                    .user_principal_id
-                    .as_deref()
-                    .map(short_principal)
-                    .unwrap_or_else(|| "local".to_string()),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "surface".to_string(),
-                label: Some("surface".to_string()),
-                value: short_surface_ref(&session.surface_ref),
-                tone: RyeOsTone::Neutral,
-                grow: false,
-            },
-            RyeOsStatusSegmentVm {
-                id: "project".to_string(),
-                label: None,
-                value: session
-                    .project_path
-                    .clone()
-                    .unwrap_or_else(|| "home".to_string()),
-                tone: RyeOsTone::Neutral,
-                grow: true,
-            },
-        ],
+        segments,
         key_hint,
         energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
         attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
@@ -1100,34 +1001,38 @@ fn status_bar_vm(
     }
 }
 
-fn workspace_vm(core: &RyeOsCore) -> RyeOsWorkspaceVm {
-    let center_is_empty = core.workspaces[core.active_workspace].center_is_empty();
+fn view_set_vm(core: &RyeOsCore) -> RyeOsViewSetVm {
+    let center_is_empty = core.view_sets[core.active_view_set].center_is_empty();
     let backdrop_visible = center_is_empty || surface_uses_backdrop_underlay(core);
-    RyeOsWorkspaceVm {
+    RyeOsViewSetVm {
+        view_set_id: core.view_sets[core.active_view_set].id,
         layout_guard: core.layout_guard(),
         split_min_ratio: crate::layout::MIN_SPLIT_RATIO,
         split_max_ratio: crate::layout::MAX_SPLIT_RATIO,
-        root: core.workspaces[core.active_workspace]
-            .layout()
+        root: core.view_sets[core.active_view_set]
+            .presentation_layout()
             .map(|layout| layout_node_vm(&layout, core)),
-        focused_tile: tile_id_text(core.workspaces[core.active_workspace].focused_tile),
+        focused_tile: tile_id_text(core.view_sets[core.active_view_set].focused_tile),
         center_is_empty,
         // The backdrop scene resolves for empty centers, and for populated
         // centers that opt into a translucent ambient underlay.
         backdrop: backdrop_visible.then(|| backdrop_scene(core)).flatten(),
-        tile_count: core.workspaces[core.active_workspace].tile_ids().len(),
+        tile_count: core.view_sets[core.active_view_set].tile_ids().len(),
         docks: dock_plane_vm(core),
-        lens_trail: core.workspaces[core.active_workspace]
+        lens_trail: core.view_sets[core.active_view_set]
             .lens_stack
             .iter()
             .map(|frame| {
-                frame
-                    .label
-                    .clone()
-                    .unwrap_or_else(|| tile_title(core, &frame.view))
+                frame.label.clone().unwrap_or_else(|| {
+                    core.focused_view_instance_key()
+                        .map(|instance| {
+                            view_title(core, &instance, &frame.view.view_ref).to_owned()
+                        })
+                        .unwrap_or_else(|| frame.view.view_ref.clone())
+                })
             })
             .collect(),
-        lens_label: core.workspaces[core.active_workspace].lens_label.clone(),
+        lens_label: core.view_sets[core.active_view_set].lens_label.clone(),
     }
 }
 
@@ -1135,16 +1040,18 @@ fn workspace_vm(core: &RyeOsCore) -> RyeOsWorkspaceVm {
 /// Absent `backdrop` → no scene (the background fill stands).
 fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
     let backdrop_ref = core
-        .data
-        .session
-        .as_ref()
-        .and_then(|session| session.effective_surface.as_ref())
+        .binding_attachment(&core.surface_attachment_id)
+        .map(|attachment| &attachment.effective_surface)
         .and_then(|surface| surface.get("backdrop"))
         .and_then(serde_json::Value::as_str)?;
     // The backdrop is content: read the embedded backdrop VIEW's body and
     // build its scene generically. The surface names which view; the view
     // declares the objects. Swap the ref → swap the background, no Rust.
-    let binding = core.views.get(backdrop_ref)?;
+    let binding = core
+        .binding_attachments
+        .get(&core.surface_attachment_id)?
+        .views
+        .get(backdrop_ref)?;
     if binding.widget != "scene" {
         return None;
     }
@@ -1160,7 +1067,7 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
     // Keep project-local background activity from making the crystal race in
-    // busy workspaces. Active threads should lift the scene slightly; transient
+    // busy view sets. Active threads should lift the scene slightly; transient
     // activity pulses carry the stronger "something just happened" signal.
     let active_component = ((active_threads.max(0) as f32) * 0.06).clamp(0.0, 0.24);
     scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
@@ -1168,10 +1075,8 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
 }
 
 fn surface_uses_backdrop_underlay(core: &RyeOsCore) -> bool {
-    core.data
-        .session
-        .as_ref()
-        .and_then(|session| session.effective_surface.as_ref())
+    core.binding_attachment(&core.surface_attachment_id)
+        .map(|attachment| &attachment.effective_surface)
         .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
         .and_then(|surface| surface.ambient)
         .is_some_and(|ambient| {
@@ -1187,22 +1092,22 @@ fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
         top: dock_tile_vm(
             core,
             RyeOsDockEdge::Top,
-            core.workspaces[core.active_workspace].docks.top.as_ref(),
+            core.view_sets[core.active_view_set].docks.top.as_ref(),
         ),
         bottom: dock_tile_vm(
             core,
             RyeOsDockEdge::Bottom,
-            core.workspaces[core.active_workspace].docks.bottom.as_ref(),
+            core.view_sets[core.active_view_set].docks.bottom.as_ref(),
         ),
         left: dock_tile_vm(
             core,
             RyeOsDockEdge::Left,
-            core.workspaces[core.active_workspace].docks.left.as_ref(),
+            core.view_sets[core.active_view_set].docks.left.as_ref(),
         ),
         right: dock_tile_vm(
             core,
             RyeOsDockEdge::Right,
-            core.workspaces[core.active_workspace].docks.right.as_ref(),
+            core.view_sets[core.active_view_set].docks.right.as_ref(),
         ),
     }
 }
@@ -1217,7 +1122,8 @@ fn dock_tile_vm(
         return None;
     }
     let RyeOsDockContent::View { view_ref } = &state.content;
-    let instance_key = super::model::dock_view_instance_key(edge);
+    let instance_key =
+        super::model::dock_view_instance_key(core.view_sets[core.active_view_set].id, edge);
     let focused = matches!(
         core.focus_target(),
         super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
@@ -1225,9 +1131,10 @@ fn dock_tile_vm(
     Some(RyeOsDockTileVm {
         instance_key: instance_key.clone(),
         edge,
-        title: view_title(core, view_ref).to_owned(),
-        heading: view_heading(core, view_ref),
-        supplement: view_supplement(core, view_ref),
+        title: view_title(core, &instance_key, view_ref).to_owned(),
+        attachment_label: selection_attachment_label(core, &instance_key),
+        heading: view_heading(core, &instance_key, view_ref),
+        supplement: view_supplement(core, &instance_key, view_ref),
         size: state.size,
         focused,
         view: bound_view_vm_keyed(
@@ -1250,18 +1157,18 @@ struct RowLocalState<'a> {
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
     collapsed_tree_rows: Option<&'a std::collections::BTreeSet<String>>,
-    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
 }
 
 fn dock_selected_state<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> RowLocalState<'a> {
-    match core.workspaces[core.active_workspace]
+    match core.view_sets[core.active_view_set]
         .dock_local
         .get(instance_key)
     {
-        Some(crate::workspace::ViewLocalState::GenericList {
+        Some(crate::view_set::ViewLocalState::GenericList {
             cursor,
             collapsed,
             expanded_rows,
@@ -1286,10 +1193,10 @@ fn instance_input_vm(
     instance_key: &RyeOsViewInstanceKey,
     view_ref: &str,
 ) -> Option<RyeOsInputVm> {
-    let binding = core.views.get(view_ref)?;
+    let binding = core.binding_for_instance(instance_key, view_ref)?;
     let input = binding.input.as_ref()?;
     let key = super::model::InputBufferKey::new(instance_key.clone(), view_ref, input.id.clone())
-        .scoped_for_input(input, &core.seat.fold().input_route());
+        .scoped_for_input(input, &core.route_for_instance(instance_key));
     Some(input_vm(core, &key, view_ref, input))
 }
 
@@ -1297,11 +1204,11 @@ fn instance_input_vm(
 /// Pure projection; unknown widgets and missing data degrade honestly.
 pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
     let (expanded_rows, collapsed_tree_rows, changed_rows) = selected_row_state(core, tile_id);
-    let instance_key = core.workspaces[core.active_workspace]
+    let instance_key = core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)
         .map(|tile| tile.instance_key.clone())
-        .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(tile_id));
+        .unwrap_or_else(|| RyeOsViewInstanceKey::view_set_tile(tile_id));
     let scoped_dataset_key = tile_id.0.to_string();
     bound_view_vm_keyed(
         core,
@@ -1334,12 +1241,20 @@ fn bound_view_vm_keyed(
         collapsed_tree_rows,
         changed_rows,
     } = local;
-    let Some(binding) = core.views.get(view_ref) else {
+    let Some(binding) = core.binding_for_instance(instance_key, view_ref) else {
         return RyeOsViewVm::Placeholder {
             title: view_ref.to_string(),
             message: format!("view {view_ref} is not embedded in the effective surface"),
         };
     };
+    if let Some((input, facets)) = core.unresolved_required_subject(instance_key) {
+        return RyeOsViewVm::RequiredSubject {
+            title: "Subject required".into(),
+            actions: required_subject_actions(core, instance_key, &facets),
+            input,
+            facets,
+        };
+    }
     // A binding that failed to parse/validate shows its reason, not its
     // (absent) content — honest degrade, not a silent "not embedded".
     if let Some(reason) = &binding.degraded {
@@ -1364,20 +1279,27 @@ fn bound_view_vm_keyed(
         "atlas" => {
             // This tile's own scoped dataset when it has one (keyed by tile
             // id == source_key); otherwise None falls back to the shared data.
-            let mut scene = build_scene_model(
+            let mut scene = super::scene_model::build_scene_model_for_instance(
                 core,
                 atlas,
                 scoped_dataset_key.and_then(|key| core.data.tile_items.get(key)),
                 scoped_dataset_key.and_then(|key| core.data.tile_file_space.get(key)),
+                Some(instance_key),
             );
-            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
             return RyeOsViewVm::Atlas { scene };
         }
         "graph" => {
             // Graph renders shared topology; no per-tile content scope yet.
-            let mut scene = build_scene_model(core, atlas, None, None);
-            let tile_id = instance_key.workspace_tile_id().map(|id| id.0.to_string());
+            let mut scene = super::scene_model::build_scene_model_for_instance(
+                core,
+                atlas,
+                None,
+                None,
+                Some(instance_key),
+            );
+            let tile_id = instance_key.view_set_tile_id().map(|id| id.0.to_string());
             bind_scene_actions(&mut scene, tile_id);
             return RyeOsViewVm::Map { scene };
         }
@@ -1385,7 +1307,7 @@ fn bound_view_vm_keyed(
             // A sections view reads one typed source channel per section, not
             // the default response below, so it assembles here ahead of the
             // source-required arms.
-            let title = view_title(core, view_ref).to_owned();
+            let title = view_title(core, instance_key, view_ref).to_owned();
             if binding.sections.is_empty() {
                 return RyeOsViewVm::Placeholder {
                     title,
@@ -1487,6 +1409,7 @@ fn bound_view_vm_keyed(
                                 super::content::affordance_eligibility(affordance, &record.raw)
                                     .enabled
                                     .then(|| RyeOsUiIntent::InvokeAffordance {
+                                        instance_key: instance_key.clone(),
                                         view_ref: view_ref.to_string(),
                                         affordance_id: affordance_id.clone(),
                                         record: record.raw.clone(),
@@ -1531,13 +1454,13 @@ fn bound_view_vm_keyed(
     let facet_response = binding
         .facet
         .as_deref()
-        .and_then(|facet| facet_backed_response(core, facet));
+        .and_then(|facet| facet_backed_response(core, instance_key, facet));
     let response = facet_response.as_ref().or_else(|| {
         source_key
             .as_ref()
             .and_then(|key| core.data.sources.get(key))
     });
-    let title = view_title(core, view_ref).to_owned();
+    let title = view_title(core, instance_key, view_ref).to_owned();
     if binding.widget == "text"
         && let Some(lines) = static_text_lines(binding)
     {
@@ -1553,7 +1476,7 @@ fn bound_view_vm_keyed(
         // The feed follows `chain_root` (the whole braid), so key the empty
         // state off that, not the moving head. Show an honest
         // start-a-conversation state instead.
-        ("timeline", None) if core.seat.fold().input_route().chain_root.is_none() => {
+        ("timeline", None) if core.focused_input_route().chain_root.is_none() => {
             RyeOsViewVm::Placeholder {
                 title,
                 message: "No conversation yet — type below to start one.".to_string(),
@@ -1634,6 +1557,7 @@ fn bound_view_vm_keyed(
                             super::content::affordance_eligibility(affordance, &record.raw)
                                 .enabled
                                 .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    instance_key: instance_key.clone(),
                                     view_ref: view_ref.to_string(),
                                     affordance_id: affordance_id.clone(),
                                     record: record.raw.clone(),
@@ -1885,6 +1809,7 @@ fn bound_view_vm_keyed(
                             super::content::affordance_eligibility(affordance, &record.raw)
                                 .enabled
                                 .then(|| RyeOsUiIntent::InvokeAffordance {
+                                    instance_key: instance_key.clone(),
                                     view_ref: view_ref.to_string(),
                                     affordance_id: affordance_id.clone(),
                                     record: record.raw.clone(),
@@ -1947,6 +1872,36 @@ fn bound_view_vm_keyed(
                 rows,
             }
         }
+        ("document", Some(response)) => {
+            let projection = |name: &str| {
+                binding
+                    .projections
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|path| super::content::field_path(response, path))
+            };
+            let Some(path) = projection("path").and_then(serde_json::Value::as_str) else {
+                return RyeOsViewVm::Placeholder {
+                    title,
+                    message: "document view has no projected path".to_string(),
+                };
+            };
+            let Some(content) = projection("content").and_then(serde_json::Value::as_str) else {
+                return RyeOsViewVm::Placeholder {
+                    title,
+                    message: "document view has no projected content".to_string(),
+                };
+            };
+            RyeOsViewVm::Document {
+                title,
+                path: path.to_string(),
+                content: content.to_string(),
+                truncated: projection("truncated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                provenance: view_ref.to_string(),
+            }
+        }
         (other, Some(_)) => RyeOsViewVm::Placeholder {
             title,
             // Degradation: an unknown widget never crashes a renderer.
@@ -1958,14 +1913,14 @@ fn bound_view_vm_keyed(
 fn field_local_state<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
-) -> Option<&'a crate::workspace::FieldLocalState> {
-    let local = core.workspaces[core.active_workspace]
+) -> Option<&'a crate::view_set::FieldLocalState> {
+    let local = core.view_sets[core.active_view_set]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| &tile.local)
         .or_else(|| {
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .dock_local
                 .get(instance_key)
         });
@@ -2030,7 +1985,15 @@ fn project_field_vm(
         .filter(|entry| entry.fingerprint == fingerprint)
         .map(|entry| entry.base.clone());
     let base = cached.unwrap_or_else(|| {
-        let base = super::field::project_field(&field_id, title, view_ref, binding, &sources, None);
+        let base = super::field::project_field_for_instance(
+            &field_id,
+            title,
+            view_ref,
+            binding,
+            &sources,
+            None,
+            instance_key,
+        );
         core.data.field_projections.borrow_mut().insert(
             instance_key.clone(),
             super::field::FieldProjectionCacheEntry {
@@ -2047,20 +2010,25 @@ pub(crate) fn field_vm_for_instance(
     core: &RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> Option<(String, super::field::RyeOsFieldVm)> {
-    let view_ref = core.workspaces[core.active_workspace]
+    let view_ref = core.view_sets[core.active_view_set]
         .tiles
         .values()
         .find(|tile| &tile.instance_key == instance_key)
         .map(|tile| tile.view.view_ref.clone())
         .or_else(|| {
-            core.workspaces[core.active_workspace]
+            core.view_sets[core.active_view_set]
                 .docks
                 .visible_slot_views()
                 .into_iter()
-                .find(|(edge, _)| super::model::dock_view_instance_key(*edge) == *instance_key)
+                .find(|(edge, _)| {
+                    super::model::dock_view_instance_key(
+                        core.view_sets[core.active_view_set].id,
+                        *edge,
+                    ) == *instance_key
+                })
                 .map(|(_, view_ref)| view_ref)
         })?;
-    let binding = core.views.get(&view_ref)?;
+    let binding = core.binding_for_instance(instance_key, &view_ref)?;
     (binding.widget == "field").then(|| {
         (
             view_ref.clone(),
@@ -2076,14 +2044,14 @@ pub(crate) fn view_vm_for_instance(
     core: &RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> Option<RyeOsViewVm> {
-    let workspace = &core.workspaces[core.active_workspace];
-    let active_tiles = workspace
+    let view_set = &core.view_sets[core.active_view_set];
+    let active_tiles = view_set
         .root
         .as_ref()
         .map(LayoutTree::active_tile_ids)
         .unwrap_or_default();
     if let Some((tile_id, view_ref)) = active_tiles.into_iter().find_map(|tile_id| {
-        workspace
+        view_set
             .tiles
             .get(&tile_id)
             .filter(|tile| &tile.instance_key == instance_key)
@@ -2171,6 +2139,61 @@ pub(crate) fn view_pointer_item(
                     _ => None,
                 };
                 Some((cursor, intent))
+            }),
+        _ => None,
+    }
+}
+
+/// Resolve an expandable semantic pointer target to its current cursor and
+/// disclosure state. Non-expandable replacements fail closed even when they
+/// reuse an old item id.
+pub(crate) fn view_pointer_expansion(
+    core: &RyeOsCore,
+    instance_key: &RyeOsViewInstanceKey,
+    item_id: &str,
+) -> Option<(usize, bool, String)> {
+    match view_vm_for_instance(core, instance_key)? {
+        RyeOsViewVm::Rows { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Table { rows, .. } => rows
+            .into_iter()
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Sections { sections, .. } => sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.id == item_id && row.expandable)
+            .and_then(|row| {
+                let key = row.id.rsplit_once('#')?.1.to_owned();
+                Some((row.cursor, row.expanded, key))
+            }),
+        RyeOsViewVm::Timeline {
+            entry_ids,
+            entry_cursors,
+            entry_expandable,
+            entry_expanded,
+            ..
+        } => entry_ids
+            .iter()
+            .position(|id| id == item_id)
+            .filter(|index| entry_expandable.get(*index).copied().unwrap_or(false))
+            .and_then(|index| {
+                Some((
+                    *entry_cursors.get(index)?,
+                    entry_expanded.get(index).copied().unwrap_or(false),
+                    entry_ids
+                        .get(index)?
+                        .strip_prefix("timeline-entry:")?
+                        .to_owned(),
+                ))
             }),
         _ => None,
     }
@@ -2315,7 +2338,7 @@ fn input_vm(
     view_ref: &str,
     input: &super::content::InputBlock,
 ) -> RyeOsInputVm {
-    let buffer = core.workspaces[core.active_workspace]
+    let buffer = core.view_sets[core.active_view_set]
         .input_buffers
         .get(&key.storage_key());
     let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
@@ -2325,12 +2348,14 @@ fn input_vm(
         .as_ref()
         .is_some_and(|(focused_key, _)| focused_key.storage_key() == key.storage_key());
 
-    let route = core.seat.fold().input_route();
+    let route = core.input_route_for(key);
     let route_label = input
         .target_label
         .clone()
         .map(|label| format!("→ {label}"))
-        .unwrap_or_else(|| derived_target_label(core, view_ref, input, &route));
+        .unwrap_or_else(|| {
+            derived_target_label(core, &key.view_instance_key, view_ref, input, &route)
+        });
 
     // Completion suggestions: an inline @-mention hint when the cursor is in
     // one, else the input's `/` command grammar.
@@ -2361,23 +2386,7 @@ fn input_vm(
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
     let has_affordance_target = input.submit_affordance().is_some();
     RyeOsInputVm {
-        address: super::model::RyeOsInputAddress {
-            session_id: core
-                .data
-                .session
-                .as_ref()
-                .map(|s| s.session_id.clone())
-                .unwrap_or_default(),
-            binding_digest: core
-                .data
-                .session
-                .as_ref()
-                .map(|s| s.binding_digest.clone())
-                .unwrap_or_default(),
-            workspace_index: core.active_workspace,
-            workspace_id: core.workspaces[core.active_workspace].id,
-            buffer: key.clone(),
-        },
+        address: core.input_address_for(key.clone()),
         focused,
         cursor,
         route_label,
@@ -2393,6 +2402,7 @@ fn input_vm(
 /// Derive the target strip when the author gives no `target_label`.
 fn derived_target_label(
     core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
     view_ref: &str,
     input: &super::content::InputBlock,
     route: &super::seat::InputRoute,
@@ -2400,8 +2410,7 @@ fn derived_target_label(
     if let Some(affordance_id) = input.submit_affordance() {
         // Derive from the bound affordance's invoke target.
         if let Some(target) = core
-            .views
-            .get(view_ref)
+            .binding_for_instance(instance, view_ref)
             .and_then(|binding| affordance_invoke_target(binding, affordance_id))
         {
             return format!("→ {target}");
@@ -2523,64 +2532,77 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
     match node {
         LayoutTree::Group {
             group_id,
+            label,
             tabs,
             active: tile_id,
         } => {
-            let view = core.workspaces[core.active_workspace]
+            let view = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .map(|tile| view_vm(core, *tile_id, tile))
                 .unwrap_or_else(|| RyeOsViewVm::Placeholder {
                     title: "Missing view".to_string(),
-                    message: format!("Tile {} is not present in the workspace.", tile_id.0),
+                    message: format!("Tile {} is not present in the view set.", tile_id.0),
                 });
-            let title = core.workspaces[core.active_workspace]
+            let title = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
-                .map(|tile| tile_title(core, &tile.view))
+                .map(|tile| tile_title(core, tile))
                 .unwrap_or_else(|| "Missing".to_string());
-            let input = core.workspaces[core.active_workspace]
+            let input = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
                 .and_then(|tile| instance_input_vm(core, &tile.instance_key, &tile.view.view_ref));
-            let chrome_hidden = core.workspaces[core.active_workspace]
+            let chrome_hidden = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
-                .is_some_and(|tile| view_hides_tile_chrome(core, &tile.view.view_ref));
-            let background_transparent = core.workspaces[core.active_workspace]
+                .is_some_and(|tile| {
+                    view_hides_tile_chrome(core, &tile.instance_key, &tile.view.view_ref)
+                });
+            let background_transparent = core.view_sets[core.active_view_set]
                 .tiles
                 .get(tile_id)
-                .is_some_and(|tile| view_has_transparent_background(core, &tile.view.view_ref));
+                .is_some_and(|tile| {
+                    view_has_transparent_background(core, &tile.instance_key, &tile.view.view_ref)
+                });
             RyeOsLayoutNodeVm::Tile {
                 group_id: group_id.0.to_string(),
+                group_label: label.clone(),
                 tabs: tabs
                     .iter()
                     .map(|id| RyeOsViewTabVm {
                         tile_id: tile_id_text(*id),
-                        title: core.workspaces[core.active_workspace]
+                        title: core.view_sets[core.active_view_set]
                             .tiles
                             .get(id)
-                            .map(|tile| tile_title(core, &tile.view))
+                            .map(|tile| tile_title(core, tile))
                             .unwrap_or_else(|| "Missing view".to_string()),
                         active: id == tile_id,
                     })
                     .collect(),
-                instance_key: core.workspaces[core.active_workspace]
+                instance_key: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
                     .map(|tile| tile.instance_key.clone())
-                    .unwrap_or_else(|| RyeOsViewInstanceKey::workspace_tile(*tile_id)),
+                    .unwrap_or_else(|| RyeOsViewInstanceKey::view_set_tile(*tile_id)),
                 tile_id: tile_id_text(*tile_id),
-                focused: *tile_id == core.workspaces[core.active_workspace].focused_tile,
+                focused: *tile_id == core.view_sets[core.active_view_set].focused_tile,
+                maximized: core.view_sets[core.active_view_set].maximized_tile == Some(*tile_id),
                 title,
-                heading: core.workspaces[core.active_workspace]
+                attachment_label: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
-                    .and_then(|tile| view_heading(core, &tile.view.view_ref)),
-                supplement: core.workspaces[core.active_workspace]
+                    .and_then(|tile| selection_attachment_label(core, &tile.instance_key)),
+                heading: core.view_sets[core.active_view_set]
                     .tiles
                     .get(tile_id)
-                    .and_then(|tile| view_supplement(core, &tile.view.view_ref)),
+                    .and_then(|tile| view_heading(core, &tile.instance_key, &tile.view.view_ref)),
+                supplement: core.view_sets[core.active_view_set]
+                    .tiles
+                    .get(tile_id)
+                    .and_then(|tile| {
+                        view_supplement(core, &tile.instance_key, &tile.view.view_ref)
+                    }),
                 intents: tile_intents(core, *tile_id),
                 view: Box::new(view),
                 chrome_hidden,
@@ -2626,16 +2648,22 @@ fn static_text_lines(binding: &super::content::ViewBinding) -> Option<Vec<RyeOsT
     (!out.is_empty()).then_some(out)
 }
 
-fn view_hides_tile_chrome(core: &RyeOsCore, view_ref: &str) -> bool {
-    core.views
-        .get(view_ref)
+fn view_hides_tile_chrome(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> bool {
+    core.binding_for_instance(instance, view_ref)
         .and_then(|binding| binding.presentation.chrome)
         .is_some_and(|chrome| matches!(chrome, super::content::ViewChromePresentation::None))
 }
 
-fn view_has_transparent_background(core: &RyeOsCore, view_ref: &str) -> bool {
-    core.views
-        .get(view_ref)
+fn view_has_transparent_background(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    view_ref: &str,
+) -> bool {
+    core.binding_for_instance(instance, view_ref)
         .and_then(|binding| binding.presentation.background)
         .is_some_and(|background| {
             matches!(
@@ -2661,20 +2689,16 @@ fn view_vm(core: &RyeOsCore, tile_id: TileId, tile: &TileState) -> RyeOsViewVm {
 
 fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
     let browser = core.data.session.as_ref();
+    let surface = core.binding_attachment(&core.surface_attachment_id);
     let dimension = core.data.dimension.as_ref();
     RyeOsSessionVm {
         session_id: browser
             .map(|session| session.session_id.clone())
             .or_else(|| dimension.map(|dimension| dimension.session.session_id.clone()))
             .unwrap_or_default(),
-        project_path: browser
-            .and_then(|session| session.project_path.clone())
-            .or_else(|| {
-                dimension.and_then(|dimension| dimension.project.as_ref().map(|p| p.path.clone()))
-            }),
-        surface_ref: browser
-            .map(|session| session.surface_ref.clone())
-            .or_else(|| dimension.map(|dimension| dimension.session.surface_ref.clone()))
+        project_path: surface.and_then(|attachment| attachment.project_path.clone()),
+        surface_ref: surface
+            .map(|attachment| attachment.surface_ref.clone())
             .unwrap_or_default(),
         ambient: ambient_vm(core),
         user_principal_id: browser
@@ -2682,16 +2706,16 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
             .or_else(|| {
                 dimension.and_then(|dimension| dimension.session.user_principal_id.clone())
             }),
-        posture: browser.map(|session| session.posture).unwrap_or_default(),
+        posture: surface
+            .map(|attachment| attachment.posture)
+            .unwrap_or_default(),
     }
 }
 
 fn ambient_vm(core: &RyeOsCore) -> RyeOsAmbientVm {
     let Some(surface) = core
-        .data
-        .session
-        .as_ref()
-        .and_then(|session| session.effective_surface.as_ref())
+        .binding_attachment(&core.surface_attachment_id)
+        .map(|attachment| &attachment.effective_surface)
         .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
     else {
         return RyeOsAmbientVm {
@@ -2749,7 +2773,9 @@ pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> {
             ..Default::default()
         });
         for view_ref in group.refs {
-            let Some(binding) = core.views.get(&view_ref) else {
+            let Some(binding) =
+                core.binding_for_insertion(core.view_sets[core.active_view_set].id, &view_ref)
+            else {
                 continue;
             };
             let missing = unsatisfied_facets(core, binding);
@@ -2806,10 +2832,30 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
     refs.sort();
     refs.dedup();
     let fold = core.seat.fold();
+    let initial_route = core
+        .view_sets
+        .get(core.active_view_set)
+        .and_then(|view_set| core.insertion_attachment_id(view_set.id))
+        .and_then(|attachment_id| core.binding_attachments.get(attachment_id))
+        .map(|attachment| {
+            serde_json::to_value(&attachment.initial_input_route).expect("InputRoute serializes")
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
     refs.retain(|spec| {
         super::content::resolve_params(
             &serde_json::Value::String(format!("@facet:{spec}")),
-            |key| fold.get(key).cloned(),
+            |key| {
+                if key == super::seat::KEY_INPUT_ROUTE {
+                    Some(initial_route.clone())
+                } else if key == super::seat::KEY_SELECTION || key.starts_with("selection.") {
+                    // Launcher availability describes a fresh mount in the
+                    // active set, not an unrelated surface-global selection.
+                    super::seat::selection_storage_key(core.view_sets[core.active_view_set].id, key)
+                        .and_then(|storage_key| fold.get(&storage_key).cloned())
+                } else {
+                    fold.get(key).cloned()
+                }
+            },
         )
         .is_null()
     });
@@ -2846,22 +2892,22 @@ fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
         (
             RyeOsDockEdge::Bottom,
             "bottom",
-            core.workspaces[core.active_workspace].docks.bottom.as_ref(),
+            core.view_sets[core.active_view_set].docks.bottom.as_ref(),
         ),
         (
             RyeOsDockEdge::Left,
             "left",
-            core.workspaces[core.active_workspace].docks.left.as_ref(),
+            core.view_sets[core.active_view_set].docks.left.as_ref(),
         ),
         (
             RyeOsDockEdge::Right,
             "right",
-            core.workspaces[core.active_workspace].docks.right.as_ref(),
+            core.view_sets[core.active_view_set].docks.right.as_ref(),
         ),
         (
             RyeOsDockEdge::Top,
             "top",
-            core.workspaces[core.active_workspace].docks.top.as_ref(),
+            core.view_sets[core.active_view_set].docks.top.as_ref(),
         ),
     ]
     .into_iter()
@@ -2880,11 +2926,14 @@ fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
 /// Each is rebuilt as an `InvokeAffordance` from the row's raw record and
 /// the view's declared affordances.
 fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
-    let Some(view) = core.workspaces[core.active_workspace].focused_view() else {
+    let Some(view) = core.view_sets[core.active_view_set].focused_view() else {
         return Vec::new();
     };
     let view_ref = view.view_ref.clone();
-    let Some(binding) = core.views.get(&view_ref) else {
+    let Some(instance_key) = core.focused_view_instance_key() else {
+        return Vec::new();
+    };
+    let Some(binding) = core.binding_for_instance(&instance_key, &view_ref) else {
         return Vec::new();
     };
     let Some(row) = focused_selected_table_row(core) else {
@@ -2920,6 +2969,7 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
                     .disabled_reason
                     .unwrap_or_else(|| "focused row".to_string()),
                 intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: instance_key.clone(),
                     view_ref: view_ref.clone(),
                     affordance_id: id.to_string(),
                     record: row.raw.clone(),
@@ -2980,7 +3030,7 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
-    if let Some(head) = core.seat.fold().input_route().thread {
+    if let Some(head) = core.focused_input_route().thread {
         // "continue" is an operator follow-up — gate it on the substrate fact so
         // a machine-only thread (graph) doesn't offer an operator continue the
         // daemon refuses. "cancel" (terminate) applies to any active thread.
@@ -3010,28 +3060,63 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
 pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     let mut items = context_command_items(core);
     items.extend(dock_command_items(core));
+    items.extend(core.releasable_binding_attachment_items());
     // Presentation actions share the existing command overlay in both clients;
     // they are not executable Tool grants or session-local service routes.
     items.push(RyeOsOverlayChoice {
-        label: "New workspace".into(),
+        label: "New view set".into(),
         hint: "open an empty arrangement".into(),
-        intent: RyeOsUiIntent::NewWorkspace,
+        intent: RyeOsUiIntent::NewViewSet,
         secondary_intent: None,
-        enabled: core.workspaces.len() < crate::surface::workspaces::MAX_WORKSPACES,
+        enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
     });
-    let workspace = &core.workspaces[core.active_workspace];
-    if workspace.tiles.contains_key(&workspace.focused_tile) {
-        for destination in &core.workspaces {
-            if destination.id == workspace.id {
+    let view_set = &core.view_sets[core.active_view_set];
+    items.push(RyeOsOverlayChoice {
+        label: "Duplicate view set".into(),
+        hint: "copy this composition with independent mounted views and drafts".into(),
+        intent: RyeOsUiIntent::DuplicateViewSet {
+            view_set_id: view_set.id,
+        },
+        secondary_intent: None,
+        enabled: core.view_sets.len() < crate::surface::view_sets::MAX_VIEW_SETS,
+    });
+    if let Some(instance) = core.focused_view_instance_key() {
+        items.extend(
+            selection_attachment_intents(core, &instance)
+                .into_iter()
+                .map(|action| RyeOsOverlayChoice {
+                    label: action.label,
+                    hint: action.title,
+                    intent: action.intent,
+                    secondary_intent: None,
+                    enabled: true,
+                }),
+        );
+    }
+    if view_set.tiles.contains_key(&view_set.focused_tile) {
+        items.extend(
+            placement_intents(core, view_set.focused_tile)
+                .into_iter()
+                .map(|action| RyeOsOverlayChoice {
+                    label: action.label,
+                    hint: action.title,
+                    intent: action.intent,
+                    secondary_intent: None,
+                    enabled: true,
+                }),
+        );
+        for destination in &core.view_sets {
+            if destination.id == view_set.id {
                 continue;
             }
             items.push(RyeOsOverlayChoice {
                 label: format!("Move view to {}", destination.title),
-                hint: "move this mounted view and its drafts; follow it to that workspace".into(),
-                intent: RyeOsUiIntent::MoveTileToWorkspace {
+                hint: "move this mounted view and its drafts; preserve its subject attachment"
+                    .into(),
+                intent: RyeOsUiIntent::MoveTileToViewSet {
                     layout_guard: core.layout_guard(),
-                    tile_id: workspace.focused_tile.0.to_string(),
-                    workspace_id: destination.id,
+                    tile_id: view_set.focused_tile.0.to_string(),
+                    view_set_id: destination.id,
                 },
                 secondary_intent: None,
                 enabled: true,
@@ -3039,15 +3124,15 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayCho
         }
     }
     items.push(RyeOsOverlayChoice {
-        label: "Close workspace".into(),
+        label: "Close view set".into(),
         hint: "close this arrangement, not its running work; current input must be cleared first"
             .into(),
-        intent: RyeOsUiIntent::CloseWorkspace {
-            workspace_id: workspace.id,
+        intent: RyeOsUiIntent::CloseViewSet {
+            view_set_id: view_set.id,
         },
         secondary_intent: None,
-        enabled: core.workspaces.len() > 1
-            && workspace
+        enabled: core.view_sets.len() > 1
+            && view_set
                 .input_buffers
                 .values()
                 .all(|input| input.text.is_empty()),
@@ -3101,7 +3186,7 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
         topic(
             "Start",
             "Input",
-            "The foot input stays open while views move",
+            "Each view keeps its own input and destination while it moves",
         ),
         view(
             "Work",
@@ -3142,36 +3227,6 @@ fn focused_selection_hint(core: &RyeOsCore) -> Option<String> {
     focused_selected_table_row(core).and_then(|row| row.cells.into_iter().next())
 }
 
-fn short_principal(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix("fp:") {
-        let prefix = rest.chars().take(8).collect::<String>();
-        return format!("fp:{prefix}…");
-    }
-    truncate_middle(value, 14)
-}
-
-fn short_surface_ref(value: &str) -> String {
-    value.strip_prefix("surface:").unwrap_or(value).to_string()
-}
-
-fn truncate_middle(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    let keep = max_chars.saturating_sub(1) / 2;
-    let start = value.chars().take(keep).collect::<String>();
-    let end = value
-        .chars()
-        .rev()
-        .take(keep)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("{start}…{end}")
-}
-
 fn overlays(core: &RyeOsCore) -> Vec<RyeOsOverlayVm> {
     let Some(active) = core.ui.overlay.active.as_deref() else {
         return Vec::new();
@@ -3198,10 +3253,8 @@ fn overlay_definition(
     id: &str,
 ) -> Option<(String, String, String, String, Vec<String>)> {
     let declared = core
-        .data
-        .session
-        .as_ref()
-        .and_then(|session| session.effective_surface.as_ref())
+        .binding_attachment(&core.surface_attachment_id)
+        .map(|attachment| &attachment.effective_surface)
         .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
         .and_then(|surface| surface.overlays.get(id).cloned());
     if let Some(spec) = declared {
@@ -3436,7 +3489,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         entry("Help", "Ctrl+H", "Open the help overlay"),
         entry("Shortcuts", "Ctrl+/", "Open the shortcuts overlay"),
         entry("Backdrop", "Ctrl+S", "Toggle backdrop break"),
-        entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+        entry("Lenses", "Ctrl+← / →", "Switch view-set tab"),
         entry(
             "Move",
             "Ctrl+U / Ctrl+D",
@@ -3444,7 +3497,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         ),
         entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
         entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
-        entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
+        entry("Layout", "Alt+M", "Promote the focused tile to master"),
         entry(
             "Layout",
             "Alt+T / Alt+B",
@@ -3456,15 +3509,267 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
 }
 
 fn tile_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
-    // Dynamic tiling: the algorithm owns the tree; tiles offer no
-    // manual splits. Closing the last tile returns home.
-    let _ = core;
+    let mut actions = placement_intents(core, tile_id);
+    if let Some(tile) = core.view_sets[core.active_view_set].tiles.get(&tile_id) {
+        actions.extend(selection_attachment_intents(core, &tile.instance_key));
+    }
     let tile_id = tile_id_text(tile_id);
-    vec![RyeOsTileIntentVm {
-        label: "×".to_string(),
-        title: "Close tile".to_string(),
+    actions.push(RyeOsTileIntentVm {
+        label: "Close view".to_string(),
+        title: "Close this view; its running work is unaffected".to_string(),
         intent: RyeOsUiIntent::CloseTile { tile_id },
-    }]
+    });
+    actions
+}
+
+fn selection_attachment_label(core: &RyeOsCore, instance: &RyeOsViewInstanceKey) -> Option<String> {
+    // Placement never retargets an admitted view. Show its binding exception
+    // independently of selection pin/follow, including selection-free views.
+    let containing = core.view_set_index_for_instance(instance)?;
+    let binding_label = core
+        .binding_attachment_for_instance(instance)
+        .and_then(|attachment| {
+            (core.insertion_attachment_id(core.view_sets[containing].id)
+                != Some(attachment.binding_attachment_id.as_str()))
+            .then(|| {
+                attachment
+                    .project_path
+                    .clone()
+                    .unwrap_or_else(|| "Node scope".into())
+            })
+        });
+    let selection_label = match core.selection_attachment_for_instance(instance) {
+        Some(super::attachment::SelectionAttachment::Pinned { .. }) => {
+            Some("Selection pinned".to_string())
+        }
+        Some(super::attachment::SelectionAttachment::RequiredSubject { input, .. }) => {
+            Some(format!("Subject required · {input}"))
+        }
+        Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id }) => {
+            (core.view_sets[containing].id != view_set_id).then(|| {
+                core.view_sets
+                    .iter()
+                    .find(|set| set.id == view_set_id)
+                    .map(|set| format!("Following {}", set.title))
+                    .unwrap_or_else(|| "Selection owner unavailable".into())
+            })
+        }
+        None => None,
+    };
+    match (binding_label, selection_label) {
+        (Some(binding), Some(selection)) => Some(format!("{binding} · {selection}")),
+        (Some(label), None) | (None, Some(label)) => Some(label),
+        (None, None) => None,
+    }
+}
+
+fn selection_attachment_intents(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+) -> Vec<RyeOsTileIntentVm> {
+    let Some(binding) = core
+        .mounted_view_ref(instance)
+        .and_then(|view_ref| core.binding_for_instance(instance, view_ref))
+    else {
+        return Vec::new();
+    };
+    if !super::attachment::participates_in_selection(binding) {
+        return Vec::new();
+    }
+    let can_pin = !super::attachment::selection_dependencies(binding).is_empty();
+    let current = core.selection_attachment_for_instance(instance);
+    if let Some(super::attachment::SelectionAttachment::RequiredSubject { facets, .. }) = &current {
+        return required_subject_actions(core, instance, facets);
+    }
+    let mut actions = Vec::new();
+    if can_pin
+        && !matches!(
+            current,
+            Some(super::attachment::SelectionAttachment::Pinned { .. })
+        )
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Pin this selection".into(),
+            title: "Keep this view on the captured selection; later selections do not retarget it"
+                .into(),
+            intent: RyeOsUiIntent::PinViewSelection {
+                instance_key: instance.clone(),
+            },
+        });
+    }
+    if can_pin
+        && core.view_sets[core.active_view_set].tiling.mode
+            != crate::surface::TilingModeSpec::SingleLens
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Open pinned alongside".into(),
+            title: "Open another instance fixed to this view's exact current selection".into(),
+            intent: RyeOsUiIntent::OpenPinnedViewAlongside {
+                instance_key: instance.clone(),
+            },
+        });
+    }
+    for set in &core.view_sets {
+        if matches!(&current, Some(super::attachment::SelectionAttachment::FollowViewSet { view_set_id }) if *view_set_id == set.id)
+        {
+            continue;
+        }
+        actions.push(RyeOsTileIntentVm {
+            label: format!("Follow selection in {}", set.title),
+            title: "Explicitly reattach this view's selection; its composer route is unchanged"
+                .into(),
+            intent: RyeOsUiIntent::FollowViewSetSelection {
+                instance_key: instance.clone(),
+                view_set_id: set.id,
+            },
+        });
+    }
+    actions
+}
+
+fn required_subject_actions(
+    core: &RyeOsCore,
+    instance: &RyeOsViewInstanceKey,
+    facets: &[String],
+) -> Vec<RyeOsTileIntentVm> {
+    let mut title_counts = std::collections::BTreeMap::new();
+    for set in &core.view_sets {
+        *title_counts.entry(set.title.as_str()).or_insert(0usize) += 1;
+    }
+    core.view_sets
+        .iter()
+        .enumerate()
+        .filter(|(_, set)| core.subject_values_from_view_set(set.id, facets).is_some())
+        .flat_map(|(index, set)| {
+            let label = if title_counts.get(set.title.as_str()).copied().unwrap_or(0) > 1 {
+                format!("Use selection in {} · set {}", set.title, index + 1)
+            } else {
+                format!("Use selection in {}", set.title)
+            };
+            let follow_label = if title_counts.get(set.title.as_str()).copied().unwrap_or(0) > 1 {
+                format!("Follow selection in {} · set {}", set.title, index + 1)
+            } else {
+                format!("Follow selection in {}", set.title)
+            };
+            [
+                RyeOsTileIntentVm {
+                    title: format!(
+                        "Pin the exact current selection to {} without changing its binding",
+                        instance.as_str()
+                    ),
+                    label,
+                    intent: RyeOsUiIntent::SupplyRequiredSubject {
+                        instance_key: instance.clone(),
+                        source_view_set_id: set.id,
+                    },
+                },
+                RyeOsTileIntentVm {
+                    title: "Follow this set as its compatible selection changes".into(),
+                    label: follow_label,
+                    intent: RyeOsUiIntent::FollowViewSetSelection {
+                        instance_key: instance.clone(),
+                        view_set_id: set.id,
+                    },
+                },
+            ]
+        })
+        .collect()
+}
+
+/// Both renderers receive exact mounted coordinates from this projection.
+/// Do not reconstruct placement authority from browser labels or DOM order.
+fn placement_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
+    use crate::view_set::FocusDirection;
+
+    let view_set = &core.view_sets[core.active_view_set];
+    if !view_set.tiles.contains_key(&tile_id) {
+        return Vec::new();
+    }
+    let guard = core.layout_guard();
+    let mut actions = Vec::new();
+    if view_set.tiling.mode == crate::surface::TilingModeSpec::MasterStack
+        && view_set.tile_ids().len() > 1
+        && view_set.tile_ids().first().copied() != Some(tile_id)
+    {
+        actions.push(RyeOsTileIntentVm {
+            label: "Promote to master".into(),
+            title: "Promote this exact mounted view without changing its subject".into(),
+            intent: RyeOsUiIntent::PromoteTileToMaster {
+                layout_guard: guard.clone(),
+                tile_id: tile_id_text(tile_id),
+            },
+        });
+    }
+    if let Some(tabs) = view_set
+        .root
+        .as_ref()
+        .and_then(|root| root.group_tabs(tile_id))
+        && let Some(index) = tabs.iter().position(|candidate| *candidate == tile_id)
+    {
+        if index > 0 {
+            actions.push(RyeOsTileIntentVm {
+                label: "Move tab left".into(),
+                title: "Move this view one place earlier in its current group".into(),
+                intent: RyeOsUiIntent::MoveTileToGroup {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(tabs[index - 1]),
+                    index: index - 1,
+                },
+            });
+        }
+        if index + 1 < tabs.len() {
+            actions.push(RyeOsTileIntentVm {
+                label: "Move tab right".into(),
+                title: "Move this view one place later in its current group".into(),
+                intent: RyeOsUiIntent::MoveTileToGroup {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(tabs[index + 1]),
+                    // The source is removed before insertion, so the position
+                    // after its next sibling is the original index + 1.
+                    index: index + 1,
+                },
+            });
+        }
+    }
+    for target_id in view_set.tile_ids() {
+        if target_id == tile_id {
+            continue;
+        }
+        let Some(target) = view_set.tiles.get(&target_id) else {
+            continue;
+        };
+        let target_label = format!("{} · {}", tile_title(core, target), target_id.0);
+        for (label, edge) in [
+            ("Left of", FocusDirection::Left),
+            ("Right of", FocusDirection::Right),
+            ("Above", FocusDirection::Up),
+            ("Below", FocusDirection::Down),
+        ] {
+            actions.push(RyeOsTileIntentVm {
+                label: format!("{label} {target_label}"),
+                title: "Move this mounted view, preserving its subject and draft".into(),
+                intent: RyeOsUiIntent::MoveTileBeside {
+                    layout_guard: guard.clone(),
+                    tile_id: tile_id_text(tile_id),
+                    target_tile_id: tile_id_text(target_id),
+                    edge,
+                },
+            });
+        }
+        actions.push(RyeOsTileIntentVm {
+            label: format!("Group with {target_label}"),
+            title: "Move this view into the destination tab group".into(),
+            intent: RyeOsUiIntent::MoveTileToGroup {
+                layout_guard: guard.clone(),
+                tile_id: tile_id_text(tile_id),
+                target_tile_id: tile_id_text(target_id),
+                index: 0,
+            },
+        });
+    }
+    actions
 }
 
 pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
@@ -3513,15 +3818,15 @@ pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> 
 
 fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
     match core.focus_target() {
-        super::model::RyeOsFocusTarget::WorkspaceTile { tile_id } => core.workspaces
-            [core.active_workspace]
+        super::model::RyeOsFocusTarget::ViewSetTile { tile_id } => core.view_sets
+            [core.active_view_set]
             .tiles
             .iter()
             .find(|(id, _)| id.0.to_string() == tile_id)
             .map(|(_, tile)| tile.instance_key.clone()),
-        super::model::RyeOsFocusTarget::Dock { edge } => {
-            Some(super::model::dock_view_instance_key(edge))
-        }
+        super::model::RyeOsFocusTarget::Dock { edge } => Some(
+            super::model::dock_view_instance_key(core.view_sets[core.active_view_set].id, edge),
+        ),
     }
 }
 
@@ -3530,8 +3835,8 @@ fn focused_view_instance_key(core: &RyeOsCore) -> Option<RyeOsViewInstanceKey> {
 /// row VM itself (the point may instead be on a collapsed header → no row).
 /// Scene widgets (graph/atlas) have no rows.
 fn focused_selected_row(core: &RyeOsCore) -> Option<RyeOsRowVm> {
-    let tile_id = core.workspaces[core.active_workspace].focused_tile;
-    let view = core.workspaces[core.active_workspace].focused_view()?;
+    let tile_id = core.view_sets[core.active_view_set].focused_tile;
+    let view = core.view_sets[core.active_view_set].focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
         RyeOsViewVm::Rows { rows, .. } => rows.into_iter().find(|row| row.selected),
         RyeOsViewVm::Sections { sections, .. } => sections
@@ -3546,8 +3851,8 @@ fn focused_selected_row(core: &RyeOsCore) -> Option<RyeOsRowVm> {
 /// VM (`RyeOsTableRowVm`, columnar cells) from the rows widget, so they need
 /// their own selection projection — same flat cursor, different shape.
 fn focused_selected_table_row(core: &RyeOsCore) -> Option<RyeOsTableRowVm> {
-    let tile_id = core.workspaces[core.active_workspace].focused_tile;
-    let view = core.workspaces[core.active_workspace].focused_view()?;
+    let tile_id = core.view_sets[core.active_view_set].focused_tile;
+    let view = core.view_sets[core.active_view_set].focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
         RyeOsViewVm::Table { rows, .. } => rows.into_iter().find(|row| row.selected),
         _ => None,
@@ -3555,7 +3860,7 @@ fn focused_selected_table_row(core: &RyeOsCore) -> Option<RyeOsTableRowVm> {
 }
 
 fn selected_cursor(core: &RyeOsCore, tile_id: TileId) -> Option<usize> {
-    let tile = core.workspaces[core.active_workspace].tiles.get(&tile_id)?;
+    let tile = core.view_sets[core.active_view_set].tiles.get(&tile_id)?;
     match &tile.local {
         ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
         ViewLocalState::None | ViewLocalState::Field(_) => None,
@@ -3566,7 +3871,7 @@ fn selected_collapsed(
     core: &RyeOsCore,
     tile_id: TileId,
 ) -> Option<&std::collections::BTreeSet<usize>> {
-    match &core.workspaces[core.active_workspace]
+    match &core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)?
         .local
@@ -3579,11 +3884,11 @@ fn selected_collapsed(
 type SelectedRowState<'a> = (
     Option<&'a std::collections::BTreeSet<String>>,
     Option<&'a std::collections::BTreeSet<String>>,
-    Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+    Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
 );
 
 fn selected_row_state(core: &RyeOsCore, tile_id: TileId) -> SelectedRowState<'_> {
-    match core.workspaces[core.active_workspace]
+    match core.view_sets[core.active_view_set]
         .tiles
         .get(&tile_id)
         .map(|tile| &tile.local)
@@ -3644,9 +3949,16 @@ fn tone_for_health(value: &str) -> RyeOsTone {
 }
 
 fn subtitle(core: &RyeOsCore) -> String {
-    session_vm(core)
-        .project_path
-        .unwrap_or_else(|| "Tiled RyeOS workspace".to_string())
+    let view_set = &core.view_sets[core.active_view_set];
+    core.insertion_attachment_id(view_set.id)
+        .and_then(|id| core.binding_attachment(id))
+        .map(|attachment| {
+            attachment
+                .project_path
+                .clone()
+                .unwrap_or_else(|| "Node scope".into())
+        })
+        .unwrap_or_else(|| "Binding unavailable".into())
 }
 
 fn tile_id_text(id: TileId) -> String {
@@ -3657,6 +3969,7 @@ fn tile_id_text(id: TileId) -> String {
 mod tests {
     use super::*;
     use crate::ui::content::{ProjectedRecord, TimelineRole};
+    use crate::ui::reducer::test_support::*;
     use crate::ui::{RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
 
@@ -3679,7 +3992,7 @@ mod tests {
 
     fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
         super::super::source_key::RyeOsSourceInstanceKey::named(
-            core.workspaces[core.active_workspace].tiles[&tile_id]
+            core.view_sets[core.active_view_set].tiles[&tile_id]
                 .instance_key
                 .clone(),
             "default",
@@ -3687,9 +4000,12 @@ mod tests {
         .encode()
     }
 
-    fn dock_default_source_key(edge: RyeOsDockEdge) -> String {
+    fn dock_default_source_key(core: &RyeOsCore, edge: RyeOsDockEdge) -> String {
         super::super::source_key::RyeOsSourceInstanceKey::named(
-            super::super::model::dock_view_instance_key(edge),
+            super::super::model::dock_view_instance_key(
+                core.view_sets[core.active_view_set].id,
+                edge,
+            ),
             "default",
         )
         .encode()
@@ -3697,24 +4013,24 @@ mod tests {
 
     #[test]
     fn failed_source_renders_error_instead_of_loading_forever() {
-        let mut core = RyeOsCore::default();
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let view_ref = "view:test/threads";
-        let instance_key = RyeOsViewInstanceKey::workspace_tile(TileId::new(1));
+        let instance_key = RyeOsViewInstanceKey::view_set_tile(TileId::new(1));
         let source_key = super::super::source_key::RyeOsSourceInstanceKey::named(
             instance_key.clone(),
             "default",
         )
         .encode();
-        core.views.insert(
-            view_ref.to_string(),
-            serde_json::from_value(json!({
+        seed_view_value(
+            &mut core,
+            view_ref,
+            json!({
                 "widget": "rows",
                 "sources": { "default": {
                     "ref": "service:ui/ryeos-ui/threads/list",
                     "collection": "threads"
                 } }
-            }))
-            .expect("view binding"),
+            }),
         );
         core.data
             .source_errors
@@ -3745,6 +4061,76 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_subject_projects_structured_shared_completion_actions() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let view_ref = "view:test/subject";
+        seed_view_value(
+            &mut core,
+            view_ref,
+            json!({
+                "widget": "rows",
+                "sources": {"default": {
+                    "ref": "service:test/subject",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }}
+            }),
+        );
+        core.add_center_tile(crate::view_set::ViewSpec::bound(view_ref));
+        let tile_id = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile_id]
+            .instance_key
+            .clone();
+        let source_set = core.view_sets[core.active_view_set].id;
+        let selection_key =
+            super::super::seat::selection_storage_key(source_set, "selection.work").unwrap();
+        core.seat
+            .append_facet(selection_key, json!({"thread": "T-current"}));
+        core.selection_attachments.insert(
+            instance.clone(),
+            super::super::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        let view = bound_view_vm_keyed(
+            &core,
+            &instance,
+            None,
+            RowLocalState {
+                cursor: None,
+                collapsed: None,
+                expanded_rows: None,
+                collapsed_tree_rows: None,
+                changed_rows: None,
+            },
+            view_ref,
+            &core.ui.atlas,
+        );
+        let RyeOsViewVm::RequiredSubject {
+            input,
+            facets,
+            actions,
+            ..
+        } = view
+        else {
+            panic!("unresolved subject must use the structured shared VM")
+        };
+        assert_eq!(input, "subject_tile_0");
+        assert_eq!(facets, vec!["selection.work.thread"]);
+        assert!(actions.iter().any(|action| matches!(
+            &action.intent,
+            RyeOsUiIntent::SupplyRequiredSubject { source_view_set_id, .. }
+                if *source_view_set_id == source_set
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            &action.intent,
+            RyeOsUiIntent::FollowViewSetSelection { view_set_id, .. }
+                if *view_set_id == source_set
+        )));
+    }
+
+    #[test]
     fn timeline_entries_merge_consecutive_flow_records() {
         let entries = timeline_entries(vec![
             record("hello ", None, None, TimelineRole::Flow, None),
@@ -3762,34 +4148,28 @@ mod tests {
 
     #[test]
     fn empty_center_resolves_backdrop_scene_from_surface_ref() {
-        let session = crate::ui::model::BrowserSession {
-            session_id: "S-backdrop".to_string(),
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
-                "name": "ryeos-base",
-                "version": "1.0.0",
-                "backdrop": "view:test/backdrop",
-                // The backdrop is content: its scene objects live in the
-                // embedded view's body, not in Rust.
-                "views": {
-                    "view:test/backdrop": {
-                        "widget": "scene",
-                        "body": { "objects": [
-                            { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
-                            { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
-                        ] }
-                    }
+        let session = session_with_surface(json!({
+            "name": "ryeos-base",
+            "version": "1.0.0",
+            "backdrop": "view:test/backdrop",
+            // The backdrop is content: its scene objects live in the
+            // embedded view's body, not in Rust.
+            "views": {
+                "view:test/backdrop": {
+                    "widget": "scene",
+                    "body": { "objects": [
+                        { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
+                        { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+                    ] }
                 }
-            })),
-            ..Default::default()
-        };
+            }
+        }));
         let core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         let vm = build_view_model(&core);
 
-        assert!(vm.workspace.center_is_empty);
+        assert!(vm.view_set.center_is_empty);
         let backdrop = vm
-            .workspace
+            .view_set
             .backdrop
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
@@ -3804,28 +4184,22 @@ mod tests {
 
     #[test]
     fn status_view_in_top_dock_includes_notice_rows() {
-        let session = crate::ui::model::BrowserSession {
-            session_id: "S-status".to_string(),
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
-                "name": "ryeos-base",
-                "slots": {
-                    "top": { "content": "view:ryeos/node/status", "open": true, "size": 3 }
-                },
-                "views": {
-                    "view:ryeos/node/status": {
-                        "widget": "key_value",
-                        "sources": { "default": { "ref": "service:node/status" } },
-                        "projections": { "detail": ["version"] }
-                    }
+        let session = session_with_surface(json!({
+            "name": "ryeos-base",
+            "slots": {
+                "top": { "content": "view:ryeos/node/status", "open": true, "size": 3 }
+            },
+            "views": {
+                "view:ryeos/node/status": {
+                    "widget": "key_value",
+                    "sources": { "default": { "ref": "service:node/status" } },
+                    "projections": { "detail": ["version"] }
                 }
-            })),
-            ..Default::default()
-        };
+            }
+        }));
         let mut core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         core.data.sources.insert(
-            dock_default_source_key(RyeOsDockEdge::Top),
+            dock_default_source_key(&core, RyeOsDockEdge::Top),
             json!({ "version": "0.1.0" }),
         );
         core.notice(
@@ -3835,7 +4209,7 @@ mod tests {
 
         let vm = build_view_model(&core);
         let dock = vm
-            .workspace
+            .view_set
             .docks
             .top
             .expect("authored top status slot should render");
@@ -3860,32 +4234,163 @@ mod tests {
 
     #[test]
     fn no_backdrop_ref_means_no_backdrop_scene() {
-        let session = crate::ui::model::BrowserSession {
-            session_id: "S-nobackdrop".to_string(),
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({ "name": "ryeos-base", "views": {} })),
-            ..Default::default()
-        };
+        let session = session_with_surface(json!({ "name": "ryeos-base", "views": {} }));
         let core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         let vm = build_view_model(&core);
-        assert!(vm.workspace.center_is_empty);
-        assert!(vm.workspace.backdrop.is_none());
+        assert!(vm.view_set.center_is_empty);
+        assert!(vm.view_set.backdrop.is_none());
     }
 
     fn session_with_views(views: serde_json::Value, tiles: serde_json::Value) -> RyeOsCore {
-        let session = crate::ui::model::BrowserSession {
-            session_id: "S-title".to_string(),
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
-                "name": "ryeos-base",
-                "tiles": tiles,
-                "views": views,
-            })),
-            ..Default::default()
-        };
+        let session = session_with_surface(json!({
+            "name": "ryeos-base",
+            "tiles": tiles,
+            "views": views,
+        }));
         RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn projected_placement_action_cannot_cross_view_set_switch() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let source = core.view_sets[core.active_view_set].tile_ids()[0];
+        let action = placement_intents(&core, source)
+            .into_iter()
+            .find(|action| matches!(&action.intent, RyeOsUiIntent::MoveTileBeside { .. }))
+            .expect("placement action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::NewViewSet,
+            },
+        });
+        let before = core.export_layout_preferences().expect("layout snapshot");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        assert_eq!(core.export_layout_preferences().unwrap(), before);
+    }
+
+    #[test]
+    fn master_promotion_is_projected_for_and_applied_to_the_exact_tile() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let tiles = core.view_sets[core.active_view_set].tile_ids();
+        assert!(
+            placement_intents(&core, tiles[0])
+                .into_iter()
+                .all(|action| !matches!(action.intent, RyeOsUiIntent::PromoteTileToMaster { .. })),
+            "the current master must not advertise an action that demotes it"
+        );
+        let promoted = tiles[1];
+        let action = placement_intents(&core, promoted)
+            .into_iter()
+            .find(|action| matches!(&action.intent, RyeOsUiIntent::PromoteTileToMaster { .. }))
+            .expect("master promotion action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        assert_eq!(core.view_sets[core.active_view_set].tile_ids()[0], promoted);
+    }
+
+    #[test]
+    fn grouped_tab_reorder_is_an_exact_projected_placement_action() {
+        let mut core = session_with_views(
+            json!({
+                "view:test/one": { "widget": "rows" },
+                "view:test/two": { "widget": "rows" }
+            }),
+            json!(["view:test/one", "view:test/two"]),
+        );
+        let tiles = core.view_sets[core.active_view_set].tile_ids();
+        assert!(core.view_sets[core.active_view_set].move_tile_to_group(tiles[1], tiles[0], 1,));
+        let action = placement_intents(&core, tiles[1])
+            .into_iter()
+            .find(|action| action.label == "Move tab left")
+            .expect("tab reorder action");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: action.intent,
+            },
+        });
+        let tabs = core.view_sets[core.active_view_set]
+            .root
+            .as_ref()
+            .and_then(|root| root.group_tabs(tiles[1]))
+            .expect("grouped tabs");
+        assert_eq!(tabs, [tiles[1], tiles[0]]);
+    }
+
+    #[test]
+    fn quiet_status_line_does_not_repeat_root_context_or_execution_counters() {
+        let core = RyeOsCore::default();
+        let healthy = RyeOsChromeVm {
+            title: "RyeOS".into(),
+            subtitle: String::new(),
+            health_label: "healthy".into(),
+            health_tone: RyeOsTone::Good,
+        };
+        assert!(status_bar_vm(&healthy, &core).segments.is_empty());
+
+        let interrupted = RyeOsChromeVm {
+            health_label: "connection interrupted".into(),
+            health_tone: RyeOsTone::Warn,
+            ..healthy
+        };
+        let status = status_bar_vm(&interrupted, &core);
+        assert_eq!(status.segments.len(), 1);
+        assert_eq!(status.segments[0].id, "connection");
+    }
+
+    #[test]
+    fn document_widget_projects_bounded_source_fields() {
+        let view_ref = "view:test/document";
+        let mut core = session_with_views(
+            json!({
+                (view_ref): {
+                    "widget": "document",
+                    "sources": { "default": { "ref": "service:test/read" } },
+                    "projections": {
+                        "path": "result.path",
+                        "content": "result.body",
+                        "truncated": "result.bounded"
+                    }
+                }
+            }),
+            json!([view_ref]),
+        );
+        let tile_id = core.view_sets[0].tile_ids()[0];
+        core.data.sources.insert(
+            tile_default_source_key(&core, tile_id),
+            json!({ "result": { "path": "src/main.rs", "body": "fn main() {}", "bounded": true } }),
+        );
+
+        let RyeOsViewVm::Document {
+            path,
+            content,
+            truncated,
+            ..
+        } = bound_view_vm(&core, tile_id, view_ref)
+        else {
+            panic!("document source should project as a document primitive")
+        };
+        assert_eq!(path, "src/main.rs");
+        assert_eq!(content, "fn main() {}");
+        assert!(truncated);
     }
 
     #[test]
@@ -3897,7 +4402,7 @@ mod tests {
             }}),
             json!(["view:test/rows"]),
         );
-        let key = tile_default_source_key(&core, core.workspaces[0].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[0].focused_tile);
         core.data.sources.insert(
             key,
             json!({"rows":[
@@ -3905,7 +4410,7 @@ mod tests {
             ]}),
         );
         let vm = build_view_model(&core);
-        let RyeOsLayoutNodeVm::Tile { view, .. } = vm.workspace.root.unwrap() else {
+        let RyeOsLayoutNodeVm::Tile { view, .. } = vm.view_set.root.unwrap() else {
             panic!("tile");
         };
         let RyeOsViewVm::Rows { rows, .. } = *view else {
@@ -3998,16 +4503,10 @@ mod tests {
 
     #[test]
     fn surface_style_border_flows_into_presentation_chrome() {
-        let session = crate::ui::model::BrowserSession {
-            session_id: "S-border".to_string(),
-            ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-            surface_ref: "surface:ryeos/ryeos/base".to_string(),
-            effective_surface: Some(json!({
-                "name": "ryeos-base",
-                "style": { "border": "thick" }
-            })),
-            ..Default::default()
-        };
+        let session = session_with_surface(json!({
+            "name": "ryeos-base",
+            "style": { "border": "thick" }
+        }));
         let core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
         let vm = build_view_model(&core);
         assert_eq!(vm.presentation.chrome.border, "thick");
@@ -4403,37 +4902,32 @@ mod tests {
     #[test]
     fn table_flat_cursor_selects_a_row_and_resolves_its_activation() {
         use crate::ui::event::{RyeOsEvent, RyeOsUiEvent};
-        use crate::ui::model::{BrowserSession, BrowserViewport};
-        let session = BrowserSession {
-            effective_surface: Some(json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/list"],
-                "views": {
-                    "view:ryeos/threads/list": {
-                        "widget": "table",
-                        "sources": { "default": { "ref": "service:threads/list", "collection": "threads" } },
-                        "projections": {
-                            "columns": [
-                                { "label": "thread", "field": "thread_id" },
-                                { "label": "status", "field": "status" }
-                            ],
-                            "tone": { "field": "status", "map": { "running": "accent" }, "default": "neutral" }
-                        },
-                        "selection": { "activate": "inspect" },
-                        "affordances": [{
-                            "id": "inspect",
-                            "label": "Inspect",
-                            "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
-                        }]
-                    }
+        use crate::ui::model::BrowserViewport;
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/threads/list"],
+            "views": {
+                "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "sources": { "default": { "ref": "service:threads/list", "collection": "threads" } },
+                    "projections": {
+                        "columns": [
+                            { "label": "thread", "field": "thread_id" },
+                            { "label": "status", "field": "status" }
+                        ],
+                        "tone": { "field": "status", "map": { "running": "accent" }, "default": "neutral" }
+                    },
+                    "selection": { "activate": "inspect" },
+                    "affordances": [{
+                        "id": "inspect",
+                        "label": "Inspect",
+                        "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
+                    }]
                 }
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+            }
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key.clone(),
             json!({ "threads": [
@@ -4452,7 +4946,7 @@ mod tests {
         }
         let selected_cells = |core: &RyeOsCore| -> Vec<Vec<String>> {
             let vm = build_view_model(core);
-            let root = vm.workspace.root.expect("layout root");
+            let root = vm.view_set.root.expect("layout root");
             match find_tile_view(&root).expect("tile view") {
                 RyeOsViewVm::Table { rows, .. } => rows
                     .iter()
@@ -4466,7 +4960,7 @@ mod tests {
         // Flat cursor 1 = the second row; activation carries that row's record.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
-                tile_id: core.workspaces[core.active_workspace]
+                tile_id: core.view_sets[core.active_view_set]
                     .focused_tile
                     .0
                     .to_string(),
@@ -4492,35 +4986,30 @@ mod tests {
 
     #[test]
     fn command_overlay_surfaces_focused_row_cancel_but_not_the_activate() {
-        use crate::ui::model::{BrowserSession, BrowserViewport};
-        let session = BrowserSession {
-            effective_surface: Some(json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/list"],
-                "views": {
-                    "view:ryeos/threads/list": {
-                        "widget": "table",
-                        "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" } },
-                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
-                        "selection": { "activate": "watch" },
-                        "affordances": [
-                            { "id": "watch", "label": "Watch",
-                              "invoke": { "plane": "ui", "facet": "input.route",
-                                          "merge": { "thread": "{record.thread_id}" },
-                                          "open_view": "view:ryeos/chain/timeline" } },
-                            { "id": "cancel", "label": "Cancel",
-                              "invoke": { "plane": "rye", "ref": "service:commands/submit",
-                                          "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" } } }
-                        ]
-                    }
+        use crate::ui::model::BrowserViewport;
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/threads/list"],
+            "views": {
+                "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" } },
+                    "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                    "selection": { "activate": "watch" },
+                    "affordances": [
+                        { "id": "watch", "label": "Watch",
+                          "invoke": { "plane": "ui", "facet": "input.route",
+                                      "merge": { "thread": "{record.thread_id}" },
+                                      "open_view": "view:ryeos/chain/timeline" } },
+                        { "id": "cancel", "label": "Cancel",
+                          "invoke": { "plane": "rye", "ref": "service:commands/submit",
+                                      "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" } } }
+                    ]
                 }
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+            }
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key,
             json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
@@ -4535,7 +5024,7 @@ mod tests {
             .expect("cancel overlay item");
         assert!(
             matches!(&cancel.intent,
-                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id, record }
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id, record, .. }
                     if view_ref == "view:ryeos/threads/list"
                         && affordance_id == "cancel"
                         && record["thread_id"] == "T-ab"),
@@ -4552,23 +5041,18 @@ mod tests {
 
     #[test]
     fn shipped_history_exposes_both_comparison_actions_through_shared_overlay() {
-        use crate::ui::model::{BrowserSession, BrowserViewport};
+        use crate::ui::model::BrowserViewport;
         let history: serde_json::Value = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml"
         ))
         .unwrap();
-        let session = BrowserSession {
-            effective_surface: Some(json!({
-                "name": "t",
-                "tiles": ["view:ryeos/threads/history"],
-                "views": { "view:ryeos/threads/history": history }
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/threads/history"],
+            "views": { "view:ryeos/threads/history": history }
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data.sources.insert(
             key,
             json!({ "threads": [{
@@ -4591,7 +5075,7 @@ mod tests {
                 .find(|item| item.label == label)
                 .unwrap_or_else(|| panic!("missing shared action {label}"));
             assert!(matches!(&item.intent,
-                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id: actual, record }
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id: actual, record, .. }
                     if view_ref == "view:ryeos/threads/history"
                         && actual == affordance_id
                         && record["thread_id"] == "T-ab"));
@@ -4601,28 +5085,23 @@ mod tests {
     /// Build a single focused timeline tile over a chain_replay response, with
     /// the feed point (distance-from-bottom 0) on the newest entry.
     fn feed_core(events: serde_json::Value) -> RyeOsCore {
-        use crate::ui::model::{BrowserSession, BrowserViewport};
-        let session = BrowserSession {
-            effective_surface: Some(json!({
-                "name": "t",
-                "tiles": ["view:ryeos/chain/timeline"],
-                "views": {
-                    "view:ryeos/chain/timeline": {
-                        "widget": "timeline",
-                        "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } }
-                    }
+        use crate::ui::model::BrowserViewport;
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/chain/timeline"],
+            "views": {
+                "view:ryeos/chain/timeline": {
+                    "widget": "timeline",
+                    "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } }
                 }
-            })),
-            posture: crate::ui::binding::UiEffectivePosture::Interactive,
-            ..Default::default()
-        };
+            }
+        }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        let tile_key = core.workspaces[core.active_workspace]
+        let tile_key = core.view_sets[core.active_view_set]
             .focused_tile
             .0
             .to_string();
-        let key =
-            tile_default_source_key(&core, core.workspaces[core.active_workspace].focused_tile);
+        let key = tile_default_source_key(&core, core.view_sets[core.active_view_set].focused_tile);
         core.data
             .sources
             .insert(key.clone(), json!({ "events": events }));
@@ -4702,8 +5181,7 @@ mod tests {
     #[test]
     fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
             thread: "T-1".to_string(),
             text: "Hel".to_string(),
@@ -4723,8 +5201,7 @@ mod tests {
     #[test]
     fn append_live_delta_ignores_buffer_for_non_head_thread() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         // A buffer left over from a different head must not render.
         core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
             thread: "T-OTHER".to_string(),
@@ -4739,8 +5216,7 @@ mod tests {
     #[test]
     fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         // Head thread is running but has emitted no streaming text yet.
         core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
@@ -4761,8 +5237,7 @@ mod tests {
     #[test]
     fn append_live_delta_no_indicator_when_head_thread_settled() {
         let mut core = RyeOsCore::default();
-        core.seat
-            .append_facet(crate::ui::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
         core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
         });
@@ -4770,38 +5245,6 @@ mod tests {
         let mut entries = Vec::new();
         append_live_delta(&core, &mut entries);
         assert!(entries.is_empty(), "settled head → no working indicator");
-    }
-
-    #[test]
-    fn conversation_usage_reads_chain_summary_not_event_sums() {
-        // `thread_usage` payloads are cumulative-so-far (100 → 105), so the
-        // conversation total is the daemon's continuation-aware `summary`
-        // block, never the events summed (that would read 205).
-        let mut core = RyeOsCore::default();
-        core.data.sources.insert(
-            "timeline".to_string(),
-            json!({
-                "events": [
-                    { "event_type": "thread_usage", "payload": { "input_tokens": 100, "output_tokens": 20 } },
-                    { "event_type": "cognition_out", "payload": { "content": "hi" } },
-                    { "event_type": "thread_usage", "payload": { "input_tokens": 105, "output_tokens": 23 } },
-                ],
-                "summary": { "status": "completed", "input_tokens": 105, "output_tokens": 23 },
-            }),
-        );
-        assert_eq!(conversation_usage(&core), (105, 23));
-    }
-
-    #[test]
-    fn conversation_usage_is_zero_without_usage_summary() {
-        assert_eq!(conversation_usage(&RyeOsCore::default()), (0, 0));
-    }
-
-    #[test]
-    fn compact_count_abbreviates_thousands() {
-        assert_eq!(compact_count(0), "0");
-        assert_eq!(compact_count(999), "999");
-        assert_eq!(compact_count(1234), "1.2k");
     }
 
     #[test]
@@ -4828,14 +5271,11 @@ mod tests {
     }
 
     fn input_session(view: serde_json::Value) -> crate::ui::model::RyeOsCore {
-        let session = crate::ui::model::BrowserSession {
-            effective_surface: Some(json!({
-                "name": "t",
-                "slots": { "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 } },
-                "views": { "view:ryeos/input": view }
-            })),
-            ..Default::default()
-        };
+        let session = session_with_surface(json!({
+            "name": "t",
+            "slots": { "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 } },
+            "views": { "view:ryeos/input": view }
+        }));
         RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0)
     }
 
@@ -4846,19 +5286,19 @@ mod tests {
             "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let bottom = vm.workspace.docks.bottom.expect("bottom slot");
+        let bottom = vm.view_set.docks.bottom.expect("bottom slot");
         let input = bottom.input.expect("bottom instance declares input");
         assert_eq!(input.placeholder, "Ask or run a command");
     }
 
     #[test]
-    fn workspace_vm_serializes_stable_view_instance_keys() {
+    fn view_set_vm_serializes_stable_view_instance_keys() {
         let mut core = RyeOsCore::default();
-        let tile_id = core.workspaces[core.active_workspace]
-            .add_tile(crate::workspace::ViewSpec::bound("view:test/missing"))
+        let tile_id = core.view_sets[core.active_view_set]
+            .add_tile(crate::view_set::ViewSpec::bound("view:test/missing"))
             .expect("fixture layout accepts view");
         let vm = build_view_model(&core);
-        let root = vm.workspace.root.expect("mounted center tile");
+        let root = vm.view_set.root.expect("mounted center tile");
         let RyeOsLayoutNodeVm::Tile { instance_key, .. } = root else {
             panic!("one tile renders as a leaf");
         };
@@ -4876,7 +5316,7 @@ mod tests {
             "input": { "id": "line", "target_label": "thread input", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert_eq!(input.route_label, "→ thread input");
     }
 
@@ -4892,7 +5332,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -4911,7 +5354,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input
                 .completion
@@ -4930,7 +5373,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -4946,7 +5392,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input.completion.is_empty(),
             "no completion source -> no suggestions"
@@ -4970,7 +5416,10 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::mention(
-                crate::ui::model::dock_view_instance_key(RyeOsDockEdge::Bottom),
+                crate::ui::model::dock_view_instance_key(
+                    core.view_sets[core.active_view_set].id,
+                    RyeOsDockEdge::Bottom,
+                ),
                 "line",
             )
             .encode(),
@@ -4987,7 +5436,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        let input = vm.view_set.docks.bottom.unwrap().input.unwrap();
         assert!(
             input
                 .completion

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import type { RyeOsOverlayVm } from "../generated";
   import { dispatchUi } from "../runtime/context";
 
@@ -7,9 +7,22 @@
   let { model }: Props = $props();
   let queryInput: HTMLInputElement;
   let panel: HTMLElement;
+  let opener: HTMLElement | null = null;
   const dispatch = dispatchUi();
 
-  onMount(() => queryInput?.focus());
+  onMount(() => {
+    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    queryInput?.focus();
+  });
+  onDestroy(() => {
+    const active = document.activeElement;
+    // Restore dismissal focus only while focus still belongs to the modal (or
+    // has fallen back to body during removal). A chosen intent that already
+    // focused its destination keeps ownership of that focus.
+    if (opener?.isConnected && (active === document.body || active === null || (active instanceof Node && panel?.contains(active)))) {
+      opener.focus();
+    }
+  });
 
   function select(itemId: string): void {
     dispatch({ type: "set_overlay_selection", item_id: itemId });
@@ -27,7 +40,7 @@
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       dispatch({ type: "move_overlay_selection", delta: event.key === "ArrowDown" ? 1 : -1 });
-    } else if (event.key === "Enter") {
+    } else if (event.key === "Enter" && event.target === queryInput) {
       event.preventDefault();
       dispatch({ type: "choose_overlay", secondary: event.shiftKey || event.altKey });
     } else if (event.key === "Tab" && panel) {
@@ -54,8 +67,14 @@
       class="overlay-query"
       data-focus-key={`overlay:${model.id}:query`}
       type="search"
+      role="combobox"
       value={model.query}
       aria-label={`Filter ${model.title}`}
+      aria-autocomplete="list"
+      aria-expanded="true"
+      aria-haspopup="listbox"
+      aria-controls={`overlay-options-${model.id}`}
+      aria-activedescendant={model.selected >= 0n && model.selected < BigInt(model.items.length) ? `overlay-option-${model.id}-${model.selected}` : undefined}
       autocomplete="off"
       spellcheck="false"
       oninput={(event) => dispatch({ type: "set_overlay_query", query: event.currentTarget.value })}
@@ -63,10 +82,11 @@
     {#if model.columns.length > 0}
       <div class="overlay-columns" style={`--columns:${model.columns.length}`}>{#each model.columns as column}<span>{column}</span>{/each}</div>
     {/if}
-    <div class="overlay-items" role="listbox" aria-label={model.title}>
+    <div id={`overlay-options-${model.id}`} class="overlay-items" role="listbox" aria-label={model.title}>
       {#each model.items as item, index (`${item.category}:${item.primary}:${index}`)}
         <div class="overlay-item" class:selected={model.selected === BigInt(index)} class:header={item.header} style={`--depth:${item.depth}`}>
           <button
+            id={`overlay-option-${model.id}-${index}`}
             role="option"
             aria-selected={model.selected === BigInt(index)}
             aria-describedby={item.disabled_reason ? `overlay-reason-${item.id}` : undefined}

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-09-19T02:07:39Z:8a757739b570684e93aaf1edc7982d177515a8be957c584423a69ffb33172c2d:tsuSgeZ08lUXDJdRC/Bftl1fhqi0co/CzeiQgc+/6CRhswM5e6H4vwjDW73KTudlFpSUqhU5C4Kb55ulcQDCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -67,6 +68,10 @@ Options:
                         over the full bundle set without creating another set.
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
+  --cargo-target-dir DIR
+                        Use this absolute Cargo target directory for population
+                        and installation, including across privileged re-exec.
+                        Defaults to this checkout's target directory.
   --crates "A B C"      With --populate, rebuild only these Cargo packages (e.g.
                         --crates ryeosd for a daemon-only source correction).
                         Unselected bundle payloads retain their existing exact
@@ -521,6 +526,7 @@ owner="RyeOS Development"
 bundle_set="full"
 node_profile_override=""
 jobs=""            # forwarded to populate as cargo -j N
+cargo_target_root="$repo_root/target"
 crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
 init_app_root="${RYEOS_APP_ROOT:-}"
@@ -585,6 +591,12 @@ while [[ $# -gt 0 ]]; do
         --jobs)
             [[ $# -ge 2 ]] || die "--jobs requires a number"
             jobs="$2"
+            shift 2
+            ;;
+        --cargo-target-dir)
+            [[ $# -ge 2 && -n "$2" ]] || die "--cargo-target-dir requires a path"
+            [[ "$2" == /* ]] || die "--cargo-target-dir requires an absolute path"
+            cargo_target_root="${2%/}"
             shift 2
             ;;
         --crates)
@@ -667,7 +679,7 @@ fi
 bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 doc_dir="/usr/share/doc/ryeos"
-target_dir="$repo_root/target/release"
+target_dir="$cargo_target_root/release"
 install_transaction_active=0
 
 # Only a root-owned Lillux lock on the exact shared package namespace permits
@@ -727,11 +739,11 @@ if [[ $run_populate -eq 1 && $install_transaction_active -eq 0 ]]; then
         populate_shell="$(getent passwd "$populate_user" | cut -d: -f7)"
         [[ -x "$populate_shell" ]] || populate_shell="/bin/sh"
         if [[ -n "${CARGO:-}" ]]; then
-            printf -v populate_cmd 'cd %q && exec env CARGO=%q %q' \
-                "$repo_root" "$CARGO" "$repo_root/scripts/populate-bundles.sh"
+            printf -v populate_cmd 'cd %q && exec env CARGO_TARGET_DIR=%q CARGO=%q %q' \
+                "$repo_root" "$cargo_target_root" "$CARGO" "$repo_root/scripts/populate-bundles.sh"
         else
-            printf -v populate_cmd 'cd %q && exec %q' \
-                "$repo_root" "$repo_root/scripts/populate-bundles.sh"
+            printf -v populate_cmd 'cd %q && exec env CARGO_TARGET_DIR=%q %q' \
+                "$repo_root" "$cargo_target_root" "$repo_root/scripts/populate-bundles.sh"
         fi
         for a in "${populate_args[@]}"; do printf -v populate_cmd '%s %q' "$populate_cmd" "$a"; done
         ryeos_term_note "running bundle population as $populate_user"
@@ -739,7 +751,8 @@ if [[ $run_populate -eq 1 && $install_transaction_active -eq 0 ]]; then
         sudo -H -u "$populate_user" "$populate_shell" -lc "$populate_cmd" || populate_status=$?
     else
         ryeos_term_suspend
-        "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}" || populate_status=$?
+        env CARGO_TARGET_DIR="$cargo_target_root" \
+            "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}" || populate_status=$?
     fi
     if (( populate_status != 0 )); then
         ryeos_term_end failure "INSTALL FAILED" "populating bundles · exit status $populate_status"

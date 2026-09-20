@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::ui::content::{Payload, Producer, ViewBinding, resolve_affordance_invoke};
 use crate::ui::event::RyeOsUiIntent;
 use crate::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
-use crate::workspace::{FieldFingerprintState, FieldLocalState};
+use crate::view_set::{FieldFingerprintState, FieldLocalState};
 
 pub const FIELD_FACTS_SCHEMA: &str = "ryeos.ui.field.facts.v2";
 pub const FIELD_PROJECTION_SCHEMA: &str = "ryeos.ui.field.projection.v1";
@@ -753,6 +753,30 @@ pub fn project_field(
     source_inputs: &[FieldSourceInput<'_>],
     local: Option<&FieldLocalState>,
 ) -> RyeOsFieldVm {
+    project_field_for_instance(
+        field_id,
+        title,
+        view_ref,
+        binding,
+        source_inputs,
+        local,
+        &crate::ids::RyeOsViewInstanceKey::view_set_tile(crate::ids::TileId::new(0)),
+    )
+}
+
+/// Project a mounted field. The exact host identity is carried into every
+/// row/relation affordance so browser activation can be fenced to the view set
+/// which produced it. The unmounted wrapper above remains useful for pure
+/// contract fixtures, whose intents are never dispatched.
+pub fn project_field_for_instance(
+    field_id: &str,
+    title: &str,
+    view_ref: &str,
+    binding: &ViewBinding,
+    source_inputs: &[FieldSourceInput<'_>],
+    local: Option<&FieldLocalState>,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
+) -> RyeOsFieldVm {
     let local = local.cloned().unwrap_or_default();
     let projection = match serde_json::from_value::<FieldProjection>(binding.projections.clone()) {
         Ok(projection) if projection.schema_version == FIELD_PROJECTION_SCHEMA => Some(projection),
@@ -1063,6 +1087,7 @@ pub fn project_field(
                 &projection,
                 binding,
                 view_ref,
+                instance_key,
                 &local,
                 &mut warnings,
             )
@@ -1104,6 +1129,7 @@ pub fn project_field(
                 &projection,
                 binding,
                 view_ref,
+                instance_key,
                 &local,
                 &mut warnings,
             ))
@@ -1114,6 +1140,7 @@ pub fn project_field(
         &projection,
         binding,
         view_ref,
+        instance_key,
         &local,
         &mut warnings,
     ));
@@ -1686,6 +1713,7 @@ fn project_entity(
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> RyeOsFieldEntityVm {
@@ -1729,14 +1757,14 @@ fn project_entity(
         .as_ref()
         .and_then(|selection| selection.change.as_deref())
         .and_then(|affordance_id| {
-            validated_affordance_intent(binding, view_ref, affordance_id, &raw_value)
+            validated_affordance_intent(binding, instance_key, view_ref, affordance_id, &raw_value)
         });
     let activate_intent = binding
         .selection
         .as_ref()
         .and_then(|selection| selection.activate.as_deref())
         .and_then(|affordance_id| {
-            validated_affordance_intent(binding, view_ref, affordance_id, &raw_value)
+            validated_affordance_intent(binding, instance_key, view_ref, affordance_id, &raw_value)
         });
     let label =
         resolved_string(set.get("label"), &raw_value).unwrap_or_else(|| entity.raw.label.clone());
@@ -1781,6 +1809,7 @@ fn project_relation(
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> RyeOsFieldRelationVm {
@@ -1799,6 +1828,7 @@ fn project_relation(
         entities,
         local.selected.as_deref(),
         binding,
+        instance_key,
         view_ref,
     );
     RyeOsFieldRelationVm {
@@ -1841,6 +1871,7 @@ fn project_derived_relations(
     projection: &FieldProjection,
     binding: &ViewBinding,
     view_ref: &str,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     local: &FieldLocalState,
     warnings: &mut Vec<String>,
 ) -> Vec<RyeOsFieldRelationVm> {
@@ -1894,6 +1925,7 @@ fn project_derived_relations(
                 entities,
                 local.selected.as_deref(),
                 binding,
+                instance_key,
                 view_ref,
             );
             out.push(RyeOsFieldRelationVm {
@@ -1951,10 +1983,17 @@ fn relation_activate_intent(
     entities: &BTreeMap<String, MergedEntity>,
     selected: Option<&str>,
     binding: &ViewBinding,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     view_ref: &str,
 ) -> Option<RyeOsUiIntent> {
     if let Some(affordance_id) = resolved_string(set.get("activate"), relation_raw) {
-        return validated_affordance_intent(binding, view_ref, &affordance_id, relation_raw);
+        return validated_affordance_intent(
+            binding,
+            instance_key,
+            view_ref,
+            &affordance_id,
+            relation_raw,
+        );
     }
     let affordance_id = binding
         .selection
@@ -1966,11 +2005,12 @@ fn relation_activate_intent(
     };
     let neighbor = entities.get(neighbor_id)?;
     let record = serde_json::to_value(&neighbor.raw).ok()?;
-    validated_affordance_intent(binding, view_ref, affordance_id, &record)
+    validated_affordance_intent(binding, instance_key, view_ref, affordance_id, &record)
 }
 
 fn validated_affordance_intent(
     binding: &ViewBinding,
+    instance_key: &crate::ids::RyeOsViewInstanceKey,
     view_ref: &str,
     affordance_id: &str,
     record: &Value,
@@ -1981,6 +2021,7 @@ fn validated_affordance_intent(
         .find(|affordance| affordance.get("id").and_then(Value::as_str) == Some(affordance_id))?;
     resolve_affordance_invoke(affordance, Producer::Selection, &Payload::Selection(record))?;
     Some(RyeOsUiIntent::InvokeAffordance {
+        instance_key: instance_key.clone(),
         view_ref: view_ref.to_string(),
         affordance_id: affordance_id.to_string(),
         record: record.clone(),

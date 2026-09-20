@@ -10,7 +10,7 @@ await wasm.default({ module_or_path: await readFile(path.join(pkg, "ryeos_web_bg
 
 const beyondSafeInteger = 9_007_199_254_740_993n;
 const envelope = wasm.ryeos_start({
-  ui_binding_contract_revision: "ryeos.ui.binding.v4",
+  ui_binding_contract_revision: "ryeos.ui.binding.v6",
   session_id: "wasm-contract",
   surface_ref: "surface:ryeos/ryeos/base",
   user_principal_id: null,

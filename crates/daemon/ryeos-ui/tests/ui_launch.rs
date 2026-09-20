@@ -3,7 +3,7 @@
 // Pins current behavior so Slice 3 can refactor with a net.
 
 mod test_state;
-use test_state::{build_test_state, launch_context};
+use test_state::{build_test_state, launch_context, mint_launch};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::state::get_ui_state;
@@ -42,10 +42,7 @@ async fn invalid_token_rejected() {
 async fn valid_token_consumed_and_session_returned() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(test_context());
+    let (session_id, token) = mint_launch(&state, test_context());
 
     let result = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
         serde_json::json!({ "token": token }),
@@ -64,10 +61,7 @@ async fn valid_token_consumed_and_session_returned() {
 async fn committed_activation_replays_the_same_session() {
     let (_tmp, state) = build_test_state();
 
-    let (session_id, token) = get_ui_state(&state)
-        .unwrap()
-        .browser_sessions
-        .mint_token(test_context());
+    let (session_id, token) = mint_launch(&state, test_context());
 
     // First consume succeeds.
     let result1 = (ryeos_ui::handlers::ui_launch::DESCRIPTOR.handler)(
@@ -96,7 +90,9 @@ async fn expired_token_rejected() {
         Duration::from_millis(1),
     );
 
-    let (_, token) = short_store.mint_token(test_context());
+    let (_, token, _) = short_store
+        .mint_token(test_context(), 16, &"22".repeat(32))
+        .expect("mint short-lived session");
 
     std::thread::sleep(Duration::from_millis(5));
 

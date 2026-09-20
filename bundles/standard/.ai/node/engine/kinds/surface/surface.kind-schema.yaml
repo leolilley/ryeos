@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-17T00:05:36Z:07af8e2ab18c241ba8828c58fdd58cce76b1d4c144a3e069acbd354516fecc37:+xhtcHl/AYvYcOJavzj74+JGPgPyMNXJX8Jid5NAqm19HwusFpNQabShF0+lLyN05zy70ySnbt7izzbAstDAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-18T22:44:50Z:39b8c14308af5d40f78db5710209431209d88f903703259c7edd211f9322a419:hwmeiIwyLgCIDAYb069gzdrUTAWqAhCHdCLgpFU/sz5vw1bOKkDeDb/tDGGeeE4iiwtcbaanlgZsLJLh2kUiCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "1.0.0"
+version: "2.0.0"
 location:
   directory: surfaces
 
@@ -26,7 +26,7 @@ composer_config:
     - name: tiles
       strategy: replace_root_last
       expect_value_type: sequence
-    - name: workspaces
+    - name: view_sets
       strategy: replace_root_last
       expect_value_type: sequence
     - name: slots
@@ -55,8 +55,8 @@ composer_config:
     - name: capabilities
       strategy: narrow_against_parent_effective
       expect_value_type: mapping
-    # replace_root_last, not keyed merge: entries may be bare view refs
-    # (legacy flat form) and the keyed merge silently drops keyless items.
+    # replace_root_last, not keyed merge: entries may be bare view refs and
+    # the keyed merge would silently drop keyless items.
     - name: library
       strategy: replace_root_last
       expect_value_type: array
@@ -81,7 +81,7 @@ composed_value_contract:
     tiles:
       type: single
       prim: sequence
-    workspaces:
+    view_sets:
       type: single
       prim: sequence
     slots:

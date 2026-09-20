@@ -17,45 +17,29 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::state::get_ui_state;
-
 const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
-fn retained_session(
-    ctx: &HandlerContext,
-    state: &AppState,
-) -> Result<crate::browser_session::BrowserSession, HandlerError> {
-    if let Some(session) = crate::seat_auth::compiled_ui_session() {
-        return Ok(session);
-    }
-    let session_id = session_id_from_context(ctx)
-        .ok_or_else(|| HandlerError::Forbidden("compiled UI session required".into()))?;
-    get_ui_state(state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))
+fn retained_attachment()
+-> Result<Arc<crate::browser_session::AdmittedBindingAttachment>, HandlerError> {
+    crate::seat_auth::compiled_ui_attachment()
+        .ok_or_else(|| HandlerError::Forbidden("compiled UI attachment required".into()))
 }
 
 fn retained_project_access(
-    session: &crate::browser_session::BrowserSession,
+    attachment: &crate::browser_session::AdmittedBindingAttachment,
 ) -> Result<Option<crate::seat_auth::RetainedProjectAccess>> {
-    Ok(crate::seat_auth::session_project_access(session)?)
+    Ok(crate::seat_auth::attachment_project_access(attachment)?)
 }
 
 // ── remotes.list ──────────────────────────────────────────────────
 
 pub async fn handle_remotes_list(
     _params: Value,
-    ctx: HandlerContext,
+    _ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session = retained_session(&ctx, &state)?;
-    let project_access = retained_project_access(&session)?;
+    let attachment = retained_attachment()?;
+    let project_access = retained_project_access(&attachment)?;
     let project = project_access.as_ref().map(|access| access.path());
 
     let report =
@@ -101,11 +85,11 @@ pub async fn handle_remotes_list(
 
 pub async fn handle_remotes_probe(
     params: Value,
-    ctx: HandlerContext,
+    _ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session = retained_session(&ctx, &state)?;
-    let project_access = retained_project_access(&session)?;
+    let attachment = retained_attachment()?;
+    let project_access = retained_project_access(&attachment)?;
     let project = project_access.as_ref().map(|access| access.path());
 
     let req: ProbeRequest = serde_json::from_value(params)

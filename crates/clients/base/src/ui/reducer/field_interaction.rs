@@ -7,7 +7,7 @@ use super::model::RyeOsCore;
 use crate::ids::RyeOsViewInstanceKey;
 use crate::ui::field::{self, FieldCursor, FieldEventRef};
 use crate::ui::source_key::{RyeOsSourceChannel, RyeOsSourceInstanceKey};
-use crate::workspace::{
+use crate::view_set::{
     FieldCursorScopeState, FieldCursorState, FieldEventRefState, FieldExpansionState,
     FieldLocalState, FieldPlaybackState, ViewLocalState,
 };
@@ -315,7 +315,7 @@ impl RyeOsCore {
         {
             return Vec::new();
         }
-        let channels = cursor_channels(self.views.get(&view_ref));
+        let channels = cursor_channels(self.binding_for_instance(&instance_key, &view_ref));
         if channels.is_empty() {
             return Vec::new();
         }
@@ -594,7 +594,7 @@ impl RyeOsCore {
         else {
             return;
         };
-        if !cursor_channels(self.views.get(&view_ref))
+        if !cursor_channels(self.binding_for_instance(&key.view_instance, &view_ref))
             .iter()
             .any(|candidate| candidate == channel)
         {
@@ -648,7 +648,7 @@ impl RyeOsCore {
     }
 
     pub(crate) fn normalize_field_cursor_scopes(&mut self) {
-        let instances = self.visible_field_instances();
+        let instances = self.mounted_field_instances();
         let mut active = std::collections::BTreeSet::new();
         for (instance_key, _) in instances {
             if let Some((scope_key, _)) = self.sync_field_cursor_scope(&instance_key) {
@@ -665,22 +665,25 @@ impl RyeOsCore {
     ) -> Option<(String, Vec<(RyeOsViewInstanceKey, String, Vec<String>)>)> {
         let view_ref = self.view_ref_for_instance(instance_key)?;
         let scope = self
-            .views
-            .get(&view_ref)?
+            .binding_for_instance(instance_key, &view_ref)?
             .field_state
             .as_ref()?
             .cursor_scope
             .clone();
-        let scope_key = self.field_cursor_scope_storage_key(&scope.id);
-        let subject_fingerprint = self.field_cursor_subject_fingerprint(&scope);
+        let scope_key = self.field_cursor_scope_storage_key(instance_key, &scope.id)?;
+        let subject_fingerprint = self.field_cursor_subject_fingerprint(instance_key, &scope);
         let members = self
-            .visible_field_instances()
+            .mounted_field_instances()
             .into_iter()
             .filter_map(|(member, member_view_ref)| {
-                let binding = self.views.get(&member_view_ref)?;
+                let binding = self.binding_for_instance(&member, &member_view_ref)?;
                 let candidate = &binding.field_state.as_ref()?.cursor_scope;
-                (candidate == &scope)
-                    .then(|| (member, member_view_ref, cursor_channels(Some(binding))))
+                (candidate == &scope
+                    && self
+                        .field_cursor_scope_storage_key(&member, &scope.id)
+                        .as_ref()
+                        == Some(&scope_key))
+                .then(|| (member, member_view_ref, cursor_channels(Some(binding))))
             })
             .collect::<Vec<_>>();
         let changed = match self.field_cursor_scopes.get_mut(&scope_key) {
@@ -729,30 +732,37 @@ impl RyeOsCore {
         }
     }
 
-    fn field_cursor_scope_storage_key(&self, scope_id: &str) -> String {
-        let surface_instance = self
-            .data
-            .session
-            .as_ref()
-            .map(|session| {
-                if session.session_id.is_empty() {
-                    session.surface_ref.as_str()
-                } else {
-                    session.session_id.as_str()
-                }
-            })
-            .filter(|value| !value.is_empty())
-            .unwrap_or("embedded-surface");
-        format!("{surface_instance}\u{1f}{scope_id}")
+    fn field_cursor_scope_storage_key(
+        &self,
+        instance: &RyeOsViewInstanceKey,
+        scope_id: &str,
+    ) -> Option<String> {
+        let surface_instance = &self.data.session.as_ref()?.session_id;
+        let binding = self.binding_attachment_for_instance(instance)?;
+        let attachment = match self.selection_attachment_for_instance(instance)? {
+            crate::ui::attachment::SelectionAttachment::FollowViewSet { view_set_id } => {
+                format!("follow:{}", view_set_id.0)
+            }
+            crate::ui::attachment::SelectionAttachment::Pinned { fingerprint, .. } => {
+                format!("pinned:{fingerprint}")
+            }
+            crate::ui::attachment::SelectionAttachment::RequiredSubject { .. } => return None,
+        };
+        Some(format!(
+            "{surface_instance}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{attachment}\u{1f}{scope_id}",
+            binding.binding_attachment_id, binding.binding_generation, binding.binding_digest
+        ))
     }
 
     fn field_cursor_subject_fingerprint(
         &self,
+        instance: &RyeOsViewInstanceKey,
         scope: &super::content::FieldCursorScopeBinding,
     ) -> String {
-        let fold = self.seat.fold();
         let authored = Value::Array(scope.subject.iter().cloned().map(Value::String).collect());
-        let resolved = super::content::resolve_params(&authored, |key| fold.get(key).cloned());
+        let resolved = super::content::resolve_params(&authored, |key| {
+            self.facet_value_for_instance(instance, key)
+        });
         field::source_subject_fingerprint(
             "field_cursor_scope",
             &serde_json::json!({
@@ -763,13 +773,50 @@ impl RyeOsCore {
         )
     }
 
+    fn mounted_field_instances(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
+        let mut instances = Vec::new();
+        for view_set in &self.view_sets {
+            instances.extend(view_set.tiles.values().filter_map(|tile| {
+                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
+                    .is_some_and(|binding| binding.widget == "field")
+                    .then(|| (tile.instance_key.clone(), tile.view.view_ref.clone()))
+            }));
+            for edge in [
+                super::model::RyeOsDockEdge::Top,
+                super::model::RyeOsDockEdge::Bottom,
+                super::model::RyeOsDockEdge::Left,
+                super::model::RyeOsDockEdge::Right,
+            ] {
+                let Some(slot) = view_set.docks.slot(edge) else {
+                    continue;
+                };
+                let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
+                if self
+                    .binding_for_instance(
+                        &super::model::dock_view_instance_key(view_set.id, edge),
+                        view_ref,
+                    )
+                    .is_some_and(|binding| binding.widget == "field")
+                {
+                    instances.push((
+                        super::model::dock_view_instance_key(view_set.id, edge),
+                        view_ref.clone(),
+                    ));
+                }
+            }
+        }
+        instances
+    }
+
+    /// Playback advances only views currently presented. Subject resets and
+    /// scope ownership use `mounted_field_instances` so inactive sets and
+    /// hidden retained slots keep correct state without doing background work.
     fn visible_field_instances(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
-        let mut instances = self.workspaces[self.active_workspace]
+        let mut instances = self.view_sets[self.active_view_set]
             .tiles
             .values()
             .filter_map(|tile| {
-                self.views
-                    .get(&tile.view.view_ref)
+                self.binding_for_instance(&tile.instance_key, &tile.view.view_ref)
                     .is_some_and(|binding| binding.widget == "field")
                     .then(|| (tile.instance_key.clone(), tile.view.view_ref.clone()))
             })
@@ -777,9 +824,8 @@ impl RyeOsCore {
         instances.extend(
             self.visible_dock_views()
                 .into_iter()
-                .filter(|(_, view_ref)| {
-                    self.views
-                        .get(view_ref)
+                .filter(|(instance, view_ref)| {
+                    self.binding_for_instance(instance, view_ref)
                         .is_some_and(|binding| binding.widget == "field")
                 }),
         );
@@ -787,17 +833,7 @@ impl RyeOsCore {
     }
 
     fn view_ref_for_instance(&self, instance_key: &RyeOsViewInstanceKey) -> Option<String> {
-        self.workspaces[self.active_workspace]
-            .tiles
-            .values()
-            .find(|tile| &tile.instance_key == instance_key)
-            .map(|tile| tile.view.view_ref.clone())
-            .or_else(|| {
-                self.visible_dock_views()
-                    .into_iter()
-                    .find(|(key, _)| key == instance_key)
-                    .map(|(_, view_ref)| view_ref)
-            })
+        self.mounted_view_ref(instance_key).map(str::to_string)
     }
 
     /// Diff the complete projected field after one named source is accepted.
@@ -856,7 +892,7 @@ impl RyeOsCore {
             let removed_entity = after.is_none() && target.fact_kind == "entity";
             local.changes.insert(
                 key,
-                crate::workspace::FieldChangeState {
+                crate::view_set::FieldChangeState {
                     id: target.id.clone(),
                     kind: kind.to_string(),
                     at_ms: now_ms,
@@ -894,13 +930,10 @@ impl RyeOsCore {
                 .changes
                 .retain(|_, change| now_ms.saturating_sub(change.at_ms) <= 2_000);
         }
-        for tile in self.workspaces[self.active_workspace].tiles.values_mut() {
+        for tile in self.view_sets[self.active_view_set].tiles.values_mut() {
             expire(&mut tile.local, now_ms);
         }
-        for local in self.workspaces[self.active_workspace]
-            .dock_local
-            .values_mut()
-        {
+        for local in self.view_sets[self.active_view_set].dock_local.values_mut() {
             expire(local, now_ms);
         }
     }
@@ -909,13 +942,14 @@ impl RyeOsCore {
         &mut self,
         instance_key: &RyeOsViewInstanceKey,
     ) -> Option<&mut FieldLocalState> {
-        let local = if let Some(tile_id) = instance_key.workspace_tile_id() {
-            &mut self.workspaces[self.active_workspace]
+        let view_set_index = self.view_set_index_for_instance(instance_key)?;
+        let local = if let Some(tile_id) = instance_key.view_set_tile_id() {
+            &mut self.view_sets[view_set_index]
                 .tiles
                 .get_mut(&tile_id)?
                 .local
         } else {
-            self.workspaces[self.active_workspace]
+            self.view_sets[view_set_index]
                 .dock_local
                 .get_mut(instance_key)?
         };
@@ -977,7 +1011,8 @@ mod tests {
     use super::*;
     use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
     use crate::ui::event::RyeOsEvent;
-    use crate::ui::model::{BrowserSession, BrowserViewport};
+    use crate::ui::model::BrowserViewport;
+    use crate::ui::reducer::test_support::{active_selection, session_with_surface};
 
     fn source_request(
         effect: &crate::ui::effect::RyeOsEffect,
@@ -1031,50 +1066,46 @@ mod tests {
 
     fn core() -> RyeOsCore {
         RyeOsCore::new(
-            BrowserSession {
-                effective_surface: Some(serde_json::json!({
-                    "name": "field-test",
-                    "tiles": ["view:test/field"],
-                    "views": {
-                        "view:test/field": {
-                            "widget": "field",
-                            "sources": {
-                                "project": { "ref": "service:project" },
-                                "execution": {
-                                    "ref": "service:execution",
-                                    "params": {
-                                        "thread_id": "@facet:selection.thread_id",
-                                        "cursor": "@field:cursor"
-                                    }
+            session_with_surface(serde_json::json!({
+                "name": "field-test",
+                "tiles": ["view:test/field"],
+                "views": {
+                    "view:test/field": {
+                        "widget": "field",
+                        "sources": {
+                            "project": { "ref": "service:project" },
+                            "execution": {
+                                "ref": "service:execution",
+                                "params": {
+                                    "thread_id": "@facet:selection.thread_id",
+                                    "cursor": "@field:cursor"
                                 }
-                            },
-                            "projections": {
-                                "schema_version": "ryeos.ui.field.projection.v1",
-                                "groups": [{ "id": "runs", "label": "Runs" }],
-                                "layers": [{ "id": "live", "label": "Live" }],
-                                "entity_rules": [{
-                                    "match": { "kind": "run" },
-                                    "set": { "group": "runs", "layer": "live" }
-                                }]
-                            },
-                            "selection": { "change": "select", "activate": "select" },
-                            "affordances": [{
-                                "id": "select",
-                                "invoke": {
-                                    "plane": "ui",
-                                    "facet": "selection",
-                                    "value": {
-                                        "thread_id": "{record.attributes.thread.id}",
-                                        "entity_id": "{record.id}"
-                                    }
-                                }
+                            }
+                        },
+                        "projections": {
+                            "schema_version": "ryeos.ui.field.projection.v1",
+                            "groups": [{ "id": "runs", "label": "Runs" }],
+                            "layers": [{ "id": "live", "label": "Live" }],
+                            "entity_rules": [{
+                                "match": { "kind": "run" },
+                                "set": { "group": "runs", "layer": "live" }
                             }]
-                        }
+                        },
+                        "selection": { "change": "select", "activate": "select" },
+                        "affordances": [{
+                            "id": "select",
+                            "invoke": {
+                                "plane": "ui",
+                                "facet": "selection",
+                                "value": {
+                                    "thread_id": "{record.attributes.thread.id}",
+                                    "entity_id": "{record.id}"
+                                }
+                            }
+                        }]
                     }
-                })),
-                posture: crate::ui::binding::UiEffectivePosture::Interactive,
-                ..Default::default()
-            },
+                }
+            })),
             BrowserViewport::default(),
             0,
         )
@@ -1110,20 +1141,48 @@ mod tests {
             })
         };
         RyeOsCore::new(
-            BrowserSession {
-                session_id: "session:shared-field".to_string(),
-                ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                surface_ref: "surface:test/shared-field".to_string(),
-                effective_surface: Some(serde_json::json!({
-                    "name": "shared-field-test",
-                    "tiles": ["view:test/solve", "view:test/board"],
-                    "views": {
-                        "view:test/solve": field_view("service:solve"),
-                        "view:test/board": field_view("service:board")
+            session_with_surface(serde_json::json!({
+                "name": "shared-field-test",
+                "tiles": ["view:test/solve", "view:test/board"],
+                "views": {
+                    "view:test/solve": field_view("service:solve"),
+                    "view:test/board": field_view("service:board")
+                }
+            })),
+            BrowserViewport::default(),
+            0,
+        )
+    }
+
+    fn two_set_shared_cursor_core() -> RyeOsCore {
+        RyeOsCore::new(
+            session_with_surface(serde_json::json!({
+                "name": "two-set-field-test",
+                "view_sets": [
+                    {"id":"one", "title":"One", "root":{"type":"group", "views":["view:test/field"], "active":0}},
+                    {"id":"two", "title":"Two", "root":{"type":"group", "views":["view:test/field"], "active":0}}
+                ],
+                "views": {
+                    "view:test/field": {
+                        "widget": "field",
+                        "sources": {"execution": {
+                            "ref": "service:execution",
+                            "params": {
+                                "thread_id": "@facet:selection.thread_id",
+                                "cursor": "@field:cursor"
+                            }
+                        }},
+                        "field_state": {"cursor_scope": {
+                            "id": "shared-authored-id",
+                            "subject": ["@facet:selection.thread_id"]
+                        }},
+                        "projections": {
+                            "schema_version": "ryeos.ui.field.projection.v1",
+                            "groups": [], "layers": [], "entity_rules": []
+                        }
                     }
-                })),
-                ..Default::default()
-            },
+                }
+            })),
             BrowserViewport::default(),
             0,
         )
@@ -1152,8 +1211,10 @@ mod tests {
     #[test]
     fn signed_cursor_scope_fans_out_and_subject_changes_never_resurrect_old_cuts() {
         let mut core = shared_cursor_core();
+        let selection_key =
+            crate::ui::seat::selection_facet_key(core.view_sets[core.active_view_set].id);
         core.seat.append_facet(
-            "selection",
+            selection_key.clone(),
             serde_json::json!({
                 "thread_id": "T-selected",
                 "definition_digest": "a".repeat(64),
@@ -1179,11 +1240,11 @@ mod tests {
             });
         }
 
-        let instances = core.workspaces[core.active_workspace]
+        let instances = core.view_sets[core.active_view_set]
             .tile_ids()
             .into_iter()
             .map(|tile_id| {
-                core.workspaces[core.active_workspace].tiles[&tile_id]
+                core.view_sets[core.active_view_set].tiles[&tile_id]
                     .instance_key
                     .clone()
             })
@@ -1260,7 +1321,7 @@ mod tests {
         }
 
         core.seat.append_facet(
-            "selection",
+            selection_key.clone(),
             serde_json::json!({
                 "thread_id": "T-other",
                 "definition_digest": "b".repeat(64),
@@ -1289,7 +1350,7 @@ mod tests {
         }
 
         core.seat.append_facet(
-            "selection",
+            selection_key,
             serde_json::json!({
                 "thread_id": "T-selected",
                 "definition_digest": "a".repeat(64),
@@ -1300,6 +1361,123 @@ mod tests {
             core.field_cursor_scopes.values().next().unwrap().cursor,
             FieldCursorState::Live,
             "returning to an old subject cannot resurrect its prior cut"
+        );
+    }
+
+    #[test]
+    fn identical_scope_ids_in_different_view_sets_never_alias_selection_or_cursor() {
+        let mut core = two_set_shared_cursor_core();
+        let first_set = core.view_sets[0].id;
+        let second_set = core.view_sets[1].id;
+        core.seat.append_facet(
+            crate::ui::seat::selection_facet_key(first_set),
+            serde_json::json!({"thread_id": "T-one"}),
+        );
+        core.seat.append_facet(
+            crate::ui::seat::selection_facet_key(second_set),
+            serde_json::json!({"thread_id": "T-two"}),
+        );
+
+        let first_instance = core.view_sets[0]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        let second_instance = core.view_sets[1]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+
+        core.active_view_set = 0;
+        let (first_key, first_members) = core.sync_field_cursor_scope(&first_instance).unwrap();
+        assert_eq!(first_members.len(), 1);
+        let cut = FieldCursorState::BraidCut {
+            anchor: FieldEventRefState {
+                chain_root_id: "T-one".to_string(),
+                chain_seq: 7,
+                event_hash: "1".repeat(64),
+            },
+        };
+        core.field_cursor_scopes.get_mut(&first_key).unwrap().cursor = cut.clone();
+
+        core.active_view_set = 1;
+        let (second_key, second_members) = core.sync_field_cursor_scope(&second_instance).unwrap();
+        assert_eq!(second_members.len(), 1);
+        assert_ne!(
+            first_key, second_key,
+            "the attachment identity must qualify the signed scope id"
+        );
+        assert_ne!(
+            core.field_cursor_scopes[&first_key].subject_fingerprint,
+            core.field_cursor_scopes[&second_key].subject_fingerprint,
+            "each scope subject must resolve through its own view-set selection"
+        );
+        assert_eq!(
+            core.field_cursor_scopes[&second_key].cursor,
+            FieldCursorState::Live,
+            "opening the same signed scope in another set must not inherit a cut"
+        );
+
+        core.active_view_set = 0;
+        let (resynced_key, _) = core.sync_field_cursor_scope(&first_instance).unwrap();
+        assert_eq!(resynced_key, first_key);
+        assert_eq!(core.field_cursor_scopes[&first_key].cursor, cut);
+        assert_eq!(core.field_cursor_scopes.len(), 2);
+    }
+
+    #[test]
+    fn inactive_cross_set_follower_resets_replay_and_expansions_by_retained_instance() {
+        let mut core = two_set_shared_cursor_core();
+        let owner = core.view_sets[0].id;
+        let follower = core.view_sets[1]
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
+        core.selection_attachments.insert(
+            follower.clone(),
+            crate::ui::attachment::SelectionAttachment::FollowViewSet { view_set_id: owner },
+        );
+        core.active_view_set = 1;
+        core.normalize_field_local_states();
+        let local = core.field_local_mut(&follower).unwrap();
+        local.cursor = FieldCursorState::BraidCut {
+            anchor: FieldEventRefState {
+                chain_root_id: "T-old".into(),
+                chain_seq: 4,
+                event_hash: "4".repeat(64),
+            },
+        };
+        local.playback.playing = true;
+        local.expansions.insert(
+            "execution\0root".into(),
+            FieldExpansionState {
+                max_depth: 2,
+                max_entities: 100,
+                continuation_token: Some("old".into()),
+            },
+        );
+
+        core.active_view_set = 0;
+        core.reset_field_replay_for_subject(&follower);
+        core.clear_field_expansions_for_channel(&follower, "execution");
+
+        let local = core.field_local_mut(&follower).unwrap();
+        assert_eq!(local.cursor, FieldCursorState::Live);
+        assert!(!local.playback.playing);
+        assert!(local.expansions.is_empty());
+        let (_, members) = core.sync_field_cursor_scope(&follower).unwrap();
+        assert_eq!(
+            members.len(),
+            2,
+            "same attachment coordinate links retained instances across sets"
         );
     }
 
@@ -1326,7 +1504,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1351,7 +1529,7 @@ mod tests {
                 entity_id: Some("run:two".to_string()),
             },
         });
-        let selection = core.seat.fold().get("selection").cloned().unwrap();
+        let selection = active_selection(&core);
         assert_eq!(selection["thread_id"], "T-two");
         assert_eq!(selection["entity_id"], "run:two");
         assert!(
@@ -1432,10 +1610,7 @@ mod tests {
                 delta: -1,
             },
         });
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["thread_id"],
-            "T-one"
-        );
+        assert_eq!(active_selection(&core)["thread_id"], "T-one");
         assert!(effects.iter().any(|effect| {
             source_request(effect).is_some_and(|(_, _, _, params)| {
                 params["thread_id"] == "T-one" && params["cursor"]["mode"] == "live"
@@ -1488,7 +1663,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1614,17 +1789,16 @@ mod tests {
                 error: None,
             },
         });
-        let tile_id = core.workspaces[core.active_workspace]
+        let tile_id = core.view_sets[core.active_view_set]
             .tiles
             .keys()
             .next()
             .copied()
             .unwrap();
-        core.workspaces[core.active_workspace].focused_tile = tile_id;
-        core.workspaces[core.active_workspace].focus_target =
-            Some(RyeOsFocusTarget::WorkspaceTile {
-                tile_id: tile_id.0.to_string(),
-            });
+        core.view_sets[core.active_view_set].focused_tile = tile_id;
+        core.view_sets[core.active_view_set].focus_target = Some(RyeOsFocusTarget::ViewSetTile {
+            tile_id: tile_id.0.to_string(),
+        });
 
         let down = ryeos_key_command(
             RyeOsKeyEvent {
@@ -1634,10 +1808,7 @@ mod tests {
             core.key_context(),
         );
         core.apply_key_command(down);
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["entity_id"],
-            "run:two"
-        );
+        assert_eq!(active_selection(&core)["entity_id"], "run:two");
 
         let enter = ryeos_key_command(
             RyeOsKeyEvent {
@@ -1647,10 +1818,7 @@ mod tests {
             core.key_context(),
         );
         core.apply_key_command(enter);
-        assert_eq!(
-            core.seat.fold().get("selection").unwrap()["thread_id"],
-            "T-two"
-        );
+        assert_eq!(active_selection(&core)["thread_id"], "T-two");
     }
 
     #[test]
@@ -1672,7 +1840,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()
@@ -1727,7 +1895,7 @@ mod tests {
                 error: None,
             },
         });
-        let instance_key = core.workspaces[core.active_workspace]
+        let instance_key = core.view_sets[core.active_view_set]
             .tiles
             .values()
             .next()

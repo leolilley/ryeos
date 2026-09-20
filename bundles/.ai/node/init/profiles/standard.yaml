@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:05:59Z:650fb10948799e3a87410d4c700c9413105a4cb72de021905f3017253bd7b0e8:UBnVE0g0gVInZGSIduIr+dvT0Kakc7D3jqdustxk5YP0xvu8WKMASQKtIITA+Yo8CE6wtjo+ErAYLfAOie8EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T02:47:08Z:addade2cb891c79f19bc45da00fe33e741a7071b016a0351689b794bba8cd339:+6LUrTkkgba49gAJxQC/PvDYx1aIKuk9ePhbXolNFpxewqOFXrY+V6HxVcLjWs3otV0e0aNd/ZO30N+rvY+0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -229,3 +229,6 @@ policies:
     schema: 1
     enabled: false
     limits: null
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

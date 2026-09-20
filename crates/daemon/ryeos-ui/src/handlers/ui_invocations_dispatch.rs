@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
@@ -20,7 +21,9 @@ use ryeos_client_base::ui::{UiBindingCoordinate, UiBindingPayload, UiBindingRequ
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::browser_session::BrowserSession;
+use crate::browser_session::{
+    AdmittedBindingAttachment, BindingAttachmentCoordinate, BrowserSession,
+};
 use crate::compiled_binding::{
     CompiledUiAffordance, CompiledUiProducer, CompiledUiResultEffect, CompiledUiSource,
     CompiledUiTarget,
@@ -40,7 +43,7 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
 
 fn invocation_context_for_session(session: &BrowserSession) -> HandlerContext {
     HandlerContext::new(
-        session.compiled_binding.binding.principal_id.clone(),
+        session.principal_id.clone(),
         session.granted_caps.clone(),
         true,
     )
@@ -68,10 +71,16 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .browser_sessions
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
-    if req.binding_digest != session.compiled_binding.binding_digest {
-        return Err(binding_stale("the browser binding digest is not current"));
-    }
-    if session
+    let attachment_coordinate = BindingAttachmentCoordinate {
+        binding_attachment_id: req.binding_attachment_id.clone(),
+        binding_generation: req.binding_generation,
+        binding_digest: req.binding_digest.clone(),
+    };
+    let attachment = ui
+        .browser_sessions
+        .resolve_attachment(&session_id, &attachment_coordinate)
+        .map_err(|error| binding_stale(&error.to_string()))?;
+    if attachment
         .compiled_binding
         .binding
         .node_policy_generation_digest
@@ -82,10 +91,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         ));
     }
     enforce_request_bounds(&state, &req, &input)?;
-    authorize_route_context(&ctx, &state, &session, &req)?;
-    let project_access = crate::seat_auth::session_project_access(&session).map_err(|_| {
-        binding_stale("the selected project path no longer names its retained authority")
-    })?;
+    authorize_route_context(&ctx, &state, &attachment, &req)?;
+    let project_access =
+        crate::seat_auth::attachment_project_access(&attachment).map_err(|_| {
+            binding_stale("the selected project path no longer names its retained authority")
+        })?;
     let project_path = match project_access.as_ref() {
         Some(access) => access.path().to_path_buf(),
         None => state.config.app_root.clone(),
@@ -94,9 +104,9 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     // validated project identity.  The descriptor-rooted path above remains
     // solely the filesystem resolution coordinate and must never escape into
     // a request or durable row.
-    let project_marker = crate::seat_auth::session_project_query_identity(&session)?
+    let project_marker = crate::seat_auth::attachment_project_query_identity(&attachment)?
         .map(|path| path.to_string_lossy().into_owned());
-    let bound = resolve_binding_request(&session, &req, project_marker.as_deref())?;
+    let bound = resolve_binding_request(&attachment, &req, project_marker.as_deref())?;
     let item_ref = bound.target.identity.canonical_ref.clone();
     let invocation_ctx = invocation_context_for_session(&session);
     let prepared = prepare_item_ref(
@@ -113,7 +123,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .engine
         .with_checked_bundle_generation(|generation| {
             if generation.request_engine_generation_identity()
-                != session
+                != attachment
                     .compiled_binding
                     .binding
                     .request_engine_generation_identity
@@ -124,8 +134,8 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             }
             super::ui_launch_mint::revalidate_binding_authority(
                 generation,
-                session.compiled_binding.as_ref(),
-                session
+                attachment.compiled_binding.as_ref(),
+                attachment
                     .project_authority
                     .as_ref()
                     .map(|_| project_path.as_path()),
@@ -165,7 +175,8 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         &invocation_ctx,
     );
 
-    let mut result = crate::seat_auth::with_compiled_ui_session(session.clone(), async {
+    let source_safe = bound.target.source_safe;
+    let mut result = crate::seat_auth::with_compiled_ui_attachment(attachment.clone(), async {
         if bound.target.source_safe {
             execute_read_only_service(
                 &item_ref,
@@ -177,6 +188,10 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             )
             .await
         } else {
+            let _dispatch_admission = ui
+                .browser_sessions
+                .admit_attachment_dispatch(&session_id, &attachment_coordinate)
+                .map_err(|error| binding_stale(&error.to_string()))?;
             execute_prepared_item_ref(
                 &item_ref,
                 bound.params,
@@ -190,7 +205,16 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     })
     .await?;
-    retain_declared_result_effect(&bound.target, &mut result)?;
+    if source_safe {
+        ui.browser_sessions
+            .recheck_attachment_after_read(&session_id, &attachment_coordinate)
+            .map_err(|error| binding_stale(&error.to_string()))?;
+    }
+    retain_declared_result_effect(
+        &bound.target,
+        &attachment_coordinate.binding_attachment_id,
+        &mut result,
+    )?;
 
     ui.session_bus.publish(
         &session_id,
@@ -206,11 +230,18 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         "status": "executed",
         "target": { "kind": "ref", "ref": item_ref },
         "invocation_id": invocation_id,
+        "binding_attachment_id": attachment_coordinate.binding_attachment_id,
+        "binding_generation": attachment_coordinate.binding_generation,
+        "binding_digest": attachment_coordinate.binding_digest,
         "result": result,
     }))
 }
 
-fn retain_declared_result_effect(target: &CompiledUiTarget, result: &mut Value) -> Result<()> {
+fn retain_declared_result_effect(
+    target: &CompiledUiTarget,
+    invoking_attachment_id: &str,
+    result: &mut Value,
+) -> Result<()> {
     let Some(fields) = result.as_object_mut() else {
         if target.result_effect.is_some() {
             return Err(HandlerError::Internal(
@@ -223,50 +254,100 @@ fn retain_declared_result_effect(target: &CompiledUiTarget, result: &mut Value) 
     let authored = fields.remove("ui_transition");
     match target.result_effect {
         None => Ok(()),
-        Some(CompiledUiResultEffect::ReplaceSession) => {
-            let transition = authored
-                .and_then(|value| value.as_object().cloned())
-                .ok_or_else(|| {
+        Some(CompiledUiResultEffect::AdmitBindingAttachment) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct AttachmentTransition {
+                kind: String,
+                attachment: ryeos_client_base::ui::UiBindingAttachment,
+            }
+            let transition: AttachmentTransition =
+                serde_json::from_value(authored.ok_or_else(|| {
                     HandlerError::Internal(
-                        "replace-session service returned no typed UI transition".into(),
+                        "attachment-admission service returned no typed UI transition".into(),
+                    )
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "attachment-admission service returned an invalid typed UI transition"
+                            .into(),
                     )
                 })?;
-            if transition.get("kind").and_then(Value::as_str) != Some("replace_session")
-                || transition
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-                || transition
-                    .get("launch_url")
-                    .and_then(Value::as_str)
-                    .is_none_or(|url| !is_local_launch_path(url))
-            {
+            if transition.kind != "admit_binding_attachment" {
                 return Err(HandlerError::Internal(
-                    "replace-session service returned an invalid typed UI transition".into(),
+                    "attachment-admission service returned an invalid typed UI transition".into(),
                 )
                 .into());
             }
-            fields.insert("ui_transition".to_string(), Value::Object(transition));
+            fields.insert(
+                "ui_transition".to_string(),
+                json!({"kind":"admit_binding_attachment","attachment":transition.attachment}),
+            );
+            Ok(())
+        }
+        Some(CompiledUiResultEffect::ResumeParticularViewSet) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ResumeTransition {
+                kind: String,
+                #[serde(default)]
+                attachment: Option<ryeos_client_base::ui::UiBindingAttachment>,
+                insertion_attachment_id: String,
+            }
+            let transition: ResumeTransition =
+                serde_json::from_value(authored.ok_or_else(|| {
+                    HandlerError::Internal(
+                        "particular-set resume returned no typed UI transition".into(),
+                    )
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "particular-set resume returned an invalid typed UI transition".into(),
+                    )
+                })?;
+            let resolved: ryeos_client_base::surface::view_sets::ResolvedParticularViewSet =
+                serde_json::from_value(fields.remove("particular_view_set").ok_or_else(|| {
+                    HandlerError::Internal("particular-set resume returned no resolved set".into())
+                })?)
+                .map_err(|_| {
+                    HandlerError::Internal(
+                        "particular-set resume returned an invalid resolved set".into(),
+                    )
+                })?;
+            if transition.kind != "resume_particular_view_set"
+                || transition.insertion_attachment_id.is_empty()
+                || transition.attachment.as_ref().is_some_and(|attachment| {
+                    attachment.binding_attachment_id != transition.insertion_attachment_id
+                })
+                || (transition.attachment.is_none()
+                    && transition.insertion_attachment_id != invoking_attachment_id)
+            {
+                return Err(HandlerError::Internal(
+                    "particular-set resume returned an invalid typed UI transition".into(),
+                )
+                .into());
+            }
+            fields.insert(
+                "particular_view_set".to_string(),
+                serde_json::to_value(resolved)?,
+            );
+            fields.insert(
+                "ui_transition".to_string(),
+                json!({
+                    "kind": "resume_particular_view_set",
+                    "attachment": transition.attachment,
+                    "insertion_attachment_id": transition.insertion_attachment_id,
+                }),
+            );
             Ok(())
         }
     }
 }
 
-fn is_local_launch_path(path: &str) -> bool {
-    let Some(token) = path.strip_prefix("/ui/launch/") else {
-        return false;
-    };
-    !token.is_empty()
-        && token.len() <= 128
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
 fn authorize_route_context(
     ctx: &HandlerContext,
     state: &AppState,
-    session: &BrowserSession,
+    attachment: &Arc<AdmittedBindingAttachment>,
     req: &UiBindingRequest,
 ) -> Result<()> {
     let (
@@ -284,7 +365,7 @@ fn authorize_route_context(
     let subjects = authorize_exact_thread_subjects(
         ctx,
         state,
-        &SeatCaller::Session(session.clone()),
+        &SeatCaller::Attachment(attachment.clone()),
         &[thread_id],
     )?;
     if route.chain_root_id.as_deref() != Some(subjects[0].chain_root_id.as_str()) {
@@ -333,13 +414,13 @@ fn enforce_request_bounds(state: &AppState, req: &UiBindingRequest, input: &Valu
 }
 
 fn resolve_binding_request(
-    session: &BrowserSession,
+    attachment: &AdmittedBindingAttachment,
     req: &UiBindingRequest,
     project_root: Option<&str>,
 ) -> Result<BoundInvocation> {
     match (&req.coordinate, &req.payload) {
         (UiBindingCoordinate::SurfaceRoute, UiBindingPayload::Input { value, route }) => {
-            let surface_route = session
+            let surface_route = attachment
                 .compiled_binding
                 .binding
                 .surface_route
@@ -397,7 +478,7 @@ fn resolve_binding_request(
             UiBindingCoordinate::Source { view_ref, channel },
             UiBindingPayload::SourceParameters { params },
         ) => {
-            let source = session
+            let source = attachment
                 .compiled_binding
                 .binding
                 .sources
@@ -420,7 +501,7 @@ fn resolve_binding_request(
             },
             payload,
         ) => {
-            let entry = session
+            let entry = attachment
                 .compiled_binding
                 .binding
                 .affordances
@@ -507,7 +588,9 @@ fn resolve_binding_request(
                 ryeos_client_base::ui::content::AffordanceInvoke::Rye { tokens, args, .. } => {
                     json!({"project_path": project_root, "tokens": tokens, "arguments": args})
                 }
-                ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. } => {
+                ryeos_client_base::ui::content::AffordanceInvoke::Ui { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::OpenSavedViewSet { .. }
+                | ryeos_client_base::ui::content::AffordanceInvoke::SaveActiveViewSet { .. } => {
                     return Err(HandlerError::BadRequest(
                         "UI-local affordance crossed execution dispatch".into(),
                     )
@@ -994,44 +1077,17 @@ mod tests {
     }
 
     fn session(user_principal_id: Option<String>) -> BrowserSession {
-        use ryeos_api::surface_views::EffectiveUiItemIdentity;
-        use ryeos_engine::resolution::{EffectiveDefinitionDigest, TrustClass};
-
         let now = Instant::now();
         BrowserSession {
             session_id: "session-1".to_string(),
             created_at: now,
             expires_at: now + Duration::from_secs(60),
-            compiled_binding: Arc::new(crate::compiled_binding::SessionCompiledUiBinding {
-                binding_digest: "11".repeat(32),
-                posture: crate::compiled_binding::EffectiveUiPosture::ObservationOnly,
-                binding: crate::compiled_binding::CompiledUiBinding {
-                    contract_revision: crate::UI_BINDING_CONTRACT_REVISION.to_string(),
-                    principal_id: "fp:test".to_string(),
-                    project_root: None,
-                    request_engine_generation_identity: "generation:test".to_string(),
-                    node_policy_generation_digest: "22".repeat(32),
-                    surface: EffectiveUiItemIdentity {
-                        canonical_ref: "surface:ryeos/ui/base-observe".to_string(),
-                        effective_definition_digest: EffectiveDefinitionDigest::parse(
-                            "33".repeat(32),
-                        )
-                        .expect("fixture digest"),
-                        effective_trust_class: TrustClass::TrustedBundle,
-                    },
-                    views: BTreeMap::new(),
-                    sources: BTreeMap::new(),
-                    affordances: BTreeMap::new(),
-                    surface_route: None,
-                    attenuated: Vec::new(),
-                },
-            }),
-            effective_surface: json!({"kind":"Surface"}),
+            principal_id: "fp:test".to_string(),
             granted_caps: vec!["ui.read".to_string()],
-            project_root: None,
-            surface_ref: "surface:ryeos/ui/base-observe".to_string(),
             user_principal_id,
-            project_authority: None,
+            surface_attachment_id: "attachment-1".to_string(),
+            attachments: Default::default(),
+            next_attachment_generation: 1,
         }
     }
 
@@ -1060,28 +1116,39 @@ mod tests {
         let mut result = json!({
             "value": 7,
             "ui_transition": {
-                "kind": "replace_session",
+                "kind": "forged_transition",
                 "session_id": "forged",
                 "launch_url": "/ui/launch/forged"
             }
         });
 
-        retain_declared_result_effect(&target(None), &mut result).expect("sanitize result");
+        retain_declared_result_effect(&target(None), "attachment-1", &mut result)
+            .expect("sanitize result");
 
         assert_eq!(result, json!({"value": 7}));
     }
 
     #[test]
-    fn declared_replace_session_effect_is_typed_and_retained() {
+    fn declared_attachment_effect_is_typed_and_retained() {
         let transition = json!({
-            "kind": "replace_session",
-            "session_id": "successor",
-            "launch_url": "/ui/launch/one-shot-token"
+            "kind": "admit_binding_attachment",
+            "attachment": {
+                "binding_attachment_id": "attachment-2",
+                "binding_generation": 2,
+                "binding_digest": "11",
+                "surface_ref": "surface:test/base",
+                "surface_generation": "22",
+                "effective_surface": {},
+                "project_path": null,
+                "posture": "observation_only",
+                "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512}
+            }
         });
         let mut result = json!({"ui_transition": transition.clone()});
 
         retain_declared_result_effect(
-            &target(Some(CompiledUiResultEffect::ReplaceSession)),
+            &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+            "attachment-1",
             &mut result,
         )
         .expect("retain signed result effect");
@@ -1090,37 +1157,108 @@ mod tests {
     }
 
     #[test]
-    fn declared_replace_session_effect_rejects_external_urls() {
+    fn declared_attachment_effect_rejects_missing_descriptor() {
         let mut result = json!({
             "ui_transition": {
-                "kind": "replace_session",
-                "session_id": "successor",
-                "launch_url": "https://attacker.invalid/ui/launch/token"
+                "kind": "admit_binding_attachment"
             }
         });
 
         let error = retain_declared_result_effect(
-            &target(Some(CompiledUiResultEffect::ReplaceSession)),
+            &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+            "attachment-1",
             &mut result,
         )
-        .expect_err("external launch URL must fail closed");
+        .expect_err("missing descriptor must fail closed");
 
         assert!(error.to_string().contains("invalid typed UI transition"));
     }
 
     #[test]
-    fn declared_replace_session_effect_rejects_path_traversal() {
+    fn declared_attachment_effect_rejects_unknown_fields() {
         let mut result = json!({
             "ui_transition": {
-                "kind": "replace_session",
-                "session_id": "successor",
-                "launch_url": "/ui/launch/../another-route"
+                "kind": "admit_binding_attachment",
+                "attachment": {},
+                "session_id": "forged"
             }
         });
 
         assert!(
             retain_declared_result_effect(
-                &target(Some(CompiledUiResultEffect::ReplaceSession)),
+                &target(Some(CompiledUiResultEffect::AdmitBindingAttachment)),
+                "attachment-1",
+                &mut result,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn particular_resume_effect_requires_typed_resolution_and_exact_insertion() {
+        let mut result = json!({
+            "particular_view_set": {
+                "id": "current",
+                "name": "Current",
+                "composition": {
+                    "id": "current",
+                    "title": "Current",
+                    "root": null,
+                    "slots": {}
+                },
+                "relationships": [],
+                "resolved_selection_work": {
+                    "thread": "T-head",
+                    "chain_root": "T-root"
+                }
+            },
+            "ui_transition": {
+                "kind": "resume_particular_view_set",
+                "attachment": null,
+                "insertion_attachment_id": "attachment-1"
+            }
+        });
+        retain_declared_result_effect(
+            &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+            "attachment-1",
+            &mut result,
+        )
+        .expect("retain typed particular-set resolution");
+        assert_eq!(
+            result["ui_transition"]["insertion_attachment_id"],
+            "attachment-1"
+        );
+        assert_eq!(
+            result["particular_view_set"]["resolved_selection_work"]["thread"],
+            "T-head"
+        );
+
+        let mut wrong_origin = result.clone();
+        wrong_origin["ui_transition"]["insertion_attachment_id"] = json!("attachment-9");
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+                "attachment-1",
+                &mut wrong_origin,
+            )
+            .is_err()
+        );
+
+        result["ui_transition"]["attachment"] = json!({
+            "binding_attachment_id": "attachment-2",
+            "binding_generation": 2,
+            "binding_digest": "11",
+            "surface_ref": "surface:test/base",
+            "surface_generation": "22",
+            "effective_surface": {},
+            "project_path": null,
+            "posture": "observation_only",
+            "binding_request_bounds": {"max_request_bytes": 1024, "max_input_bytes": 512}
+        });
+        assert!(
+            retain_declared_result_effect(
+                &target(Some(CompiledUiResultEffect::ResumeParticularViewSet)),
+                "attachment-1",
                 &mut result,
             )
             .is_err()
@@ -1130,6 +1268,8 @@ mod tests {
     #[test]
     fn binding_request_cannot_decode_an_arbitrary_target() {
         let request = serde_json::from_value::<UiBindingRequest>(serde_json::json!({
+            "binding_attachment_id": "attachment-1",
+            "binding_generation": 1,
             "binding_digest": "11",
             "coordinate": { "kind": "source", "view_ref": "view:x", "channel": "default" },
             "payload": { "kind": "source_parameters", "params": {} },

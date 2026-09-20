@@ -1,15 +1,15 @@
-# Workspace visual study
+# ViewSet visual study
 
 This is an isolated, interactive HTML/CSS design prototype, not the installed
 renderer and not execution evidence. All statuses, conversations, changes and
 projects are synthetic. It makes no network or daemon calls.
 
 The study preserves RyeOS's Gruvbox palette and explores typography, tile
-chrome, optional navigation slots, workspace tabs, contextual input and the
+chrome, optional navigation slots, view set tabs, contextual input and the
 launcher. Overview/Development and the launcher can be opened; other controls
 are appearance specimens. No production implementation is claimed.
 
-Open `workspace.html` in a browser. Use the top workspace tabs, Launch button,
+Open `view-set.html` in a browser. Use the top view set tabs, Launch button,
 or Ctrl/Cmd+K. The navigation-slot button toggles the left region.
 
 System Arial/Helvetica and Liberation Mono are prototype font choices. Final
@@ -18,10 +18,10 @@ type selection and portable font assets remain to be reviewed.
 ## Approved direction and implementation boundary
 
 The user approved this visual treatment on 2026-09-16, then approved supporting
-arbitrarily nested splits and tabbed view groups in the shared workspace model.
+arbitrarily nested splits and tabbed view groups in the shared view set model.
 Keep Gruvbox, the launcher, optional slots and the composable working environment.
 The fixed CSS grid here is only a visual specimen, not the production layout
-algorithm. Its hardcoded labels, data and workspace switching must not become
+algorithm. Its hardcoded labels, data and view set switching must not become
 renderer product logic.
 
 Production must reuse the existing surface/compiler, layout, view-instance,

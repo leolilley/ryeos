@@ -1,6 +1,6 @@
 {
   "schema_version": "ryeos.ui.asset-manifest.v1",
-  "ui_binding_revision": "ryeos.ui.binding.v4",
+  "ui_binding_revision": "ryeos.ui.binding.v5",
   "assets": [
     {
       "route": "/ui",
@@ -18,7 +18,7 @@
       "filename": "ryeos_ui.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "5c1de5450db5ff345d0d4b4d42ba865fbe9d02b34aa8ed15b086cb8ff1796e85",
+      "sha256": "a06591e95d4546fd54d9e329fd5647681521a3999e5fa18e4c69aa2de5ceb45e",
       "imports": [
         "/ui/assets/ryeos_three.js",
         "/ui/assets/ryeos_web.js",
@@ -30,7 +30,7 @@
       "filename": "ryeos_ui.css",
       "mime": "text/css; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "ccd33287cf41e6cfc83d429e2828bed67d42da797945d0333eb65d699a519528",
+      "sha256": "eb26a439e40e3ab54b5836df9253126e0222182efd9bdc1b0206590762bf1365",
       "imports": []
     },
     {
@@ -38,7 +38,7 @@
       "filename": "ryeos_three.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "71693b835003a2b5d56f5e3f194acb363bef459535e3402779207d42ff2f2cd3",
+      "sha256": "914899ca99c9e5aba19e97a9df9bc3e6895c524159133bf591e9b66e7d24eb62",
       "imports": []
     },
     {
@@ -46,7 +46,7 @@
       "filename": "ryeos_web.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "4fe175316400c649ea673834acb9ac85b26a1d3e96ba8799034c78e23ae2018b",
+      "sha256": "4f73526ceaaca1e7c991d0d37d65543b933f6d2e49dcb14af32b7552790c0474",
       "imports": [
         "/ui/assets/ryeos_web_bg.wasm"
       ]
@@ -56,7 +56,7 @@
       "filename": "ryeos_web_bg.wasm",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "a919d4f0261ced31daab25a7b70434d37c672974324a76c9f399e794f686fffc",
+      "sha256": "e93086e1ce638e871913c343de765229468a09ab1e71e15066f3a0b9ecd32059",
       "imports": []
     }
   ]

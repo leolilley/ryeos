@@ -8,7 +8,7 @@ import type { RyeOsOverlayVm } from "./RyeOsOverlayVm";
 import type { RyeOsPresentationVm } from "./RyeOsPresentationVm";
 import type { RyeOsSessionVm } from "./RyeOsSessionVm";
 import type { RyeOsTransportVm } from "./RyeOsTransportVm";
-import type { RyeOsWorkspaceVm } from "./RyeOsWorkspaceVm";
+import type { RyeOsViewSetVm } from "./RyeOsViewSetVm";
 
 export interface RyeOsViewModel {
   schema_version: string;
@@ -21,7 +21,7 @@ export interface RyeOsViewModel {
   navigation: RyeOsNavigationVm;
   chrome: RyeOsChromeVm;
   presentation: RyeOsPresentationVm;
-  workspace: RyeOsWorkspaceVm;
+  view_set: RyeOsViewSetVm;
   overlays: RyeOsOverlayVm[];
   notices: RyeOsNoticeVm[];
   transport: RyeOsTransportVm;

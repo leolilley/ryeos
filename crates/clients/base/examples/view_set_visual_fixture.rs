@@ -2,7 +2,7 @@
 //! no daemon, credentials, installed state or execution requests are involved.
 use ryeos_client_base::ui::{
     BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent, RyeOsSourceInstanceKey, RyeOsUiEvent,
-    RyeOsUiIntent,
+    RyeOsUiIntent, UiBindingAttachment, UiBindingRequestBounds,
 };
 use serde_json::{Value, json};
 
@@ -13,8 +13,8 @@ fn dispatch(core: &mut RyeOsCore, intent: RyeOsUiIntent) {
 }
 
 fn populate(core: &mut RyeOsCore, data: &Value) {
-    let workspace = &core.workspaces[core.active_workspace];
-    let mut mounts: Vec<_> = workspace
+    let view_set = &core.view_sets[core.active_view_set];
+    let mut mounts: Vec<_> = view_set
         .tiles
         .values()
         .map(|tile| (tile.instance_key.clone(), tile.view.view_ref.clone()))
@@ -43,7 +43,7 @@ fn main() {
     conversation["description"] = json!("Sample conversation — no live execution");
     conversation["body"] = json!({"heading":{
         "eyebrow":"Development / 02", "title":"A clearer view of work.",
-        "summary":"Refine the workspace header and keep the current view when switching between remote sessions.",
+        "summary":"Refine the view-set header and keep the current view when switching between remote sessions.",
         "metadata":["Codex", "Dev machine ↗", "started 14:28 · sample"]
     }});
     conversation["body"]["supplement"] =
@@ -52,10 +52,10 @@ fn main() {
     conversation["projections"]["event_kinds"]["author"] =
         json!({"primary":"text","meta":"label","role":"line"});
     let surface = json!({
-        "name":"visual-qualification", "style":{"workspace_tabs":true,"border":"thin"},
+        "name":"visual-qualification", "style":{"view_set_tabs":true,"border":"thin"},
         "library":[{"group":"Work","views":["view:fixture/conversation","view:fixture/changes","view:fixture/execution"]},
             {"group":"Explore","views":["view:fixture/projects","view:fixture/overview"]}],
-        "workspaces":[
+        "view_sets":[
             {"id":"overview","title":"Overview","root":{"type":"group","views":["view:fixture/overview","view:fixture/projects"],"active":0}},
             {"id":"development","title":"Development","slots":{"left":{"content":"view:fixture/projects","open":true,"size":26}},
              "root":{"type":"split","axis":"horizontal","ratio":0.72,
@@ -78,7 +78,7 @@ fn main() {
                 "sections":[
                     {"title":"Projects","source_channel":"default","collection":"rows","projection":{"primary":"title","secondary":"detail","glyph":"glyph"}},
                     {"title":"Open views","source_channel":"default","collection":"views","projection":{"primary":"title","glyph":"glyph"}},
-                    {"title":"View sets","source_channel":"default","collection":"sets","projection":{"primary":"title","glyph":"glyph"}}
+                    {"title":"ViewSets","source_channel":"default","collection":"sets","projection":{"primary":"title","glyph":"glyph"}}
                 ]},
             "view:fixture/overview":rows("Your work"),
             "view:fixture/execution":{
@@ -101,12 +101,12 @@ fn main() {
                 "projections":{"primary":"title","meta":"state","glyph":"glyph"}},
             "view:fixture/changes":{"widget":"rows","title":"Changes","sources":source,
                 "body":{"heading":{"title":"Working changes","summary":"Private workspace · not published"},
-                    "supplement":{"excerpt_title":"workspace.rs · +14 −4","excerpt":[
+                    "supplement":{"excerpt_title":"view_set.rs · +14 −4","excerpt":[
                         {"field":"218","value":"  // Keep the selected view attached"},
-                        {"field":"219","value":"  // to its existing workspace."},
-                        {"field":"220","value":"+ let active = workspace.active_view();","tone":"good"},
+                        {"field":"219","value":"  // to its existing view_set."},
+                        {"field":"220","value":"+ let active = view_set.active_view();","tone":"good"},
                         {"field":"221","value":"+ header.set_selected(active);","tone":"good"},
-                        {"field":"222","value":"  preserve_draft(&workspace);"}
+                        {"field":"222","value":"  preserve_draft(&view_set);"}
                     ],"footer":"Sample changes · not an executed candidate"}},
                 "projections":{"primary":"file","secondary":"path","meta":"change","glyph":"glyph"}}
         }
@@ -114,25 +114,25 @@ fn main() {
     let data = json!({
         "view:fixture/projects":{"rows":[
             {"title":"RyeOS","detail":"next · local + 1 remote","glyph":"◇"},
-            {"title":"ARC experiments","detail":"2 workspaces","glyph":"◇"},
-            {"title":"Farm","detail":"1 workspace","glyph":"◇"}],
+            {"title":"ARC experiments","detail":"2 view_sets","glyph":"◇"},
+            {"title":"Farm","detail":"1 view set","glyph":"◇"}],
             "views":[{"title":"Worker conversation","glyph":"◧"},{"title":"Changes","glyph":"≋"},{"title":"Execution","glyph":"⌁"},{"title":"Project files","glyph":"◇"}],
             "sets":[{"title":"Development","glyph":"⊞"},{"title":"Overview","glyph":"⊞"},{"title":"Open a view…","glyph":"＋"}]},
         "view:fixture/overview":{"rows":[
             {"title":"A clearer view of work.","detail":"Projects, conversations and evidence — arranged around the work at hand.","state":""},
-            {"title":"Refine the workspace header","detail":"RyeOS / next · conversation and candidate available","state":"IN REVIEW"},
+            {"title":"Refine the view-set header","detail":"RyeOS / next · conversation and candidate available","state":"IN REVIEW"},
             {"title":"Explore the next experiment","detail":"ARC experiments · research notes","state":"READY"},
             {"title":"Review the latest simulation","detail":"Farm · evaluation evidence","state":"READY"}]},
         "view:fixture/conversation":{"rows":[
             {"event_type":"author","label":"14:28","text":"You"},
-            {"event_type":"prose","text":"Keep the existing tiling behaviour. Make the active workspace easier to identify, and check that switching views preserves the draft."},
+            {"event_type":"prose","text":"Keep the existing tiling behaviour. Make the active view set easier to identify, and check that switching views preserves the draft."},
             {"event_type":"author","label":"14:29","text":"Codex"},
-            {"event_type":"prose","text":"I’ve traced workspace selection and draft ownership. The state is already retained; the header needs to make that relationship visible."},
-            {"event_type":"author","label":"✓","text":"Read workspace and input bindings"},
-            {"event_type":"author","label":"✓","text":"Refine the active workspace header"},
+            {"event_type":"prose","text":"I’ve traced view-set selection and draft ownership. The state is already retained; the header needs to make that relationship visible."},
+            {"event_type":"author","label":"✓","text":"Read view-set and input bindings"},
+            {"event_type":"author","label":"✓","text":"Refine the active view set header"},
             {"event_type":"prose","text":"I’ve kept the change within the current presentation model. I’m checking keyboard focus and restoring a draft after a view switch."}]},
         "view:fixture/changes":{"rows":[
-            {"file":"workspace.rs","path":"clients/base/src/ui","change":"+14","glyph":"▧"},{"file":"view_model.rs","path":"clients/base/src/ui","change":"+6","glyph":"▧"},{"file":"web-shell.css","path":"clients/web/pkg","change":"+4","glyph":"▧"}]},
+            {"file":"view_set.rs","path":"clients/base/src/ui","change":"+14","glyph":"▧"},{"file":"view_model.rs","path":"clients/base/src/ui","change":"+6","glyph":"▧"},{"file":"web-shell.css","path":"clients/web/pkg","change":"+4","glyph":"▧"}]},
         "view:fixture/execution":{"rows":[
             {"title":"Format","state":"✓ Passed   0.8s","glyph":""},
             {"title":"Focused checks","state":"✓ Passed   2.1s","glyph":""},
@@ -143,10 +143,22 @@ fn main() {
         BrowserSession {
             ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION.into(),
             session_id: "visual-fixture".into(),
-            binding_digest: "fixture-not-authority".into(),
-            surface_ref: "surface:fixture/visual".into(),
             user_principal_id: Some("fixture".into()),
-            effective_surface: Some(surface),
+            surface_attachment_id: "visual-fixture-attachment".into(),
+            binding_attachments: vec![UiBindingAttachment {
+                binding_attachment_id: "visual-fixture-attachment".into(),
+                binding_generation: 1,
+                binding_digest: "visual-fixture-binding".into(),
+                surface_ref: "surface:fixture/visual".into(),
+                surface_generation: "visual-fixture-surface".into(),
+                effective_surface: surface,
+                project_path: None,
+                posture: Default::default(),
+                binding_request_bounds: UiBindingRequestBounds {
+                    max_request_bytes: 64 * 1024,
+                    max_input_bytes: 16 * 1024,
+                },
+            }],
             ..Default::default()
         },
         BrowserViewport {
@@ -163,12 +175,13 @@ fn main() {
     populate(&mut core, &data);
     let overview = core.envelope(vec![]);
     dispatch(&mut core, RyeOsUiIntent::SwitchTab { index: 1 });
-    core.workspaces[core.active_workspace].dock_local.insert(
+    let active_view_set_id = core.view_sets[core.active_view_set].id;
+    core.view_sets[core.active_view_set].dock_local.insert(
         ryeos_client_base::ui::model::dock_view_instance_key(
+            active_view_set_id,
             ryeos_client_base::ui::model::RyeOsDockEdge::Left,
         ),
-        ryeos_client_base::workspace::ViewSpec::bound("view:fixture/projects")
-            .initial_local_state(),
+        ryeos_client_base::view_set::ViewSpec::bound("view:fixture/projects").initial_local_state(),
     );
     populate(&mut core, &data);
     let work = core.envelope(vec![]);

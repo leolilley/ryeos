@@ -18,8 +18,8 @@
   }
 </script>
 
-<section class="composer" aria-label={model.route_label}>
-  <div class="composer-route"><span class="route-state">●</span><span>{model.route_label}</span><span class="draft-state">DRAFT</span></div>
+<section class="composer" class:live-filter={model.live_filter} aria-label={model.route_label}>
+  {#if !model.live_filter}<div class="composer-route"><span class="route-state">●</span><span>{model.route_label}</span><span class="draft-state">DRAFT</span></div>{/if}
   <textarea
     data-focus-key={`input:${model.address.buffer.view_instance_key}:${model.address.buffer.input_id}`}
     value={model.text}
@@ -30,11 +30,14 @@
     oncompositionend={(event) => { composing = false; emitInput(event.currentTarget); }}
     oninput={(event) => emitInput(event.currentTarget)}
     onkeydown={(event) => {
-      if (event.key === "Enter" && !event.shiftKey && !composing && model.submit_enabled) {
+      if (event.key === "Enter" && model.live_filter && !composing) {
+        event.preventDefault();
+        dispatch({ type: "activate_focused" });
+      } else if (event.key === "Enter" && !event.shiftKey && !composing && model.submit_enabled) {
         event.preventDefault();
         dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: event.altKey } });
       }
     }}
   ></textarea>
-  <div class="composer-actions"><span>{model.hint}</span><button disabled={!model.submit_enabled} onclick={() => dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: false } })}>↑</button></div>
+  <div class="composer-actions"><span>{model.hint}</span>{#if !model.live_filter}<button aria-label={`Send to ${model.route_label}`} disabled={!model.submit_enabled} onclick={() => dispatch({ type: "input_at", address: model.address, action: { type: "submit", interrupt: false } })}>↑</button>{/if}</div>
 </section>

@@ -7,6 +7,23 @@ use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use crate::transport::daemon::DaemonClient;
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SeatBindingCoordinate {
+    pub binding_attachment_id: String,
+    pub binding_generation: u64,
+    pub binding_digest: String,
+}
+
+impl From<&ryeos_client_base::ui::binding::UiBindingAttachment> for SeatBindingCoordinate {
+    fn from(attachment: &ryeos_client_base::ui::binding::UiBindingAttachment) -> Self {
+        Self {
+            binding_attachment_id: attachment.binding_attachment_id.clone(),
+            binding_generation: attachment.binding_generation,
+            binding_digest: attachment.binding_digest.clone(),
+        }
+    }
+}
+
 /// The transport half of seat startup: which thread carries this seat's
 /// braid, and any facet history replayed off it. Pure data — the loop
 /// folds it into the core when it arrives, so the daemon round trips
@@ -21,10 +38,9 @@ pub struct SeatBootstrap {
 /// would silently discard the durable session authority the user requested.
 pub async fn bootstrap_seat(
     client: &DaemonClient,
-    surface_ref: &str,
-    project_path: &str,
+    binding: &SeatBindingCoordinate,
 ) -> Result<SeatBootstrap, String> {
-    let (thread_id, replayed) = reattach_seat_thread(client, surface_ref, project_path).await?;
+    let (thread_id, replayed) = reattach_seat_thread(client, binding).await?;
     Ok(SeatBootstrap {
         thread_id,
         replayed,
@@ -34,12 +50,10 @@ pub async fn bootstrap_seat(
 /// Open the seat session thread.
 pub async fn open_seat_thread(
     client: &DaemonClient,
-    _surface_ref: &str,
-    _project_path: &str,
+    binding: &SeatBindingCoordinate,
 ) -> Result<String, String> {
-    let body = serde_json::json!({});
     let envelope = client
-        .signed_post("/ui/api/session/seat/open", &body)
+        .signed_post("/ui/api/session/seat/open", binding)
         .await
         .map_err(|error| format!("open durable UI seat: {error}"))?;
     envelope
@@ -52,15 +66,13 @@ pub async fn open_seat_thread(
 
 async fn reattach_seat_thread(
     client: &DaemonClient,
-    _surface_ref: &str,
-    _project_path: &str,
+    binding: &SeatBindingCoordinate,
 ) -> Result<(String, Vec<SeatEvent>), String> {
     // The session endpoint atomically reattaches the freshest owned seat or
     // creates one. Clients never enumerate seat-session threads or author the
     // execution policy that owns them.
-    let body = serde_json::json!({});
     let envelope = client
-        .signed_post("/ui/api/session/seat/open", &body)
+        .signed_post("/ui/api/session/seat/open", binding)
         .await
         .map_err(|error| format!("reattach durable UI seat: {error}"))?;
     let thread_id = envelope
@@ -208,5 +220,23 @@ mod tests {
         });
 
         assert!(seat_event_from_replay(&event).is_none());
+    }
+
+    #[test]
+    fn seat_binding_coordinate_serializes_as_flat_exact_triple() {
+        let coordinate = SeatBindingCoordinate {
+            binding_attachment_id: "attachment-7".to_string(),
+            binding_generation: 4,
+            binding_digest: "digest-7".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(coordinate).expect("serialize seat coordinate"),
+            json!({
+                "binding_attachment_id": "attachment-7",
+                "binding_generation": 4,
+                "binding_digest": "digest-7",
+            })
+        );
     }
 }

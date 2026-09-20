@@ -11852,6 +11852,15 @@ impl StateStore {
         g.runtime_db.remove_seat_lease(thread_id)
     }
 
+    pub fn seat_leases_for_owner_client(
+        &self,
+        owner: &str,
+        client_ref: &str,
+    ) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.seat_leases_for_owner_client(owner, client_ref)
+    }
+
     pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
         let g = self.lock()?;
         g.runtime_db.expired_seat_leases(cutoff_ms)

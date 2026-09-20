@@ -24,7 +24,11 @@ export const encodeSeatPayloadDigest = (value) => encode(value, true);
 export const decodeJsonBody = (value) => JSON.parse(value);
 export const errorMessage = (error) => error instanceof Error ? error.message : String(error);
 export const getJson = (url) => globalThis.__seatGetJson(url);
-export const postJson = (url, body) => globalThis.__seatPostJson(url, body);
+export const postJson = (url, body) => {
+  globalThis.__seatJsonBodies ??= [];
+  globalThis.__seatJsonBodies.push({ url, body });
+  return globalThis.__seatPostJson(url, body);
+};
 export async function postEncodedJson(url, body) {
   globalThis.__seatEncodedBodies.push(body);
   if (globalThis.__seatHttpStatusOnce) {
@@ -77,6 +81,19 @@ function appendAcknowledgement(encoded) {
   };
 }
 
+const surfaceAttachment = {
+  binding_attachment_id: "attachment-test",
+  binding_generation: 1,
+  binding_digest: "d".repeat(64),
+};
+
+function currentSession() {
+  return {
+    session_id: "session-test",
+    binding_attachments: [surfaceAttachment],
+  };
+}
+
 test("reattach deduplicates startup baseline but preserves mutation during delayed open", async () => {
   globalThis.crypto ??= webcrypto;
   globalThis.window = globalThis;
@@ -85,10 +102,11 @@ test("reattach deduplicates startup baseline but preserves mutation during delay
     value: { sendBeacon: () => true },
   });
   globalThis.__seatEncodedBodies = [];
+  globalThis.__seatJsonBodies = [];
   globalThis.__seatUnknownOnce = true;
   globalThis.__seatUnknownAlways = false;
   globalThis.__seatHttpStatusOnce = 0;
-  globalThis.__seatGetJson = async () => ({ session_id: "session-test" });
+  globalThis.__seatGetJson = async () => currentSession();
   installDurableStorage();
 
   let resolveOpen;
@@ -117,6 +135,7 @@ test("reattach deduplicates startup baseline but preserves mutation during delay
   const runtime = createSessionRuntime({
     sessionId: "session-test",
     eventsUrl: null,
+    surfaceAttachment,
     seatEvents: () => localEvents,
     commitEvent: () => {},
     replaySeatEvents: (events) => {
@@ -149,6 +168,11 @@ test("reattach deduplicates startup baseline but preserves mutation during delay
     next_engine_seq: "1",
   });
   await attaching;
+  assert.deepEqual(
+    globalThis.__seatJsonBodies.find(({ url }) => url.endsWith("/open")).body,
+    surfaceAttachment,
+    "seat open is bound to the immutable authored surface attachment",
+  );
   assert.deepEqual(
     localEvents.slice(-3).map((event) => [event.seq, event.payload.key]),
     [[0n, "durable"], [1n, "local"], [2n, "local-2"]],
@@ -189,7 +213,7 @@ test("pending seat history blocks visibly at its count bound without dropping in
   globalThis.__seatUnknownOnce = false;
   globalThis.__seatUnknownAlways = false;
   globalThis.__seatHttpStatusOnce = 0;
-  globalThis.__seatGetJson = async () => ({ session_id: "session-overflow" });
+  globalThis.__seatGetJson = async () => ({ session_id: "session-overflow", binding_attachments: [surfaceAttachment] });
   installDurableStorage();
 
   let resolveOpen;
@@ -205,6 +229,7 @@ test("pending seat history blocks visibly at its count bound without dropping in
   const runtime = createSessionRuntime({
     sessionId: "session-overflow",
     eventsUrl: null,
+    surfaceAttachment,
     seatEvents: () => localEvents,
     commitEvent: (event) => committed.push(event),
     replaySeatEvents: () => {},
@@ -250,7 +275,7 @@ for (const status of [401, 403]) {
     let currentCalls = 0;
     globalThis.__seatGetJson = async () => {
       currentCalls += 1;
-      return { session_id: `session-${status}` };
+      return { session_id: `session-${status}`, binding_attachments: [surfaceAttachment] };
     };
     globalThis.__seatPostJson = async (url) => {
       if (url.endsWith("/open")) {
@@ -274,6 +299,7 @@ for (const status of [401, 403]) {
     const runtime = createSessionRuntime({
       sessionId: `session-${status}`,
       eventsUrl: null,
+      surfaceAttachment,
       seatEvents: () => localEvents,
       commitEvent: () => {},
       replaySeatEvents: () => {},
@@ -302,7 +328,7 @@ test("exhausted unknown delivery survives close and reconciles before restart op
   globalThis.__seatUnknownOnce = false;
   globalThis.__seatUnknownAlways = true;
   globalThis.__seatHttpStatusOnce = 0;
-  globalThis.__seatGetJson = async () => ({ session_id: "session-restart" });
+  globalThis.__seatGetJson = async () => ({ session_id: "session-restart", binding_attachments: [surfaceAttachment] });
   const retained = installDurableStorage();
   globalThis.__seatPostEncodedJson = async (_url, encoded) => appendAcknowledgement(encoded);
   globalThis.__seatPostJson = async (url) => {
@@ -326,6 +352,7 @@ test("exhausted unknown delivery survives close and reconciles before restart op
   const first = createSessionRuntime({
     sessionId: "session-restart",
     eventsUrl: null,
+    surfaceAttachment,
     seatEvents: () => firstEvents,
     commitEvent: () => {},
     replaySeatEvents: () => {},
@@ -367,6 +394,7 @@ test("exhausted unknown delivery survives close and reconciles before restart op
   const second = createSessionRuntime({
     sessionId: "session-restart",
     eventsUrl: null,
+    surfaceAttachment,
     seatEvents: () => replayed,
     commitEvent: () => {},
     replaySeatEvents: (events) => { replayed.push(...events); },
@@ -392,7 +420,7 @@ test("close racing an in-flight append preserves recovery and does not retire th
   globalThis.__seatUnknownOnce = false;
   globalThis.__seatUnknownAlways = false;
   globalThis.__seatHttpStatusOnce = 0;
-  globalThis.__seatGetJson = async () => ({ session_id: "session-close-race" });
+  globalThis.__seatGetJson = async () => ({ session_id: "session-close-race", binding_attachments: [surfaceAttachment] });
   const retained = installDurableStorage();
   globalThis.__seatPostJson = async (url) => url.endsWith("/open") ? {
     thread_id: "T-close-race",
@@ -414,6 +442,7 @@ test("close racing an in-flight append preserves recovery and does not retire th
   const runtime = createSessionRuntime({
     sessionId: "session-close-race",
     eventsUrl: null,
+    surfaceAttachment,
     seatEvents: () => events,
     commitEvent: () => {},
     replaySeatEvents: () => {},

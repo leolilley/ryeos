@@ -387,6 +387,44 @@ pub fn build_scene_model(
     items: Option<&super::dto::RyeOsItemsDto>,
     file_space: Option<&super::dto::RyeOsFileSpaceDto>,
 ) -> RyeOsSceneModel {
+    build_scene_model_for_instance(core, atlas, items, file_space, None)
+}
+
+/// Mounted scenes resolve selection through their attachment. Ambient scenes
+/// intentionally describe the active set and have no mounted subject owner.
+pub(crate) fn build_scene_model_for_instance(
+    core: &RyeOsCore,
+    atlas: &AtlasUiStateVm,
+    items: Option<&super::dto::RyeOsItemsDto>,
+    file_space: Option<&super::dto::RyeOsFileSpaceDto>,
+    instance: Option<&crate::ids::RyeOsViewInstanceKey>,
+) -> RyeOsSceneModel {
+    let mounted_dimension = instance.and_then(|instance| {
+        mounted_scene_role::<super::dto::RyeOsDimensionDto>(core, instance, "dimension")
+    });
+    let dimension = if instance.is_some() {
+        mounted_dimension.as_ref()
+    } else {
+        core.data.dimension.as_ref()
+    };
+    let mounted_topology = instance.and_then(|instance| {
+        mounted_scene_role::<super::dto::RyeOsTopologyDto>(core, instance, "topology")
+    });
+    let topology = if instance.is_some() {
+        mounted_topology.as_ref()
+    } else {
+        core.data.topology.as_ref()
+    };
+    let selection = if let Some(instance) = instance {
+        core.facet_value_for_instance(instance, crate::ui::seat::KEY_SELECTION)
+    } else {
+        core.seat
+            .fold()
+            .get(&crate::ui::seat::selection_facet_key(
+                core.view_sets[core.active_view_set].id,
+            ))
+            .cloned()
+    };
     let mut scene = RyeOsSceneModel {
         generation: core.scene_frame(),
         ..RyeOsSceneModel::default()
@@ -401,7 +439,7 @@ pub fn build_scene_model(
         RyeOsTone::Neutral,
     ));
 
-    if let Some(dimension) = &core.data.dimension {
+    if let Some(dimension) = dimension {
         scene.objects.push(scene_object(
             "project:core",
             RyeOsSceneObjectKind::ProjectCore,
@@ -490,7 +528,7 @@ pub fn build_scene_model(
         }
     }
 
-    if let Some(topology) = &core.data.topology {
+    if let Some(topology) = topology {
         let limit = topology.nodes.len().min(48);
         let mut projected_nodes = Vec::new();
         for (index, node) in topology.nodes.iter().take(limit).enumerate() {
@@ -605,17 +643,15 @@ pub fn build_scene_model(
         ));
         // Selection is a seat facet — the scene highlights what the
         // seat braid says is selected.
-        let selected_ref = core
-            .seat
-            .fold()
-            .get(crate::ui::seat::KEY_SELECTION)
+        let selected_ref = selection
+            .as_ref()
             .and_then(|sel| sel.get("item"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
         // UI-session dispatch authority stays in the daemon-compiled binding;
         // it is never copied into renderer state as a capability list.
         let mut capabilities = Vec::new();
-        if let Some(dimension) = &core.data.dimension {
+        if let Some(dimension) = dimension {
             for service in &dimension.local_node.services {
                 capabilities.extend(service.required_caps.clone());
             }
@@ -650,10 +686,8 @@ pub fn build_scene_model(
 
     if atlas.active_projection == AtlasProjectionVm::FileSpace {
         let file_space = file_space.or(core.data.file_space.as_ref());
-        let selected_ref = core
-            .seat
-            .fold()
-            .get(crate::ui::seat::KEY_SELECTION)
+        let selected_ref = selection
+            .as_ref()
             .and_then(|sel| sel.get("file"))
             .map(|file| {
                 format!(
@@ -703,7 +737,7 @@ pub fn build_scene_model(
         ));
     }
 
-    if let Some(dimension) = &core.data.dimension {
+    if let Some(dimension) = dimension {
         scene.objects.push(scene_object(
             "schedules:list",
             RyeOsSceneObjectKind::SchedulePulse,
@@ -716,6 +750,30 @@ pub fn build_scene_model(
     }
 
     scene
+}
+
+/// Resolve a renderer-wide scene role from the source channel owned by this
+/// exact mounted instance. Multiple channels claiming one role are ambiguous
+/// and deliberately produce no projection.
+fn mounted_scene_role<T: serde::de::DeserializeOwned>(
+    core: &RyeOsCore,
+    instance: &crate::ids::RyeOsViewInstanceKey,
+    role: &str,
+) -> Option<T> {
+    let view_ref = core.mounted_view_ref(instance)?;
+    let binding = core.binding_for_instance(instance, view_ref)?;
+    let mut channels = binding
+        .sources
+        .iter()
+        .filter(|(_, source)| source.role.as_deref() == Some(role));
+    let (channel, _) = channels.next()?;
+    if channels.next().is_some() {
+        return None;
+    }
+    let key =
+        crate::ui::source_key::RyeOsSourceInstanceKey::named(instance.clone(), channel.clone())
+            .encode();
+    serde_json::from_value(core.data.sources.get(&key)?.clone()).ok()
 }
 
 /// Build a scene from a `widget: scene` view's body — the generic,

@@ -5,6 +5,7 @@
   import { fieldAccessibilityModel } from "../visuals/ryeos_field_accessibility.js";
   import { FieldCanvasController } from "../visuals/ryeos_field_canvas.js";
   import GridPreview from "./GridPreview.svelte";
+  import RowDetails from "../components/RowDetails.svelte";
 
   interface Props { field: RyeOsFieldVm; instanceKey: RyeOsViewInstanceKey }
   let { field, instanceKey }: Props = $props();
@@ -109,6 +110,7 @@
     <aside class="field-detail">
       {#if selected}
         <strong>{selected.label}</strong><small>{[selected.kind, selected.status, selected.source].filter(Boolean).join(" · ")}</small>
+        <RowDetails details={selected.detail} label={`${selected.label} details`} />
         {#each selectedRelations as relation (relation.id)}<button disabled={!relation.activate_intent} onclick={() => relation.activate_intent && dispatch({ type: "activate", intent: relation.activate_intent })}>{relation.label}</button>{/each}
         {#each previews as preview (preview.id)}<GridPreview {preview} compareEnabled={selected.compare_available} oncompare={() => compareEntity(selected.id)} />{/each}
       {/if}

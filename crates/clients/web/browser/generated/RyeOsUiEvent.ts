@@ -119,6 +119,12 @@ export type RyeOsUiEvent =
    */
   | { type: "choose_view_item"; instance_key: RyeOsViewInstanceKey; item_id: string; activate: boolean }
   /**
+   * Expand or collapse one exact projected item in one mounted view.
+   * The reducer resolves the current cursor and expansion key from the
+   * semantic item id, so a stale renderer cannot affect a replacement row.
+   */
+  | { type: "toggle_view_item_expansion"; instance_key: RyeOsViewInstanceKey; item_id: string; expand: boolean }
+  /**
    * Dismiss one exact transient notice. Unknown/already-dismissed ids are
    * idempotent no-ops so stale renderer frames cannot remove another one.
    */
