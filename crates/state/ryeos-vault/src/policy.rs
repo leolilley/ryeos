@@ -31,6 +31,7 @@ pub const BLOCKED_NAMES: &[&str] = &[
 
 pub const BLOCKED_PREFIXES: &[&str] = &["LD_", "DYLD_", "RYEOS_", "RYEOSD_"];
 pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";
+pub const INTERNAL_PLACEMENT_VAULT_PREFIX: &str = "INTERNAL_PLACEMENT_VAULT_";
 
 /// The sealed backend decrypts one envelope per operation, so the envelope and
 /// its plaintext map are deliberately finite. These are storage invariants,
@@ -50,6 +51,10 @@ pub fn is_blocked_name(key: &str) -> bool {
 
 pub fn is_internal_runtime_vault_key(key: &str) -> bool {
     key.starts_with(INTERNAL_RUNTIME_VAULT_PREFIX)
+}
+
+pub fn is_internal_vault_key(key: &str) -> bool {
+    is_internal_runtime_vault_key(key) || key.starts_with(INTERNAL_PLACEMENT_VAULT_PREFIX)
 }
 
 pub fn validate_decrypted_keys(map: &HashMap<String, String>, store_path: &Path) -> Result<()> {
@@ -107,8 +112,8 @@ pub fn validate_key_name(key: &str) -> Result<()> {
     if key.len() > MAX_VAULT_KEY_BYTES {
         bail!("vault: key name exceeds the {MAX_VAULT_KEY_BYTES}-byte maximum");
     }
-    if is_internal_runtime_vault_key(key) {
-        bail!("vault: key name uses the reserved internal runtime vault prefix");
+    if is_internal_vault_key(key) {
+        bail!("vault: key name uses a reserved internal vault prefix");
     }
     if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         bail!("vault: invalid key name `{key}` (must match [A-Za-z0-9_]+)");

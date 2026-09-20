@@ -58,6 +58,9 @@ use anyhow::{Result, anyhow, bail};
 
 use ryeos_engine::roots;
 
+pub mod placement;
+use placement::PlacementCredentialAccess;
+
 // Vault key-name policy + write helpers live in
 // `ryeos_core_tools::actions::vault` so they can be shared with the CLI
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
@@ -67,8 +70,8 @@ pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{
     BLOCKED_NAMES, INTERNAL_RUNTIME_VAULT_PREFIX, MAX_VAULT_ENTRIES, MAX_VAULT_ENVELOPE_BYTES,
     MAX_VAULT_KEY_BYTES, MAX_VAULT_PLAINTEXT_BYTES, MAX_VAULT_VALUE_BYTES,
-    is_internal_runtime_vault_key, validate_decrypted_keys, validate_key_name,
-    validate_secret_value,
+    is_internal_runtime_vault_key, is_internal_vault_key, validate_decrypted_keys,
+    validate_key_name, validate_secret_value,
 };
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
 
@@ -129,6 +132,9 @@ fn validate_operator_secret_name(name: &str) -> Result<()> {
     if is_internal_runtime_vault_key(name) {
         bail!("vault: secret name uses reserved internal runtime vault prefix");
     }
+    if is_internal_vault_key(name) {
+        bail!("vault: secret name uses reserved internal placement vault prefix");
+    }
     Ok(())
 }
 
@@ -155,6 +161,24 @@ fn runtime_physical_prefix(bundle_id: &str, namespace: &str) -> Result<String> {
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
+    /// Only app code can construct this coordinate; callers must keep it inside
+    /// the protected placement owner, never construct it from workload inputs.
+    /// Unsupported backends refuse; never fall back to workload or host secrets.
+    fn placement_credential(
+        &self,
+        _access: &PlacementCredentialAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        bail!("vault backend does not support protected placement credentials")
+    }
+
+    /// Insert-only generation provisioning. No overwrite or deletion API exists.
+    fn provision_placement_credential(
+        &self,
+        _access: &PlacementCredentialAccess,
+        _value: &str,
+    ) -> Result<()> {
+        bail!("vault backend does not support protected placement credentials")
+    }
     /// Return the secrets the given principal is allowed to see.
     ///
     /// V0 ignores `principal` (single-operator node, no per-principal
@@ -689,11 +713,49 @@ impl SealedEnvelopeVault {
 }
 
 impl NodeVault for SealedEnvelopeVault {
+    fn placement_credential(
+        &self,
+        access: &PlacementCredentialAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        let mut entries = self.read_all_internal()?;
+        let result = entries.remove(access.physical_key());
+        // The decrypted store also contains other generations. Do not leave
+        // copies of their values in this private accessor's temporary map.
+        use zeroize::Zeroize;
+        for value in entries.values_mut() {
+            value.zeroize();
+        }
+        result
+            .map(zeroize::Zeroizing::new)
+            .ok_or_else(|| anyhow!("protected placement credential generation is absent"))
+    }
+
+    fn provision_placement_credential(
+        &self,
+        access: &PlacementCredentialAccess,
+        value: &str,
+    ) -> Result<()> {
+        validate_secret_value(value)?;
+        if value.is_empty() {
+            bail!("placement credential must not be empty");
+        }
+        self.read_modify_write(|map| {
+            if let Some(existing) = map.get(access.physical_key()) {
+                if existing != value {
+                    bail!("placement credential generation is immutable");
+                }
+                return Ok(());
+            }
+            map.insert(access.physical_key().to_owned(), value.to_owned());
+            Ok(())
+        })
+    }
+
     fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
         Ok(self
             .read_all_internal()?
             .into_iter()
-            .filter(|(key, _)| !is_internal_runtime_vault_key(key))
+            .filter(|(key, _)| !is_internal_vault_key(key))
             .collect())
     }
 
@@ -712,7 +774,7 @@ impl NodeVault for SealedEnvelopeVault {
         let map = self.read_all_internal()?;
         let mut keys: Vec<String> = map
             .into_keys()
-            .filter(|key| !is_internal_runtime_vault_key(key))
+            .filter(|key| !is_internal_vault_key(key))
             .collect();
         keys.sort();
         Ok(keys)

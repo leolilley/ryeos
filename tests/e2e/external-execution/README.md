@@ -59,6 +59,19 @@ missing guest implementation or older schema versions describe those checkpoints
 
 ## Allocation journal
 
+Protected credentials (inactive placement integration): the existing sealed
+NodeVault now has a separate placement domain addressed by an opaque app-created
+owner/generation coordinate. Provisioning inserts immutable generations and
+allows identical replay only. No deletion API or environment fallback exists.
+Operator and runtime secret paths cannot address that domain; CLI listings hide
+internal entries and mixed removal requests are rejected before mutation. The
+14 core-tools vault tests and 46 app vault tests pass, including the CLI bypass,
+generation reopen, malformed-coordinate and unsupported-backend regressions. Architecture
+and security re-review found no remaining storage-slice blocker. This does not
+qualify placement admission, credential provisioning authority, or cloud cleanup.
+The returned secret is zeroizing, but existing sealed-store temporary buffers
+are not claimed to provide comprehensive memory erasure.
+
 Protected-owner wiring checkpoint: node-config admission retains the exact
 verified signed source bytes and signer without reopening the source path.
 All 18 loader tests pass, including signed-fixture admission after in-place
