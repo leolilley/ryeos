@@ -15,6 +15,7 @@ pub mod export;
 pub mod guest_journal;
 pub mod journal;
 pub mod transcript;
+pub mod transport;
 
 pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;

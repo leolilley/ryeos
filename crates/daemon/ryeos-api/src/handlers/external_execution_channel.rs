@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
+#[cfg(test)]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
@@ -11,92 +12,13 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub schema: u32,
-    pub placement_thread_id: String,
-    pub occurrence_id: String,
-    pub bootstrap_capability: String,
-    pub supervisor_public_key: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExchangeRequest {
-    pub schema: u32,
-    pub placement_thread_id: String,
-    pub occurrence_id: String,
-    pub frame_base64: String,
-}
-
-impl Request {
-    pub fn validate_shape(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported external attachment schema");
-        ensure!(
-            !self.placement_thread_id.is_empty() && self.placement_thread_id.len() <= 256,
-            "external attachment placement is invalid"
-        );
-        ensure!(
-            !self.occurrence_id.is_empty() && self.occurrence_id.len() <= 512,
-            "external attachment occurrence is invalid"
-        );
-        ensure!(
-            self.bootstrap_capability.len() == 44,
-            "external attachment capability has the wrong length"
-        );
-        let capability = STANDARD
-            .decode(&self.bootstrap_capability)
-            .map_err(|_| anyhow::anyhow!("external attachment capability is invalid"))?;
-        ensure!(
-            capability.len() == 32 && STANDARD.encode(capability) == self.bootstrap_capability,
-            "external attachment capability is not canonical"
-        );
-        ryeos_state::external_execution::validate_channel_public_key(&self.supervisor_public_key)?;
-        Ok(())
-    }
-
-    pub fn principal_id(&self) -> String {
-        format!("external-occurrence:{}", self.occurrence_id)
-    }
-}
-
-impl ExchangeRequest {
-    pub fn validate_shape(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported external exchange schema");
-        ensure!(
-            !self.placement_thread_id.is_empty() && self.placement_thread_id.len() <= 256,
-            "external exchange placement is invalid"
-        );
-        ensure!(
-            !self.occurrence_id.is_empty() && self.occurrence_id.len() <= 512,
-            "external exchange occurrence is invalid"
-        );
-        self.decode_frame().map(|_| ())
-    }
-
-    pub fn decode_frame(&self) -> Result<Vec<u8>> {
-        ensure!(
-            !self.frame_base64.is_empty()
-                && self.frame_base64.len()
-                    <= ryeos_state::external_execution::MAX_FRAME_BYTES.div_ceil(3) * 4,
-            "external exchange frame exceeds its encoded bound"
-        );
-        let wire = STANDARD
-            .decode(&self.frame_base64)
-            .map_err(|_| anyhow::anyhow!("external exchange frame is invalid base64"))?;
-        ensure!(
-            wire.len() <= ryeos_state::external_execution::MAX_FRAME_BYTES
-                && STANDARD.encode(&wire) == self.frame_base64,
-            "external exchange frame is not canonical"
-        );
-        Ok(wire)
-    }
-
-    pub fn principal_id(&self) -> String {
-        format!("external-occurrence:{}", self.occurrence_id)
-    }
-}
+use ryeos_state::external_execution::transport::{
+    EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachResponse,
+    ExternalChannelExchangeResponse, ExternalChannelResponseFrame,
+};
+pub use ryeos_state::external_execution::transport::{
+    ExternalChannelAttachRequest as Request, ExternalChannelExchangeRequest as ExchangeRequest,
+};
 
 fn require_occurrence_principal(req: &Request, ctx: &HandlerContext) -> Result<()> {
     ctx.require_verified()
@@ -132,11 +54,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         &authenticated,
         &req.supervisor_public_key,
     )?;
-    Ok(serde_json::json!({
-        "schema": 1,
-        "binding": binding,
-        "binding_digest": binding.digest()?,
-    }))
+    Ok(serde_json::to_value(ExternalChannelAttachResponse {
+        schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+        binding_digest: binding.digest()?,
+        binding,
+    })?)
 }
 
 pub async fn handle_exchange(
@@ -162,29 +84,34 @@ pub async fn handle_exchange(
         .outbound()
         .iter()
         .map(|frame| {
-            serde_json::json!({
-                "sequence": frame.sequence(),
-                "frame_digest": frame.frame_digest(),
-                "frame_base64": STANDARD.encode(frame.canonical_wire()),
-            })
+            ExternalChannelResponseFrame::new(
+                frame.sequence(),
+                frame.frame_digest().to_owned(),
+                frame.canonical_wire(),
+            )
         })
-        .collect::<Vec<_>>();
-    let urgent_revocation = result.urgent_revocation().map(|frame| {
-        serde_json::json!({
-            "sequence": frame.sequence(),
-            "frame_digest": frame.frame_digest(),
-            "frame_base64": STANDARD.encode(frame.canonical_wire()),
+        .collect::<Result<Vec<_>>>()?;
+    let urgent_revocation = result
+        .urgent_revocation()
+        .map(|frame| {
+            ExternalChannelResponseFrame::new(
+                frame.sequence(),
+                frame.frame_digest().to_owned(),
+                frame.canonical_wire(),
+            )
         })
-    });
-    Ok(serde_json::json!({
-        "schema": 1,
-        "incoming_new": result.incoming_new(),
-        "incoming_sequence": authenticated.sequence(),
-        "incoming_frame_digest": authenticated.frame_digest(),
-        "acknowledgement_frame_digest": result.acknowledgement_digest(),
-        "outbound_frames": frames,
-        "urgent_revocation_frame": urgent_revocation,
-    }))
+        .transpose()?;
+    let response = ExternalChannelExchangeResponse {
+        schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
+        incoming_new: result.incoming_new(),
+        incoming_sequence: authenticated.sequence(),
+        incoming_frame_digest: authenticated.frame_digest().to_owned(),
+        acknowledgement_frame_digest: result.acknowledgement_digest().map(str::to_owned),
+        outbound_frames: frames,
+        urgent_revocation_frame: urgent_revocation,
+    };
+    response.validate_shape()?;
+    Ok(serde_json::to_value(response)?)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

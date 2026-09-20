@@ -220,6 +220,41 @@ identity has been qualified, and no provider, model, Render, or worker contact
 occurred. The signed route/service definitions and source checks do not prove a
 remote B -> C workflow.
 
+## Guest transport-driver checkpoint
+
+The daemon and future guest executable now share one closed attach/exchange wire
+schema from `ryeos-state`; the API handler no longer carries a second private
+interpretation of that contract. A generic executor-owned transport driver joins
+one exact `ExecutionChannelBinding` to the live protected supervisor. It retries
+ambiguous network outcomes with byte-identical signed frames, bounds response
+frames and bytes, validates every signed envelope, gives sticky cancellation
+priority over ordinary backlog, and resumes partial protocol writes without
+starting again at byte zero. Application acknowledgement remains distinct from
+HTTP success.
+
+The driver retains the exact cancellation application state. A claimed or
+otherwise uncertain cancellation remains `RevokedAwaitingCleanup` across later
+acknowledgement-only or empty polls; it cannot become successful revocation
+without new durable evidence. Cancellation blocks later candidate input but is
+not provider cleanup, occurrence termination, or capacity-release evidence.
+Sealed-export application also remains pending until controller-signed
+destination retention evidence arrives; the source guest no longer self-applies
+its own export.
+
+Focused source evidence on 2026-09-21: all 5 executor transport-driver tests and
+the shared state wire-contract test passed, `cargo check -p ryeos-api --tests`
+passed, direct formatting checks for the changed Rust files passed, and
+`git diff --check` passed. Independent architecture/protocol,
+authority/security/recovery, and tests/documentation re-reviews found no
+remaining blocker in this checkpoint after cancellation uncertainty and partial
+continuation were corrected.
+
+This remains an inactive pure transport checkpoint. It does not provide the
+guest HTTP client/executable, a sealed endpoint/TLS identity, lifecycle-adapter
+activation, controller-to-guest bootstrap delivery, or an installed B -> C
+execution. No network, provider, allocator, model, Render, installation, or node
+lifecycle contact occurred.
+
 The sections below retain earlier checkpoint evidence. References there to
 missing guest implementation or older schema versions describe those checkpoints.
 

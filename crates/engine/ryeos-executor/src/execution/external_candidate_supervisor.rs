@@ -312,23 +312,11 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             occurrence_digest,
             &mut stage,
         )?;
-        match self
-            .journal
-            .record_and_claim(sealed.canonical().as_bytes())?
-        {
-            GuestApplicationClaim::New(token) => {
-                let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
-                self.journal.finish(performed)?;
-            }
-            GuestApplicationClaim::AlreadyClaimed => {
-                self.journal
-                    .reconcile_retained_export_application(&sealed)?;
-            }
-            GuestApplicationClaim::AlreadyApplied => {}
-            GuestApplicationClaim::Revoked => {
-                anyhow::bail!("sealed external candidate was durably revoked")
-            }
-        }
+        // Native retention proves that these exact candidate bytes remain
+        // available to transfer. It does not apply the supervisor-authored
+        // ExportSealed observation at the controller. Leave the outbound frame
+        // pending until signed controller acknowledgement reports its actual
+        // destination-side application state.
         Ok(SupervisorCaptureOutcome {
             receipt,
             sealed_frame: sealed.canonical().to_owned(),
@@ -648,6 +636,28 @@ mod tests {
             .unwrap();
         assert_eq!(first.receipt.staging_id(), repeated.receipt.staging_id());
         assert_eq!(first.sealed_frame, repeated.sealed_frame);
+        let sealed = SignedExecutionFrame::decode_and_verify(
+            first.sealed_frame.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let retained_ack = signed_owner_frame(
+            &binding,
+            &owner,
+            4,
+            Some(quiesce.digest().to_owned()),
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: sealed.frame().sequence,
+                peer_frame_digest: sealed.digest().to_owned(),
+                application: ryeos_state::external_execution::ExecutionFrameApplication::Retained,
+            },
+        );
+        assert!(
+            runtime
+                .record_owner_acknowledgement(retained_ack.canonical().as_bytes())
+                .unwrap()
+        );
         let (journal, launcher) = runtime.into_parts();
         assert_eq!(launcher.releases, 1);
         assert_eq!(launcher.captures, 1);

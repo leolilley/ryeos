@@ -665,36 +665,6 @@ impl LiveGuestJournal {
         })
     }
 
-    pub fn reconcile_retained_export_application(
-        &self,
-        sealed: &AuthenticatedExecutionFrame,
-    ) -> Result<GuestApplicationAck> {
-        ensure_same_file(&self.0.directory, &self.0.database_file)?;
-        ensure!(
-            sealed.frame().direction == ChannelDirection::SupervisorToOwner
-                && matches!(
-                    sealed.frame().payload,
-                    ExecutionChannelPayload::ExportSealed { .. }
-                ),
-            "export reconciliation requires an exact sealed supervisor frame"
-        );
-        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
-        journal::finish_application(
-            &tx,
-            &self.0.owner(),
-            &self.0.binding.placement_thread_id,
-            ChannelDirection::SupervisorToOwner,
-            sealed.frame().sequence,
-            sealed.digest(),
-        )?;
-        tx.commit()?;
-        Ok(GuestApplicationAck {
-            direction: ChannelDirection::SupervisorToOwner,
-            sequence: sealed.frame().sequence,
-            frame_digest: sealed.digest().to_owned(),
-        })
-    }
-
     pub fn record_frame(&self, wire: &[u8]) -> Result<bool> {
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let verified = SignedExecutionFrame::decode_and_verify(

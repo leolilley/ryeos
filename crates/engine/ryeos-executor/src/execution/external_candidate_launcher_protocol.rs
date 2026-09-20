@@ -101,6 +101,10 @@ pub struct ExternalOwnerFrameDispatch {
 }
 
 impl LiveInheritedExternalCandidateSupervisor {
+    pub fn binding(&self) -> &ExecutionChannelBinding {
+        self.supervisor.journal().binding()
+    }
+
     pub fn process_identity(&self) -> &lillux::ExactProcessIdentity {
         &self.process_identity
     }

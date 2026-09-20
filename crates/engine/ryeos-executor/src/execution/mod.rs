@@ -14,6 +14,7 @@ pub mod external_candidate;
 pub mod external_candidate_launcher;
 pub mod external_candidate_launcher_protocol;
 pub mod external_candidate_supervisor;
+pub mod external_candidate_transport;
 pub(crate) mod external_content;
 pub mod ingest;
 pub mod launch;
