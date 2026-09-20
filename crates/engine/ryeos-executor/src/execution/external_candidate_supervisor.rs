@@ -212,39 +212,57 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             self.journal.binding(),
             lillux::time::timestamp_millis(),
         )?;
-        let token = match self.journal.record_and_claim(wire)? {
-            GuestApplicationClaim::New(token) => token,
-            GuestApplicationClaim::AlreadyClaimed => {
-                anyhow::bail!("external quiescence is claimed with an uncertain native outcome")
+        let capture = match self.journal.record_and_claim(wire)? {
+            GuestApplicationClaim::New(token) => {
+                let (capture, performed) = self
+                    .journal
+                    .apply_once(token, |frame| self.launcher.capture(frame))?;
+                ensure!(
+                    capture.occurrence_digest == occurrence_digest,
+                    "launcher capture changed its exact occurrence"
+                );
+                self.journal
+                    .record_native_capture(authority, &quiesce, &capture)?;
+                let acknowledged = self.journal.finish(performed)?;
+                self.launcher
+                    .acknowledge_finish(acknowledged.frame_digest())?;
+                capture
             }
-            GuestApplicationClaim::AlreadyApplied => {
-                anyhow::bail!("external quiescence replay requires durable export reconciliation")
+            GuestApplicationClaim::AlreadyClaimed | GuestApplicationClaim::AlreadyApplied => {
+                let capture = self
+                    .journal
+                    .native_capture_for_quiesce(quiesce.digest())?
+                    .context(
+                        "quiescence is claimed/applied without durable native capture evidence",
+                    )?;
+                ensure!(
+                    capture.occurrence_digest == occurrence_digest,
+                    "durable capture changed its exact occurrence"
+                );
+                self.journal
+                    .record_native_capture(authority, &quiesce, &capture)?;
+                let acknowledged = self
+                    .journal
+                    .reconcile_native_capture_application(&capture)?;
+                self.launcher
+                    .acknowledge_finish(acknowledged.frame_digest())?;
+                capture
             }
             GuestApplicationClaim::Revoked => {
                 anyhow::bail!("external quiescence was durably revoked")
             }
         };
-        let (capture, performed) = self
-            .journal
-            .apply_once(token, |frame| self.launcher.capture(frame))?;
-        ensure!(
-            capture.occurrence_digest == occurrence_digest,
-            "launcher capture changed its exact occurrence"
-        );
-        self.journal
-            .record_native_capture(authority, &quiesce, &capture)?;
-        let acknowledged = self.journal.finish(performed)?;
-        self.launcher
-            .acknowledge_finish(acknowledged.frame_digest())?;
-
-        let sealed = self.journal.author_supervisor_frame(
-            signing_key,
-            ExecutionChannelPayload::ExportSealed {
-                candidate_snapshot_hash: capture.snapshot_hash.clone(),
-                completion_request_digest: capture.completion_request_digest.clone(),
-                writer_exclusion_evidence_hash: capture.writer_exclusion_evidence_hash.clone(),
-            },
-        )?;
+        let sealed = match self.journal.supervisor_export_for_capture(&capture)? {
+            Some(sealed) => sealed,
+            None => self.journal.author_supervisor_frame(
+                signing_key,
+                ExecutionChannelPayload::ExportSealed {
+                    candidate_snapshot_hash: capture.snapshot_hash.clone(),
+                    completion_request_digest: capture.completion_request_digest.clone(),
+                    writer_exclusion_evidence_hash: capture.writer_exclusion_evidence_hash.clone(),
+                },
+            )?,
+        };
         let guard = authority.acquire_shared_guard()?;
         let mut assembler = CandidateExportAssembler::new(
             authority,
@@ -275,16 +293,23 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
             occurrence_digest,
             &mut stage,
         )?;
-        let GuestApplicationClaim::New(token) = self.journal.claim(
-            ChannelDirection::SupervisorToOwner,
-            sealed.frame().sequence,
-            sealed.digest(),
-        )?
-        else {
-            anyhow::bail!("fresh sealed export was not claimable")
-        };
-        let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
-        self.journal.finish(performed)?;
+        match self
+            .journal
+            .record_and_claim(sealed.canonical().as_bytes())?
+        {
+            GuestApplicationClaim::New(token) => {
+                let (_, performed) = self.journal.apply_once(token, |_| Ok(()))?;
+                self.journal.finish(performed)?;
+            }
+            GuestApplicationClaim::AlreadyClaimed => {
+                self.journal
+                    .reconcile_retained_export_application(&sealed)?;
+            }
+            GuestApplicationClaim::AlreadyApplied => {}
+            GuestApplicationClaim::Revoked => {
+                anyhow::bail!("sealed external candidate was durably revoked")
+            }
+        }
         Ok(SupervisorCaptureOutcome {
             receipt,
             sealed_frame: sealed.canonical().to_owned(),

@@ -552,6 +552,149 @@ impl LiveGuestJournal {
         &self.0.binding
     }
 
+    pub fn native_capture_for_quiesce(
+        &self,
+        quiesce_frame_digest: &str,
+    ) -> Result<Option<DurableNativeCandidateCapture>> {
+        hash(quiesce_frame_digest, "quiesce frame digest")?;
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0
+            .conn
+            .query_row(
+                "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
+                        snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
+                 FROM external_guest_native_capture
+                 WHERE binding_digest=?1 AND quiesce_frame_digest=?2",
+                params![self.0.binding.digest()?, quiesce_frame_digest],
+                |row| {
+                    Ok(DurableNativeCandidateCapture {
+                        quiesce_frame_digest: row.get(0)?,
+                        occurrence_digest: row.get(1)?,
+                        durable_stage_id: row.get(2)?,
+                        snapshot_hash: row.get(3)?,
+                        completion_request_digest: row.get(4)?,
+                        writer_exclusion_evidence_hash: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn supervisor_export_for_capture(
+        &self,
+        capture: &DurableNativeCandidateCapture,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let wire: Option<String> = self
+            .0
+            .conn
+            .query_row(
+                "SELECT frame_json FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                 AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
+                 AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?2
+                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?3
+                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?4",
+                params![
+                    self.0.binding.digest()?,
+                    capture.snapshot_hash,
+                    capture.completion_request_digest,
+                    capture.writer_exclusion_evidence_hash
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        wire.map(|wire| {
+            SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &self.0.binding,
+                self.0.binding.issued_at_ms,
+            )
+        })
+        .transpose()
+    }
+
+    pub fn reconcile_native_capture_application(
+        &self,
+        capture: &DurableNativeCandidateCapture,
+    ) -> Result<GuestApplicationAck> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let retained = self
+            .native_capture_for_quiesce(&capture.quiesce_frame_digest)?
+            .context("native capture reconciliation has no durable evidence")?;
+        ensure!(
+            retained == *capture,
+            "native capture reconciliation changed durable evidence"
+        );
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        let (sequence, wire): (i64, String) = tx.query_row(
+            "SELECT sequence,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+             AND frame_digest=?2
+             AND json_extract(frame_json,'$.frame.payload.kind')='quiesce'",
+            params![self.0.binding.digest()?, capture.quiesce_frame_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let frame = SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            &self.0.binding,
+            self.0.binding.issued_at_ms,
+        )?;
+        ensure!(
+            matches!(
+                &frame.frame().payload,
+                ExecutionChannelPayload::Quiesce { completion_request_digest }
+                    if completion_request_digest == &capture.completion_request_digest
+            ),
+            "native capture reconciliation changed completion authority"
+        );
+        journal::finish_application(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+            u64::try_from(sequence)?,
+            &capture.quiesce_frame_digest,
+        )?;
+        tx.commit()?;
+        Ok(GuestApplicationAck {
+            direction: ChannelDirection::OwnerToSupervisor,
+            sequence: u64::try_from(sequence)?,
+            frame_digest: capture.quiesce_frame_digest.clone(),
+        })
+    }
+
+    pub fn reconcile_retained_export_application(
+        &self,
+        sealed: &AuthenticatedExecutionFrame,
+    ) -> Result<GuestApplicationAck> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        ensure!(
+            sealed.frame().direction == ChannelDirection::SupervisorToOwner
+                && matches!(
+                    sealed.frame().payload,
+                    ExecutionChannelPayload::ExportSealed { .. }
+                ),
+            "export reconciliation requires an exact sealed supervisor frame"
+        );
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        journal::finish_application(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            sealed.frame().sequence,
+            sealed.digest(),
+        )?;
+        tx.commit()?;
+        Ok(GuestApplicationAck {
+            direction: ChannelDirection::SupervisorToOwner,
+            sequence: sealed.frame().sequence,
+            frame_digest: sealed.digest().to_owned(),
+        })
+    }
+
     pub fn record_frame(&self, wire: &[u8]) -> Result<bool> {
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let verified = SignedExecutionFrame::decode_and_verify(
@@ -975,9 +1118,24 @@ impl LiveGuestJournal {
         );
         occurrence_stage.ensure_publication_contract(&publication_key, None)?;
         // Central recovery roots publish before the guest row. A crash between
-        // these commits is conservative: recovery retains an orphan root for
-        // exact reconciliation rather than losing candidate bytes.
-        let receipt = retained.retain_external_candidate_occurrence(authority, occurrence_stage)?;
+        // these commits is conservative and exactly reconcilable: the already
+        // retained receipt may create only its matching missing guest row.
+        let receipt = if occurrence_stage.admitted_target_hash().is_some() {
+            let receipt = occurrence_stage.external_candidate_receipt()?;
+            let (objects, blobs) = retained.retained_root_sets(authority)?;
+            ensure!(
+                receipt.owner_principal() == self.0.bootstrap_digest
+                    && receipt.publication_key() == &publication_key
+                    && receipt.snapshot_hash() == content.snapshot_hash()
+                    && receipt.object_hashes() == &objects
+                    && receipt.blob_hashes() == &blobs
+                    && receipt.large_object_hashes().is_empty(),
+                "existing external-candidate receipt changed retained content"
+            );
+            receipt
+        } else {
+            retained.retain_external_candidate_occurrence(authority, occurrence_stage)?
+        };
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         self.0.owner().require_owner(&tx, &self.0.binding)?;
         let matches_frame: bool = tx.query_row(
@@ -1135,7 +1293,7 @@ impl LiveGuestJournal {
             |row| row.get(0),
         )?;
         ensure!(
-            application == "claimed",
+            matches!(application.as_str(), "claimed" | "applied"),
             "native capture has no exact claimed quiesce application"
         );
         let changed = tx.execute(
@@ -2186,7 +2344,13 @@ mod tests {
         let (_, performed) = live.apply_once(quiesce_token, |_| Ok(())).unwrap();
         live.record_native_capture(&authority, &quiesce, &capture)
             .unwrap();
-        live.finish(performed).unwrap();
+        drop(performed);
+        assert_eq!(
+            live.reconcile_native_capture_application(&capture)
+                .unwrap()
+                .frame_digest(),
+            capture.quiesce_frame_digest
+        );
         drop(live);
         RecoveredGuestJournal::open(
             lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),

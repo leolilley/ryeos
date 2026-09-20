@@ -466,6 +466,14 @@ impl ValidatedCandidateRetention<'_> {
         )?;
         stage.retain_external_candidate_occurrence(self.guard, imported.snapshot_hash())
     }
+
+    pub(super) fn retained_root_sets(
+        &self,
+        authority: &PinnedStateAuthority,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        authority.ensure_guard(self.guard)?;
+        Ok(candidate_retention_roots(self.imported))
+    }
 }
 
 fn candidate_retention_roots(
