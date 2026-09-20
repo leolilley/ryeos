@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:15:45Z:f6918e788f312d24b5eeafd9223430b34992e698220991ce5d0f5f79a88a8f80:V3kV9TUGstjApR+IjVRo8J6oEb/t3OnbZlt12+Re7suRNEAu/WMkyCfzcOJa6TW2pVqpfGQzNycXeHJhAc+aAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:01Z:4c383f8da831bc76cb7067cba2a1475b89b9411a0d5e5c80f818a927334472c7:7w1j1FFxt8MpT6ne/GFqcxd96JyAOd4E9qcZ8/+UZ6E0CY82fkwL31iTiVYLMjG+ea5W+D6nhZyUFNch3noTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -98,6 +98,14 @@ policies:
         - ryeos.execute.config.bundle-release/native-build-products
         - ryeos.execute.config.bundle-release/signed-capture-products
         - ryeos.execute.config.bundle-release/substrate-build-products
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/native-build
+        - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+        - ryeos.execute.tool.ryeos/bundle-release/substrate-build
+        - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
         - ryeos.execute.service.bundle-release/authority-calibrate
         - ryeos.execute.service.bundle-release/authority-measure
         - ryeos.execute.service.bundle-release/catalog-remote-publish

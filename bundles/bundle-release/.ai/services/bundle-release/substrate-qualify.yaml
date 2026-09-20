@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:7cc65c496e2d786bc9e9126015da3231098763dbf08876ee34359599ab67782c:dpvoGEXUsBEu0KRqIGCh2T+RyNx0ja8ZVHct7B+OOf47AV1NdBIYnBThYlOdfsubZf1N1vgqEQ/arqw4cf5CBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:11Z:69da5aaeeeddd7d4c85f5d46c80f7c33e3c354a15b28c44215d9e73a9086482a:NbwF1w4tiF4rawh76BkXJJPkyKN3K4pP7Dt2ztCpILJShULpZ6PawMlnycaBgNRZLHWnXOq2aJyVi+NjCExJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-qualify
 version: "1.0.0"
@@ -8,7 +8,9 @@ ui_read_only: false
 state_access: read_write
 record_thread: true
 availability: daemon_only
-required_caps: ["ryeos.execute.service.bundle-release/substrate-qualify"]
+required_caps:
+  - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
+  - ryeos.execute.service.bundle-release/substrate-qualify
 schema:
   project_path: string
   source_snapshot_hash: string

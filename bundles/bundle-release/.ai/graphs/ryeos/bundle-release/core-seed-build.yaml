@@ -1,9 +1,13 @@
-# ryeos:signed:2026-09-20T14:05:57Z:7e72f31e2a14ce7c78071f8190e41e918e95041cd966b7faa59ccef2564d8918:aRq+AgPyvDJvVjRtkBhW6LS3+Qn074DmBK6vjpfcliJ+sv2CL7i4n6ihc2g+ekD14nStkTB6RlAUHDnB9oKRBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:9b57d525755ad128a5c04d1e2f71cfac419b2a4d6eaa41045c86d5f28b814cf9:9uJTWTOV6HgOJKdNAlA+WRP4ZNcvFQSxq4iRSBOajrz6PKFNANNylfsbOR+bjjRvNw2J7fIsG1xPwyBzmIRbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build the exact unsigned Core generation that will seed a measured RyeOS substrate.
 effects: live
 product_recipe: config:bundle-release/core-seed-build-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
 config:
   start: build
   max_steps: 2

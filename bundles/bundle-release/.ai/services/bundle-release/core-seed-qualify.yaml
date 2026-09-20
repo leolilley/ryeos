@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:fd83b8dee30eabbc408ee38db206b34c871273a125a49e50aca1dc50d09c95bc:Zv94KlHlt0MY18fnUFsfc+yBnuMfoPe3WAeNQxaU4ePX525GrZFN6YPfQkiSqT83t6GAT21ov6oNlLpxCwmgAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:11Z:dd8a1c4f83a5e9a751df2f69edc409ec196b20087e9dfd31b5ba1fd607abf9f9:HR2Qwol803bsTE5sY8evMHB9X5b0iDNQ/6HWoqXR/sx1myDsF63XToTL0/EremSx3z4AIKDu6X5fIL4nBq+1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-qualify
 version: "1.0.0"
@@ -8,7 +8,9 @@ ui_read_only: false
 state_access: read_write
 record_thread: true
 availability: daemon_only
-required_caps: ["ryeos.execute.service.bundle-release/core-seed-qualify"]
+required_caps:
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+  - ryeos.execute.service.bundle-release/core-seed-qualify
 schema:
   build: object
   signed_product_witness: string

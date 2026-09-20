@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:15:47Z:6eb98468efa8c23f50a50e10de9d940b7986cd8491b3e06cd4111c89370e2fd1:CaunRS9NG+d7XZr/pmmT4v2EVM2loNkkZ2SAZS7EoE1PxO+dDr3Hif4OIeTo1y4hWub3ylnMrr6aVkqfaodICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:7ade828353227e61ac6d17354d3a0ad9a9ea8d8244d2a63654a1ac831e2e9bef:l/BUXAxYP1QTBtdol/ILERPxre8kRkUjIumpt5pe5Ya5+FjWUaV1THNz2ywr4qVp0eCqI+PLGEU/WIQczh+1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: authority-calibrate
 version: "1.0.0"
@@ -14,6 +14,14 @@ required_caps:
   - ryeos.execute.config.bundle-release/native-build-products
   - ryeos.execute.config.bundle-release/signed-capture-products
   - ryeos.execute.config.bundle-release/substrate-build-products
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/native-build
+  - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+  - ryeos.execute.tool.ryeos/bundle-release/substrate-build
+  - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
   - ryeos.execute.service.bundle-release/authority-calibrate
 schema:
   project_path: string

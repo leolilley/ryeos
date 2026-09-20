@@ -1,9 +1,13 @@
-# ryeos:signed:2026-09-20T14:05:58Z:04f4913f4c290e5aee7c30267e156dcb13d9739fdfb369aaf9774654376fb064:DFXp0aG8L8rivQRtlKcw0CIfdu0sn+K5O5yvbitJLPDzkc7DHML3y6l1786cP9lIGgW13cPvF13sl9Rm/hf9BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:89a13ec786c78b8c939c73ebca6a8e8a71243f2a6b6bac90e59a7b29d9661a88:zzko01XKimRTzjd305+HnFltrqcKOlnsBSBTzJ0j7/IgMpN32CelviPDqXVptvpJ8tYv2hhP1fhR0mjIasGMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Produce one captured receipt binding a measured host image to its qualified Core generation.
 effects: live
 product_recipe: config:bundle-release/substrate-build-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/substrate-build
 config:
   start: build
   max_steps: 2

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:d0237cddf494885d94a43634d559f1f3785ee465120fbd61e5bbbbc85229cb83:chnGE1NADn7Y5w/kNL2J4KzRbnOdAT7+e1ZjONJ9MnbkfM2F9LN3s9PoS409clDJ+XGMUJkTxwbgujSb9J7cDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:700e5827e6a3639a7571f1fed1b383e4c0b2086fdd5d72eac50df0ed30d8b2b5:QXqCccClV37+eEsX861IIL/08vhy2vdg+NUIPSUSq7heoVcRxKzm5VOXaocZ/QtGWIcN08K23VFW9mv3WzWAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-build
 version: "1.0.0"
@@ -8,7 +8,10 @@ ui_read_only: false
 state_access: read_write
 record_thread: true
 availability: daemon_only
-required_caps: ["ryeos.execute.service.bundle-release/core-seed-build"]
+required_caps:
+  - ryeos.execute.config.bundle-release/core-seed-build-products
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+  - ryeos.execute.service.bundle-release/core-seed-build
 schema:
   catalog_namespace: string
   bundle_publication_policy_section_digest: string

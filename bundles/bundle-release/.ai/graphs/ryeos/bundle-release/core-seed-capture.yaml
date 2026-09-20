@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:05:57Z:2e5d57eebe8d7140f9899d5c298a792e01324705959b8f77295256e5fc88cab5:Y5qgzitXaSKRlk8ielGoLLHrO+Hs7dJJog/OWe4sDlaj+1/0ke5AzTO39UZuKpJWKH5ujmT6+FYTDBaWg/9pCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:e54db9b6e4af16fd581a9b1eb40f61b7a6fd4976175619089677d6ba18a1c240:3FaOntgyk86V3qBqsAkAEdb6lxQUczwa0Thtaa57n0/OrxWMQru7i8AQr+utiG+zZt0K9pjPKaNXSQH8ecrABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Capture the admitted unsigned Core seed with only its exact publisher-signed manifest changed.
@@ -11,6 +11,10 @@ external_product_slots:
     mount_root: execution_runtime
     mount: unsigned-core-seed
 product_recipe: config:bundle-release/core-seed-capture-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
 config:
   start: capture
   max_steps: 2

@@ -1,11 +1,14 @@
-# ryeos:signed:2026-09-20T01:14:46Z:fc9c80834dff5a7ea4a8d6aecf1a19ed8f37975af3701c37ca9863461b64ea64:yqqKmmuSLAk2ltuzJ4RS/6DzQ11LNcLlEVRsj7Xl+DTOzBQ3Kq0Rc8776AsNfy7XIZWbnWLKvS2rThbwv57FCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:11Z:d8ba39290c849b3e75a82f7092b4cc5fc00c9719bb42d04b445a1162094e3644:E+F5kQQ5RTwtWymRoV/3O0Y3sFAm0+wAU7lVZ9qCoKOF3t2LmzKeHkKqbvAcqhaiVwvcYoY5aM4mDyC2qKkpBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-capture
 version: "1.0.0"
 description: Capture the exact signed output tree without authoring or authorizing a generation.
 endpoint: bundle_release.generation_capture
 availability: daemon_only
-required_caps: ["ryeos.execute.service.bundle-release/generation-capture"]
+required_caps:
+  - ryeos.execute.config.bundle-release/signed-capture-products
+  - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+  - ryeos.execute.service.bundle-release/generation-capture
 schema:
   release_input: object
   catalog_namespace: string

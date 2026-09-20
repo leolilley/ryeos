@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:15:46Z:e34c79398a6bd8b381d6cc81db230d93ab2ec40835bd14318b6d0aee92c2c6a9:MLcZxfYZEGF1ashlcV2r6aXswrTATn5hoxIyetp8jDFY7yunMmKQTKMc8jbImvjAE4oRneC3puASjRtELWrdBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:09Z:3d5ef85a21dced95773611228869c10806c6e69eef115c8e942e8e3c23ec61a7:+LkMsQPtP7EJTfu5uCaHoAovzate4yVCHmV/QnJYYu5vKYT1SbvxRUJTR3y8V4BeXVxtavDwp1OdJp6GpjvTDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Run the bounded pre-policy authority calibration against one clean source snapshot without contacting a catalog or publisher.
@@ -11,6 +11,14 @@ requires:
       - ryeos.execute.config.bundle-release/native-build-products
       - ryeos.execute.config.bundle-release/signed-capture-products
       - ryeos.execute.config.bundle-release/substrate-build-products
+      - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+      - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+      - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/native-build
+      - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+      - ryeos.execute.tool.ryeos/bundle-release/substrate-build
+      - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
       - ryeos.execute.service.bundle-release/authority-calibrate
 config:
   start: calibrate

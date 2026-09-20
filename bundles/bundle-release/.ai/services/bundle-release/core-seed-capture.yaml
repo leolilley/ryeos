@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:e8a9c1ac86c00a72aa8ad55b175cc95723982173f40836c45e172b813cf67bae:Wt7+413qBQ/3SHMwA9uUBLsS0XEMXdwqHche44iYH4b6hHagafh41t2bzbuHLJTycjuHnrxRG6utGT3wVm/fAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:11Z:1ced3dbbebea45f9df5eb8b002c0492dc1de9ba3bb95567571775f5d76dea9d6:22wAq+zw53QyZ4KGsCimGK0T/FEd/fLHxYTK3SIaZQwoHh1D7QkrcKS/bsSZy08Veav3UAbtsiyhtAJPCNAvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-capture
 version: "1.0.0"
@@ -8,7 +8,10 @@ ui_read_only: false
 state_access: read_write
 record_thread: true
 availability: daemon_only
-required_caps: ["ryeos.execute.service.bundle-release/core-seed-capture"]
+required_caps:
+  - ryeos.execute.config.bundle-release/core-seed-capture-products
+  - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+  - ryeos.execute.service.bundle-release/core-seed-capture
 schema:
   build: object
   selected_product_witness: string

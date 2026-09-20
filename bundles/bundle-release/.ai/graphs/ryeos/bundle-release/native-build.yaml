@@ -1,9 +1,13 @@
-# ryeos:signed:2026-09-20T14:05:57Z:62e7f3ace921ac91b36316ad6b2172c8d6064aedd7316e039cbf2915ecade055:x8ULB1RNWR6OIKRL8b80RyqpHc4TMp0WRlnpQs4LcnylCwvTD/fDHb7l8p7cvFtgokGrYwyjcPg1/bsCfoeCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:3b8860807e9a7b40718505cd609b57e6814443b3817f5b52da0227d0272c821f:E7Zc/kWnETBz9AGDIdM2LKII+a6SVb45/R5liEOn+k4g5oYDzMT0OQ7xSfn/UPpKFFx5Hq3uRHxqCYkR6krCCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build exactly one non-core bundle and all payloads selected by the ownership contract into a clean captured output.
 effects: live
 product_recipe: config:bundle-release/native-build-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/native-build
 config:
   start: build
   max_steps: 2

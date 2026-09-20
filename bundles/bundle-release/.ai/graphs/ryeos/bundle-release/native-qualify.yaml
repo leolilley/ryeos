@@ -1,8 +1,12 @@
-# ryeos:signed:2026-09-20T14:05:57Z:0eea661d0cf7ec636e9b1e2e3248c3efa97e3cd2ff906d32ff776e5b24a6303b:EtbySXL9wEZFp60lF/dvGBl5C8rl4z4iAO7yIWAQlPCVpk8/IzudehS2ggYZY81YOIcXwwnwct4ljggyrdDnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:5929feea30109d0f7bc961fa72860a937659890bb387a2c68ca49380829a19a4:xsJ4fHFrhsLC6WKsZbqT9ZgDUaiiVkAExixCgBbOoHTC7AMlKXDmeHsh3fH8WGFl7v4W7urH2PwvVhqUnO/aBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Run the exact native bundle verifier against the admitted captured producer product.
 effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/native-qualify
 external_product_slots:
   - id: subject
     relationship_ref: config:bundle-release/signed-capture-products

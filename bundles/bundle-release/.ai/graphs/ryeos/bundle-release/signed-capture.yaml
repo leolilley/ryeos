@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:05:57Z:bad3bf445deae93977315faf88adf4141e22d30738a0c94ba0101568e1a97a5c:DELJO+T+L7pPyUdhSbtj6ZsFVIiXhTyNYGOj951Jzgc9PEPmn2g39Mco+SHJccajSjKySMq8pEt8nDloAjJPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T14:52:10Z:bdb87533bb474901b1b1f35909270b52ace50e5db7a4448efc7b51857874e415:JxL3hWUG+XyKzgduwk6nPtujOx1p+vuqlS8qjG7xu+d/vTWhIO1AgnxNXEgHGEX041A7nk0iNslIydv3mv+NDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Materialize the publisher-signed bundle tree as a second admitted product.
@@ -11,6 +11,10 @@ external_product_slots:
     mount_root: execution_runtime
     mount: unsigned-native-bundle
 product_recipe: config:bundle-release/signed-capture-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos/bundle-release/signed-capture
 config:
   start: capture
   max_steps: 2
