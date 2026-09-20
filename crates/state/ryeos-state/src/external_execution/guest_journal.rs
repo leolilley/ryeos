@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 2;
+const SCHEMA_EPOCH: i64 = 3;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=2),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=3),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -52,6 +52,12 @@ CREATE TABLE external_guest_launcher_ready (
     binding_digest TEXT PRIMARY KEY,
     handshake_transcript_digest TEXT NOT NULL,
     FOREIGN KEY(binding_digest) REFERENCES external_guest_launcher_occurrence(binding_digest)
+);
+CREATE TABLE external_guest_terminal_application (
+    binding_digest TEXT PRIMARY KEY,
+    frame_digest TEXT NOT NULL UNIQUE,
+    application TEXT NOT NULL CHECK(application IN ('claimed','applied')),
+    FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
 );
 CREATE TABLE external_guest_export_retention (
     binding_digest TEXT PRIMARY KEY,
@@ -93,6 +99,14 @@ BEGIN SELECT RAISE(ABORT, 'external guest launcher readiness is immutable'); END
 CREATE TRIGGER external_guest_launcher_ready_no_delete
 BEFORE DELETE ON external_guest_launcher_ready
 BEGIN SELECT RAISE(ABORT, 'external guest launcher readiness cannot be deleted'); END;
+CREATE TRIGGER external_guest_terminal_application_immutable
+BEFORE UPDATE ON external_guest_terminal_application
+WHEN NEW.binding_digest!=OLD.binding_digest OR NEW.frame_digest!=OLD.frame_digest
+ OR NOT (OLD.application='claimed' AND NEW.application='applied')
+BEGIN SELECT RAISE(ABORT, 'external guest terminal application cannot be rewritten'); END;
+CREATE TRIGGER external_guest_terminal_application_no_delete
+BEFORE DELETE ON external_guest_terminal_application
+BEGIN SELECT RAISE(ABORT, 'external guest terminal application cannot be deleted'); END;
 CREATE TRIGGER external_guest_single_channel
 BEFORE INSERT ON external_execution_channel
 WHEN EXISTS(SELECT 1 FROM external_execution_channel)
@@ -193,6 +207,12 @@ impl LauncherOccurrenceEvidence {
             channel_challenge_digest: channel_challenge_digest.to_owned(),
         })
     }
+
+    pub fn digest(&self) -> Result<String> {
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
 }
 
 pub struct AuthenticatedLauncherReady {
@@ -218,6 +238,12 @@ impl AuthenticatedLauncherReady {
 pub struct GuestApplicationToken {
     frame: AuthenticatedExecutionFrame,
     protocol_offset: usize,
+}
+
+impl GuestApplicationToken {
+    pub fn frame_digest(&self) -> &str {
+        self.frame.digest()
+    }
 }
 
 pub enum GuestApplicationClaim {
@@ -248,6 +274,19 @@ pub struct CommittedGuestRevocation {
     newly_recorded: bool,
 }
 
+/// Only a fresh durable terminal claim can mint this process-local stop
+/// authority. A crash after this token is minted is an uncertain stop and can
+/// never mint another token.
+pub struct GuestTerminalApplicationToken(AuthenticatedExecutionFrame);
+
+pub enum GuestTerminalApplicationClaim {
+    New(GuestTerminalApplicationToken),
+    AlreadyClaimed,
+    AlreadyApplied,
+}
+
+pub struct PerformedGuestTerminalApplication(AuthenticatedExecutionFrame);
+
 impl CommittedGuestRevocation {
     pub fn frame_digest(&self) -> &str {
         self.frame.digest()
@@ -255,6 +294,14 @@ impl CommittedGuestRevocation {
 
     pub fn newly_recorded(&self) -> bool {
         self.newly_recorded
+    }
+
+    pub fn direction(&self) -> ChannelDirection {
+        self.frame.frame().direction
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.frame.frame().sequence
     }
 }
 
@@ -282,6 +329,10 @@ impl GuestApplicationAck {
 }
 
 impl PreparedGuestJournal {
+    pub fn binding(&self) -> &ExecutionChannelBinding {
+        &self.0.binding
+    }
+
     pub fn store_identity(&self) -> &GuestJournalStoreIdentity {
         &self.0.store_identity
     }
@@ -526,6 +577,27 @@ impl LiveGuestJournal {
         })
     }
 
+    /// Retain and immediately claim one ordinary authenticated frame without
+    /// asking the transport owner to reconstruct its signed coordinates.
+    /// Cancellation uses the separate sticky-revocation API.
+    pub fn record_and_claim(&self, wire: &[u8]) -> Result<GuestApplicationClaim> {
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            &self.0.binding,
+            lillux::time::timestamp_millis(),
+        )?;
+        ensure!(
+            !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel),
+            "guest cancellation requires sticky revocation before append"
+        );
+        self.record_frame(wire)?;
+        self.claim(
+            verified.frame().direction,
+            verified.frame().sequence,
+            verified.digest(),
+        )
+    }
+
     /// Commit sticky cancellation independently of contiguous transcript
     /// append. This token alone can authorize the one live launcher stop.
     pub fn commit_terminal_revocation(&self, wire: &[u8]) -> Result<CommittedGuestRevocation> {
@@ -539,11 +611,10 @@ impl LiveGuestJournal {
         self.0.try_append_terminal_observation(committed)
     }
 
-    pub fn apply_terminal_revocation<T>(
+    pub fn claim_terminal_revocation(
         &self,
-        committed: CommittedGuestRevocation,
-        stop: impl FnOnce(&AuthenticatedExecutionFrame) -> Result<T>,
-    ) -> Result<T> {
+        committed: &CommittedGuestRevocation,
+    ) -> Result<GuestTerminalApplicationClaim> {
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         self.0.owner().require_owner(&tx, &self.0.binding)?;
@@ -558,9 +629,78 @@ impl LiveGuestJournal {
             |row| row.get(0),
         )?;
         ensure!(retained, "guest cancellation lost its sticky authority");
-        let value = stop(&committed.frame)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT application FROM external_guest_terminal_application
+                 WHERE binding_digest=?1 AND frame_digest=?2",
+                params![self.0.binding.digest()?, committed.frame.digest()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let claim = match existing.as_deref() {
+            Some("claimed") => GuestTerminalApplicationClaim::AlreadyClaimed,
+            Some("applied") => GuestTerminalApplicationClaim::AlreadyApplied,
+            Some(_) => anyhow::bail!("guest terminal application has an invalid state"),
+            None => {
+                tx.execute(
+                    "INSERT INTO external_guest_terminal_application VALUES(?1,?2,'claimed')",
+                    params![self.0.binding.digest()?, committed.frame.digest()],
+                )?;
+                let frame = SignedExecutionFrame::decode_and_verify(
+                    &committed.wire,
+                    &self.0.binding,
+                    lillux::time::timestamp_millis(),
+                )?;
+                GuestTerminalApplicationClaim::New(GuestTerminalApplicationToken(frame))
+            }
+        };
         tx.commit()?;
-        Ok(value)
+        Ok(claim)
+    }
+
+    pub fn apply_terminal_revocation<T>(
+        &self,
+        token: GuestTerminalApplicationToken,
+        stop: impl FnOnce(&AuthenticatedExecutionFrame) -> Result<T>,
+    ) -> Result<(T, PerformedGuestTerminalApplication)> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let state: String = tx.query_row(
+            "SELECT application FROM external_guest_terminal_application
+             WHERE binding_digest=?1 AND frame_digest=?2",
+            params![self.0.binding.digest()?, token.0.digest()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            state == "claimed",
+            "guest terminal stop has no exact durable claim"
+        );
+        let value = stop(&token.0)?;
+        tx.commit()?;
+        Ok((value, PerformedGuestTerminalApplication(token.0)))
+    }
+
+    pub fn finish_terminal_revocation(
+        &self,
+        performed: PerformedGuestTerminalApplication,
+    ) -> Result<GuestApplicationAck> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let frame = performed.0;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let changed = tx.execute(
+            "UPDATE external_guest_terminal_application SET application='applied'
+             WHERE binding_digest=?1 AND frame_digest=?2 AND application='claimed'",
+            params![self.0.binding.digest()?, frame.digest()],
+        )?;
+        ensure!(changed == 1, "guest terminal stop is not freshly performed");
+        tx.commit()?;
+        Ok(GuestApplicationAck {
+            direction: frame.frame().direction,
+            sequence: frame.frame().sequence,
+            frame_digest: frame.digest().to_owned(),
+        })
     }
 
     fn application_transaction(
@@ -640,7 +780,7 @@ impl LiveGuestJournal {
     pub fn apply_protocol_chunk(
         &self,
         mut token: GuestApplicationToken,
-        action: impl FnOnce(&[u8]) -> Result<usize>,
+        action: impl FnOnce(&AuthenticatedExecutionFrame, &[u8]) -> Result<usize>,
     ) -> Result<GuestProtocolApplication> {
         let bytes = token.frame.protocol_bytes()?;
         ensure!(
@@ -648,7 +788,7 @@ impl LiveGuestJournal {
             "protocol application has no remaining bytes"
         );
         let tx = self.application_transaction(&token.frame)?;
-        let written = action(&bytes[token.protocol_offset..])?;
+        let written = action(&token.frame, &bytes[token.protocol_offset..])?;
         ensure!(
             written > 0 && written <= bytes.len() - token.protocol_offset,
             "protocol application reported an invalid bounded write"
@@ -1645,7 +1785,7 @@ mod tests {
         };
         let mut written = Vec::new();
         let GuestProtocolApplication::Pending(token) = live
-            .apply_protocol_chunk(token, |remaining| {
+            .apply_protocol_chunk(token, |_, remaining| {
                 written.push(remaining[0]);
                 Ok(1)
             })
@@ -1664,7 +1804,7 @@ mod tests {
         );
         assert!(live.record_frame(&cancel).unwrap());
         assert!(
-            live.apply_protocol_chunk(token, |remaining| {
+            live.apply_protocol_chunk(token, |_, remaining| {
                 written.extend_from_slice(remaining);
                 Ok(remaining.len())
             })
@@ -1715,6 +1855,78 @@ mod tests {
                 revocation_committed: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn terminal_stop_is_durably_one_shot() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
+            live_store(&root, &authority);
+        let (cancel, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Cancel,
+        );
+        let committed = live.commit_terminal_revocation(&cancel).unwrap();
+        assert!(matches!(
+            live.try_append_terminal_observation(&committed),
+            RevocationAppendOutcome::Appended
+        ));
+        let GuestTerminalApplicationClaim::New(token) =
+            live.claim_terminal_revocation(&committed).unwrap()
+        else {
+            panic!("first terminal stop must acquire its durable claim")
+        };
+        let mut stops = 0;
+        let (_, performed) = live
+            .apply_terminal_revocation(token, |_| {
+                stops += 1;
+                Ok(())
+            })
+            .unwrap();
+        let ack = live.finish_terminal_revocation(performed).unwrap();
+        assert_eq!(ack.frame_digest(), committed.frame_digest());
+        assert!(matches!(
+            live.claim_terminal_revocation(&committed).unwrap(),
+            GuestTerminalApplicationClaim::AlreadyApplied
+        ));
+        assert_eq!(stops, 1);
+    }
+
+    #[test]
+    fn failed_terminal_stop_remains_claimed_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (live, binding, owner, _supervisor, _bootstrap, _store_identity) =
+            live_store(&root, &authority);
+        let (cancel, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Cancel,
+        );
+        let committed = live.commit_terminal_revocation(&cancel).unwrap();
+        let GuestTerminalApplicationClaim::New(token) =
+            live.claim_terminal_revocation(&committed).unwrap()
+        else {
+            panic!("first terminal stop must acquire its durable claim")
+        };
+        assert!(
+            live.apply_terminal_revocation::<()>(token, |_| anyhow::bail!("lost response"))
+                .is_err()
+        );
+        assert!(matches!(
+            live.claim_terminal_revocation(&committed).unwrap(),
+            GuestTerminalApplicationClaim::AlreadyClaimed
         ));
     }
 }

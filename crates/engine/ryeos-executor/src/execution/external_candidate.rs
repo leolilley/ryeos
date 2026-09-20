@@ -62,21 +62,31 @@ struct CandidateProtocolInput {
 }
 
 #[derive(Default)]
-struct ApplicationFence(Option<String>);
+struct ApplicationFence {
+    awaiting_finish: Option<String>,
+    last_acknowledged: Option<String>,
+}
 
 impl ApplicationFence {
     fn begin(&mut self, digest: &str) -> Result<()> {
-        ensure!(self.0.is_none(), "candidate already awaits durable finish");
-        self.0 = Some(digest.to_owned());
+        ensure!(
+            self.awaiting_finish.is_none(),
+            "candidate already awaits durable finish"
+        );
+        self.awaiting_finish = Some(digest.to_owned());
         Ok(())
     }
 
     fn acknowledge(&mut self, digest: &str) -> Result<()> {
+        if self.awaiting_finish.is_none() && self.last_acknowledged.as_deref() == Some(digest) {
+            return Ok(());
+        }
         ensure!(
-            self.0.as_deref() == Some(digest),
+            self.awaiting_finish.as_deref() == Some(digest),
             "candidate finish acknowledgement changed its exact application"
         );
-        self.0 = None;
+        self.awaiting_finish = None;
+        self.last_acknowledged = Some(digest.to_owned());
         Ok(())
     }
 
@@ -84,11 +94,11 @@ impl ApplicationFence {
     /// interrupted input stays durably claimed and is never retried; the live
     /// launcher now waits only for the cancellation finish acknowledgement.
     fn begin_terminal(&mut self, digest: &str) {
-        self.0 = Some(digest.to_owned());
+        self.awaiting_finish = Some(digest.to_owned());
     }
 
     fn is_clear(&self) -> bool {
-        self.0.is_none()
+        self.awaiting_finish.is_none()
     }
 }
 
@@ -364,6 +374,38 @@ impl NativeExternalCandidate {
             self.close_input();
         }
         result
+    }
+
+    /// Apply one journal-gated prefix of an authenticated protocol frame. The
+    /// first call binds the native pending buffer; later calls must present the
+    /// same frame and continue from its retained offset.
+    pub fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize> {
+        self.require_owner(frame)?;
+        if self.protocol.pending.is_none() {
+            self.begin_protocol_input(frame)?;
+        } else {
+            let (digest, _, _) = self
+                .protocol
+                .pending
+                .as_ref()
+                .context("candidate protocol pending state disappeared")?;
+            ensure!(
+                digest == frame.digest(),
+                "candidate protocol chunk changed its claimed frame"
+            );
+        }
+        let before = self
+            .protocol
+            .pending
+            .as_ref()
+            .map(|(_, _, offset)| *offset)
+            .context("candidate protocol input was not established")?;
+        let progress = self.flush_protocol_input()?;
+        ensure!(
+            progress.written_bytes > before,
+            "candidate protocol writer made no bounded progress"
+        );
+        Ok(progress.written_bytes - before)
     }
 
     /// Release the native action fence only after the protected supervisor has
@@ -650,7 +692,7 @@ mod tests {
         assert!(!fence.is_clear());
         fence.acknowledge("release-frame").unwrap();
         assert!(fence.is_clear());
-        assert!(fence.acknowledge("release-frame").is_err());
+        fence.acknowledge("release-frame").unwrap();
         fence.begin("partial-input").unwrap();
         fence.begin_terminal("cancel");
         assert!(fence.acknowledge("partial-input").is_err());

@@ -32,6 +32,7 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-provider-contract = { workspace = true }
 ryeos-scheduler = { workspace = true }
