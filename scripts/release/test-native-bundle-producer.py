@@ -82,6 +82,16 @@ class NativeBundleProducerSurfaceTests(unittest.TestCase):
         self.assertIn("optional optimization", operations)
         self.assertIn("not used by the default release Graph", operations)
 
+    def test_release_authority_enforces_isolation_for_captured_builds(self):
+        profile = (
+            ROOT / "bundles/.ai/node/init/profiles/release-authority.yaml"
+        ).read_text()
+        isolation = profile[profile.index("  isolation:") : profile.index("  ingest_ignore:")]
+        self.assertIn("      mode: enforce", isolation)
+        self.assertIn("        implementation: linux-lillux", isolation)
+        self.assertIn("        nested_sandbox: true", isolation)
+        self.assertIn("        proc_filesystem: pid_namespace_nested", isolation)
+
     def test_surface_has_no_legacy_or_generic_signing_escape(self):
         bodies = [GRAPH.read_text()]
         bodies.extend(path.read_text() for path in SERVICES.glob("*.yaml"))

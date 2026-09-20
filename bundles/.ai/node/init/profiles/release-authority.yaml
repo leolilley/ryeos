@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:37Z:2b8b97fa041fde3251556161cddcb8400e5b0d504f1fc6f7017beb328f317e2a:SEkirPeqinU2j41w9bWhXbIwynHdpfcIRToptGE2kLHn++J2TI6w/TvxCe9PH42Rj/cBAF76n29C1kk9ahwVCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T16:04:40Z:a5c6f99c930361cd186d279e56da3358946c9f175e0f08c9ae9d476c5d4b4d07:xCRYsklXGXJZSWdWTVxCZ0Ljmu9f9TA/mpdAYnMkNwY5cfjS0kLY+005N2J0Yj7N5k6912X1GN3exTZmb0keAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -221,16 +221,19 @@ policies:
     policy:
       version: 7
       process_scopes:
-        # Resource-bearing launches require a Lillux-owned durable scope even
-        # when filesystem/network isolation is disabled.
+        # Release materialization executes captured source. It therefore
+        # requires the qualified Lillux provider and a nested private process
+        # scope; disabled isolation cannot admit these release tools.
         mode: required
         control_timeout_ms: 5000
-        nested_sandbox: false
+        nested_sandbox: true
       trusted_process_group_sessions: false
-      mode: disabled
-      backend: null
+      mode: enforce
+      backend:
+        bundle: core
+        implementation: linux-lillux
       filesystem:
-        proc_filesystem: empty
+        proc_filesystem: pid_namespace_nested
         live_project:
           mode: fixed_parents
           limits:
@@ -247,16 +250,28 @@ policies:
           - "{checkpoint_dir}"
       network:
         mode: host
-        runtime_files: []
+        runtime_files:
+          - source: /etc/resolv.conf
+            destination: /etc/resolv.conf
+            max_bytes: 65536
+          - source: /etc/hosts
+            destination: /etc/hosts
+            max_bytes: 65536
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/certs/ca-certificates.crt
+            max_bytes: 4194304
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/cert.pem
+            max_bytes: 4194304
       environment:
         allow:
           - "*"
       limits:
-        open_files: 1024
+        open_files: 4096
         stdout_bytes: 8388608
         stderr_bytes: 8388608
-        verified_artifact_file_bytes: 67108864
-        verified_artifact_total_bytes: 268435456
+        verified_artifact_file_bytes: 268435456
+        verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
   ingest_ignore:
     schema: 2
