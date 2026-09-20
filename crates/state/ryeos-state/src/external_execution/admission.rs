@@ -1,6 +1,9 @@
 //! Program requirements for external candidate execution. These identities
 //! never grant cloud allocation or substitute for a protected placement binding.
 
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -17,21 +20,187 @@ pub const REQUIRED_CLAIMS: &[&str] = &[
     "no_local_execution_fallback",
 ];
 
+/// Admission ceiling for the profile-owned recipe. The launcher bootstrap
+/// carries both the admitted program and an independently checked projection
+/// of this recipe. Keeping the recipe below 96 KiB leaves more than 64 KiB for
+/// the fixed binding/program envelope inside its 256 KiB descriptor limit, so
+/// every admitted recipe remains representable after channel attachment.
+pub const MAX_EXTERNAL_RUNTIME_RECIPE_BYTES: usize = 96 * 1024;
+
+/// Exact credential-free exec-server recipe selected by the signed worker
+/// profile. The referenced executable remains content-owned by the qualified
+/// runtime product; this recipe grants no filesystem or placement authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalCandidateRuntimeRecipe {
+    pub schema: u32,
+    pub runtime_mount_destination: String,
+    pub executable_relative_path: String,
+    pub argv0: String,
+    pub arguments: Vec<String>,
+    pub cwd: String,
+    pub environment: BTreeMap<String, String>,
+    pub max_stdout_bytes: u64,
+    pub max_stderr_bytes: u64,
+    pub proc_filesystem: ExternalCandidateProcFilesystem,
+    pub contain_process_group: bool,
+    pub nested_sandbox: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCandidateProcFilesystem {
+    Empty,
+    PidNamespace,
+    PidNamespaceNested,
+}
+
+impl ExternalCandidateRuntimeRecipe {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1,
+            "unsupported external runtime recipe schema"
+        );
+        let mount = Path::new(&self.runtime_mount_destination);
+        require_absolute_normalized(mount, "runtime mount destination")?;
+        ensure!(
+            !mount.starts_with("/workspace")
+                && !Path::new("/workspace").starts_with(mount)
+                && !["/proc", "/dev", "/sys", "/tmp"]
+                    .iter()
+                    .any(|reserved| mount.starts_with(reserved)
+                        || Path::new(reserved).starts_with(mount)),
+            "external runtime mount overlaps a protected namespace"
+        );
+        let executable = Path::new(&self.executable_relative_path);
+        require_relative_normalized(executable, "runtime executable")?;
+        ensure!(
+            executable.components().count() <= 64,
+            "external runtime executable is too deep"
+        );
+        let namespace_executable = mount.join(executable);
+        require_absolute_normalized(&namespace_executable, "namespace executable")?;
+        ensure!(
+            !self.argv0.is_empty()
+                && self.argv0.len() <= 4096
+                && !self.argv0.contains('\0')
+                && self.arguments.len() <= 256
+                && self
+                    .arguments
+                    .iter()
+                    .all(|value| value.len() <= 64 * 1024 && !value.contains('\0')),
+            "external runtime arguments exceed bounds"
+        );
+        let cwd = Path::new(&self.cwd);
+        require_absolute_normalized(cwd, "candidate working directory")?;
+        ensure!(
+            cwd.starts_with("/workspace"),
+            "external candidate working directory is outside /workspace"
+        );
+        ensure!(
+            self.environment.len() <= 256
+                && self.environment.iter().all(|(name, value)| {
+                    valid_environment_name(name)
+                        && name.len() <= 256
+                        && value.len() <= 64 * 1024
+                        && !value.contains('\0')
+                }),
+            "external runtime environment exceeds bounds"
+        );
+        ensure!(
+            (1..=64 * 1024 * 1024).contains(&self.max_stdout_bytes)
+                && (1..=64 * 1024 * 1024).contains(&self.max_stderr_bytes),
+            "external runtime output bounds are invalid"
+        );
+        ensure!(
+            self.contain_process_group
+                && matches!(
+                    (self.proc_filesystem, self.nested_sandbox),
+                    (ExternalCandidateProcFilesystem::Empty, false)
+                        | (ExternalCandidateProcFilesystem::PidNamespace, false)
+                        | (ExternalCandidateProcFilesystem::PidNamespaceNested, true)
+                ),
+            "external runtime containment settings are inconsistent"
+        );
+        ensure!(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.len()
+                <= MAX_EXTERNAL_RUNTIME_RECIPE_BYTES,
+            "external runtime recipe exceeds its encoded bound"
+        );
+        Ok(())
+    }
+
+    pub fn namespace_executable(&self) -> Result<String> {
+        self.validate()?;
+        Ok(Path::new(&self.runtime_mount_destination)
+            .join(&self.executable_relative_path)
+            .to_str()
+            .context("external runtime executable is not UTF-8")?
+            .to_owned())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.external-candidate-runtime-recipe.v1",
+            "recipe": self,
+        }))
+    }
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
+    ensure!(path.is_absolute(), "external {label} is not absolute");
+    ensure!(
+        path.components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+            && path.as_os_str().as_encoded_bytes().len() <= 4096
+            && !path.as_os_str().as_encoded_bytes().contains(&0),
+        "external {label} is not normalized"
+    );
+    Ok(())
+}
+
+fn require_relative_normalized(path: &Path, label: &str) -> Result<()> {
+    ensure!(
+        !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+            && path.as_os_str().as_encoded_bytes().len() <= 4096
+            && !path.as_os_str().as_encoded_bytes().contains(&0),
+        "external {label} is not normalized"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalCandidateRequirement {
     pub schema: u32,
     pub protocol: String,
     pub runtime_product_declaration_id: String,
+    pub runtime_recipe: ExternalCandidateRuntimeRecipe,
 }
 
 impl ExternalCandidateRequirement {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1 && self.protocol == PROTOCOL,
+            self.schema == 2 && self.protocol == PROTOCOL,
             "external candidate protocol is not admitted"
         );
-        crate::external_content::products::validate_name(&self.runtime_product_declaration_id)
+        crate::external_content::products::validate_name(&self.runtime_product_declaration_id)?;
+        self.runtime_recipe.validate()
     }
 
     pub fn resolve(
@@ -72,6 +241,7 @@ impl ExternalCandidateRequirement {
             runtime_witness_hash: runtime.witness_hash.clone(),
             qualification_attestation_hash: qualification.attestation_hash.clone(),
             selection_identity_digest: canonical_value_digest(&runtime.semantic_identity_value()?)?,
+            runtime_recipe_digest: self.runtime_recipe.digest()?,
         })
     }
 }
@@ -87,6 +257,7 @@ pub struct AdmittedExternalCandidateProgram {
     pub runtime_witness_hash: String,
     pub qualification_attestation_hash: String,
     pub selection_identity_digest: String,
+    pub runtime_recipe_digest: String,
 }
 
 impl AdmittedExternalCandidateProgram {
@@ -97,9 +268,14 @@ impl AdmittedExternalCandidateProgram {
             &self.runtime_witness_hash,
             &self.qualification_attestation_hash,
             &self.selection_identity_digest,
+            &self.runtime_recipe_digest,
         ] {
             super::hash(hash)?;
         }
+        ensure!(
+            self.runtime_recipe_digest == self.requirement.runtime_recipe.digest()?,
+            "external candidate runtime recipe changed its retained identity"
+        );
         Ok(())
     }
 
@@ -114,17 +290,43 @@ impl AdmittedExternalCandidateProgram {
         );
         Ok(())
     }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.external-candidate-program.v1",
+            "program": self,
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn runtime_recipe() -> ExternalCandidateRuntimeRecipe {
+        ExternalCandidateRuntimeRecipe {
+            schema: 1,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: BTreeMap::from([("LANG".into(), "C.UTF-8".into())]),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: true,
+            nested_sandbox: true,
+        }
+    }
+
     fn requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 1,
+            schema: 2,
             protocol: PROTOCOL.into(),
             runtime_product_declaration_id: "auxiliary".into(),
+            runtime_recipe: runtime_recipe(),
         }
     }
 
@@ -172,6 +374,7 @@ mod tests {
             "runtime_witness_hash",
             "qualification_attestation_hash",
             "selection_identity_digest",
+            "runtime_recipe_digest",
         ] {
             let mut wire = serde_json::to_value(&program).unwrap();
             wire[field] = serde_json::json!("0".repeat(64));
@@ -181,6 +384,72 @@ mod tests {
                 "{field}"
             );
         }
+        let mut changed = requirement.clone();
+        changed.runtime_recipe.arguments.push("--changed".into());
+        let mut program = requirement.resolve(Some(&selections)).unwrap();
+        program.requirement = changed;
+        assert!(program.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_recipe_is_closed_bounded_and_content_relative() {
+        let recipe = runtime_recipe();
+        recipe.validate().unwrap();
+        assert_eq!(recipe.namespace_executable().unwrap(), "/runtime/bin/codex");
+        for mutation in [
+            "schema",
+            "mount",
+            "relative_mount",
+            "noncanonical_mount",
+            "executable",
+            "absolute_executable",
+            "noncanonical_executable",
+            "cwd",
+            "relative_cwd",
+            "noncanonical_cwd",
+            "environment",
+            "stdout_zero",
+            "stderr_zero",
+            "stdout_over",
+            "stderr_over",
+            "containment",
+            "nested",
+        ] {
+            let mut changed = recipe.clone();
+            match mutation {
+                "schema" => changed.schema += 1,
+                "mount" => changed.runtime_mount_destination = "/workspace/runtime".into(),
+                "relative_mount" => changed.runtime_mount_destination = "runtime".into(),
+                "noncanonical_mount" => {
+                    changed.runtime_mount_destination = "/runtime//tools".into()
+                }
+                "executable" => changed.executable_relative_path = "../bin/codex".into(),
+                "absolute_executable" => {
+                    changed.executable_relative_path = "/runtime/bin/codex".into()
+                }
+                "noncanonical_executable" => changed.executable_relative_path = "bin//codex".into(),
+                "cwd" => changed.cwd = "/controller".into(),
+                "relative_cwd" => changed.cwd = "workspace".into(),
+                "noncanonical_cwd" => changed.cwd = "/workspace//candidate".into(),
+                "environment" => {
+                    changed
+                        .environment
+                        .insert("BAD=NAME".into(), "value".into());
+                }
+                "stdout_zero" => changed.max_stdout_bytes = 0,
+                "stderr_zero" => changed.max_stderr_bytes = 0,
+                "stdout_over" => changed.max_stdout_bytes = 64 * 1024 * 1024 + 1,
+                "stderr_over" => changed.max_stderr_bytes = 64 * 1024 * 1024 + 1,
+                "containment" => changed.contain_process_group = false,
+                "nested" => changed.nested_sandbox = false,
+                _ => unreachable!(),
+            }
+            assert!(changed.validate().is_err(), "accepted {mutation}");
+        }
+        let mut exact_maximum = recipe;
+        exact_maximum.max_stdout_bytes = 64 * 1024 * 1024;
+        exact_maximum.max_stderr_bytes = 64 * 1024 * 1024;
+        exact_maximum.validate().unwrap();
     }
 
     #[test]
@@ -294,7 +563,7 @@ mod tests {
     #[test]
     fn external_requirement_refuses_ambient_or_occurrence_authority() {
         for (field, value) in [
-            ("schema", serde_json::json!(2)),
+            ("schema", serde_json::json!(1)),
             ("protocol", serde_json::json!("local_fallback")),
             (
                 "runtime_product_declaration_id",

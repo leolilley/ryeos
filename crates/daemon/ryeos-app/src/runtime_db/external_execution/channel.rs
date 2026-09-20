@@ -687,7 +687,7 @@ mod tests {
         let supervisor = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -695,6 +695,7 @@ mod tests {
             base_snapshot_hash: reservation.base_snapshot_hash.clone(),
             execution_binding_hash: reservation.binding_hash.clone(),
             supervisor_runtime_hash: activation.supervisor_runtime_hash.clone(),
+            candidate_program_digest: "0".repeat(64),
             channel_nonce: "9".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
@@ -746,7 +747,7 @@ mod tests {
         // mutable clock is part of the authority contract.
         let now = reservation.contact_deadline_ms + 60_000;
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest,
             occurrence_id: "external-expired".into(),
@@ -754,6 +755,7 @@ mod tests {
             base_snapshot_hash: reservation.base_snapshot_hash,
             execution_binding_hash: reservation.binding_hash,
             supervisor_runtime_hash: activation.supervisor_runtime_hash,
+            candidate_program_digest: "0".repeat(64),
             channel_nonce: "9".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),

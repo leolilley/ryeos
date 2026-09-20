@@ -4456,9 +4456,23 @@ mod tests {
         let mut profile = gating_approval_profile();
         profile.external_candidate = Some(
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 1,
+                schema: 2,
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 runtime_product_declaration_id: "candidate_runtime".into(),
+                runtime_recipe: ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
+                    schema: 1,
+                    runtime_mount_destination: "/runtime".into(),
+                    executable_relative_path: "bin/codex".into(),
+                    argv0: "codex".into(),
+                    arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+                    cwd: "/workspace".into(),
+                    environment: std::collections::BTreeMap::new(),
+                    max_stdout_bytes: 1024 * 1024,
+                    max_stderr_bytes: 1024 * 1024,
+                    proc_filesystem: ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem::PidNamespaceNested,
+                    contain_process_group: true,
+                    nested_sandbox: true,
+                },
             },
         );
         let error = validate_structured_session_profile(&profile).unwrap_err();

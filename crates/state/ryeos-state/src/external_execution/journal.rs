@@ -1537,7 +1537,7 @@ mod tests {
         let owner = lillux::crypto::generate_signing_key();
         let supervisor = lillux::crypto::generate_signing_key();
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: "T-shared-journal".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -1545,6 +1545,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            candidate_program_digest: "0".repeat(64),
             channel_nonce: "f".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),

@@ -185,6 +185,7 @@ fn decode_frame(frame: ExternalChannelResponseFrame) -> Result<ExternalTransport
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::process::Command;
@@ -192,6 +193,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use ryeos_state::external_execution::admission::{
+        AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+        ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
+    };
 
     const TEST_CA_DER: &str = "MIIDETCCAfmgAwIBAgIUX+scmKJ6HD/VzI8cSkNb1CDQYYMwDQYJKoZIhvcNAQELBQAwGDEWMBQGA1UEAwwNUnllT1MgVGVzdCBDQTAeFw0yNjA5MjAxMzQ1NDVaFw0zNjA5MTcxMzQ1NDVaMBgxFjAUBgNVBAMMDVJ5ZU9TIFRlc3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC+O+75C261AEfbAhLd1BO0VJmKyR4jk6bDQ1EU3druPMqf6qfvcfFye+FqR2mTyjRw0Lzw+WpEfpUT2Vo7qQVbSMnsaw9do1OK+gI2A+L2bWLH2uCN4nLULEbN91COVmnzY19sQz1esCDkGAza8RbgZjXOabK7Nil7R1HyFtlWj96eik5OEGjEpdAJQpsT9hhJXslyMBmSTtccR3Zl5fL7hbBnI8aUG5EbgPg/SWrtCN2M25RmmFdPbBz5aspSfsv8G4LsqH6NaDKwTC0iliR79C/D+wCFKcnOZIvHCDhTgAcNi0I44W0J0MlAm96wXmmv2Im1UF6DagU5cH/avTuVAgMBAAGjUzBRMB0GA1UdDgQWBBQM8Xib0/5JOrMFvPu3AFMR4v+m/DAfBgNVHSMEGDAWgBQM8Xib0/5JOrMFvPu3AFMR4v+m/DAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCaxmJjrKa4su45TmAYnZPDxRqvgDomTmO89BBPXnY5qHTUZ2bfu6o3vtm5tRywiQXpQkzYIEqYJbT2RndFxgwPigyUqKviA+URXSMX7C8dn01eUtqIe73XYnsBey57JjnRgYtERBytFCGFaaqrreT+Tf1ZV4mjrqqgTyEXxr5/L+TtyYq1D4b4dWSkyEuf8qPFP36RGkVxC0dDzhwXC5AiewkPgGTiQvzcWVB+FyYKmrVMdkR6o5+1Chw7IJiPZSm4/JLX3UQb+Wc/+Lc7lMx4APqExKlW0KLTLCmYZ6gnff6bva6DLcYbZuxu486fc7DPFK3hNqLzrjkaAq5MlFqH";
     const TEST_SERVER_DER: &str = "MIIDJzCCAg+gAwIBAgIUO9YtUXKy4lBXHfmjbWP+VWuMp2IwDQYJKoZIhvcNAQELBQAwGDEWMBQGA1UEAwwNUnllT1MgVGVzdCBDQTAeFw0yNjA5MjAxMzQ1NDVaFw0zNjA5MTcxMzQ1NDVaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALmtC3mDEpcyntYNCnHHF97p3C3gcKVTWHOaahFOrcylv4uLnIlkNS//HBGPvWrL4r+7JUGiMyHny5h8zzhXsfBB8AnhqqaYdnpBbthh6mEJmQ9xrB8x8Zxe/aShIDeVViIAa4mMSBok9nCdW6KZc/1LmteIG70ulpDDbl4zHWIp/vJU6rrQzJbzyVfGFwKCD6hwQfhp9RMOmogaC6CtRhsEDqTmjpRHnmXTKbxDXHd22LgxwWqqPhh7nhBpab90B6YF6krKsCwXBO6lW6IOSSS6zODXkVi0DEUCuWqOmSEbETp5DwIeQXCzZPBJMO3seYSMsO/4sWnbZ1gmjQdq9CkCAwEAAaNtMGswFAYDVR0RBA0wC4IJbG9jYWxob3N0MBMGA1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBTbuqZMwWmYDtA+W2h5EwZ8pEfnojAfBgNVHSMEGDAWgBQM8Xib0/5JOrMFvPu3AFMR4v+m/DANBgkqhkiG9w0BAQsFAAOCAQEAOA9Wly9zikvpml9I5pcBG9BuZwS3W9y5jk+nVbgEMHndcHxbBttRMw7EcvqHku8YkOIqnrGQm27CtomoH7RdzOjG1pxtDH4hrEpPWpP/PJpnbMNAvMHamABNQDQTQT8sIIJdDMtCIN2/sqaryAt2PTf7tdEZR4OApFD83UQ1Ba7Xauxct8aVsgaijdjnxnK+z3/5Czx+lwBl5mxTwfnYn8DBckjF0lRAKUcQ3A1Vo680zwg52hiGXvmCTHjWiYMK3suLtYdE0HKIp2xphEmpdQNdQW7VUOHq3xD+QSBfpbTkGRKpqyaXfN4sORg72d5J3pYPydwn8v2BBcbcSpkFmA==";
@@ -200,8 +205,23 @@ mod tests {
     const TEST_SERVER_KEY_DER: &str = "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC5rQt5gxKXMp7WDQpxxxfe6dwt4HClU1hzmmoRTq3Mpb+Li5yJZDUv/xwRj71qy+K/uyVBojMh58uYfM84V7HwQfAJ4aqmmHZ6QW7YYephCZkPcawfMfGcXv2koSA3lVYiAGuJjEgaJPZwnVuimXP9S5rXiBu9LpaQw25eMx1iKf7yVOq60MyW88lXxhcCgg+ocEH4afUTDpqIGgugrUYbBA6k5o6UR55l0ym8Q1x3dti4McFqqj4Ye54QaWm/dAemBepKyrAsFwTupVuiDkkkuszg15FYtAxFArlqjpkhGxE6eQ8CHkFws2TwSTDt7HmEjLDv+LFp22dYJo0HavQpAgMBAAECggEAKPhbCNP4PS6pR7gW7uYsiT53HBRjJsfOQ6v17Z270eVc77C9uL9I0S9shR9/f1o/zWjBHstolvmrvhkELH2FQOt7yOJnol0P/4gCqnJookLY6ER/415E3ulC9JmtHzavi88l63Lt0f8H9e9y8d0EcAbHwvlAja0DAixtZRHIUQls57TbuVPfDRkGJ7q9fTaX3VcuOp57Uhv2K6nKPuqhLWpA++Tw3+VmGCx5yAPhmqKPUmYnytC1iW/adHi2TfF+O1SONegoEJtCPfN9xcugOz7FdLaGyGrLRAw2JDFK96JZMj6APvnwgUS3cJCXPfigl1SaGGOONQXx7AuWDUE0hQKBgQDlEwuzNAalh/31MVDbqk4d+k6lk/EARF/ezcecIZhukDFy3N6LI6n/oYakEJcDp9ZsXQFjw9Tf6g3dwxUIBdnv/Rk4D+aEiJoMAaIJdCcjNNJe0B3ZMW2rpDRQGuSQWXZ04Uhpu+bWozEqMNzqFr56/yHi/ikcdGsecZMvDalohwKBgQDPgB64+9R3coT4Dkuk466ES70IAuHUIp/JhmH67cLt9AXQzHDM4f9JYEkoz5AQigQyamwuHsdXT2Jn1eLN+9BdtoGjTGSRvBtltKtzA02O70VExhvItN6J3Fma47j9ha1FOPVnRUrqykzzAtWqMkNH3VNpW4U4OKdFRZPX5cPZzwKBgBeJo3QgbmZn2NJu5M4Na8VsyNP+pY7Pd8JfBpmmYhFKQ6p3w24slfUsVbdZ9QptHn03+UKVBrSTSiV1PB386+3a5dJ638bSenGtYUbzZmoZrVwMqmR8zbYLQ0zP1ph2eNN9qoEiy49WaWDacHilKaFdwc+fKf5AgBk6tlLpZnTVAoGAVUFP3jNiLZ248m51OA9wUd0IkvUUMmPzgQqc0UvFTp13kj2djyDAEjbkeEcn6xO5+7jsL9rnjoEIbp9bq8Rt7UMiaqTloVdHbndYBk5yHGtE66f2HHXsBXqqulAcXtYAxjNL6R14VZW/Hg2pGl/CcxGFxwEacGoemACpaQh3etMCgYA2fdOocmWnWgSTxGEf7ohIUnK2TTfpae39zl+tOVY74MKLvBycg5qogjoJgYWx490Segvk+z9HCGOxd9MJ0CXssHVf9wWrHwNKQ/IkcruT2LNWW9kxyisSSjzHQiq+t+pSDmaj80Y28fDlhWkyTJgYP3o+sOp1kWSBVfV0faeHYw==";
 
     fn bootstrap(origin: String, roots: Vec<String>) -> ExternalSupervisorBootstrap {
-        ExternalSupervisorBootstrap {
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
             schema: 1,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: true,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        ExternalSupervisorBootstrap {
+            schema: 2,
             controller:
                 ryeos_state::external_execution::transport::ExternalControllerTransportContract {
                     schema: 1,
@@ -226,6 +246,19 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            candidate_program: AdmittedExternalCandidateProgram {
+                requirement: ExternalCandidateRequirement {
+                    schema: 2,
+                    protocol: PROTOCOL.into(),
+                    runtime_product_declaration_id: "runtime".into(),
+                    runtime_recipe,
+                },
+                runtime_manifest_hash: "e".repeat(64),
+                runtime_witness_hash: "1".repeat(64),
+                qualification_attestation_hash: "2".repeat(64),
+                selection_identity_digest: "3".repeat(64),
+                runtime_recipe_digest,
+            },
             owner_public_key: encode_channel_public_key(
                 &lillux::crypto::SigningKey::from_bytes(&[51; 32]).verifying_key(),
             )
@@ -371,7 +404,7 @@ mod tests {
         assert_eq!(attach.bootstrap_capability, bootstrap.bootstrap_capability);
         let issued_at_ms = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -379,6 +412,7 @@ mod tests {
             base_snapshot_hash: bootstrap.base_snapshot_hash.clone(),
             execution_binding_hash: bootstrap.execution_binding_hash.clone(),
             supervisor_runtime_hash: bootstrap.supervisor_runtime_hash.clone(),
+            candidate_program_digest: bootstrap.candidate_program.digest().unwrap(),
             channel_nonce: "f".repeat(64),
             owner_public_key: bootstrap.owner_public_key.clone(),
             supervisor_public_key: attach.supervisor_public_key,
@@ -419,6 +453,7 @@ mod tests {
             "base" => binding.base_snapshot_hash = "2".repeat(64),
             "binding" => binding.execution_binding_hash = "3".repeat(64),
             "runtime" => binding.supervisor_runtime_hash = "4".repeat(64),
+            "program" => binding.candidate_program_digest = "5".repeat(64),
             "owner_key" => {
                 binding.owner_public_key = encode_channel_public_key(
                     &lillux::crypto::SigningKey::from_bytes(&[61; 32]).verifying_key(),
@@ -643,6 +678,7 @@ mod tests {
             "base",
             "binding",
             "runtime",
+            "program",
             "owner_key",
             "supervisor_key",
             "execution_window",

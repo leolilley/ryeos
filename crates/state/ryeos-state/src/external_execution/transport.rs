@@ -9,6 +9,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use super::admission::AdmittedExternalCandidateProgram;
 use super::{
     ExecutionChannelBinding, MAX_CHUNK_BYTES, MAX_FRAME_BYTES, hash, validate_channel_public_key,
 };
@@ -146,6 +147,7 @@ pub struct ExternalSupervisorBootstrap {
     pub base_snapshot_hash: String,
     pub execution_binding_hash: String,
     pub supervisor_runtime_hash: String,
+    pub candidate_program: AdmittedExternalCandidateProgram,
     pub owner_public_key: String,
     pub bootstrap_capability: String,
     pub attachment_deadline_ms: i64,
@@ -157,7 +159,7 @@ pub struct ExternalSupervisorBootstrap {
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1,
+            self.schema == 2,
             "unsupported external supervisor bootstrap schema"
         );
         self.controller.validate()?;
@@ -185,6 +187,11 @@ impl ExternalSupervisorBootstrap {
         ] {
             hash(digest)?;
         }
+        self.candidate_program.validate()?;
+        ensure!(
+            self.candidate_program.runtime_manifest_hash == self.supervisor_runtime_hash,
+            "external supervisor program changed its runtime manifest"
+        );
         validate_channel_public_key(&self.owner_public_key)?;
         let capability = STANDARD
             .decode(&self.bootstrap_capability)
@@ -240,6 +247,7 @@ impl ExternalSupervisorBootstrap {
                 && binding.base_snapshot_hash == self.base_snapshot_hash
                 && binding.execution_binding_hash == self.execution_binding_hash
                 && binding.supervisor_runtime_hash == self.supervisor_runtime_hash
+                && binding.candidate_program_digest == self.candidate_program.digest()?
                 && binding.owner_public_key == self.owner_public_key
                 && binding.supervisor_public_key == supervisor_public_key,
             "external attachment response changed its precommitted identity"
@@ -520,7 +528,13 @@ fn bounded_text(value: &str, maximum: usize, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::external_execution::admission::{
+        ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
+        ExternalCandidateRuntimeRecipe, PROTOCOL,
+    };
 
     fn controller(roots: &[String]) -> ExternalControllerTransportContract {
         ExternalControllerTransportContract {
@@ -536,8 +550,23 @@ mod tests {
 
     fn bootstrap() -> ExternalSupervisorBootstrap {
         let roots = vec![STANDARD.encode(b"fixture DER root")];
-        ExternalSupervisorBootstrap {
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
             schema: 1,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: true,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        ExternalSupervisorBootstrap {
+            schema: 2,
             controller: controller(&roots),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -547,6 +576,19 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            candidate_program: AdmittedExternalCandidateProgram {
+                requirement: ExternalCandidateRequirement {
+                    schema: 2,
+                    protocol: PROTOCOL.into(),
+                    runtime_product_declaration_id: "runtime".into(),
+                    runtime_recipe,
+                },
+                runtime_manifest_hash: "e".repeat(64),
+                runtime_witness_hash: "1".repeat(64),
+                qualification_attestation_hash: "2".repeat(64),
+                selection_identity_digest: "3".repeat(64),
+                runtime_recipe_digest,
+            },
             owner_public_key: super::super::encode_channel_public_key(
                 &lillux::crypto::SigningKey::from_bytes(&[41; 32]).verifying_key(),
             )
@@ -603,7 +645,7 @@ mod tests {
         )
         .unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -611,6 +653,7 @@ mod tests {
             base_snapshot_hash: bootstrap.base_snapshot_hash.clone(),
             execution_binding_hash: bootstrap.execution_binding_hash.clone(),
             supervisor_runtime_hash: bootstrap.supervisor_runtime_hash.clone(),
+            candidate_program_digest: bootstrap.candidate_program.digest().unwrap(),
             channel_nonce: "f".repeat(64),
             owner_public_key: bootstrap.owner_public_key.clone(),
             supervisor_public_key: supervisor_public_key.clone(),
@@ -637,11 +680,27 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&bootstrap).unwrap()).unwrap();
         changed.tls_root_certificates_der_base64 = vec![STANDARD.encode(b"other root")];
         assert!(changed.validate().is_err());
+        let mut changed: ExternalSupervisorBootstrap =
+            serde_json::from_value(serde_json::to_value(&bootstrap).unwrap()).unwrap();
+        changed
+            .candidate_program
+            .requirement
+            .runtime_recipe
+            .arguments
+            .push("--changed".into());
+        assert!(changed.validate().is_err());
         let mut changed_binding = response.binding.clone();
         changed_binding.owner_public_key = super::super::encode_channel_public_key(
             &lillux::crypto::SigningKey::from_bytes(&[44; 32]).verifying_key(),
         )
         .unwrap();
+        assert!(
+            bootstrap
+                .validate_attached_binding(&changed_binding, &supervisor_public_key)
+                .is_err()
+        );
+        let mut changed_binding = response.binding.clone();
+        changed_binding.candidate_program_digest = "0".repeat(64);
         assert!(
             bootstrap
                 .validate_attached_binding(&changed_binding, &supervisor_public_key)

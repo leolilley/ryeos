@@ -748,7 +748,7 @@ pub fn attach_external_execution_channel(
     let mut nonce = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let binding = ryeos_state::external_execution::ExecutionChannelBinding {
-        schema: 1,
+        schema: 2,
         placement_thread_id: authenticated.placement_thread_id.clone(),
         allocation_request_digest: allocation.reservation.request_digest,
         occurrence_id: occurrence.occurrence_id.clone(),
@@ -756,6 +756,7 @@ pub fn attach_external_execution_channel(
         base_snapshot_hash: allocation.reservation.base_snapshot_hash,
         execution_binding_hash: allocation.reservation.binding_hash,
         supervisor_runtime_hash: program.runtime_manifest_hash.clone(),
+        candidate_program_digest: program.digest()?,
         channel_nonce: lillux::sha256_hex(&nonce),
         owner_public_key: allocation.reservation.channel_owner_public_key,
         supervisor_public_key: supervisor_public_key.to_owned(),
@@ -994,6 +995,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             contact_gate,
             controller_lifetime,
             channel_authority,
+            program: program.clone(),
             record,
         })
     }
@@ -1048,6 +1050,10 @@ pub(crate) struct PreparedExternalPlacement {
     contact_gate: Arc<AtomicBool>,
     controller_lifetime: Arc<StateLockLease>,
     channel_authority: ExternalChannelAuthority,
+    // Exact projection reloaded from the admitted capsule and rejoined to its
+    // retained product selections by `ExternalPlacementOwner::prepare`.
+    // Recovery constructs a new prepared owner and reloads that capsule.
+    program: ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     record: ExternalAllocationRecord,
 }
 
@@ -1096,6 +1102,7 @@ impl PreparedExternalPlacement {
                         credential: self.credential,
                         contact_gate: self.contact_gate,
                         channel_authority: self.channel_authority,
+                        program: self.program,
                         _controller_lifetime: self.controller_lifetime,
                         record,
                     },
@@ -1138,6 +1145,7 @@ pub(crate) struct ExternalPlacementReconciliation {
     credential: PlacementCredential,
     contact_gate: Arc<AtomicBool>,
     channel_authority: ExternalChannelAuthority,
+    program: ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     // Reconciliation and termination are provider mutations/observations too;
     // they must not overlap a replacement controller generation.
     _controller_lifetime: Arc<StateLockLease>,
@@ -1225,11 +1233,19 @@ impl ExternalPlacementReconciliation {
             .occurrence
             .as_ref()
             .context("external supervisor activation has no exact occurrence")?;
+        self.program.validate()?;
+        ensure!(
+            self.program.runtime_manifest_hash == self.contract.runtime_manifest_hash
+                && self.program.selection_identity_digest
+                    == self.contract.runtime_selection_identity,
+            "external supervisor activation changed its qualified runtime"
+        );
         let (intent, activation) = supervisor_activation(
             &self.contract,
             &current.reservation,
             occurrence,
             &self.channel_authority,
+            &self.program,
         )?;
         let owns_contact = self
             .state_store
@@ -1374,6 +1390,7 @@ fn supervisor_activation(
     reservation: &ExternalAllocationReservation,
     occurrence: &ExternalAllocationOccurrence,
     authority: &ExternalChannelAuthority,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
 ) -> Result<(
     ExternalSupervisorActivationIntent,
     ExternalSupervisorActivation,
@@ -1394,8 +1411,14 @@ fn supervisor_activation(
         .observation_timeout_seconds
         .checked_add(contract.cleanup_timeout_seconds)
         .context("external supervisor post-execution timeout overflow")?;
+    program.validate()?;
+    ensure!(
+        program.runtime_manifest_hash == contract.runtime_manifest_hash
+            && program.selection_identity_digest == contract.runtime_selection_identity,
+        "external supervisor program contradicts its protected lifecycle binding"
+    );
     let bootstrap = ryeos_state::external_execution::transport::ExternalSupervisorBootstrap {
-        schema: 1,
+        schema: 2,
         controller: contract.controller_transport.clone(),
         tls_root_certificates_der_base64: contract
             .controller_tls_root_certificates_der_base64
@@ -1407,6 +1430,7 @@ fn supervisor_activation(
         base_snapshot_hash: reservation.base_snapshot_hash.clone(),
         execution_binding_hash: reservation.binding_hash.clone(),
         supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+        candidate_program: program.clone(),
         owner_public_key: reservation.channel_owner_public_key.clone(),
         bootstrap_capability: authority.bootstrap_capability().to_owned(),
         attachment_deadline_ms,
@@ -1675,16 +1699,35 @@ mod tests {
     }
 
     fn program() -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+        let runtime_recipe =
+            ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
+                schema: 1,
+                runtime_mount_destination: "/runtime".into(),
+                executable_relative_path: "bin/codex".into(),
+                argv0: "codex".into(),
+                arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+                cwd: "/workspace".into(),
+                environment: BTreeMap::new(),
+                max_stdout_bytes: 1024 * 1024,
+                max_stderr_bytes: 1024 * 1024,
+                proc_filesystem:
+                    ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem::PidNamespaceNested,
+                contain_process_group: true,
+                nested_sandbox: true,
+            };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
             requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 1,
+                schema: 2,
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
                 runtime_product_declaration_id: "runtime".into(),
+                runtime_recipe,
             },
             runtime_manifest_hash: "b".repeat(64),
             runtime_witness_hash: "1".repeat(64),
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "c".repeat(64),
+            runtime_recipe_digest,
         }
     }
 
@@ -1858,6 +1901,7 @@ mod tests {
             channel_authority: ExternalChannelAuthority::test_fixture(
                 &reservation.channel_authority_generation,
             ),
+            program: program(),
             record: store
                 .external_allocation(&reservation.placement_thread_id)
                 .unwrap()
@@ -1963,7 +2007,7 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ryeos_state::external_execution::ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: reservation.placement_thread_id.clone(),
             allocation_request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -1971,6 +2015,7 @@ mod tests {
             base_snapshot_hash: reservation.base_snapshot_hash.clone(),
             execution_binding_hash: reservation.binding_hash.clone(),
             supervisor_runtime_hash: "9".repeat(64),
+            candidate_program_digest: "0".repeat(64),
             channel_nonce: "8".repeat(64),
             owner_public_key: reservation.channel_owner_public_key.clone(),
             supervisor_public_key: ryeos_state::external_execution::encode_channel_public_key(
@@ -2048,7 +2093,8 @@ mod tests {
         assert_eq!(backend.allocation_observations.load(Ordering::SeqCst), 1);
 
         let (activation_intent, activation) =
-            supervisor_activation(&contract, &reservation, &occurrence, &authority).unwrap();
+            supervisor_activation(&contract, &reservation, &occurrence, &authority, &program())
+                .unwrap();
         assert!(
             db.begin_external_supervisor_activation("T-one", &activation_intent)
                 .unwrap()

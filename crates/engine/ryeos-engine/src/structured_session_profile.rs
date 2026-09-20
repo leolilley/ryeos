@@ -2442,14 +2442,33 @@ mod tests {
             .unwrap()
             .remove("external_candidate");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
-        profile["external_candidate"] = json!({"schema":1,
-            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
-            "runtime_product_declaration_id":"candidate_runtime"});
+        profile["external_candidate"] = json!({"schema":2,
+        "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+        "runtime_product_declaration_id":"candidate_runtime",
+        "runtime_recipe":{
+            "schema":1,
+            "runtime_mount_destination":"/runtime",
+            "executable_relative_path":"bin/codex",
+            "argv0":"codex",
+            "arguments":["exec-server","--listen","stdio"],
+            "cwd":"/workspace",
+            "environment":{"LANG":"C.UTF-8"},
+            "max_stdout_bytes":1048576,
+            "max_stderr_bytes":1048576,
+            "proc_filesystem":"pid_namespace_nested",
+            "contain_process_group":true,
+            "nested_sandbox":true
+        }});
         let external = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
         assert!(external.external_candidate_requirement().unwrap().is_some());
         assert_ne!(local.profile_hash, external.profile_hash);
         let valid = profile.clone();
-        for field in ["schema", "protocol", "runtime_product_declaration_id"] {
+        for field in [
+            "schema",
+            "protocol",
+            "runtime_product_declaration_id",
+            "runtime_recipe",
+        ] {
             let mut invalid = valid.clone();
             invalid["external_candidate"]
                 .as_object_mut()
@@ -2457,6 +2476,10 @@ mod tests {
                 .remove(field);
             assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
         }
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["runtime_recipe"]["executable_relative_path"] =
+            json!("../bin/codex");
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
         profile["external_candidate"]["url"] = json!("https://arbitrary.invalid");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
     }

@@ -752,7 +752,7 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[12; 32]);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: "T-external-transport".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -760,6 +760,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            candidate_program_digest: "0".repeat(64),
             channel_nonce: "f".repeat(64),
             owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
                 &owner.verifying_key(),

@@ -5,6 +5,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_state::external_execution::ExecutionChannelBinding;
+use ryeos_state::external_execution::admission::{
+    AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+};
 use serde::{Deserialize, Serialize};
 
 use super::external_candidate::{NativeCandidateOutput, NativeExternalCandidate};
@@ -30,6 +33,7 @@ pub struct ExternalCandidateRuntimeMountSpec {
 pub struct ExternalCandidateLauncherSpec {
     pub schema: u32,
     pub binding: ExecutionChannelBinding,
+    pub candidate_program: AdmittedExternalCandidateProgram,
     pub executable: String,
     pub argv0: String,
     pub arguments: Vec<String>,
@@ -43,18 +47,73 @@ pub struct ExternalCandidateLauncherSpec {
     pub nested_sandbox: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalCandidateProcFilesystem {
-    Empty,
-    PidNamespace,
-    PidNamespaceNested,
-}
-
 impl ExternalCandidateLauncherSpec {
+    /// Compile the exact profile-owned recipe after channel attachment. The
+    /// runtime tree itself is supplied independently as one exact descriptor;
+    /// this conversion cannot select an ambient executable or extra mount.
+    pub fn from_admitted_program(
+        binding: ExecutionChannelBinding,
+        program: &AdmittedExternalCandidateProgram,
+    ) -> Result<Self> {
+        program.validate()?;
+        ensure!(
+            binding.candidate_program_digest == program.digest()?
+                && binding.supervisor_runtime_hash == program.runtime_manifest_hash,
+            "external launcher program contradicts its attached channel"
+        );
+        let recipe = &program.requirement.runtime_recipe;
+        let spec = Self {
+            schema: 1,
+            binding,
+            candidate_program: program.clone(),
+            executable: recipe.namespace_executable()?,
+            argv0: recipe.argv0.clone(),
+            arguments: recipe.arguments.clone(),
+            cwd: recipe.cwd.clone(),
+            environment: recipe.environment.clone(),
+            runtime_mounts: vec![ExternalCandidateRuntimeMountSpec {
+                destination: recipe.runtime_mount_destination.clone(),
+                layer: 0,
+            }],
+            max_stdout_bytes: recipe.max_stdout_bytes,
+            max_stderr_bytes: recipe.max_stderr_bytes,
+            proc_filesystem: recipe.proc_filesystem,
+            contain_process_group: recipe.contain_process_group,
+            nested_sandbox: recipe.nested_sandbox,
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(self.schema == 1, "unsupported external launcher schema");
         self.binding.validate()?;
+        self.candidate_program.validate()?;
+        ensure!(
+            self.binding.candidate_program_digest == self.candidate_program.digest()?
+                && self.binding.supervisor_runtime_hash
+                    == self.candidate_program.runtime_manifest_hash,
+            "external launcher program contradicts its attached channel"
+        );
+        let recipe = &self.candidate_program.requirement.runtime_recipe;
+        ensure!(
+            self.executable == recipe.namespace_executable()?
+                && self.argv0 == recipe.argv0
+                && self.arguments == recipe.arguments
+                && self.cwd == recipe.cwd
+                && self.environment == recipe.environment
+                && self.runtime_mounts
+                    == [ExternalCandidateRuntimeMountSpec {
+                        destination: recipe.runtime_mount_destination.clone(),
+                        layer: 0,
+                    }]
+                && self.max_stdout_bytes == recipe.max_stdout_bytes
+                && self.max_stderr_bytes == recipe.max_stderr_bytes
+                && self.proc_filesystem == recipe.proc_filesystem
+                && self.contain_process_group == recipe.contain_process_group
+                && self.nested_sandbox == recipe.nested_sandbox,
+            "external launcher specification changed its admitted runtime recipe"
+        );
         ensure!(
             !self.executable.is_empty() && self.executable.len() <= 4096,
             "external launcher executable is invalid"
@@ -328,13 +387,49 @@ pub unsafe fn prepare_from_inherited_bootstrap() -> Result<(
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use ryeos_state::external_execution::admission::{
+        ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe,
+        MAX_EXTERNAL_RUNTIME_RECIPE_BYTES, PROTOCOL,
+    };
+
+    fn program() -> AdmittedExternalCandidateProgram {
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
+            schema: 1,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into()],
+            cwd: "/workspace".into(),
+            environment: BTreeMap::from([("HOME".into(), "/workspace/.home".into())]),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: true,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        AdmittedExternalCandidateProgram {
+            requirement: ExternalCandidateRequirement {
+                schema: 2,
+                protocol: PROTOCOL.into(),
+                runtime_product_declaration_id: "runtime".into(),
+                runtime_recipe,
+            },
+            runtime_manifest_hash: "e".repeat(64),
+            runtime_witness_hash: "1".repeat(64),
+            qualification_attestation_hash: "2".repeat(64),
+            selection_identity_digest: "3".repeat(64),
+            runtime_recipe_digest,
+        }
+    }
 
     fn binding() -> ExecutionChannelBinding {
         let owner = lillux::crypto::generate_signing_key();
         let supervisor = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
+        let program = program();
         ExecutionChannelBinding {
-            schema: 1,
+            schema: 2,
             placement_thread_id: "T-external-launcher-bootstrap".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-external-launcher-bootstrap".into(),
@@ -342,6 +437,7 @@ mod tests {
             base_snapshot_hash: "c".repeat(64),
             execution_binding_hash: "d".repeat(64),
             supervisor_runtime_hash: "e".repeat(64),
+            candidate_program_digest: program.digest().unwrap(),
             channel_nonce: "f".repeat(64),
             owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
             supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
@@ -357,6 +453,7 @@ mod tests {
         ExternalCandidateLauncherSpec {
             schema: 1,
             binding: binding(),
+            candidate_program: program(),
             executable: "/runtime/bin/codex".into(),
             argv0: "codex".into(),
             arguments: vec!["exec-server".into()],
@@ -368,137 +465,132 @@ mod tests {
             }],
             max_stdout_bytes: 1024 * 1024,
             max_stderr_bytes: 1024 * 1024,
-            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespace,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
             contain_process_group: true,
             nested_sandbox: true,
         }
     }
 
     #[test]
-    fn launcher_spec_refuses_ambiguous_or_workspace_overlapping_paths() {
-        let valid = spec();
-        valid.validate().unwrap();
+    fn launcher_spec_is_the_exact_admitted_program_projection() {
+        let program = program();
+        let binding = binding();
+        let compiled =
+            ExternalCandidateLauncherSpec::from_admitted_program(binding.clone(), &program)
+                .unwrap();
+        let mut expected = spec();
+        expected.binding = binding;
+        assert_eq!(compiled, expected);
 
-        let mut changed = valid.clone();
-        changed.cwd = "workspace".into();
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("not absolute")
-        );
-
-        let mut changed = valid.clone();
-        changed.executable = "/runtime/../bin/codex".into();
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("not normalized")
-        );
-
-        let mut changed = valid.clone();
-        changed.runtime_mounts[0].destination = "/workspace/runtime".into();
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("overlaps /workspace")
-        );
-
-        let mut changed = valid.clone();
-        changed
-            .runtime_mounts
-            .push(changed.runtime_mounts[0].clone());
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("duplicated")
-        );
-
-        let mut changed = valid;
-        changed.max_stdout_bytes = 0;
-        assert!(
-            changed
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("output bounds")
-        );
+        for mutation in [
+            "binding",
+            "program",
+            "executable",
+            "argv0",
+            "arguments",
+            "cwd",
+            "environment",
+            "mount_destination",
+            "mount_layer",
+            "mount_count",
+            "stdout",
+            "stderr",
+            "proc",
+            "process_group",
+            "nested",
+        ] {
+            let mut changed = compiled.clone();
+            match mutation {
+                "binding" => changed.binding.candidate_program_digest = "0".repeat(64),
+                "program" => changed
+                    .candidate_program
+                    .requirement
+                    .runtime_recipe
+                    .arguments
+                    .push("--changed".into()),
+                "executable" => changed.executable = "/runtime/bin/other".into(),
+                "argv0" => changed.argv0 = "other".into(),
+                "arguments" => changed.arguments.push("--changed".into()),
+                "cwd" => changed.cwd = "/workspace/other".into(),
+                "environment" => {
+                    changed.environment.insert("OTHER".into(), "value".into());
+                }
+                "mount_destination" => {
+                    changed.runtime_mounts[0].destination = "/other-runtime".into()
+                }
+                "mount_layer" => changed.runtime_mounts[0].layer = 1,
+                "mount_count" => changed.runtime_mounts.clear(),
+                "stdout" => changed.max_stdout_bytes += 1,
+                "stderr" => changed.max_stderr_bytes += 1,
+                "proc" => changed.proc_filesystem = ExternalCandidateProcFilesystem::Empty,
+                "process_group" => changed.contain_process_group = false,
+                "nested" => changed.nested_sandbox = false,
+                _ => unreachable!(),
+            }
+            assert!(changed.validate().is_err(), "{mutation}");
+        }
     }
 
     #[test]
-    fn launcher_spec_refuses_path_aliases_and_unrepresentable_process_strings() {
-        for path in [
-            "/runtime//bin/codex",
-            "/runtime/./bin/codex",
-            "/runtime/bin/codex/",
-            "/runtime/bin/co\0dex",
-        ] {
-            let mut changed = spec();
-            changed.executable = path.into();
-            assert!(changed.canonical_bytes().is_err(), "{path:?}");
+    fn admitted_recipe_ceiling_is_representable_in_launcher_bootstrap() {
+        fn compile_with_argument_bytes(total: usize) -> Result<ExternalCandidateLauncherSpec> {
+            let mut remaining = total;
+            let mut arguments = Vec::new();
+            while remaining > 0 {
+                let bytes = remaining.min(64 * 1024);
+                arguments.push("a".repeat(bytes));
+                remaining -= bytes;
+            }
+            let mut program = program();
+            program.requirement.runtime_recipe.arguments = arguments;
+            program.runtime_recipe_digest = program.requirement.runtime_recipe.digest()?;
+            let mut binding = binding();
+            binding.candidate_program_digest = program.digest()?;
+            ExternalCandidateLauncherSpec::from_admitted_program(binding, &program)
         }
-        for path in [
-            "/workspace//candidate",
-            "/workspace/./candidate",
-            "/workspace/",
-            "/workspace/a\0b",
-        ] {
-            let mut changed = spec();
-            changed.cwd = path.into();
-            assert!(changed.canonical_bytes().is_err(), "{path:?}");
-        }
-        for path in [
-            "/runtime/",
-            "/runtime//tools",
-            "/runtime/./tools",
-            "/runtime/a\0b",
-        ] {
-            let mut changed = spec();
-            changed.runtime_mounts[0].destination = path.into();
-            assert!(changed.canonical_bytes().is_err(), "{path:?}");
-        }
-        let mut changed = spec();
-        changed.argv0 = "co\0dex".into();
-        assert!(changed.canonical_bytes().is_err());
-        let mut changed = spec();
-        changed.arguments.push("exec\0server".into());
-        assert!(changed.canonical_bytes().is_err());
-    }
 
-    #[test]
-    fn launcher_sender_enforces_the_receivers_encoded_bootstrap_ceiling() {
-        let mut boundary = spec();
-        boundary.arguments = vec![String::new(); 4];
-        let mut remaining =
-            MAX_LAUNCHER_BOOTSTRAP_BYTES - boundary.canonical_bytes().unwrap().len();
-        for argument in &mut boundary.arguments {
-            let bytes = remaining.min(64 * 1024);
-            *argument = "a".repeat(bytes);
-            remaining -= bytes;
+        let mut accepted = 0_usize;
+        let mut refused = MAX_EXTERNAL_RUNTIME_RECIPE_BYTES + 1;
+        while accepted + 1 < refused {
+            let candidate = accepted + (refused - accepted) / 2;
+            if compile_with_argument_bytes(candidate)
+                .and_then(|spec| spec.canonical_bytes())
+                .is_ok()
+            {
+                accepted = candidate;
+            } else {
+                refused = candidate;
+            }
         }
-        assert_eq!(remaining, 0);
+        let boundary = compile_with_argument_bytes(accepted).unwrap();
+        let recipe_bytes = lillux::canonical_json(
+            &serde_json::to_value(&boundary.candidate_program.requirement.runtime_recipe).unwrap(),
+        )
+        .unwrap()
+        .len();
+        assert!(recipe_bytes <= MAX_EXTERNAL_RUNTIME_RECIPE_BYTES);
+        assert!(MAX_EXTERNAL_RUNTIME_RECIPE_BYTES - recipe_bytes <= 2);
         let encoded = boundary.canonical_bytes().unwrap();
-        assert_eq!(encoded.len(), MAX_LAUNCHER_BOOTSTRAP_BYTES);
+        assert!(encoded.len() <= MAX_LAUNCHER_BOOTSTRAP_BYTES);
         serde_json::from_slice::<ExternalCandidateLauncherSpec>(&encoded)
             .unwrap()
             .validate()
             .unwrap();
-        boundary.arguments.last_mut().unwrap().push('b');
-        assert!(boundary.canonical_bytes().is_err());
+        assert!(
+            compile_with_argument_bytes(accepted + 1)
+                .and_then(|spec| spec.canonical_bytes())
+                .is_err()
+        );
 
         // Every argument fits its individual limit, but JSON escaping makes
-        // this request exceed the descriptor reader's aggregate ceiling.
-        let mut changed = spec();
-        changed.arguments = vec!["\n".repeat(64 * 1024); 2];
+        // the recipe exceed the preallocation ceiling before it can become a
+        // launcher bootstrap.
+        let mut changed = program();
+        changed.requirement.runtime_recipe.arguments = vec!["\n".repeat(64 * 1024); 2];
         assert!(
             changed
+                .requirement
+                .runtime_recipe
                 .arguments
                 .iter()
                 .all(|value| value.len() <= 64 * 1024)
@@ -508,9 +600,8 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .to_string()
-                .contains("encoded byte bound")
+                .contains("encoded bound")
         );
-        assert!(changed.canonical_bytes().is_err());
         assert!(changed.digest().is_err());
 
         let valid = spec();

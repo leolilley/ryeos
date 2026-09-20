@@ -4,6 +4,43 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Exact external candidate program checkpoint
+
+Runtime operator epoch 50 and guest-journal epoch 7 cut the external execution
+wire to requirement, supervisor-bootstrap, and channel-binding schema 2. The
+signed profile now owns one closed credential-free runtime recipe: its exact
+content-relative executable, arguments, working directory, environment, mount
+destination, output limits, proc policy, process-group containment, and nested
+sandbox requirement. The qualified runtime product continues to own the exact
+runtime bytes and qualification evidence. Their joined admitted-program digest
+is retained in the capsule, placement preparation, supervisor bootstrap,
+attached channel, guest journal, and launcher bootstrap.
+
+The dedicated launcher independently verifies that every projected launch
+coordinate is identical to the admitted recipe. A 96 KiB preallocation recipe
+ceiling reserves enough space for the duplicated program/projection plus the
+fixed channel envelope inside the launcher's 256 KiB descriptor limit, so a
+recipe cannot pass allocation admission and become unrepresentable only after
+attachment. Placement recovery reloads the capsule and reconstructs the exact
+private program projection; it does not accept a caller-supplied recipe or
+reconstruct authority from provider state.
+
+Focused source evidence on 2026-09-21: 41 state external-execution tests, 15
+structured-profile tests, 8 placement-owner tests, 29 application channel tests,
+19 node-config loader tests, the structured-session refusal regression, 25
+independent production-DDL SQLite tests, 9 protected-supervisor TLS tests, and
+the native inherited-descriptor launcher test passed. After review hardening,
+the 4 admission tests and 4 launcher recipe/projection tests passed again, as
+did the bounded seven-crate test check. Architecture, security/recovery, and
+testing review found no remaining authority defect after adding the conservative
+recipe ceiling and direct path/budget plus complete projection mutation tests.
+No installation, lifecycle, provider/model, Render, credential, grant, or paid
+resource was contacted or changed.
+
+This checkpoint still does not provide the production supervisor executable,
+cross-machine object-chunk export, production lifecycle adapter,
+structured-session connector, or complete B -> C -> evaluation -> D proof.
+
 ## Bidirectional candidate transport checkpoint
 
 Runtime operator epoch 49 and guest-journal epoch 6 add the missing candidate

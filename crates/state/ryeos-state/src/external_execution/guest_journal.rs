@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 6;
+const SCHEMA_EPOCH: i64 = 7;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=6),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=7),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -1920,7 +1920,7 @@ mod tests {
         let now = lillux::time::timestamp_millis();
         (
             ExecutionChannelBinding {
-                schema: 1,
+                schema: 2,
                 placement_thread_id: "T-guest".into(),
                 allocation_request_digest: "a".repeat(64),
                 occurrence_id: "occurrence-guest".into(),
@@ -1928,6 +1928,7 @@ mod tests {
                 base_snapshot_hash: "c".repeat(64),
                 execution_binding_hash: "d".repeat(64),
                 supervisor_runtime_hash: "e".repeat(64),
+                candidate_program_digest: "0".repeat(64),
                 channel_nonce: "f".repeat(64),
                 owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
                 supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),

@@ -5271,7 +5271,8 @@ session:
     #[test]
     fn external_candidate_capsule_cannot_omit_or_invent_its_program_authority() {
         use ryeos_state::external_execution::admission::{
-            AdmittedExternalCandidateProgram, ExternalCandidateRequirement, PROTOCOL,
+            AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+            ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
         };
         let mut capsule = capsule_fixture(&retained_program_fixture("/fixture/worker.yaml", 'a'));
         capsule.validate().unwrap();
@@ -5283,16 +5284,33 @@ session:
             .unwrap()
             .remove("external_candidate");
         assert!(AdmittedPersistentSessionCapsule::from_current_value(&missing).is_err());
+        let runtime_recipe = ExternalCandidateRuntimeRecipe {
+            schema: 1,
+            runtime_mount_destination: "/runtime".into(),
+            executable_relative_path: "bin/codex".into(),
+            argv0: "codex".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: std::collections::BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: true,
+            nested_sandbox: true,
+        };
+        let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         capsule.external_candidate = Some(AdmittedExternalCandidateProgram {
             requirement: ExternalCandidateRequirement {
-                schema: 1,
+                schema: 2,
                 protocol: PROTOCOL.into(),
                 runtime_product_declaration_id: "candidate_runtime".into(),
+                runtime_recipe,
             },
             runtime_manifest_hash: "1".repeat(64),
             runtime_witness_hash: "2".repeat(64),
             qualification_attestation_hash: "3".repeat(64),
             selection_identity_digest: "4".repeat(64),
+            runtime_recipe_digest,
         });
         assert_ne!(original, capsule.authority().digest().unwrap());
         assert!(

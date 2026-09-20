@@ -39,6 +39,10 @@ pub struct ExecutionChannelBinding {
     pub base_snapshot_hash: String,
     pub execution_binding_hash: String,
     pub supervisor_runtime_hash: String,
+    /// Exact admitted command/mount recipe and qualified runtime identities.
+    /// This prevents a lifecycle adapter from substituting a different program
+    /// beneath the same runtime tree hash.
+    pub candidate_program_digest: String,
     /// Fresh random 256-bit identity; never reused after replacement.
     pub channel_nonce: String,
     /// Canonical base64 Ed25519 keys, not profile or cloud-account credentials.
@@ -55,7 +59,7 @@ pub struct ExecutionChannelBinding {
 
 impl ExecutionChannelBinding {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported external channel schema");
+        ensure!(self.schema == 2, "unsupported external channel schema");
         text(&self.placement_thread_id, 256)?;
         text(&self.occurrence_id, 512)?;
         for digest in [
@@ -64,6 +68,7 @@ impl ExecutionChannelBinding {
             &self.base_snapshot_hash,
             &self.execution_binding_hash,
             &self.supervisor_runtime_hash,
+            &self.candidate_program_digest,
             &self.channel_nonce,
         ] {
             hash(digest)?;
@@ -632,7 +637,7 @@ mod tests {
         let supervisor = lillux::crypto::generate_signing_key();
         (
             ExecutionChannelBinding {
-                schema: 1,
+                schema: 2,
                 placement_thread_id: "T-external".into(),
                 occurrence_id: "occurrence".into(),
                 allocation_request_digest: "a".repeat(64),
@@ -640,6 +645,7 @@ mod tests {
                 base_snapshot_hash: "c".repeat(64),
                 execution_binding_hash: "d".repeat(64),
                 supervisor_runtime_hash: "e".repeat(64),
+                candidate_program_digest: "0".repeat(64),
                 channel_nonce: "f".repeat(64),
                 owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
                 supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
