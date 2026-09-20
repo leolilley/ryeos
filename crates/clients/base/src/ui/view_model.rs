@@ -4061,6 +4061,76 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_subject_projects_structured_shared_completion_actions() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        let view_ref = "view:test/subject";
+        seed_view_value(
+            &mut core,
+            view_ref,
+            json!({
+                "widget": "rows",
+                "sources": {"default": {
+                    "ref": "service:test/subject",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }}
+            }),
+        );
+        core.add_center_tile(crate::view_set::ViewSpec::bound(view_ref));
+        let tile_id = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile_id]
+            .instance_key
+            .clone();
+        let source_set = core.view_sets[core.active_view_set].id;
+        let selection_key =
+            super::super::seat::selection_storage_key(source_set, "selection.work").unwrap();
+        core.seat
+            .append_facet(selection_key, json!({"thread": "T-current"}));
+        core.selection_attachments.insert(
+            instance.clone(),
+            super::super::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        let view = bound_view_vm_keyed(
+            &core,
+            &instance,
+            None,
+            RowLocalState {
+                cursor: None,
+                collapsed: None,
+                expanded_rows: None,
+                collapsed_tree_rows: None,
+                changed_rows: None,
+            },
+            view_ref,
+            &core.ui.atlas,
+        );
+        let RyeOsViewVm::RequiredSubject {
+            input,
+            facets,
+            actions,
+            ..
+        } = view
+        else {
+            panic!("unresolved subject must use the structured shared VM")
+        };
+        assert_eq!(input, "subject_tile_0");
+        assert_eq!(facets, vec!["selection.work.thread"]);
+        assert!(actions.iter().any(|action| matches!(
+            &action.intent,
+            RyeOsUiIntent::SupplyRequiredSubject { source_view_set_id, .. }
+                if *source_view_set_id == source_set
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            &action.intent,
+            RyeOsUiIntent::FollowViewSetSelection { view_set_id, .. }
+                if *view_set_id == source_set
+        )));
+    }
+
+    #[test]
     fn timeline_entries_merge_consecutive_flow_records() {
         let entries = timeline_entries(vec![
             record("hello ", None, None, TimelineRole::Flow, None),

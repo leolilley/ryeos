@@ -304,6 +304,85 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_subject_suppresses_every_alternate_source_path() {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/source-fence",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {
+                    "independent": {"ref": "service:test/independent", "params": {}},
+                    "detail": {
+                        "ref": "service:test/detail",
+                        "role": "detail",
+                        "activation": "on_demand",
+                        "params": {"thread": "@facet:selection.work.thread"}
+                    }
+                },
+                "input": {
+                    "id": "query",
+                    "submit": "route",
+                    "completion": {"ref": "service:test/completion", "collection": "rows"},
+                    "mentions": {
+                        "ref": "service:test/mentions",
+                        "collection": "rows",
+                        "reference": "id",
+                        "label": "label"
+                    }
+                }
+            }),
+        );
+        core.add_center_tile(ViewSpec::bound("view:test/source-fence"));
+        let tile = core.view_sets[core.active_view_set].focused_tile;
+        let instance = core.view_sets[core.active_view_set].tiles[&tile]
+            .instance_key
+            .clone();
+        core.selection_attachments.insert(
+            instance.clone(),
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_tile_0".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+
+        let effects = core.initial_effects();
+        assert!(effects.iter().all(|effect| {
+            let RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind else {
+                return true;
+            };
+            !crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)
+                .is_some_and(|key| key.belongs_to(&instance))
+        }));
+        assert!(
+            core.refresh_source_channel(instance.clone(), "view:test/source-fence", "detail",)
+                .is_empty()
+        );
+        assert!(
+            core.fetch_view_source_role(
+                instance.clone(),
+                "view:test/source-fence",
+                "detail",
+                serde_json::json!({"thread": "T-forged"}),
+            )
+            .is_none()
+        );
+        let deferred_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(instance.clone(), "detail")
+                .encode();
+        core.deferred_source_fetches.insert(
+            deferred_key.clone(),
+            crate::ui::model::DeferredSourceFetch {
+                view_ref: "view:test/source-fence".into(),
+                channel: "detail".into(),
+                params: serde_json::json!({"thread": "T-forged"}),
+            },
+        );
+        assert!(core.release_deferred_source_fetch(&deferred_key).is_none());
+        assert!(!core.deferred_source_fetches.contains_key(&deferred_key));
+    }
+
+    #[test]
     fn supply_required_subject_reads_the_named_set_and_pins_exact_facets() {
         let (mut core, instance) = core_with_selection_view();
         let source = core.view_sets[core.active_view_set].id;
@@ -353,6 +432,82 @@ mod tests {
             core.selection_attachments.get(&instance),
             Some(crate::ui::attachment::SelectionAttachment::RequiredSubject { .. })
         ));
+    }
+
+    #[test]
+    fn stale_source_or_changed_binding_cannot_complete_required_subject() {
+        let (mut core, instance) = core_with_selection_view();
+        let source = core.view_sets[core.active_view_set].id;
+        set_selection(&mut core, source, "T-current");
+        let unresolved = crate::ui::attachment::SelectionAttachment::RequiredSubject {
+            input: "subject_tile_0".into(),
+            facets: vec!["selection.work.thread".into()],
+        };
+        core.selection_attachments
+            .insert(instance.clone(), unresolved.clone());
+
+        assert!(
+            core.supply_required_subject(instance.clone(), ViewSetId::new(u64::MAX))
+                .is_empty()
+        );
+        assert_eq!(core.selection_attachments.get(&instance), Some(&unresolved));
+
+        seed_view_value(
+            &mut core,
+            "view:test/selection",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {"initial": {
+                    "ref": "service:test/initial",
+                    "params": {"item": "@facet:selection.item.id"}
+                }}
+            }),
+        );
+        assert!(
+            core.supply_required_subject(instance.clone(), source)
+                .is_empty()
+        );
+        assert_eq!(core.selection_attachments.get(&instance), Some(&unresolved));
+
+        let tile_id = instance.view_set_tile_id().unwrap();
+        core.view_sets[core.active_view_set].tiles.remove(&tile_id);
+        assert!(core.supply_required_subject(instance, source).is_empty());
+    }
+
+    #[test]
+    fn supply_required_subject_enforces_the_exact_target_byte_bound() {
+        let (mut core, instance) = core_with_selection_view();
+        let source = core.view_sets[core.active_view_set].id;
+        set_selection(&mut core, source, "T-bounded");
+        let facets = vec!["selection.work.thread".to_string()];
+        let values = core.subject_values_from_view_set(source, &facets).unwrap();
+        let encoded_len = serde_json::to_vec(&values).unwrap().len();
+        let unresolved = crate::ui::attachment::SelectionAttachment::RequiredSubject {
+            input: "subject_tile_0".into(),
+            facets,
+        };
+        core.selection_attachments
+            .insert(instance.clone(), unresolved.clone());
+
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .descriptor
+            .binding_request_bounds
+            .max_request_bytes = u64::try_from(encoded_len - 1).unwrap();
+        assert!(
+            core.supply_required_subject(instance.clone(), source)
+                .is_empty()
+        );
+        assert_eq!(core.selection_attachments.get(&instance), Some(&unresolved));
+
+        core.binding_attachments
+            .get_mut("fixture-attachment")
+            .unwrap()
+            .descriptor
+            .binding_request_bounds
+            .max_request_bytes = u64::try_from(encoded_len).unwrap();
+        assert!(!core.supply_required_subject(instance, source).is_empty());
     }
 
     #[test]

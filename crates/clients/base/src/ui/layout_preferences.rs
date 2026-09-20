@@ -837,6 +837,38 @@ mod tests {
         )
     }
 
+    fn add_subject_dock(core: &mut RyeOsCore) -> crate::ids::RyeOsViewInstanceKey {
+        let view_ref = "view:test/subject-dock";
+        core.binding_attachments
+            .get_mut("attachment:test")
+            .unwrap()
+            .views
+            .insert(
+                view_ref.into(),
+                serde_json::from_value(json!({
+                    "widget": "rows",
+                    "sources": {"default": {
+                        "ref": "service:test/subject-dock",
+                        "params": {"thread": "@facet:selection.work.thread"}
+                    }}
+                }))
+                .unwrap(),
+            );
+        core.view_sets[core.active_view_set].docks.bottom = Some(RyeOsDockSlotState {
+            visible: true,
+            size: 9,
+            content: RyeOsDockContent::View {
+                view_ref: view_ref.into(),
+            },
+        });
+        let instance = super::super::model::dock_view_instance_key(
+            core.view_sets[core.active_view_set].id,
+            super::super::model::RyeOsDockEdge::Bottom,
+        );
+        core.stamp_instance_binding(instance.clone(), "attachment:test");
+        instance
+    }
+
     #[test]
     fn arrangement_round_trip_allocates_fresh_ids_and_never_saves_drafts() {
         let mut source = core();
@@ -1097,6 +1129,43 @@ mod tests {
         };
         assert_eq!(values["selection.work.id"], "fresh-work");
         assert!(target.export_layout_preferences().is_err());
+    }
+
+    #[test]
+    fn unresolved_dock_save_open_save_preserves_the_exact_requirement() {
+        let mut source = core();
+        let dock = add_subject_dock(&mut source);
+        source.selection_attachments.insert(
+            dock,
+            super::super::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_slot_bottom".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
+        let template = source
+            .export_active_view_set_template("dock-set".into(), "Dock set".into())
+            .unwrap();
+
+        let mut reopened = core();
+        add_subject_dock(&mut reopened);
+        reopened
+            .open_saved_view_set_template(&template, "attachment:test")
+            .unwrap();
+        let reopened_dock = super::super::model::dock_view_instance_key(
+            reopened.view_sets[reopened.active_view_set].id,
+            super::super::model::RyeOsDockEdge::Bottom,
+        );
+        assert!(matches!(
+            reopened.selection_attachments.get(&reopened_dock),
+            Some(super::super::attachment::SelectionAttachment::RequiredSubject {
+                input,
+                facets,
+            }) if input == "subject_slot_bottom" && facets == &["selection.work.thread"]
+        ));
+        let recaptured = reopened
+            .export_active_view_set_template("dock-set-again".into(), "Dock set again".into())
+            .unwrap();
+        assert_eq!(recaptured.relationships, template.relationships);
     }
 
     #[test]

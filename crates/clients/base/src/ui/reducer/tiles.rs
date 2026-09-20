@@ -2229,8 +2229,28 @@ mod tests {
                 facets: vec!["selection.work.thread".into()],
             },
         );
+        seed_view_value(
+            &mut core,
+            "view:ryeos/input",
+            serde_json::json!({
+                "widget": "rows",
+                "sources": {"default": {
+                    "ref": "service:test/dock",
+                    "params": {"thread": "@facet:selection.work.thread"}
+                }}
+            }),
+        );
+        let source_dock =
+            super::model::dock_view_instance_key(source_id, super::model::RyeOsDockEdge::Bottom);
+        core.selection_attachments.insert(
+            source_dock,
+            crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input: "subject_slot_bottom".into(),
+                facets: vec!["selection.work.thread".into()],
+            },
+        );
 
-        core.duplicate_view_set(source_id);
+        let effects = core.duplicate_view_set(source_id);
 
         let duplicate = &core.view_sets[core.active_view_set];
         assert_ne!(duplicate.id, source_id);
@@ -2262,6 +2282,22 @@ mod tests {
                 .count(),
             1
         );
+        let duplicate_dock =
+            super::model::dock_view_instance_key(duplicate.id, super::model::RyeOsDockEdge::Bottom);
+        assert!(matches!(
+            core.selection_attachments.get(&duplicate_dock),
+            Some(crate::ui::attachment::SelectionAttachment::RequiredSubject {
+                input,
+                facets,
+            }) if input == "subject_slot_bottom" && facets == &["selection.work.thread"]
+        ));
+        assert!(effects.iter().all(|effect| {
+            let super::effect::RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind else {
+                return true;
+            };
+            !crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)
+                .is_some_and(|key| key.belongs_to(&duplicate_dock))
+        }));
     }
 
     #[test]
