@@ -199,7 +199,7 @@ impl RuntimeDb {
             digest,
         )?;
         tx.commit()?;
-        Ok(result)
+        Ok(result.is_new())
     }
 
     /// Called by the protected relay only after its exact application completes.

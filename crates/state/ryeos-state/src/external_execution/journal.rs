@@ -115,6 +115,27 @@ pub trait JournalOwner {
     ) -> Result<()>;
 }
 
+/// Exact durable result of trying to acquire one retained application.
+///
+/// Only [`ApplicationClaim::New`] authorizes a caller to cross an execution
+/// boundary. `AlreadyClaimed` is deliberately uncertainty, not idempotent
+/// dispatch permission; `AlreadyApplied` and `Revoked` are retained history.
+pub enum ApplicationClaim {
+    New(AuthenticatedExecutionFrame),
+    AlreadyClaimed,
+    AlreadyApplied,
+    Revoked,
+}
+
+impl ApplicationClaim {
+    /// Compatibility projection for owners whose established API reports only
+    /// whether this call acquired a new claim. An execution dispatcher must
+    /// instead consume the authenticated frame carried by `New`.
+    pub fn is_new(&self) -> bool {
+        matches!(self, Self::New(_))
+    }
+}
+
 /// Stage sticky terminal revocation. Commit this transaction before attempting
 /// a potentially failing contiguous append; failure must never reopen input.
 pub fn record_revocation(
@@ -309,7 +330,7 @@ pub fn claim_application(
     direction: ChannelDirection,
     sequence: u64,
     digest: &str,
-) -> Result<bool> {
+) -> Result<ApplicationClaim> {
     let binding = load_binding(tx, placement)?;
     let binding_digest = binding.digest()?;
     owner.require_owner(tx, &binding)?;
@@ -331,8 +352,12 @@ pub fn claim_application(
         wire.as_bytes(),
         binding.issued_at_ms,
     )?;
-    if application != "pending" {
-        return Ok(false);
+    match application.as_str() {
+        "claimed" => return Ok(ApplicationClaim::AlreadyClaimed),
+        "applied" => return Ok(ApplicationClaim::AlreadyApplied),
+        "revoked" => return Ok(ApplicationClaim::Revoked),
+        "pending" => {}
+        _ => bail!("external frame retained an unknown application state"),
     }
     let verified = authenticate_retained_frame(
         &binding,
@@ -396,7 +421,10 @@ pub fn claim_application(
         WHERE binding_digest=?1 AND direction=?2 AND sequence=?3 AND application='pending'",
         params![binding_digest, direction.as_str(), sequence],
     )?;
-    Ok(changed == 1)
+    if changed != 1 {
+        bail!("external application claim lost its serialized pending state");
+    }
+    Ok(ApplicationClaim::New(verified))
 }
 
 /// Acknowledge an exact claimed delivery, including after cancellation.
@@ -907,6 +935,26 @@ mod tests {
             digest,
         )?;
         tx.commit()?;
+        Ok(result.is_new())
+    }
+
+    fn claim_outcome(
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        direction: ChannelDirection,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<ApplicationClaim> {
+        let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let result = claim_application(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            direction,
+            sequence,
+            digest,
+        )?;
+        tx.commit()?;
         Ok(result)
     }
 
@@ -1287,6 +1335,17 @@ mod tests {
             )
             .unwrap()
         );
+        assert!(matches!(
+            claim_outcome(
+                &conn,
+                &binding,
+                ChannelDirection::OwnerToSupervisor,
+                1,
+                &release_digest
+            )
+            .unwrap(),
+            ApplicationClaim::AlreadyClaimed
+        ));
         let (cancel, _) = wire(
             &binding,
             &owner,
@@ -1309,16 +1368,17 @@ mod tests {
             &release_digest,
         )
         .unwrap();
-        assert!(
-            !claim(
+        assert!(matches!(
+            claim_outcome(
                 &conn,
                 &binding,
                 ChannelDirection::OwnerToSupervisor,
                 1,
                 &release_digest
             )
-            .unwrap()
-        );
+            .unwrap(),
+            ApplicationClaim::AlreadyApplied
+        ));
     }
 
     #[test]

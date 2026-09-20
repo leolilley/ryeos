@@ -29,6 +29,10 @@ pub struct NativeExternalCandidate {
     terminal: bool,
     input: Option<std::fs::File>,
     protocol: CandidateProtocolInput,
+    /// The native side effect crossed its boundary but the protected journal
+    /// has not yet acknowledged its durable `applied` transition. No later
+    /// action may start while this fence is present.
+    application_fence: ApplicationFence,
 }
 
 /// Output streams are untrusted bytes; no writable input descriptor escapes
@@ -52,6 +56,37 @@ struct CandidateProtocolInput {
     frontier: u64,
     revoked: bool,
     pending: Option<(String, Vec<u8>, usize)>,
+}
+
+#[derive(Default)]
+struct ApplicationFence(Option<String>);
+
+impl ApplicationFence {
+    fn begin(&mut self, digest: &str) -> Result<()> {
+        ensure!(self.0.is_none(), "candidate already awaits durable finish");
+        self.0 = Some(digest.to_owned());
+        Ok(())
+    }
+
+    fn acknowledge(&mut self, digest: &str) -> Result<()> {
+        ensure!(
+            self.0.as_deref() == Some(digest),
+            "candidate finish acknowledgement changed its exact application"
+        );
+        self.0 = None;
+        Ok(())
+    }
+
+    /// Terminal cancellation may overtake an uncertain input claim. The
+    /// interrupted input stays durably claimed and is never retried; the live
+    /// launcher now waits only for the cancellation finish acknowledgement.
+    fn begin_terminal(&mut self, digest: &str) {
+        self.0 = Some(digest.to_owned());
+    }
+
+    fn is_clear(&self) -> bool {
+        self.0.is_none()
+    }
 }
 
 impl CandidateProtocolInput {
@@ -239,6 +274,7 @@ impl NativeExternalCandidate {
                 terminal: false,
                 input: Some(pipes.stdin),
                 protocol: CandidateProtocolInput::default(),
+                application_fence: ApplicationFence::default(),
             },
             NativeCandidateOutput {
                 stdout: pipes.stdout,
@@ -254,12 +290,16 @@ impl NativeExternalCandidate {
             "not an external release command"
         );
         ensure!(
-            !self.terminal && !self.released && Instant::now() < self.deadline,
-            "external candidate is terminal, released or expired"
+            !self.terminal
+                && !self.released
+                && self.application_fence.is_clear()
+                && Instant::now() < self.deadline,
+            "external candidate is terminal, released, awaiting finish or expired"
         );
         // A release error may have crossed the boundary. Never retry it.
         self.released = true;
         self.protocol.frontier = frame.frame().sequence;
+        self.application_fence.begin(frame.digest())?;
         if let Err(error) = self.process.release_once() {
             self.close_input();
             return Err(anyhow::Error::msg(error));
@@ -273,8 +313,11 @@ impl NativeExternalCandidate {
     pub fn begin_protocol_input(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
         self.require_owner(frame)?;
         ensure!(
-            self.released && !self.terminal && !self.execution_expired(),
-            "candidate is not executable"
+            self.released
+                && !self.terminal
+                && self.application_fence.is_clear()
+                && !self.execution_expired(),
+            "candidate is not executable or awaits durable finish"
         );
         self.protocol.begin(
             frame.frame().sequence,
@@ -293,10 +336,23 @@ impl NativeExternalCandidate {
         let result = self
             .protocol
             .flush(self.input.as_mut().context("candidate input is closed")?);
+        if let Ok(progress) = &result
+            && progress.complete
+        {
+            self.application_fence.begin(&progress.frame_digest)?;
+        }
         if result.is_err() {
             self.close_input();
         }
         result
+    }
+
+    /// Release the native action fence only after the protected supervisor has
+    /// committed `finish_application` for this exact frame. A lost response or
+    /// acknowledgement leaves the launcher fenced rather than permitting a
+    /// second action after an uncertain effect.
+    pub fn acknowledge_application_finish(&mut self, frame_digest: &str) -> Result<()> {
+        self.application_fence.acknowledge(frame_digest)
     }
 
     pub fn cancel(&mut self, frame: &AuthenticatedExecutionFrame, timeout: Duration) -> Result<()> {
@@ -307,6 +363,7 @@ impl NativeExternalCandidate {
         );
         // A terminal revocation does not wait for a missing data predecessor.
         // The supervisor persists its sticky record before calling this method.
+        self.application_fence.begin_terminal(frame.digest());
         self.stop(timeout)
     }
 
@@ -348,9 +405,13 @@ impl NativeExternalCandidate {
             self.released
                 && !self.terminal
                 && self.protocol.pending.is_none()
+                && self.application_fence.is_clear()
                 && frame.frame().sequence > self.protocol.frontier,
             "external candidate is not capturable"
         );
+        // Namespace termination and capture are one irreversible native
+        // application. Fence subsequent actions before crossing that boundary.
+        self.application_fence.begin(frame.digest())?;
         self.close_input();
         let proof = self
             .process
@@ -529,5 +590,22 @@ mod tests {
             assert_eq!(input.frontier, 0);
             assert!(input.pending.is_none());
         }
+    }
+
+    #[test]
+    fn application_fence_requires_exact_durable_finish_acknowledgement() {
+        let mut fence = ApplicationFence::default();
+        fence.begin("release-frame").unwrap();
+        assert!(!fence.is_clear());
+        assert!(fence.begin("later-frame").is_err());
+        assert!(fence.acknowledge("wrong-frame").is_err());
+        assert!(!fence.is_clear());
+        fence.acknowledge("release-frame").unwrap();
+        assert!(fence.is_clear());
+        assert!(fence.acknowledge("release-frame").is_err());
+        fence.begin("partial-input").unwrap();
+        fence.begin_terminal("cancel");
+        assert!(fence.acknowledge("partial-input").is_err());
+        fence.acknowledge("cancel").unwrap();
     }
 }
