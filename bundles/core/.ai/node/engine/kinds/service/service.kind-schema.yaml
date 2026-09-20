@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T05:56:15Z:92a5e52e577fecc820f38fe407482ea41b0c7510a2ba1afed6127c2f1a06c68e:TN3yPZ6QlGruuqz3latI8b47GrzzUcU+nn23eFIYZpPvWr9rdcP7l7X3VzWBaDPoNk07EjIdS5IuhwWEnMWPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T08:51:39Z:6a7b7fec63aab04dbb255622caa4d60304717fbe7a73f7874f36cf4e817b3f02:cZIkhSqP/8waep/HVLqbbS32ATRJy/ng/arJ0yDzOE5RQ7IsalKoWdx3AbhSsADODljSIfCNUxuk9OZmFEouAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 inventory_policy:
   admission:
@@ -86,7 +86,7 @@ composed_value_contract:
     ui_result_effect:
       type: single
       prim: string
-      enum: [admit_binding_attachment]
+      enum: [admit_binding_attachment, resume_particular_view_set]
     schema: { type: single, prim: mapping }
 metadata:
   rules:

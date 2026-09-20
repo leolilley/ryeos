@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-20T08:10:45Z:7e3b2aa374b0f8ec20526b886ade12ed369030285793ff3653868605198e93b0:3wLcJCtQVrDes+iPdAJV9OO+5E/gpmA+3XYDn2Kq/EjJUffZSZVFjjiph2geAYrqyKUOQM688exqoaULgbJSDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Stopped-node bundle-set update
 
 `ryeos bundle set-update` is the consumer operation for independently published
