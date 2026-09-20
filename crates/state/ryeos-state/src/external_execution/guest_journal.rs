@@ -1276,7 +1276,9 @@ impl LiveGuestJournal {
             )?;
         stage.ensure_publication_contract(&publication_key, None)?;
         ensure!(
-            stage.admitted_target_hash().is_none()
+            stage
+                .admitted_target_hash()
+                .is_none_or(|target| target == capture.snapshot_hash)
                 && stage.protected_object_hashes() == &objects
                 && stage.protected_blob_hashes() == &blobs
                 && stage.protected_large_object_hashes().is_empty(),

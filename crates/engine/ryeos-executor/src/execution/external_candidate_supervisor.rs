@@ -320,3 +320,300 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         (self.journal, self.launcher)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use ryeos_state::external_execution::guest_journal::{
+        AuthenticatedLauncherReady, LauncherOccurrenceEvidence, PreparedGuestJournal,
+    };
+    use ryeos_state::external_execution::{
+        ExecutionChannelBinding, ExecutionFrame, NativeNamespaceExit,
+        NativeWriterExclusionMechanism, NativeWriterExclusionObservation, SignedExecutionFrame,
+    };
+    use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingLauncher {
+        capture: Option<DurableNativeCandidateCapture>,
+        releases: usize,
+        captures: usize,
+        finish_acks: Vec<String>,
+    }
+
+    impl ExternalCandidateLauncherClient for RecordingLauncher {
+        fn release(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+            self.releases += 1;
+            Ok(())
+        }
+
+        fn apply_protocol_chunk(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<usize> {
+            anyhow::bail!("test launcher does not admit protocol input")
+        }
+
+        fn cancel(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
+            anyhow::bail!("test launcher does not admit cancellation")
+        }
+
+        fn capture(
+            &mut self,
+            _frame: &AuthenticatedExecutionFrame,
+        ) -> Result<DurableNativeCandidateCapture> {
+            self.captures += 1;
+            self.capture.clone().context("test capture is absent")
+        }
+
+        fn acknowledge_finish(&mut self, frame_digest: &str) -> Result<()> {
+            self.finish_acks.push(frame_digest.to_owned());
+            Ok(())
+        }
+    }
+
+    fn signed_owner_frame(
+        binding: &ExecutionChannelBinding,
+        owner: &lillux::crypto::SigningKey,
+        sequence: u64,
+        previous_frame_digest: Option<String>,
+        payload: ExecutionChannelPayload,
+    ) -> AuthenticatedExecutionFrame {
+        let signed = SignedExecutionFrame::sign(
+            ExecutionFrame {
+                schema: 1,
+                binding_digest: binding.digest().unwrap(),
+                direction: ChannelDirection::OwnerToSupervisor,
+                sequence,
+                previous_frame_digest,
+                acknowledged_peer_sequence: 1,
+                payload,
+            },
+            binding,
+            owner,
+        )
+        .unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap();
+        SignedExecutionFrame::decode_and_verify(
+            wire.as_bytes(),
+            binding,
+            lillux::time::timestamp_millis(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn complete_capture_replay_reuses_exact_receipt_without_second_native_capture() {
+        let state_root = tempfile::tempdir().unwrap();
+        let state =
+            ryeos_state::StateDb::open(state_root.path(), Arc::new(ryeos_state::TrustStore::new()))
+                .unwrap();
+        let authority = state.pinned_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let policy = ProjectSnapshotPolicy::new(
+            ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            vec![],
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let policy_hash = cas.store_object(&policy.to_value()).unwrap();
+        let candidate_bytes = b"print('retained external candidate')\n";
+        let candidate_blob_hash = cas.store_blob(candidate_bytes).unwrap();
+        let file = ProjectFile {
+            blob_hash: candidate_blob_hash.clone(),
+            size: candidate_bytes.len() as u64,
+            normalized_mode: ProjectFile::REGULAR_MODE,
+        };
+        let file_hash = cas.store_object(&file.to_value()).unwrap();
+        let tree = ProjectTree {
+            files: [("main.py".to_owned(), file_hash.clone())]
+                .into_iter()
+                .collect(),
+        };
+        let tree_hash = cas.store_object(&tree.to_value()).unwrap();
+        let base = ProjectSnapshot {
+            project_tree_hash: tree_hash.clone(),
+            effective_policy_hash: policy_hash.clone(),
+            parent_hashes: vec![],
+            created_at: "2026-09-20T00:00:00Z".into(),
+            message: None,
+            source: "external-supervisor-replay-base".into(),
+        };
+        let base_hash = cas.store_object(&base.to_value()).unwrap();
+        let candidate = ProjectSnapshot {
+            project_tree_hash: tree_hash.clone(),
+            effective_policy_hash: policy_hash.clone(),
+            parent_hashes: vec![base_hash.clone()],
+            created_at: "2026-09-20T00:00:01Z".into(),
+            message: None,
+            source: "external_candidate_terminal_capture".into(),
+        };
+        let snapshot_hash = cas.store_object(&candidate.to_value()).unwrap();
+
+        let owner = lillux::crypto::generate_signing_key();
+        let supervisor_key = lillux::crypto::generate_signing_key();
+        let now = lillux::time::timestamp_millis();
+        let binding = ExecutionChannelBinding {
+            schema: 1,
+            placement_thread_id: "T-external-supervisor-replay".into(),
+            allocation_request_digest: "a".repeat(64),
+            occurrence_id: "occurrence-external-supervisor-replay".into(),
+            admitted_capsule_hash: "b".repeat(64),
+            base_snapshot_hash: base_hash,
+            execution_binding_hash: "c".repeat(64),
+            supervisor_runtime_hash: "d".repeat(64),
+            channel_nonce: "e".repeat(64),
+            owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
+            supervisor_public_key: STANDARD.encode(supervisor_key.verifying_key().as_bytes()),
+            issued_at_ms: now - 1_000,
+            execution_deadline_ms: now + 60_000,
+            expires_at_ms: now + 120_000,
+            max_frames: 32,
+            max_bytes: 2 * 1024 * 1024,
+        };
+        let journal_root = tempfile::tempdir().unwrap();
+        let journal_directory = lillux::PinnedDirectory::open(journal_root.path())
+            .unwrap()
+            .unwrap();
+        journal_directory.tighten_owner_private_directory().unwrap();
+        let bootstrap_digest = "f".repeat(64);
+        let prepared = PreparedGuestJournal::create(
+            journal_directory,
+            &authority,
+            &bootstrap_digest,
+            binding.clone(),
+        )
+        .unwrap();
+        let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
+            lillux::ExactProcessIdentity {
+                boot_id: "external-supervisor-replay-boot".into(),
+                target_pid: 200,
+                target_start_time_ticks: 300,
+                group_leader_pid: 200,
+                group_leader_start_time_ticks: 300,
+            },
+            &"1".repeat(64),
+            &"2".repeat(64),
+        )
+        .unwrap();
+        let occurrence_digest = occurrence.digest().unwrap();
+        let live = prepared
+            .bind_launcher(occurrence)
+            .unwrap()
+            .mark_launcher_ready(
+                AuthenticatedLauncherReady::from_handshake_transcript(&"3".repeat(64)).unwrap(),
+            )
+            .unwrap();
+
+        let completion_request_digest = "4".repeat(64);
+        let observation = NativeWriterExclusionObservation {
+            schema: 1,
+            binding_digest: binding.digest().unwrap(),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            completion_request_digest: completion_request_digest.clone(),
+            mechanism: NativeWriterExclusionMechanism::NamespaceInitReaped,
+            exit: NativeNamespaceExit::Code(0),
+        };
+        let writer_exclusion_evidence_hash = cas
+            .store_blob(
+                lillux::canonical_json(&serde_json::to_value(observation).unwrap())
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let publication_key = DurableCasPublicationKey::external_candidate_occurrence(
+            &binding.digest().unwrap(),
+            &occurrence_digest,
+        )
+        .unwrap();
+        let mut stage = authority
+            .require_recovery()
+            .unwrap()
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &bootstrap_digest,
+                "external-supervisor-replay-capture",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let objects = BTreeSet::from([snapshot_hash.clone(), tree_hash, policy_hash, file_hash]);
+        let blobs = BTreeSet::from([candidate_blob_hash, writer_exclusion_evidence_hash.clone()]);
+        stage
+            .protect_cas_closure(
+                &guard,
+                objects.iter().map(String::as_str),
+                blobs.iter().map(String::as_str),
+            )
+            .unwrap();
+        let capture = DurableNativeCandidateCapture {
+            quiesce_frame_digest: String::new(),
+            occurrence_digest: occurrence_digest.clone(),
+            durable_stage_id: stage.staging_id().to_owned(),
+            snapshot_hash,
+            completion_request_digest: completion_request_digest.clone(),
+            writer_exclusion_evidence_hash,
+        };
+        drop(stage);
+        drop(guard);
+
+        let launcher = RecordingLauncher {
+            capture: Some(capture),
+            ..Default::default()
+        };
+        let mut runtime = SerializedExternalCandidateSupervisor::new(live, launcher);
+        runtime.publish_ready(&supervisor_key).unwrap();
+        let release =
+            signed_owner_frame(&binding, &owner, 1, None, ExecutionChannelPayload::Release);
+        assert_eq!(
+            runtime
+                .dispatch_release(release.canonical().as_bytes())
+                .unwrap(),
+            SupervisorApplicationOutcome::Applied
+        );
+        let quiesce = signed_owner_frame(
+            &binding,
+            &owner,
+            2,
+            Some(release.digest().to_owned()),
+            ExecutionChannelPayload::Quiesce {
+                completion_request_digest,
+            },
+        );
+        runtime
+            .launcher
+            .capture
+            .as_mut()
+            .unwrap()
+            .quiesce_frame_digest = quiesce.digest().to_owned();
+        let first = runtime
+            .dispatch_quiesce(
+                quiesce.canonical().as_bytes(),
+                &authority,
+                &supervisor_key,
+                &occurrence_digest,
+                &bootstrap_digest,
+            )
+            .unwrap();
+        let repeated = runtime
+            .dispatch_quiesce(
+                quiesce.canonical().as_bytes(),
+                &authority,
+                &supervisor_key,
+                &occurrence_digest,
+                &bootstrap_digest,
+            )
+            .unwrap();
+        assert_eq!(first.receipt.staging_id(), repeated.receipt.staging_id());
+        assert_eq!(first.sealed_frame, repeated.sealed_frame);
+        let (journal, launcher) = runtime.into_parts();
+        assert_eq!(launcher.releases, 1);
+        assert_eq!(launcher.captures, 1);
+        assert_eq!(launcher.finish_acks.len(), 3);
+        journal.validate().unwrap();
+    }
+}
