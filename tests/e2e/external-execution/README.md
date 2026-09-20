@@ -59,6 +59,16 @@ missing guest implementation or older schema versions describe those checkpoints
 
 ## Allocation journal
 
+Protected-owner wiring checkpoint: node-config admission retains the exact
+verified signed source bytes and signer without reopening the source path.
+All 18 loader tests pass, including signed-fixture admission after in-place
+overwrite and atomic pathname replacement. Raw allocation reservation, contact
+claim, occurrence binding and channel registration are app-private; this closes
+the cross-crate mutation surface but does not implement the placement owner.
+The planned owner must independently load the capsule/products and join the
+installed lifecycle binding before granting a one-shot contact permit. All 14
+allocation/channel Rust regressions also pass after the visibility change.
+
 `test_allocation_journal.py` executes the exact production SQLite DDL extracted
 from `ryeos-app`, with no Rust build, node, credentials or cloud contact:
 

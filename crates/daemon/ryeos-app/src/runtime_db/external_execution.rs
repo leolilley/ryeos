@@ -431,7 +431,7 @@ impl RuntimeDb {
 
     /// Idempotent reservation; no allocator may be contacted here. Unknown
     /// prior calls and quarantined occurrences retain capacity across restart.
-    pub fn reserve_external_allocation(
+    pub(crate) fn reserve_external_allocation(
         &self,
         reservation: &ExternalAllocationReservation,
     ) -> Result<ExternalAllocationRecord> {
@@ -483,7 +483,7 @@ impl RuntimeDb {
 
     /// Only the winner of this durable CAS may contact the allocator.
     /// false means no new call, including after an ambiguous response/crash.
-    pub fn claim_external_allocation_contact(
+    pub(crate) fn claim_external_allocation_contact(
         &self,
         placement: &str,
         request_digest: &str,
@@ -513,7 +513,7 @@ impl RuntimeDb {
 
     /// Bind the exact returned occurrence to the original pending contact.
     /// This is allocation observation only, not release or completion proof.
-    pub fn bind_external_allocation(
+    pub(crate) fn bind_external_allocation(
         &self,
         placement: &str,
         occurrence: &ExternalAllocationOccurrence,

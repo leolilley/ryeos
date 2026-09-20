@@ -51,6 +51,7 @@ struct VerifiedItem {
     ctx: NodeItemContext,
     signer_fingerprint: String,
     body: Value,
+    signed_source: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,9 @@ impl NodeConfigSource {
 pub(crate) struct NodeConfigAdmission {
     pub(crate) source_file: PathBuf,
     pub(crate) command_provenance: ryeos_runtime::CommandProvenance,
+    /// Exact bytes verified by the loader, never a re-read of source_file.
+    pub(crate) signed_source: std::sync::Arc<str>,
+    pub(crate) signer_fingerprint: String,
 }
 
 pub(crate) struct NodeConfigSnapshotBuilder {
@@ -123,9 +127,10 @@ impl NodeConfigSnapshotBuilder {
     fn admit(
         &mut self,
         record: Box<dyn super::CompiledNodeConfigItem>,
-        context: &NodeItemContext,
+        verified: &VerifiedItem,
         source: &NodeConfigSource,
     ) -> Result<()> {
+        let context = &verified.ctx;
         if record.section_name() != context.section {
             bail!(
                 "node-config compiler `{}` returned record for section `{}`",
@@ -136,6 +141,8 @@ impl NodeConfigSnapshotBuilder {
         let admission = NodeConfigAdmission {
             source_file: context.source_file.clone(),
             command_provenance: source.command_provenance()?,
+            signed_source: verified.signed_source.clone(),
+            signer_fingerprint: verified.signer_fingerprint.clone(),
         };
         record.admit(self, &admission)
     }
@@ -328,6 +335,7 @@ fn verify_and_parse(
         ctx,
         signer_fingerprint,
         body,
+        signed_source: content.into(),
     })
 }
 
@@ -453,7 +461,7 @@ impl<'a> BootstrapLoader<'a> {
                                     section_name
                                 )
                             })?;
-                    builder.admit(record, &verified.ctx, &scan_root.source)?;
+                    builder.admit(record, &verified, &scan_root.source)?;
                     count = count.saturating_add(1);
                 }
             }
@@ -711,6 +719,93 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_retains_verified_bytes_after_source_replacement() {
+        #[derive(Debug, Clone)]
+        struct CheckSource {
+            expected: std::sync::Arc<str>,
+            signer: String,
+        }
+        impl super::super::CompiledNodeConfigItem for CheckSource {
+            fn section_name(&self) -> &'static str {
+                "routes"
+            }
+            fn admit(
+                self: Box<Self>,
+                _: &mut NodeConfigSnapshotBuilder,
+                admission: &NodeConfigAdmission,
+            ) -> Result<()> {
+                assert_eq!(admission.signed_source, self.expected);
+                assert_eq!(admission.signer_fingerprint, self.signer);
+                assert_ne!(
+                    fs::read_to_string(&admission.source_file)?,
+                    self.expected.as_ref()
+                );
+                Ok(())
+            }
+        }
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .unwrap()
+            .to_path_buf();
+        let trust = TrustStore::load_from_dir(
+            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("current.yaml");
+        fs::copy(
+            workspace.join("bundles/ryeos-ui/.ai/node/routes/ui/session/current.yaml"),
+            &path,
+        )
+        .unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let expected_signer = ryeos_engine::item_resolution::parse_signature_header(
+            &original,
+            &node_config_envelope(),
+        )
+        .unwrap()
+        .signer_fingerprint;
+        let files = scan_yaml_files(dir.path(), false).unwrap();
+        let verified = verify_and_parse(&files[0], dir.path(), "routes", &trust).unwrap();
+        let check = CheckSource {
+            expected: original.into(),
+            signer: expected_signer,
+        };
+        fs::write(&path, "replaced after verification").unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(
+            &[],
+            CommandRegistrationAuthority {
+                claim_rules: Vec::new(),
+                system_source_caps: Vec::new(),
+                bundle_source_caps: Default::default(),
+            },
+        )
+        .unwrap();
+        builder
+            .admit(
+                Box::new(check.clone()),
+                &verified,
+                &NodeConfigSource::Node {
+                    command_registration_caps: Vec::new(),
+                },
+            )
+            .unwrap();
+        let replacement = dir.path().join("replacement.yaml");
+        fs::write(&replacement, "atomic replacement after verification").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        builder
+            .admit(
+                Box::new(check),
+                &verified,
+                &NodeConfigSource::Node {
+                    command_registration_caps: Vec::new(),
+                },
+            )
+            .unwrap();
+    }
 
     #[test]
     fn strip_signature_removes_signed_line() {

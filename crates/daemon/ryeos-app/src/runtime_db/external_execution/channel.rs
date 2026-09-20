@@ -103,7 +103,7 @@ impl RuntimeDb {
     /// Called only by protected placement admission after exact allocation.
     /// The caller must retain the corresponding supervisor private key outside
     /// the candidate. Registering a public binding alone enables no execution.
-    pub fn register_external_execution_channel(
+    pub(crate) fn register_external_execution_channel(
         &self,
         binding: &ExecutionChannelBinding,
     ) -> Result<()> {
