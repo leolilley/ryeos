@@ -1319,7 +1319,7 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use lillux::crypto::SigningKey;
@@ -1342,7 +1342,7 @@ mod tests {
         (binding, owner, supervisor)
     }
 
-    fn pending_channel(
+    pub(in super::super) fn pending_channel(
         db: &RuntimeDb,
         suffix: &str,
         occurrence_id: &str,
@@ -1606,7 +1606,11 @@ mod tests {
         let digest = lillux::sha256_hex(&bytes);
         (bytes, digest)
     }
-    fn ready(db: &RuntimeDb, binding: &ExecutionChannelBinding, supervisor: &SigningKey) -> String {
+    pub(in super::super) fn ready(
+        db: &RuntimeDb,
+        binding: &ExecutionChannelBinding,
+        supervisor: &SigningKey,
+    ) -> String {
         let (wire, digest) = wire(
             binding,
             supervisor,

@@ -144,6 +144,50 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.db.execute("DELETE FROM external_execution_terminal_observation")
 
+    def test_connector_is_one_use_immutable_and_blocks_settlement_while_live(self):
+        self.reserve()
+        self.phase("contact_pending")
+        self.db.execute(
+            "UPDATE external_execution_allocation SET phase='bound', occurrence_json='{}'")
+        self.db.execute("""INSERT INTO external_execution_channel
+            VALUES('T-one','channel-binding',
+                '{"execution_binding_hash":"execution-binding"}',
+                'prepared',NULL,NULL,NULL)""")
+        self.db.execute(
+            "UPDATE external_execution_channel SET state='running' WHERE placement_thread_id='T-one'")
+        self.db.execute("""INSERT INTO external_execution_frame
+            VALUES('channel-binding','owner_to_supervisor',1,1,'release-digest',
+                '{"frame":{"payload":{"kind":"release"}}}',2,0,'pending')""")
+        self.db.execute("""INSERT INTO external_execution_connector VALUES(
+            'T-one','channel-binding','execution-binding',
+            'ryeos.external-candidate.connector.v1','artifact',1,
+            'generation','capability','prepared',NULL,NULL,1,NULL,NULL,NULL)""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "UPDATE external_execution_connector SET capability_hash='changed'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("DELETE FROM external_execution_connector")
+        self.db.execute("""UPDATE external_execution_connector
+            SET state='connected',peer_process_identity_json='{}',
+                peer_process_identity_digest='peer',connected_at_ms=2""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("""UPDATE external_execution_connector
+                SET peer_process_identity_json='{"changed":true}'""")
+        self.db.execute(
+            "INSERT INTO external_execution_termination_intent VALUES('T-one','{}')")
+        self.db.execute(
+            "INSERT INTO external_execution_terminal_observation VALUES('T-one','{}')")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.phase("terminated")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("""UPDATE external_execution_connector
+                SET state='closed',peer_process_identity_json='{"changed":true}',
+                    closed_at_ms=3,close_reason='disconnected'""")
+        self.db.execute("""UPDATE external_execution_connector
+            SET state='closed',closed_at_ms=3,close_reason='disconnected'""")
+        self.phase("terminated")
+        self.assertEqual(self.guard(), 0)
+
     def test_supervisor_activation_is_separate_immutable_bound_effect(self):
         self.reserve()
         with self.assertRaises(sqlite3.IntegrityError):

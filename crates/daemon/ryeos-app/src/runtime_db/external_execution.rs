@@ -10,6 +10,7 @@ use super::*;
 use anyhow::ensure;
 
 mod channel;
+pub(crate) mod connector;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
     ExternalSupervisorExchange,
@@ -59,6 +60,86 @@ CREATE TABLE external_execution_import (
     completion_request_digest TEXT NOT NULL,
     export_frame_digest TEXT NOT NULL
 );
+
+CREATE TABLE external_execution_connector (
+    placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
+    channel_binding_digest TEXT NOT NULL,
+    execution_binding_hash TEXT NOT NULL,
+    connector_protocol TEXT NOT NULL,
+    connector_artifact_hash TEXT NOT NULL,
+    connector_artifact_bytes INTEGER NOT NULL CHECK (connector_artifact_bytes > 0),
+    capability_generation TEXT NOT NULL,
+    capability_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('prepared','connected','closed')),
+    peer_process_identity_json TEXT,
+    peer_process_identity_digest TEXT,
+    prepared_at_ms INTEGER NOT NULL,
+    connected_at_ms INTEGER,
+    closed_at_ms INTEGER,
+    close_reason TEXT,
+    CHECK (
+        ((state='prepared' AND peer_process_identity_json IS NULL
+              AND peer_process_identity_digest IS NULL AND connected_at_ms IS NULL
+              AND closed_at_ms IS NULL AND close_reason IS NULL)
+         OR (state='connected' AND peer_process_identity_json IS NOT NULL
+              AND peer_process_identity_digest IS NOT NULL AND connected_at_ms IS NOT NULL
+              AND closed_at_ms IS NULL AND close_reason IS NULL)
+         OR (state='closed' AND closed_at_ms IS NOT NULL AND close_reason IS NOT NULL
+              AND ((peer_process_identity_json IS NULL AND peer_process_identity_digest IS NULL
+                    AND connected_at_ms IS NULL)
+                OR (peer_process_identity_json IS NOT NULL
+                    AND peer_process_identity_digest IS NOT NULL
+                    AND connected_at_ms IS NOT NULL))))
+        AND (connected_at_ms IS NULL OR connected_at_ms >= prepared_at_ms)
+        AND (closed_at_ms IS NULL OR closed_at_ms >= prepared_at_ms)
+        AND (connected_at_ms IS NULL OR closed_at_ms IS NULL
+             OR closed_at_ms >= connected_at_ms)
+    )
+);
+CREATE TRIGGER external_execution_connector_insert_guard
+BEFORE INSERT ON external_execution_connector
+WHEN NEW.state!='prepared'
+ OR NOT EXISTS(SELECT 1 FROM external_execution_allocation a
+    JOIN external_execution_channel c ON c.placement_thread_id=a.placement_thread_id
+    WHERE a.placement_thread_id=NEW.placement_thread_id AND a.phase='bound'
+      AND c.binding_digest=NEW.channel_binding_digest AND c.state='running'
+      AND json_extract(c.binding_json,'$.execution_binding_hash')=NEW.execution_binding_hash)
+ OR NOT EXISTS(SELECT 1 FROM external_execution_frame f
+    WHERE f.binding_digest=NEW.channel_binding_digest
+      AND f.direction='owner_to_supervisor'
+      AND json_extract(f.frame_json,'$.frame.payload.kind')='release')
+BEGIN SELECT RAISE(ABORT, 'external connector requires exact released channel authority'); END;
+CREATE TRIGGER external_execution_connector_transition_guard
+BEFORE UPDATE ON external_execution_connector
+WHEN NEW.placement_thread_id != OLD.placement_thread_id
+ OR NEW.channel_binding_digest != OLD.channel_binding_digest
+ OR NEW.execution_binding_hash != OLD.execution_binding_hash
+ OR NEW.connector_protocol != OLD.connector_protocol
+ OR NEW.connector_artifact_hash != OLD.connector_artifact_hash
+ OR NEW.connector_artifact_bytes != OLD.connector_artifact_bytes
+ OR NEW.capability_generation != OLD.capability_generation
+ OR NEW.capability_hash != OLD.capability_hash
+ OR NEW.prepared_at_ms != OLD.prepared_at_ms
+ OR (OLD.state='prepared' AND NEW.state='closed'
+     AND (NEW.peer_process_identity_json IS NOT NULL
+       OR NEW.peer_process_identity_digest IS NOT NULL
+       OR NEW.connected_at_ms IS NOT NULL))
+ OR (OLD.state='connected'
+     AND (NEW.peer_process_identity_json IS NOT OLD.peer_process_identity_json
+       OR NEW.peer_process_identity_digest IS NOT OLD.peer_process_identity_digest
+       OR NEW.connected_at_ms IS NOT OLD.connected_at_ms))
+ OR NOT ((OLD.state='prepared' AND NEW.state IN ('connected','closed'))
+      OR (OLD.state='connected' AND NEW.state='closed'))
+BEGIN SELECT RAISE(ABORT, 'external connector transition contradicts retained authority'); END;
+CREATE TRIGGER external_execution_connector_no_delete
+BEFORE DELETE ON external_execution_connector
+BEGIN SELECT RAISE(ABORT, 'external connector occurrence is retained'); END;
+CREATE TRIGGER external_execution_connector_settlement_guard
+BEFORE UPDATE OF phase ON external_execution_allocation
+WHEN NEW.phase IN ('no_contact','contacted_no_occurrence','terminated')
+ AND EXISTS(SELECT 1 FROM external_execution_connector c
+    WHERE c.placement_thread_id=OLD.placement_thread_id AND c.state!='closed')
+BEGIN SELECT RAISE(ABORT, 'external allocation retains a live local connector'); END;
 
 CREATE TABLE external_execution_no_occurrence (
     placement_thread_id TEXT PRIMARY KEY REFERENCES external_execution_allocation(placement_thread_id),
@@ -1057,6 +1138,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
         validate_lifecycle_evidence(conn, &record)?;
     }
     channel::validate_channels(conn)?;
+    connector::validate_connectors(conn)?;
     Ok(())
 }
 

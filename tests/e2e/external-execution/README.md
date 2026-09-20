@@ -27,6 +27,34 @@ This checkpoint is protected secret provisioning only. It does not persist a
 connector occurrence, open a listener, authenticate a peer, grant reconnect or
 input-replay authority, configure Codex, or contact a provider.
 
+## Durable one-use connector lifecycle checkpoint
+
+Runtime operator epoch 55 adds a retained controller-local connector occurrence
+after the exact authenticated supervisor Ready has been applied and its one
+candidate Release has been authored. The record binds the placement, channel
+digest, execution binding, signed protocol and artifact coordinates, derived
+capability generation, and capability hash. Its only forward states are
+`prepared -> connected -> closed` or `prepared -> closed`.
+
+The first authenticated peer wins one SQLite compare-and-swap and retains its
+canonical exact Lillux process-incarnation identity. An identical repeat returns
+durable uncertainty rather than reconnect authority; a different peer and every
+post-close connection are refused. Connection rechecks the live session owner,
+workspace readiness, Running channel, sticky revocation, execution deadline,
+and deterministic capability generation inside the writer transaction. Reopen
+rederives the generation and every channel/artifact join, including closed
+history. Capacity settlement is refused until the connector is closed, and the
+row and authenticated peer evidence are immutable.
+
+Focused source evidence on 2026-09-21: connector lifecycle tests cover release
+gating, exact preparation replay, Prepared/Connected/Closed reopen, same-peer
+uncertainty, changed-peer and post-close refusal, revocation/quiescence/stopping/
+expiry/orphan races, retained-generation corruption, terminal closure, and
+capacity settlement exclusion. The independent production-DDL suite covers the
+one-way SQL transitions and passes 26 tests. This checkpoint does not yet open
+the owner-private listener, verify the installed peer executable, relay protocol
+bytes, generate Codex configuration, or contact a provider.
+
 ## Signed connector admission checkpoint
 
 Runtime operator epoch 54, signed external-binding schema 6, external-candidate
