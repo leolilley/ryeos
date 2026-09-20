@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:51:22Z:78d5117d7587e93661f75b96c6cd4d0702c6d2fd64e9a29b37905d15d740d7d9:JMuQI53z21MJrKNCabMcmC1ryk8FQY6bgg+z4lnyGcSpPigkoE6I4A0ofkYfQlnXEAcreSHrnO25sMJRrjg2Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:44:42Z:0696140f41c62d07f573d9242db9c1c8844f388be73d3a61753f716f191e4cb5:uDS/BRsirAYnI3dANDXLBlBrmicr82QNwxONSAeqa8jQF81tHcb/rHaOJj3id0oy0l98f0Ov8iAtE7WzGr45AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Captured output contract for an admitted non-core binary or data-only bundle producer.
@@ -7,24 +7,24 @@ build_products:
   output_roots:
     - name: bundle_tree
       path: products/native-bundle
-      storage: cas
+      storage: content
       bounds:
         maximum_entries: 4096
         maximum_depth: 32
-        maximum_file_bytes: 134217728
-        maximum_total_bytes: 536870912
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
   products:
     - name: native_bundle
       source: {kind: workspace_output, root: bundle_tree}
       path: products/native-bundle/tree
       shape: tree
-      storage: cas
+      storage: content
       required: true
       bounds:
         maximum_entries: 4096
         maximum_depth: 32
-        maximum_file_bytes: 134217728
-        maximum_total_bytes: 536870912
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
@@ -39,12 +39,12 @@ product_relationships:
         declaration_id: subject
       required_product:
         shape: tree
-        storage: cas
+        storage: content
         bounds:
           maximum_entries: 4096
           maximum_depth: 32
-          maximum_file_bytes: 134217728
-          maximum_total_bytes: 536870912
+          maximum_file_bytes: 33554432
+          maximum_total_bytes: 268435456
       qualification:
         policy_ref: config:bundle-release/native-qualification
         required_claims: [native_bundle_release_checks_v1]

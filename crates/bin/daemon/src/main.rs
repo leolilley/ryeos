@@ -1218,7 +1218,7 @@ async fn run(
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
                 isolation,
-                state_store,
+                state_store: Arc::clone(&state_store),
                 engine: engine.clone(),
                 resolution_cache: std::sync::Arc::new(
                     ryeos_app::resolution_cache::ResolutionCache::new(128),
@@ -3552,7 +3552,7 @@ async fn run_service_standalone(
         config: Arc::new(config.clone()),
         daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),
         isolation,
-        state_store,
+        state_store: Arc::clone(&state_store),
         engine: engine.clone(),
         resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(
             128,

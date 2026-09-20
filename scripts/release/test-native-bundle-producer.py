@@ -9,6 +9,19 @@ SERVICES = ROOT / "bundles/bundle-release/.ai/services/bundle-release"
 
 
 class NativeBundleProducerSurfaceTests(unittest.TestCase):
+    def test_catalog_transport_does_not_require_publisher_private_custody(self):
+        policy = (ROOT / "crates/daemon/ryeos-app/src/node_policy/sections/bundle_publication.rs").read_text()
+        catalog = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/catalog.rs").read_text()
+        upload = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_catalog.rs").read_text()
+        release = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
+        self.assertIn("pub authorized_uploaders: Vec<String>", policy)
+        self.assertIn("catalog.require_uploader(&ctx.fingerprint)?", upload)
+        self.assertIn("catalog.require_uploader(state.identity.fingerprint())?", release)
+        self.assertIn("catalog_policy.require_uploader(&request.authenticated_principal)?", catalog)
+        self.assertIn("authenticated_principal: Some(request.authenticated_principal.clone())", catalog)
+        self.assertIn("attestation.verify_with_key(key)?", catalog)
+        self.assertIn("attestation.issuer_fingerprint()? != fingerprint", catalog)
+
     def test_graph_has_closed_ordered_release_operations(self):
         body = GRAPH.read_text()
         operations = [
@@ -65,10 +78,10 @@ class NativeBundleProducerSurfaceTests(unittest.TestCase):
     def test_compiled_handlers_fail_closed_behind_typed_authority_adapter(self):
         handler = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
         owner = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/producer.rs").read_text()
-        self.assertEqual(handler.count("descriptor!("), 5)
-        for custom in ["INPUT_INSPECT", "GENERATION_BUILD", "GENERATION_QUALIFY", "GENERATION_FINALIZE", "SET_COMPOSE"]:
+        self.assertEqual(handler.count("descriptor!("), 4)
+        for custom in ["INPUT_INSPECT", "GENERATION_BUILD", "GENERATION_CAPTURE", "GENERATION_QUALIFY", "GENERATION_FINALIZE", "SET_COMPOSE"]:
             self.assertIn(f"pub const {custom}: ServiceDescriptor", handler)
-        self.assertIn("run_authenticated_graph", handler)
+        self.assertIn("run_pinned_release_graph", handler)
         self.assertIn("product_qualification::qualify", handler)
         self.assertNotIn("store_object(&result)", handler)
         self.assertIn("pub const SUBMIT: ServiceDescriptor", handler)

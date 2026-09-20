@@ -1,6 +1,14 @@
 //! Native bundle producer service endpoints.
 
-use std::{collections::BTreeMap, future::Future, io::Read as _, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    io::Read as _,
+    path::{Path, PathBuf},
+    pin::Pin,
+    process::{Command, Stdio},
+    sync::Arc,
+};
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -18,10 +26,12 @@ use ryeos_app::{
 use ryeos_executor::executor::ServiceAvailability;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 const RELEASE_GRAPH_REF: &str = "graph:ryeos/bundle-release/publish";
 const NATIVE_BUILD_GRAPH_REF: &str = "graph:ryeos/bundle-release/native-build";
-const NATIVE_QUALIFY_GRAPH_REF: &str = "graph:ryeos/bundle-release/native-qualify";
+const SIGNED_CAPTURE_GRAPH_REF: &str = "graph:ryeos/bundle-release/signed-capture";
+const NATIVE_QUALIFY_TOOL_REF: &str = "tool:ryeos/bundle-release/native-qualify";
 const CATALOG_UPLOAD_SERVICE: &str = "service:bundle-catalog/upload";
 const CATALOG_PUBLISH_SERVICE: &str = "service:bundle-catalog/publish";
 const CATALOG_BLOB_CHUNK_BYTES: usize = 512 * 1024;
@@ -75,6 +85,22 @@ async fn catalog_remote_publish_handler(
     context: HandlerContext,
     state: Arc<AppState>,
 ) -> anyhow::Result<Value> {
+    // The CAS guard is deliberately thread-bound. Keep its entire lifetime,
+    // including network waits, on one blocking worker instead of moving it
+    // between async executor threads or dropping GC protection during upload.
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(catalog_remote_publish_locked(params, context, state))
+    })
+    .await
+    .context("catalog remote publication worker failed")?
+}
+
+async fn catalog_remote_publish_locked(
+    params: Value,
+    context: HandlerContext,
+    state: Arc<AppState>,
+) -> anyhow::Result<Value> {
     context
         .require_verified()
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -84,13 +110,11 @@ async fn catalog_remote_publish_handler(
         .require::<ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy>(
     )?;
     let catalog = policy.require_catalog(&request.catalog_namespace)?;
-    anyhow::ensure!(
-        context.fingerprint == catalog.publisher_fingerprint
-            && state.identity.fingerprint() == catalog.publisher_fingerprint,
-        "remote catalog publication must retain the exact configured publisher principal"
-    );
+    // The caller already passed service capability admission. The remote call
+    // is signed by this node, not by the isolated artifact publisher.
+    catalog.require_uploader(state.identity.fingerprint())?;
     // Publication destinations are operator-configured node remotes. Release
-    // source content must not be able to redirect publisher-authenticated
+    // source content must not be able to redirect authorized-uploader
     // catalog writes through a project-local remotes override.
     let client =
         crate::remote::client::RemoteClient::from_named_remote(&state, &request.remote, None)?;
@@ -235,7 +259,6 @@ struct ContextualReleaseProof<'a> {
     state: &'a AppState,
     context: &'a HandlerContext,
     authority: ryeos_state::PinnedStateAuthority,
-    guard: ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
 }
 
@@ -275,7 +298,8 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
     fn verify_release_evidence(
         &self,
         generation: &ryeos_bundle_publication_contract::BundleGeneration,
-        accepted: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        _accepted: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        accepted_capture: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
         materialization: &ryeos_bundle_publication_contract::PublisherMaterializationResult,
         binding: &ryeos_app::bundle_publication::ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
@@ -302,10 +326,14 @@ impl ryeos_app::bundle_publication::BundleReleaseEvidenceProof for ContextualRel
             "native bundle release requires exactly one qualification"
         );
         let required = vec!["native_bundle_release_checks_v1".to_owned()];
+        // Acquire on the synchronous caller's thread. The proof object itself
+        // never owns a thread-affine guard and remains Send + Sync.
+        let guard = self.authority.acquire_shared_guard()?;
         ryeos_app::operator_external_content::product_qualification::verify_current_qualification_for_release(
-            self.state, self.context, &self.authority, &self.guard, self.limits,
-            &accepted.owner_principal, &generation.qualification_evidence_hashes[0],
-            &generation.content_manifest_hash, &required,
+            self.state, self.context, &self.authority, &guard, self.limits,
+            &accepted_capture.owner_principal, &generation.qualification_evidence_hashes[0],
+            &generation.selected_signed_product_witness, &generation.content_manifest_hash,
+            &required,
         )
     }
 }
@@ -459,9 +487,100 @@ async fn run_release_graph(
     .await
 }
 
-async fn run_authenticated_graph(
+fn materialize_release_execution_project(
+    source: &Path,
+    expected_source_hash: &str,
+    signed_build_recipe: &str,
+    signed_capture_recipe: Option<&str>,
+) -> anyhow::Result<tempfile::TempDir> {
+    struct HashingReader<R> {
+        inner: R,
+        digest: Sha256,
+    }
+    impl<R: std::io::Read> std::io::Read for HashingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            self.digest.update(&buffer[..count]);
+            Ok(count)
+        }
+    }
+    let workspace = tempfile::Builder::new()
+        .prefix("ryeos-bundle-release-")
+        .tempdir()?;
+    let mut archive = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start exact release source materialization")?;
+    let stdout = archive
+        .stdout
+        .take()
+        .context("release source materializer has no stdout")?;
+    let mut reader = HashingReader {
+        inner: stdout,
+        digest: Sha256::new(),
+    };
+    {
+        let mut tar = tar::Archive::new(&mut reader);
+        tar.unpack(workspace.path())
+            .context("materialize exact release source archive")?;
+    }
+    std::io::copy(&mut reader, &mut std::io::sink())
+        .context("finish hashing exact release source archive")?;
+    let output = archive
+        .wait_with_output()
+        .context("wait for release source materialization")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "release source materialization failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let materialized_source_hash = format!("{:x}", reader.digest.finalize());
+    anyhow::ensure!(
+        materialized_source_hash == expected_source_hash,
+        "release source HEAD changed after its admitted snapshot was authorized"
+    );
+    let mut directory = workspace.path().to_path_buf();
+    for component in [".ai", "config", "bundle-release"] {
+        directory.push(component);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "release recipe overlay crosses an unsafe source entry"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&directory)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for (name, contents) in [
+        ("native-build-products.yaml", Some(signed_build_recipe)),
+        ("signed-capture-products.yaml", signed_capture_recipe),
+    ] {
+        let Some(contents) = contents else { continue };
+        let recipe_path = directory.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&recipe_path) {
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "release source has an unsafe fixed recipe entry"
+            );
+        }
+        lillux::atomic_write_private(&recipe_path, contents.as_bytes())?;
+    }
+    Ok(workspace)
+}
+
+async fn run_pinned_release_graph(
     graph_ref: &'static str,
-    project_path: std::path::PathBuf,
+    source_project: PathBuf,
+    expected_source_hash: String,
+    signed_build_recipe: String,
+    signed_capture_recipe: Option<String>,
+    recipe_ref: &'static str,
+    expected_recipe_raw_digest: String,
     parameters: Value,
     product_selections: Vec<
         ryeos_state::external_content::products::composition::ProductSelectionInput,
@@ -474,18 +593,52 @@ async fn run_authenticated_graph(
         context.verified,
         "bundle release execution requires an authenticated caller"
     );
-    ryeos_app::execution_policy::authorize_standard_local_live_execution(&context.scopes)?;
-    let project_path = project_path.canonicalize()?;
-    let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
-        &project_path,
-        context.scopes.clone(),
-        &state.isolation,
+    let workspace = tokio::task::spawn_blocking(move || {
+        materialize_release_execution_project(
+            &source_project,
+            &expected_source_hash,
+            &signed_build_recipe,
+            signed_capture_recipe.as_deref(),
+        )
+    })
+    .await
+    .context("release execution project materializer stopped")??;
+    let mut policy = ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
+        ryeos_app::execution_policy::ExecutionResponse::Wait,
+    );
+    policy.ownership = ryeos_app::execution_policy::ExecutionOwnership::RequestScoped;
+    policy.recovery = ryeos_app::execution_policy::ExecutionRecovery::None;
+    policy.validate()?;
+    let project_source =
+        ryeos_executor::execution::project_source::ProjectSource::CaptureLiveFullProject;
+    let mut project_ctx = crate::routes::response_modes::execute_mode::resolve_project_context_off_thread(
+        crate::routes::response_modes::execute_mode::ResolveProjectContextRequest {
+            state: state.as_ref().clone(),
+            source: project_source.clone(),
+            project_path: workspace.path().to_path_buf(),
+            principal_id: context.fingerprint.clone(),
+            checkout_id: format!("bundle-release-{}", uuid::Uuid::new_v4()),
+            pinned_realization: Some(
+                ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+            ),
+            normalization:
+                crate::routes::response_modes::execute_mode::ProjectRootNormalization::CanonicalizeLive,
+            launch_timings: None,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("capture release execution project: {error}"))?;
+    let resolved = crate::routes::response_modes::execute_mode::resolve_execution_contract(
+        &policy,
+        &project_source,
+        &project_ctx,
+        None,
+        None,
+        &context.fingerprint,
+        &context.scopes,
+        &state,
     )?;
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        project_path.clone(),
-        Arc::clone(&state.engine),
-        resolved_authority.project,
-    )?;
+    let effective_path = project_ctx.effective_path.clone();
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -495,19 +648,29 @@ async fn run_authenticated_graph(
             },
         ),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
-            path: project_path.clone(),
+            path: effective_path.clone(),
         },
-        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+        subject_resolution_authority: resolved.provenance.subject_resolution_authority(),
         current_site_id: site_id.clone(),
         origin_site_id: context.execution_origin(&site_id),
         execution_hints: Default::default(),
         scheduled_fire: None,
         validate_only: false,
     };
+    let recipe_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(recipe_ref)?;
+    let resolved_recipe = project_ctx.request_engine.resolve(&plan_ctx, &recipe_ref)?;
+    anyhow::ensure!(
+        resolved_recipe.raw_content_digest == expected_recipe_raw_digest,
+        "admitted native build recipe differs from publisher-authorized bytes"
+    );
+    project_ctx
+        .request_engine
+        .verify(&plan_ctx, resolved_recipe)
+        .context("publisher-authorized native build recipe is not trusted")?;
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
         principal_fingerprint: context.fingerprint.clone(),
         caller_scopes: context.scopes.clone(),
-        engine: Arc::clone(&state.engine),
+        engine: Arc::clone(&project_ctx.request_engine),
         plan_ctx,
         requested_call: None,
     };
@@ -520,11 +683,15 @@ async fn run_authenticated_graph(
         ref_bindings: Default::default(),
         product_selections,
         acting_principal: &acting_principal,
-        project_path: &project_path,
-        provenance,
-        lifecycle_authority: resolved_authority.lifecycle,
+        project_path: &effective_path,
+        provenance: resolved.provenance,
+        lifecycle_authority: resolved.lifecycle_authority,
         launch_timings: None,
-        original_root_kind: "graph",
+        original_root_kind: if graph_ref.starts_with("tool:") {
+            "tool"
+        } else {
+            "graph"
+        },
         pre_minted_thread_id,
         usage_subject: None,
         usage_subject_asserted_by: None,
@@ -534,11 +701,60 @@ async fn run_authenticated_graph(
         parent_execution_context: None,
         effect_authority: None,
     };
-    ryeos_executor::dispatch::dispatch_with_handler_context(
+    let result = ryeos_executor::dispatch::dispatch_with_handler_context(
         graph_ref, context, &request, &exec_ctx, &state,
     )
     .await
-    .map_err(|error| anyhow::anyhow!("{graph_ref} dispatch failed: {error}"))
+    .map_err(|error| anyhow::anyhow!("{graph_ref} dispatch failed: {error}"));
+    // The context owns the staged snapshot roots until dispatch has made its
+    // authoritative birth/result rows visible. It must not be dropped earlier.
+    drop(project_ctx.take_captured_generation());
+    drop(workspace);
+    result
+}
+
+fn dispatch_result(envelope: &Value) -> anyhow::Result<&Value> {
+    let terminal = envelope
+        .get("result")
+        .context("release execution omitted its terminal result envelope")?;
+    anyhow::ensure!(
+        terminal.get("outcome_code").and_then(Value::as_str) == Some("success"),
+        "release execution did not complete successfully"
+    );
+    terminal
+        .get("result")
+        .filter(|value| !value.is_null())
+        .context("release execution omitted its successful result")
+}
+
+fn accept_dispatch_products(
+    envelope: &Value,
+    state: &AppState,
+) -> anyhow::Result<(
+    String,
+    ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+)> {
+    let thread_id = envelope
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .context("release producer omitted its terminal thread identity")?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(thread_id)?
+        .context("release producer has no admitted launch capsule")?;
+    let accepted = ryeos_app::operator_external_content::product_build::accept_terminal(
+        state, &capsule, thread_id, &guard,
+    )?;
+    ryeos_app::operator_external_content::product_build::verify_current(
+        state,
+        &guard,
+        &accepted.to_value()?,
+        &capsule,
+    )?;
+    let hash = authority.cas_store()?.store_object(&accepted.to_value()?)?;
+    Ok((hash, accepted))
 }
 
 fn input_inspect_handler(
@@ -623,17 +839,57 @@ fn generation_build_handler(
             request.release_input["authored_manifest"] == serde_json::to_value(authored_manifest)?,
             "release manifest differs from the exact source snapshot"
         );
-        let result = run_authenticated_graph(
+        let policy = state.node_policy.require::<
+            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+        >()?;
+        let catalog = policy.require_catalog(&request.catalog_namespace)?;
+        anyhow::ensure!(!catalog.frozen, "bundle publication catalog is frozen");
+        anyhow::ensure!(
+            policy.section_digest()? == request.bundle_publication_policy_section_digest
+                && catalog.trust_epoch == request.trust_epoch,
+            "build request does not match current bundle publication policy"
+        );
+        let recipe_request = ryeos_app::bundle_publication::recipe::AuthorizeBuildRecipeRequest {
+            catalog_namespace: request.catalog_namespace.clone(),
+            bundle_publication_policy_section_digest: request
+                .bundle_publication_policy_section_digest
+                .clone(),
+            trust_epoch: request.trust_epoch,
+            release_input: request.release_input.clone(),
+        };
+        let authorities = state
+            .extensions
+            .get::<BundleReleaseAuthorities>()
+            .context("bundle release publisher authority is unavailable")?;
+        let recipe = authorities
+            .execute(BundleReleaseOperation::AuthorizeBuildRecipe(recipe_request))
+            .await?;
+        let signed_recipe = recipe
+            .get("signed_config")
+            .and_then(Value::as_str)
+            .context("publisher recipe authorization omitted signed Config bytes")?
+            .to_owned();
+        let recipe_raw_digest = recipe
+            .get("body_hash")
+            .and_then(Value::as_str)
+            .context("publisher recipe authorization omitted body identity")?
+            .to_owned();
+        let result = run_pinned_release_graph(
             NATIVE_BUILD_GRAPH_REF,
-            project.into(),
-            serde_json::to_value(&request)?,
+            PathBuf::from(project),
+            source_hash.to_owned(),
+            signed_recipe.clone(),
+            None,
+            ryeos_app::bundle_publication::recipe::BUILD_RECIPE_REF,
+            recipe_raw_digest.clone(),
+            json!({"release_input": request.release_input}),
             Vec::new(),
             None,
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
-        let accepted = ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult::from_value(&result)?;
+        let (accepted_hash, accepted) = accept_dispatch_products(&result, &state)?;
         anyhow::ensure!(
             accepted.producer_ref == NATIVE_BUILD_GRAPH_REF,
             "build result came from another producer"
@@ -648,7 +904,6 @@ fn generation_build_handler(
             "build returned undeclared extra products"
         );
         let cas = state.state_store.pinned_state_authority()?.cas_store()?;
-        let accepted_hash = cas.store_object(&accepted.to_value()?)?;
         let witness_value = cas
             .get_object(&product.witness_hash)?
             .context("native bundle witness is absent")?;
@@ -675,7 +930,150 @@ fn generation_build_handler(
             "selected_product_identity":product.product_name,
             "selected_product_witness":product.witness_hash,
             "input_content_manifest_hash":evidence.manifest_hash,
-            "build_execution_evidence_hash":accepted.producer_partition_identity
+            "build_execution_evidence_hash":accepted.producer_partition_identity,
+            "build_recipe_signed_config":signed_recipe,
+            "build_recipe_raw_digest":recipe_raw_digest
+        }))
+    })
+}
+
+fn generation_capture_handler(
+    params: Value,
+    context: HandlerContext,
+    state: Arc<AppState>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>> {
+    Box::pin(async move {
+        let request: GenerationCaptureRequest = crate::handler_error::parse_request(params)?;
+        BundleReleaseOperation::GenerationCapture(request.clone()).validate()?;
+        let project = request.release_input["project_path"]
+            .as_str()
+            .context("release input has no project path")?;
+        let source_hash = request.release_input["source_snapshot_hash"]
+            .as_str()
+            .context("release input has no source snapshot")?;
+        let policy = state.node_policy.require::<
+            ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
+        >()?;
+        let catalog = policy.require_catalog(&request.catalog_namespace)?;
+        anyhow::ensure!(
+            !catalog.frozen
+                && policy.section_digest()? == request.bundle_publication_policy_section_digest
+                && catalog.trust_epoch == request.trust_epoch,
+            "capture request does not match current bundle publication policy"
+        );
+        let authority = state.state_store.pinned_state_authority()?;
+        let cas = authority.cas_store()?;
+        let materialization =
+            ryeos_bundle_publication_contract::PublisherMaterializationResult::from_current_value(
+                &cas.get_object(&request.materialization_result_hash)?
+                    .context("publisher materialization result is absent")?,
+            )?;
+        anyhow::ensure!(
+            materialization.output_content_manifest_hash == request.signed_tree_manifest_hash,
+            "capture request and publisher materialization disagree on signed tree"
+        );
+        let signed_manifest_bytes = cas
+            .get_blob(&materialization.output_manifest_item_hash)?
+            .context("publisher-signed manifest blob is absent")?;
+        let signed_manifest = String::from_utf8(signed_manifest_bytes)
+            .context("publisher-signed manifest is not UTF-8")?;
+        let (_, build_recipe_body) = request
+            .build_recipe_signed_config
+            .split_once('\n')
+            .context("build recipe signature envelope is absent")?;
+        anyhow::ensure!(
+            lillux::signature::content_hash(build_recipe_body) == request.build_recipe_raw_digest,
+            "retained build recipe bytes disagree with their admitted identity"
+        );
+        let capture_recipe_request =
+            ryeos_app::bundle_publication::recipe::AuthorizeCaptureRecipeRequest {
+                catalog_namespace: request.catalog_namespace.clone(),
+                bundle_publication_policy_section_digest: request
+                    .bundle_publication_policy_section_digest
+                    .clone(),
+                trust_epoch: request.trust_epoch,
+                release_input: request.release_input.clone(),
+                materialization_result_hash: request.materialization_result_hash.clone(),
+                signed_tree_manifest_hash: request.signed_tree_manifest_hash.clone(),
+                manifest_item_hash: materialization.output_manifest_item_hash.clone(),
+                signed_manifest,
+            };
+        let graph_parameters = capture_recipe_request.graph_parameters();
+        let authorities = state
+            .extensions
+            .get::<BundleReleaseAuthorities>()
+            .context("bundle release publisher authority is unavailable")?;
+        let recipe = authorities
+            .execute(BundleReleaseOperation::AuthorizeCaptureRecipe(
+                capture_recipe_request,
+            ))
+            .await?;
+        let signed_capture_recipe = recipe["signed_config"]
+            .as_str()
+            .context("publisher capture recipe omitted signed Config bytes")?
+            .to_owned();
+        let capture_recipe_digest = recipe["body_hash"]
+            .as_str()
+            .context("publisher capture recipe omitted body identity")?
+            .to_owned();
+        let selections = vec![ryeos_state::external_content::products::composition::ProductSelectionInput {
+            target: ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {},
+            selection: ryeos_state::external_content::products::composition::ProductSelection {
+                declaration_id: "unsigned_bundle".to_owned(),
+                witness_hash: request.selected_product_witness,
+                witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                qualification_hash: None,
+            },
+        }];
+        let result = run_pinned_release_graph(
+            SIGNED_CAPTURE_GRAPH_REF,
+            PathBuf::from(project),
+            source_hash.to_owned(),
+            request.build_recipe_signed_config,
+            Some(signed_capture_recipe.clone()),
+            ryeos_app::bundle_publication::recipe::CAPTURE_RECIPE_REF,
+            capture_recipe_digest.clone(),
+            graph_parameters,
+            selections,
+            None,
+            context,
+            Arc::clone(&state),
+        )
+        .await?;
+        let (accepted_hash, accepted) = accept_dispatch_products(&result, &state)?;
+        anyhow::ensure!(
+            accepted.producer_ref == SIGNED_CAPTURE_GRAPH_REF && accepted.products.len() == 1,
+            "signed capture returned another producer or product set"
+        );
+        let product = &accepted.products[0];
+        anyhow::ensure!(
+            product.product_name == "signed_native_bundle",
+            "signed capture omitted its declared product"
+        );
+        let witness_value = cas
+            .get_object(&product.witness_hash)?
+            .context("signed bundle witness is absent")?;
+        let witness = ryeos_state::objects::Attestation::from_value(&witness_value)?;
+        let evidence = ryeos_state::external_content::products::ProductCaptureEvidence::verify_attestation_for_owner(
+            &witness,
+            state.identity.verifying_key(),
+            &accepted.owner_principal,
+        )?;
+        anyhow::ensure!(
+            evidence.manifest_hash == request.signed_tree_manifest_hash,
+            "captured signed-tree witness differs from publisher materialization"
+        );
+        Ok(json!({
+            "schema":"ryeos.bundle_generation_capture.v1",
+            "materialization_result_hash":request.materialization_result_hash,
+            "content_manifest_hash":evidence.manifest_hash,
+            "manifest_item_hash":materialization.output_manifest_item_hash,
+            "signed_product_witness":product.witness_hash,
+            "signed_product_identity":product.product_name,
+            "accepted_capture_result_hash":accepted_hash,
+            "capture_recipe_signed_config":signed_capture_recipe,
+            "capture_recipe_raw_digest":capture_recipe_digest,
+            "publisher_fingerprint":materialization.publisher_fingerprint,
         }))
     })
 }
@@ -693,82 +1091,52 @@ fn generation_qualify_handler(
             .get("project_path")
             .and_then(Value::as_str)
             .context("release input has no project path")?;
-        let release_input_digest =
-            lillux::sha256_hex(lillux::canonical_json(&request.release_input)?.as_bytes());
+        let source_hash = request
+            .release_input
+            .get("source_snapshot_hash")
+            .and_then(Value::as_str)
+            .context("release input has no source snapshot")?;
         let selections = vec![ryeos_state::external_content::products::composition::ProductSelectionInput {
             target: ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {},
             selection: ryeos_state::external_content::products::composition::ProductSelection {
                 declaration_id: "subject".to_owned(),
-                witness_hash: request.manifest_item_hash.clone(),
+                witness_hash: request.signed_product_witness.clone(),
                 witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
                 qualification_hash: None,
             },
         }];
         let verifier_chain_root_id = ryeos_app::thread_lifecycle::new_thread_id();
-        let result = run_authenticated_graph(
-            NATIVE_QUALIFY_GRAPH_REF,
-            project.into(),
-            json!({
-                "release_input":request.release_input,
-                "release_input_digest":release_input_digest,
-                "captured_tree_manifest_hash":request.captured_tree_manifest_hash,
-                "manifest_item_hash":request.manifest_item_hash,
-            }),
+        let result = run_pinned_release_graph(
+            NATIVE_QUALIFY_TOOL_REF,
+            PathBuf::from(project),
+            source_hash.to_owned(),
+            request.build_recipe_signed_config.clone(),
+            Some(request.capture_recipe_signed_config.clone()),
+            ryeos_app::bundle_publication::recipe::CAPTURE_RECIPE_REF,
+            request.capture_recipe_raw_digest.clone(),
+            json!({}),
             selections,
             Some(verifier_chain_root_id.clone()),
             context.clone(),
             Arc::clone(&state),
         )
         .await?;
+        let terminal_result = dispatch_result(&result)?;
         anyhow::ensure!(
-            result.get("schema").and_then(Value::as_str)
+            terminal_result.get("schema").and_then(Value::as_str)
                 == Some("ryeos.product_qualification_result.v1"),
             "qualification returned another contract"
-        );
-        let probe = result
-            .get("probe_evidence")
-            .context("qualification omitted probe evidence")?;
-        anyhow::ensure!(
-            probe.get("release_input_digest").and_then(Value::as_str)
-                == Some(&release_input_digest),
-            "qualification changed release input"
-        );
-        anyhow::ensure!(
-            probe
-                .get("captured_tree_manifest_hash")
-                .and_then(Value::as_str)
-                == Some(&request.captured_tree_manifest_hash),
-            "qualification changed captured tree"
-        );
-        anyhow::ensure!(
-            probe.get("manifest_item_hash").and_then(Value::as_str)
-                == Some(&request.manifest_item_hash),
-            "qualification changed manifest item"
-        );
-        let children = state
-            .state_store
-            .list_thread_children(&verifier_chain_root_id)?;
-        let mut verifiers = children.iter().filter(|child| {
-            child.item_ref == "tool:ryeos/bundle-release/native-qualify"
-                && child.status == "completed"
-        });
-        let verifier = verifiers
-            .next()
-            .context("qualification graph retained no completed verifier child")?;
-        anyhow::ensure!(
-            verifiers.next().is_none(),
-            "qualification graph retained more than one verifier child"
         );
         let publication =
             ryeos_app::operator_external_content::product_qualification::qualify(
                 Arc::clone(&state),
                 context,
                 ryeos_app::operator_external_content::product_qualification::ProductQualificationRequest {
-                    witness_hash: request.manifest_item_hash,
+                    witness_hash: request.signed_product_witness,
                     witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
-                    relationship_name: "native_bundle_to_release_qualification".to_owned(),
-                    verifier_chain_root_id,
-                    verifier_thread_id: verifier.thread_id.clone(),
+                    relationship_name: "signed_native_bundle_to_release_qualification".to_owned(),
+                    verifier_chain_root_id: verifier_chain_root_id.clone(),
+                    verifier_thread_id: verifier_chain_root_id,
                 },
             )
             .await?;
@@ -787,9 +1155,6 @@ fn contextual_proof<'a>(
     context: &'a HandlerContext,
 ) -> anyhow::Result<ContextualReleaseProof<'a>> {
     let authority = state.state_store.pinned_state_authority()?;
-    let cas = authority.cas_store()?;
-    let guard = ryeos_state::CasMutationGuard::shared_from_cas_root(cas.root())?;
-    authority.ensure_guard(&guard)?;
     let limits = state
         .node_policy
         .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
@@ -798,7 +1163,6 @@ fn contextual_proof<'a>(
         state,
         context,
         authority,
-        guard,
         limits,
     })
 }
@@ -812,6 +1176,8 @@ fn generation_finalize_handler(
         let request: GenerationFinalizeRequest = crate::handler_error::parse_request(params)?;
         BundleReleaseOperation::GenerationFinalize(request.clone()).validate()?;
         let proof = contextual_proof(&state, &context)?;
+        // No await occurs while this transaction owns the thread-bound guard.
+        let _guard = proof.authority.acquire_shared_guard()?;
         let generation = ryeos_bundle_publication_contract::BundleGeneration::from_current_value(
             &request.generation,
         )?;
@@ -841,6 +1207,8 @@ fn set_compose_handler(
         let request: SetComposeRequest = crate::handler_error::parse_request(params)?;
         BundleReleaseOperation::SetCompose(request.clone()).validate()?;
         let proof = contextual_proof(&state, &context)?;
+        // Retain GC exclusion from the first read through the final CAS write.
+        let _guard = proof.authority.acquire_shared_guard()?;
         let cas = proof.authority.cas_store()?;
         let mut set = ryeos_bundle_publication_contract::BundleSet::from_current_value(
             &ryeos_app::bundle_publication::PublicationObjectReader::get_object(
@@ -994,14 +1362,13 @@ descriptor!(
     RequestTreeSigningRequest,
     BundleReleaseOperation::RequestTreeSigning
 );
-descriptor!(
-    GENERATION_CAPTURE,
-    "service:bundle-release/generation-capture",
-    "bundle_release.generation_capture",
-    "ryeos.execute.service.bundle-release/generation-capture",
-    GenerationCaptureRequest,
-    BundleReleaseOperation::GenerationCapture
-);
+pub const GENERATION_CAPTURE: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:bundle-release/generation-capture",
+    endpoint: "bundle_release.generation_capture",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.bundle-release/generation-capture"],
+    handler: generation_capture_handler,
+};
 pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle-release/generation-qualify",
     endpoint: "bundle_release.generation_qualify",
@@ -1077,3 +1444,80 @@ pub const ALL: &[ServiceDescriptor] = &[
     SUBMIT,
     STATUS,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_execution_project_is_exact_head_with_only_fixed_recipe_replaced() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join(".ai/knowledge")).unwrap();
+        std::fs::write(source.path().join("source.txt"), b"source\n").unwrap();
+        std::fs::write(source.path().join(".ai/knowledge/existing.md"), b"kept\n").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=RyeOS Test",
+                "-c",
+                "user.email=ryeos@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(source.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let signed = "# ryeos:signed:test\nexact: recipe\n";
+        let source_hash = ryeos_app::bundle_publication::admitted_build::CleanGitSourceSnapshotAuthority::snapshot_hash(source.path()).unwrap();
+        let workspace =
+            materialize_release_execution_project(source.path(), &source_hash, signed, None)
+                .unwrap();
+        assert_eq!(
+            std::fs::read(workspace.path().join("source.txt")).unwrap(),
+            b"source\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                workspace
+                    .path()
+                    .join(".ai/config/bundle-release/native-build-products.yaml")
+            )
+            .unwrap(),
+            signed
+        );
+        assert!(!workspace.path().join(".git").exists());
+        assert!(
+            materialize_release_execution_project(source.path(), &"f".repeat(64), signed, None,)
+                .unwrap_err()
+                .to_string()
+                .contains("HEAD changed")
+        );
+    }
+
+    #[test]
+    fn contextual_proof_does_not_retain_thread_bound_guard() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ContextualReleaseProof<'static>>();
+    }
+
+    #[test]
+    fn release_dispatch_result_requires_successful_nested_terminal_value() {
+        let value = json!({
+            "thread":{"thread_id":"thread:test"},
+            "result":{"outcome_code":"success","result":{"schema":"expected"},"error":null,"artifacts":[]}
+        });
+        assert_eq!(dispatch_result(&value).unwrap()["schema"], "expected");
+        let failed = json!({"result":{"outcome_code":"failed","result":null}});
+        assert!(dispatch_result(&failed).is_err());
+    }
+}

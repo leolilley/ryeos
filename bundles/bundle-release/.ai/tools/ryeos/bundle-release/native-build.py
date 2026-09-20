@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:10:25Z:33b4ca200c7a3c2004413015b8a2562c4305cc8851d71ab35b4008cc78ceda1d:d/ZH4zRsHHGghV5sYSjwn8HpjnCGRZIjiiP24g3JT2yhLLsF0vj0vI5EdEi9URZJUdf0foHuPEyWbGR4sL6rAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T00:34:48Z:80a455e8d9d5798bd9da63835a69ca50e241bc3119a7a9185bec4bf58c4da666:SV4Hqb1TbWVdG/Pouaf2Ar/SPAHtsW5qnBguorDJG46J43I+WKg+KyeK+wxDHMVkFYTZhinjm9MajzsY22aiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/python3
 """Build one exact non-core bundle selected by the ownership contract."""
 import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile
@@ -15,7 +15,9 @@ required = {"schema","project_path","bundle_name","authored_manifest","source_sn
 if not isinstance(value, dict) or set(value) != required: fail("release input shape changed")
 if value["build_profile"] != "release" or not value["clean_output_required"] or value["ambient_target_reuse_allowed"]:
     fail("clean release build is mandatory")
-root = pathlib.Path(value["project_path"]).resolve(strict=True)
+# Source reads are rooted in the admitted pinned execution generation. The
+# original path remains provenance only and is never ambient build authority.
+root = pathlib.Path.cwd().resolve(strict=True)
 parser_path = root / "scripts/release/bundle-payload-ownership.py"
 spec = importlib.util.spec_from_file_location("bundle_payload_ownership", parser_path)
 ownership_parser = importlib.util.module_from_spec(spec)

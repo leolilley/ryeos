@@ -1,6 +1,6 @@
 # Constrained bundle publisher
 
-The release-authority node calls a separately composed publisher over three
+The release-authority node calls a separately composed publisher over five
 purpose-owned HTTP operations. The publisher owns the private publisher key;
 the release-authority daemon never does.
 
@@ -30,6 +30,8 @@ authorities. There is deliberately no generic signing route.
 
 The only accepted paths are:
 
+- `POST /v1/bundle-recipe/authorize-build`
+- `POST /v1/bundle-recipe/authorize-capture`
 - `POST /v1/bundle-tree/sign`
 - `POST /v1/bundle-generation/authorize`
 - `POST /v1/bundle-catalog/authorize-successor`
@@ -39,6 +41,22 @@ decoded through a current strict request schema, and is validated before the
 authority runs. Unknown paths are not routed. Publisher errors do not create a
 second signing surface: callers receive an unsuccessful response and must not
 infer or manufacture an attestation.
+
+The recipe operation accepts only `catalog_namespace`,
+`bundle_publication_policy_section_digest`, `trust_epoch`, and the closed
+`release_input` plan. It rejects Core, unsupported inputs and mismatched policy
+coordinates. The publisher constructs a fixed Config template with exact build
+parameters and bounded product allowances; callers cannot supply Config bytes,
+graph refs, output paths, capabilities or arbitrary signing payloads. The returned
+signed Config and its exact blob/body hashes are not execution admission or proof
+that a source snapshot exists. Normal signature/trust, retained-source, payload
+ownership and product admission checks remain mandatory.
+
+This endpoint is implemented independently of release-graph wiring. The recipe
+must be installed at its fixed identity in a retained per-release execution
+workspace, not written into the clean source checkout or substituted through an
+unchecked ref override. That workspace/source admission and post-sign capture
+integration are still pending; this endpoint alone does not make releases runnable.
 
 The `ryeos-bundle-publisher` binary is the explicit deployment entrypoint. It
 accepts `--publisher-key`, `--bearer-file`, `--cas-root`, and `--policy`, and
@@ -81,6 +99,21 @@ Pin the actual qualification signer public key/fingerprint, publisher fingerprin
 publisher-tool definition/artifact identity, required claims and nonzero trust
 epoch. These values are deployment-specific and cannot be supplied by the source
 repository. A managed-runtime inference artifact is not a native verifier.
+
+Each catalog must also specify `authorized_uploaders`: a sorted, unique list of
+the release **node** public-key fingerprints permitted to upload and publish
+already-signed catalog content. An empty list permits no writes. The publisher
+fingerprint is not implicitly an uploader. Keep the publisher's private key
+exclusively in the constrained publisher; do not install it as a release-node
+identity. Authorize each uploader separately for the bundle-source service
+capabilities it needs. Both service-capability admission and catalog-specific
+uploader policy are required. A release submission's caller needs its own
+release-service capabilities, not the publisher key or the release node key.
+
+Upload sessions remain owned by the actual authenticated uploader. A different
+uploader cannot resume that session, even when both are allowed by catalog policy.
+Catalog/set/generation signatures are always checked against the independent
+publisher identity; transport permission never grants signing authority.
 
 Use the same complete section on the release, bundle-source and consumer nodes:
 the section digest binds the evidence, so independently different catalog lists

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:51:21Z:9e3b28d5a4bc8833c4d5d4392d36a590674e12cd1e4513ef977987510c827da3:aqzgNZfH3MprZKTSH0cosh2acOvoHIYEawTBB7osTnzw4R8L9sKyuBrfMXjDyuPohV6Dk0fHpFY4tXQ5EAUHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T01:14:46Z:fc9c80834dff5a7ea4a8d6aecf1a19ed8f37975af3701c37ca9863461b64ea64:yqqKmmuSLAk2ltuzJ4RS/6DzQ11LNcLlEVRsj7Xl+DTOzBQ3Kq0Rc8776AsNfy7XIZWbnWLKvS2rThbwv57FCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-capture
 version: "1.0.0"
@@ -7,5 +7,12 @@ endpoint: bundle_release.generation_capture
 availability: daemon_only
 required_caps: ["ryeos.execute.service.bundle-release/generation-capture"]
 schema:
+  release_input: object
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  selected_product_witness: string
+  build_recipe_signed_config: string
+  build_recipe_raw_digest: string
   materialization_result_hash: string
   signed_tree_manifest_hash: string

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T03:43:17Z:9148a7ba6c7b61f7e7eb72162051d86a5bea47a1053c792844b3102802dd11dc:Hlz05tHCuQP9qTRu9a5S0Le8J0iFmyiBPVW7RsCJWzVF0T/I4C5lmEy/UyQX/NQdXgQpZrtGKdI9yozR94XQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-20T01:57:09Z:8548aa52993d61b81d1390ceb525a15b4cd12cf3c3196d63567b39380ae59648:y03tRa0gZDH6L7ChSiud5GUDjr5EZcEScPp4HFMP3/C+ofV0H9Z+wCfe/kbHStMJ9kTxWrEMG5oo8nogiKrpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
@@ -126,11 +126,21 @@ operator action, or delegated capability that independently verifies and signs
 only the exact qualified subject selected by policy. Build completion must not
 grant a generic sign-any-hash operation.
 
+Transport admission is separate from publisher custody. Each catalog explicitly
+lists `authorized_uploaders` as node fingerprints; membership permits transport
+only alongside the required service capabilities. The publisher is not implicitly
+an uploader. Upload sessions retain their actual authenticated owner, while every
+artifact signature must independently satisfy the pinned publisher policy. No
+release node needs the publisher private key to upload a signed release.
+
 Bundle-source and consumer nodes independently admit publishers through a
 `bundle_publication` section in their existing atomic, operator-signed node-
 policy generation. It binds catalog namespace, fingerprint, accepted
 claim/policy, trust epoch, and any delegation. This avoids a parallel policy
-authority. The two sections may legitimately differ. General trust-store
+authority. The current implementation binds the complete section digest in
+release evidence, so release, source, consumer, and constrained-publisher policy
+must use the same section. Independent differing sections require a future
+explicit policy-equivalence or delegation contract. General trust-store
 membership alone does not authorize a key for every catalog. Publication must
 prove the snapshot publisher, namespace owner, publication-attestation issuer,
 and selected source section agree or carry an explicit admitted delegation;
@@ -320,6 +330,21 @@ predecessor.
 The first implementation may build from a Git checkout, but it must capture an
 exact source coordinate or closure before claiming a release result. A mutable
 checkout is an input workspace, not durable release identity.
+
+The implemented native-build admission path now treats the checkout only as
+source provenance. After the constrained publisher authors the exact
+per-release recipe, the release node re-materializes and re-hashes the admitted
+Git archive, installs that recipe at the fixed project-overlay Config identity,
+captures the augmented project as a pinned generation, verifies that the
+snapshot overlay resolves the publisher-authored raw digest, and executes from
+that generation. The post-sign transformation follows the same model: the
+publisher authors an exact signed-capture recipe bound to the fixed trusted-
+bundle qualification policy, a second admitted producer captures the signed
+tree, and the parameter-free qualifier derives its subject facts from that
+admitted signed-tree realization. The generation retains both immutable
+accepted results, the publisher materialization, the signed witness, and its
+qualification so authorization can verify the complete build-to-release chain
+without mutating the original accepted result.
 
 For an affected bundle, the first implementation rebuilds every binary payload
 owned by that bundle. It must not preserve unselected output from an ambient

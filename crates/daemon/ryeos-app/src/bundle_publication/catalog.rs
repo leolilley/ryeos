@@ -75,9 +75,7 @@ pub fn stage_local_catalog_closure(
     require_optional_hash(request.expected_current.as_deref(), "expected catalog head")?;
     let policy = state.node_policy.require::<BundlePublicationPolicy>()?;
     let catalog = policy.require_catalog(&request.catalog_namespace)?;
-    if request.authenticated_principal != catalog.publisher_fingerprint {
-        bail!("authenticated principal is not the current catalog publisher");
-    }
+    catalog.require_uploader(&request.authenticated_principal)?;
     let publication_key = ryeos_state::DurableCasPublicationKey::bundle_catalog(
         &catalog.publisher_fingerprint,
         &request.catalog_namespace,
@@ -159,7 +157,7 @@ pub fn inspect_catalog(
     let policy_section_digest = publication_policy.section_digest()?;
     let publisher = format!("fp:{}", catalog_policy.publisher_fingerprint);
     let binding = CatalogPolicyBinding {
-        authenticated_principal: catalog_policy.publisher_fingerprint.clone(),
+        authenticated_principal: None,
         publisher_fingerprint: publisher,
         catalog_namespace: catalog_namespace.to_owned(),
         policy_section_digest: policy_section_digest.clone(),
@@ -209,7 +207,7 @@ struct CurrentCatalogPolicyAuthority<'a> {
     policy: &'a BundlePublicationPolicy,
     policy_section_digest: String,
     node_policy_generation_digest: &'a str,
-    trust_store: &'a ryeos_engine::trust::TrustStore,
+    trust_store: &'a ryeos_state::TrustStore,
 }
 
 struct CasCatalogClosureAvailability<'a> {
@@ -220,7 +218,8 @@ struct CasCatalogClosureAvailability<'a> {
 /// Local policy decision bound to the durable upload/publication session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogPolicyBinding {
-    pub authenticated_principal: String,
+    /// None is read-only inspection, never an upload/publication request.
+    pub authenticated_principal: Option<String>,
     pub publisher_fingerprint: String,
     pub catalog_namespace: String,
     pub policy_section_digest: String,
@@ -425,10 +424,11 @@ impl CatalogPolicyAuthority for CurrentCatalogPolicyAuthority<'_> {
             bail!("catalog binding does not name the exact live node-policy generation");
         }
         let expected_publisher = format!("fp:{}", catalog.publisher_fingerprint);
-        if binding.publisher_fingerprint != expected_publisher
-            || binding.authenticated_principal != catalog.publisher_fingerprint
-        {
+        if binding.publisher_fingerprint != expected_publisher {
             bail!("catalog binding publisher is not authorized by current node policy");
+        }
+        if let Some(uploader) = &binding.authenticated_principal {
+            catalog.require_uploader(uploader)?;
         }
         self.publisher_key(&catalog.publisher_fingerprint)?;
         Ok(())
@@ -491,7 +491,6 @@ impl CurrentCatalogPolicyAuthority<'_> {
     fn publisher_key(&self, fingerprint: &str) -> anyhow::Result<&lillux::crypto::VerifyingKey> {
         self.trust_store
             .get(fingerprint)
-            .map(|signer| &signer.verifying_key)
             .with_context(|| format!("catalog publisher {fingerprint} is not currently trusted"))
     }
 
@@ -552,12 +551,10 @@ pub fn publish_catalog(
     let publication_policy = state.node_policy.require::<BundlePublicationPolicy>()?;
     let catalog_policy = publication_policy.require_catalog(&request.catalog_namespace)?;
     let publisher_principal = format!("fp:{}", catalog_policy.publisher_fingerprint);
-    if request.authenticated_principal != catalog_policy.publisher_fingerprint {
-        bail!("authenticated principal is not the current catalog publisher");
-    }
+    catalog_policy.require_uploader(&request.authenticated_principal)?;
     let policy_section_digest = publication_policy.section_digest()?;
     let binding = CatalogPolicyBinding {
-        authenticated_principal: request.authenticated_principal.clone(),
+        authenticated_principal: Some(request.authenticated_principal.clone()),
         publisher_fingerprint: publisher_principal,
         catalog_namespace: request.catalog_namespace.clone(),
         policy_section_digest: policy_section_digest.clone(),
@@ -851,8 +848,8 @@ fn validate_binding(binding: &CatalogPolicyBinding) -> anyhow::Result<()> {
         .strip_prefix("fp:")
         .context("catalog publisher must be a fingerprint principal")?;
     require_hash(publisher, "catalog publisher fingerprint")?;
-    if binding.authenticated_principal != publisher {
-        bail!("authenticated catalog publisher disagrees with policy publisher");
+    if let Some(uploader) = &binding.authenticated_principal {
+        require_hash(uploader, "authenticated catalog uploader")?;
     }
     require_name(&binding.catalog_namespace, "catalog namespace")?;
     require_hash(
@@ -893,4 +890,79 @@ fn require_name(value: &str, label: &str) -> anyhow::Result<()> {
         bail!("{label} must be a bounded lowercase identifier");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod transport_binding_tests {
+    use super::*;
+
+    #[test]
+    fn trusted_uploader_cannot_sign_publisher_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let publisher =
+            crate::identity::NodeIdentity::create(&temp.path().join("publisher.pem")).unwrap();
+        let uploader =
+            crate::identity::NodeIdentity::create(&temp.path().join("uploader.pem")).unwrap();
+        let mut trust = ryeos_state::TrustStore::new();
+        trust.insert(
+            publisher.fingerprint().to_owned(),
+            *publisher.verifying_key(),
+        );
+        trust.insert(uploader.fingerprint().to_owned(), *uploader.verifying_key());
+        let policy = BundlePublicationPolicy {
+            schema: 1,
+            catalogs: vec![],
+        };
+        let authority = CurrentCatalogPolicyAuthority {
+            policy: &policy,
+            policy_section_digest: policy.section_digest().unwrap(),
+            node_policy_generation_digest: "unused-for-signature-test",
+            trust_store: &trust,
+        };
+        let publisher_principal = format!("fp:{}", publisher.fingerprint());
+        for (identity, expected) in [(&publisher, true), (&uploader, false)] {
+            let signer = crate::state_store::NodeIdentitySigner::from_identity(identity);
+            let attestation = Attestation::unsigned(
+                "a".repeat(64),
+                BUNDLE_CATALOG_RELEASE_CLAIM.into(),
+                BUNDLE_PUBLICATION_POLICY.into(),
+                "2026-09-19T00:00:00Z".into(),
+                None,
+                serde_json::json!({}),
+            )
+            .sign(&signer)
+            .unwrap();
+            assert_eq!(
+                authority
+                    .verify_publisher_attestation(
+                        &attestation,
+                        &publisher_principal,
+                        BUNDLE_CATALOG_RELEASE_CLAIM,
+                        BUNDLE_PUBLICATION_POLICY,
+                    )
+                    .is_ok(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn transport_and_publisher_are_distinct_coordinates() {
+        let mut binding = CatalogPolicyBinding {
+            authenticated_principal: Some("b".repeat(64)),
+            publisher_fingerprint: format!("fp:{}", "a".repeat(64)),
+            catalog_namespace: "official".into(),
+            policy_section_digest: "c".repeat(64),
+            node_policy_generation_digest: "d".repeat(64),
+        };
+        // Structural binding accepts separate identities. Live policy and
+        // signature verification independently authorize each at admission.
+        validate_binding(&binding).unwrap();
+        binding.authenticated_principal = Some("invalid".into());
+        assert!(validate_binding(&binding).is_err());
+        binding.authenticated_principal = None;
+        validate_binding(&binding).unwrap(); // read-only inspection
+        binding.publisher_fingerprint = "invalid".into();
+        assert!(validate_binding(&binding).is_err());
+    }
 }

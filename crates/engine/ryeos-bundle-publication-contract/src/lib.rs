@@ -115,6 +115,9 @@ pub struct BundleGeneration {
     pub selected_product_identity: String,
     pub selected_product_witness: String,
     pub publisher_materialization_result_hash: String,
+    pub accepted_capture_result_hash: String,
+    pub selected_signed_product_identity: String,
+    pub selected_signed_product_witness: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub source_snapshot_hash: Option<String>,
     /// Attestation object hashes. Their subjects retain the qualified objects.
@@ -347,10 +350,22 @@ impl BundleGeneration {
                 "publisher materialization result",
                 &self.publisher_materialization_result_hash,
             ),
+            (
+                "accepted capture result",
+                &self.accepted_capture_result_hash,
+            ),
+            (
+                "selected signed product witness",
+                &self.selected_signed_product_witness,
+            ),
         ] {
             hash64(hash, label)?;
         }
         name(&self.selected_product_identity, "selected product identity")?;
+        name(
+            &self.selected_signed_product_identity,
+            "selected signed product identity",
+        )?;
         optional_hash(&self.source_snapshot_hash, "source snapshot")?;
         sorted_hashes(
             &self.qualification_evidence_hashes,

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:51:21Z:5e9fc8f12644a7f9a746252c35dea34471e1ae0cddda88f3b2f9c5c194b8a77a:cHPLQS+K2C7TUCSlb+Af2GcNUZV7sQUBqQJpcscqQcV+klAqByyYXxATWv56uZPiXWlXChkO5KaswR9QSRcJDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T00:34:48Z:d3eff1f96250a11cac58a275dc7a14e35d9f63e934facde5c341ee193a640655:hqVOUqKyYie8tOF2UUyFXXvj2jPt1MAfB0vY02yoVf+AoZFLys3ej44RXcL9I9hqN+tA7YSG11+pKn+XVtKHAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-build
 version: "1.0.0"
@@ -8,3 +8,6 @@ availability: daemon_only
 required_caps: ["ryeos.execute.service.bundle-release/generation-build"]
 schema:
   release_input: object
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer

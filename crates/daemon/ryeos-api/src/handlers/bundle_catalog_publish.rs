@@ -1,8 +1,8 @@
-//! Publisher-authenticated bundle catalog head publication.
+//! Authorized-uploader bundle catalog head publication.
 //!
 //! Catalog construction and signing remain producer-authority operations. This
 //! endpoint is the distinct bundle-source mutation boundary: it derives the
-//! publisher principal exclusively from authenticated handler context and
+//! uploader principal exclusively from authenticated handler context and
 //! admits the already publisher-authored candidate through the catalog CAS.
 
 use std::sync::Arc;

@@ -13,7 +13,7 @@ class ConsumerUpdateContract(unittest.TestCase):
         for required in (
             "BundleSetUpdateSelection", "expected_catalog_publication_attestation_hash",
             "operator_signing_key", "StoppedBundleSetUpdateAuthority",
-            "async fn prepare", "apply_stopped_bundle_set", "requires_stopped_node", "admit_journal",
+            "fn prepare", "apply_stopped_bundle_set", "requires_stopped_node", "admit_journal",
         ):
             self.assertIn(required, source)
         self.assertNotIn("install_single_bundle", source)

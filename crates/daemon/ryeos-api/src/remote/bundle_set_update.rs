@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use ryeos_app::{
-    bundle_publication::{PublicationObjectReader, consumer},
+    bundle_publication::consumer,
     bundle_set_transaction::{
         BundleSetActionKind, InstalledBundleIdentity, PreparedBundleSetAction,
         StoppedBundleSetApplyRequest,

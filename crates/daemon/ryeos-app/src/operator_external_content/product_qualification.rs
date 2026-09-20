@@ -1203,6 +1203,7 @@ pub fn verify_current_qualification_for_release(
     limits: ryeos_state::object_closure::ObjectClosureLimits,
     owner_principal: &str,
     qualification_hash: &str,
+    expected_product_witness: &str,
     expected_subject_manifest: &str,
     required_claims: &[String],
 ) -> anyhow::Result<()> {
@@ -1214,6 +1215,9 @@ pub fn verify_current_qualification_for_release(
         owner_principal,
         qualification_hash,
     )?;
+    if proof.evidence.product_witness_hash != expected_product_witness {
+        bail!("qualification attests a different release product witness");
+    }
     if proof.evidence.result.subject_manifest_hash != expected_subject_manifest {
         bail!("qualification attests a different release manifest");
     }

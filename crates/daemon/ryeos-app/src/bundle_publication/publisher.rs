@@ -60,6 +60,20 @@ pub struct SignedBundleTree {
 }
 
 pub trait ConstrainedBundleTreePublisher: Send + Sync {
+    fn authorize_build_recipe(
+        &self,
+        _request: &super::recipe::AuthorizeBuildRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("publisher has no explicit release recipe authoring authority")
+    }
+
+    fn authorize_capture_recipe(
+        &self,
+        _request: &super::recipe::AuthorizeCaptureRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("publisher has no explicit signed-capture recipe authoring authority")
+    }
+
     fn materialize_and_sign(
         &self,
         candidate: &VerifiedPublisherCandidate,

@@ -72,11 +72,17 @@ impl BundleReleaseEvidenceProof for FetchedCasReleaseProof {
         &self,
         generation: &BundleGeneration,
         accepted: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        accepted_capture: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
         materialization: &ryeos_bundle_publication_contract::PublisherMaterializationResult,
         binding: &ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
-        self.inner
-            .verify_release_evidence(generation, accepted, materialization, binding)
+        self.inner.verify_release_evidence(
+            generation,
+            accepted,
+            accepted_capture,
+            materialization,
+            binding,
+        )
     }
 }
 

@@ -105,6 +105,12 @@ fn generation_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
     push_kind(&mut links, &object.manifest_item_hash, "item_source");
     push_kind(&mut links, &object.accepted_product_result_hash, ryeos_state::external_content::products::accepted_result::PRODUCT_BUILD_ACCEPTED_RESULT_KIND);
     push_kind(&mut links, &object.selected_product_witness, "attestation");
+    push_kind(&mut links, &object.accepted_capture_result_hash, ryeos_state::external_content::products::accepted_result::PRODUCT_BUILD_ACCEPTED_RESULT_KIND);
+    push_kind(
+        &mut links,
+        &object.selected_signed_product_witness,
+        "attestation",
+    );
     push_kind(
         &mut links,
         &object.publisher_materialization_result_hash,

@@ -10,6 +10,8 @@ DOC = (ROOT / "deploy/constrained-bundle-publisher.md").read_text()
 COMMAND = (ROOT / "crates/bin/daemon/src/bin/ryeos-bundle-publisher.rs").read_text()
 
 PATHS = (
+    "v1/bundle-recipe/authorize-build",
+    "v1/bundle-recipe/authorize-capture",
     "v1/bundle-tree/sign",
     "v1/bundle-generation/authorize",
     "v1/bundle-catalog/authorize-successor",
@@ -20,7 +22,7 @@ for path in PATHS:
     assert f'"/{path}"' in SERVER, f"server path missing: {path}"
     assert f"`POST /{path}`" in DOC, f"deployment contract missing: {path}"
 
-assert SERVER.count(".route(") == 3, "publisher surface gained an unreviewed route"
+assert SERVER.count(".route(") == 5, "publisher surface gained an unreviewed route"
 assert "DefaultBodyLimit::max(MAX_BODY_BYTES)" in SERVER
 assert "operation.validate()" in SERVER
 assert "ct_eq" in SERVER
@@ -33,4 +35,4 @@ assert "is_loopback" in COMMAND
 assert "LocalConstrainedPublisherAuthority::new_with_cas" in COMMAND
 assert "axum::serve" in COMMAND
 
-print("constrained publisher surface: 3/3 exact operations")
+print("constrained publisher surface: 5/5 exact operations")

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:10:25Z:29881be8e9331c91b906b63ccd339e1a1d3befd4d5aa3fc416dcb35183d6dbc0:rYMPgrMBqB+j+aKg7uOGU3Mkp3LOG9MngzvUXgc9iUNSsLcPC4sRgDmmXgn4mJJTD7RUo1z8fmXpwoncbZzRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T01:46:30Z:a9d75a56eb0e23037e527551d74f30c7238eb9d7f5ea5fbbf9eff4e12f5ff003:BeHFb8UQM/9xmlPQTXkNIQnPxmb63i0YoOFmssSz5l3CMNJgoDiYS+/o1km2yuA4x0p6xKAuqeFaQ6Hwqe/kBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -73,6 +73,9 @@ config:
         item_id: service:bundle-release/generation-build
         params:
           release_input: "${state.release_input}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
       assign:
         accepted_product: "${result}"
       next: {type: unconditional, to: request_tree_signing}
@@ -91,6 +94,13 @@ config:
       action:
         item_id: service:bundle-release/generation-capture
         params:
+          release_input: "${state.release_input}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
+          selected_product_witness: "${state.accepted_product.selected_product_witness}"
+          build_recipe_signed_config: "${state.accepted_product.build_recipe_signed_config}"
+          build_recipe_raw_digest: "${state.accepted_product.build_recipe_raw_digest}"
           materialization_result_hash: "${state.materialization.materialization_result_hash}"
           signed_tree_manifest_hash: "${state.materialization.output_content_manifest_hash}"
       assign:
@@ -103,6 +113,10 @@ config:
           release_input: "${state.release_input}"
           captured_tree_manifest_hash: "${state.captured.content_manifest_hash}"
           manifest_item_hash: "${state.materialization.output_manifest_item_hash}"
+          signed_product_witness: "${state.captured.signed_product_witness}"
+          build_recipe_signed_config: "${state.accepted_product.build_recipe_signed_config}"
+          capture_recipe_signed_config: "${state.captured.capture_recipe_signed_config}"
+          capture_recipe_raw_digest: "${state.captured.capture_recipe_raw_digest}"
       assign:
         qualification: "${result}"
       next: {type: unconditional, to: finalize}
@@ -128,6 +142,9 @@ config:
             selected_product_identity: "${state.accepted_product.selected_product_identity}"
             selected_product_witness: "${state.accepted_product.selected_product_witness}"
             publisher_materialization_result_hash: "${state.materialization.materialization_result_hash}"
+            accepted_capture_result_hash: "${state.captured.accepted_capture_result_hash}"
+            selected_signed_product_identity: "${state.captured.signed_product_identity}"
+            selected_signed_product_witness: "${state.captured.signed_product_witness}"
             source_snapshot_hash: "${inputs.source_snapshot_hash}"
             qualification_evidence_hashes: "${state.qualification.evidence_hashes}"
             provenance_hash: "${state.qualification.provenance_hash}"

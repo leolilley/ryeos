@@ -1,4 +1,7 @@
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use ryeos_bundle_publication_contract::{
     BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleBuildProfile, BundleGeneration,
@@ -33,7 +36,7 @@ impl PublicationObjectReader for MemoryObjects {
 }
 
 struct Proof {
-    called: Cell<bool>,
+    called: AtomicBool,
     accept: bool,
 }
 
@@ -44,7 +47,7 @@ impl PublisherMaterializationProof for Proof {
         input: &ExternalContentManifestObject,
         output: &ExternalContentManifestObject,
     ) -> anyhow::Result<()> {
-        self.called.set(true);
+        self.called.store(true, Ordering::Relaxed);
         assert_eq!(
             result.mutation_contract,
             PublisherMutationContract::RyeosBundleSignV1
@@ -62,6 +65,7 @@ impl BundleReleaseEvidenceProof for Proof {
         &self,
         _generation: &BundleGeneration,
         _accepted_result: &ProductBuildAcceptedResult,
+        _accepted_capture_result: &ProductBuildAcceptedResult,
         _materialization: &PublisherMaterializationResult,
         _policy_binding: &ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
@@ -137,10 +141,13 @@ fn fixture() -> (MemoryObjects, BundleGeneration) {
         build_profile: BundleBuildProfile::Release,
         substrate_protocol: 1,
         bundle_manifest_format: "ryeos.bundle-manifest/v1".into(),
-        accepted_product_result_hash: accepted_hash,
+        accepted_product_result_hash: accepted_hash.clone(),
         selected_product_identity: "bundle".into(),
-        selected_product_witness: witness,
+        selected_product_witness: witness.clone(),
         publisher_materialization_result_hash: materialization_hash,
+        accepted_capture_result_hash: accepted_hash.clone(),
+        selected_signed_product_identity: "bundle".into(),
+        selected_signed_product_witness: witness.clone(),
         source_snapshot_hash: None,
         qualification_evidence_hashes: vec![],
         provenance_hash: None,
@@ -153,12 +160,12 @@ fn fixture() -> (MemoryObjects, BundleGeneration) {
 fn verifies_exact_cross_object_identity_and_requires_proof() {
     let (objects, generation) = fixture();
     let proof = Proof {
-        called: Cell::new(false),
+        called: AtomicBool::new(false),
         accept: true,
     };
     let verified =
         verify_bundle_generation(generation, &objects, &proof, &proof, &binding()).unwrap();
-    assert!(proof.called.get());
+    assert!(proof.called.load(Ordering::Relaxed));
     assert_eq!(
         verified.accepted_result().products[0].product_name,
         "bundle"
@@ -174,13 +181,13 @@ fn rejects_selected_witness_mismatch_before_proof() {
     let (objects, mut generation) = fixture();
     generation.selected_product_witness = hash('9');
     let proof = Proof {
-        called: Cell::new(false),
+        called: AtomicBool::new(false),
         accept: true,
     };
     let error =
         verify_bundle_generation(generation, &objects, &proof, &proof, &binding()).unwrap_err();
     assert!(error.to_string().contains("witness disagrees"));
-    assert!(!proof.called.get());
+    assert!(!proof.called.load(Ordering::Relaxed));
 }
 
 #[test]
@@ -188,24 +195,24 @@ fn rejects_generation_materialization_output_mismatch() {
     let (objects, mut generation) = fixture();
     generation.manifest_item_hash = hash('9');
     let proof = Proof {
-        called: Cell::new(false),
+        called: AtomicBool::new(false),
         accept: true,
     };
     let error =
         verify_bundle_generation(generation, &objects, &proof, &proof, &binding()).unwrap_err();
     assert!(error.to_string().contains("output identity"));
-    assert!(!proof.called.get());
+    assert!(!proof.called.load(Ordering::Relaxed));
 }
 
 #[test]
 fn rejects_unproven_publisher_transformation() {
     let (objects, generation) = fixture();
     let proof = Proof {
-        called: Cell::new(false),
+        called: AtomicBool::new(false),
         accept: false,
     };
     let error =
         verify_bundle_generation(generation, &objects, &proof, &proof, &binding()).unwrap_err();
     assert!(error.to_string().contains("closed mutation is unproven"));
-    assert!(proof.called.get());
+    assert!(proof.called.load(Ordering::Relaxed));
 }

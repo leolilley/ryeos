@@ -21,6 +21,7 @@ pub mod catalog;
 
 pub mod admitted_build;
 pub mod producer;
+pub mod recipe;
 pub mod standalone_publisher;
 pub mod tree;
 
@@ -67,6 +68,7 @@ pub trait BundleReleaseEvidenceProof: Send + Sync {
         &self,
         generation: &BundleGeneration,
         accepted_result: &ProductBuildAcceptedResult,
+        accepted_capture_result: &ProductBuildAcceptedResult,
         materialization: &PublisherMaterializationResult,
         policy_binding: &ReleasePolicyBinding,
     ) -> anyhow::Result<()>;
@@ -145,6 +147,18 @@ pub fn verify_bundle_generation(
     let materialization =
         PublisherMaterializationResult::from_current_value(&materialization_value)
             .context("bundle generation references an invalid publisher materialization")?;
+    let accepted_capture_value = read_exact(objects, &generation.accepted_capture_result_hash)?;
+    let accepted_capture_result =
+        ProductBuildAcceptedResult::from_value(&accepted_capture_value)
+            .context("bundle generation references an invalid signed capture result")?;
+    let selected_signed_product = accepted_capture_result
+        .products
+        .iter()
+        .find(|product| product.product_name == generation.selected_signed_product_identity)
+        .context("bundle generation signed product is absent from capture result")?;
+    if selected_signed_product.witness_hash != generation.selected_signed_product_witness {
+        bail!("bundle generation signed product witness disagrees with capture result");
+    }
 
     if materialization.accepted_product_result_hash != generation.accepted_product_result_hash
         || materialization.selected_product_identity != generation.selected_product_identity
@@ -173,6 +187,7 @@ pub fn verify_bundle_generation(
         .verify_release_evidence(
             &generation,
             &accepted_result,
+            &accepted_capture_result,
             &materialization,
             policy_binding,
         )

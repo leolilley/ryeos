@@ -1400,6 +1400,7 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         .context("load pinned operator verification authority")?;
     let operator_key = trust_store
         .get(&document.body.operator_fingerprint)
+        .map(|signer| &signer.verifying_key)
         .context("init completion operator is absent from pinned trust")?;
     let operator_fingerprint = compute_fingerprint(operator_key);
     if operator_fingerprint != document.body.operator_fingerprint {
@@ -2621,7 +2622,7 @@ mod tests {
 
         let error = run_init(&opts).expect_err("ordinary init must not reinterpret schema 1");
         assert!(
-            format!("{error:#}").contains("ingest_ignore policy schema is not current"),
+            format!("{error:#}").contains("unknown field `additional_patterns`"),
             "got: {error:#}"
         );
 

@@ -1,5 +1,10 @@
 # Bundle-source operations
 
+Readiness: the topology below is the intended operational path, not yet a
+qualified first-run procedure. Initial Core/complete-set production and exact
+per-release product-recipe/signing admission remain implementation blockers.
+Compilation or runtime registration alone does not demonstrate bundle updates.
+
 Native bundle publication is initiated from an admitted RyeOS development
 project through `service:bundle-release/submit`. That operation invokes the
 canonical `graph:ryeos/bundle-release/publish`; GitHub is not an alternate
@@ -10,13 +15,15 @@ The normal topology keeps the release authority and bundle-source node
 separate. After the publisher authorizes the exact successor, the release
 authority transports its complete bounded CAS closure through a pinned RyeOS
 named remote (normally `bundle-source`) and the
-publisher-authenticated `service:bundle-catalog/upload` boundary on the
+authorized-uploader `service:bundle-catalog/upload` boundary on the
 bundle-source node. It then requests `service:bundle-catalog/publish` using the
 returned durable upload-session identifier and exact expected predecessor.
 This is the canonical path even when both nodes run from the same substrate
 image. A normal bundle release does not rebuild or republish that image.
-The remote client signs each call with the release node identity; there is no
-parallel bearer-token publication protocol.
+The remote client signs each call with the release node identity, which must be
+listed in the catalog's `authorized_uploaders` policy and admitted for the
+remote service capabilities. That identity is independent of the publisher
+signing key. There is no parallel bearer-token catalog publication protocol.
 
 `service:bundle-release/status` returns bounded progress and, on success, only
 immutable release coordinates: generation hash, generation-publication
@@ -26,7 +33,7 @@ derive success from logs, mutable channels, or workflow status.
 Disaster recovery uses `service:bundle-catalog/export-recovery` to capture the
 exact current catalog coordinate, policy binding, and bounded object/blob
 closure inventory. Restore first transports that inventory through the same
-publisher-authenticated `service:bundle-catalog/upload` session used by normal
+authorized-uploader `service:bundle-catalog/upload` session used by normal
 publication. `service:bundle-catalog/restore-genesis` then accepts the exact
 publisher-authored catalog only when the catalog head is absent and the live
 policy digests exactly match the export. It never manufactures replacement
@@ -37,12 +44,14 @@ root or `AppState`. Its constrained publisher is an independently operated
 authenticated service configured at process startup with
 `RYEOS_BUNDLE_PUBLISHER_URL` and `RYEOS_BUNDLE_PUBLISHER_BEARER` (both or
 neither). The endpoint must use HTTPS, except for a loopback development
-sidecar, and must expose only the three closed operations for tree signing,
-generation authorization, and catalog-successor authorization. See
+sidecar, and must expose only the five closed operations for exact build-recipe
+authoring, tree signing, generation authorization, and catalog-successor authorization. See
 `deploy/release-authority.env.example`; inject the bearer from the deployment
 secret store.
 
-The authenticated JSON endpoints are `POST /v1/bundle-tree/sign`,
+The authenticated JSON endpoints are `POST /v1/bundle-recipe/authorize-build`,
+`POST /v1/bundle-recipe/authorize-capture`,
+`POST /v1/bundle-tree/sign`,
 `POST /v1/bundle-generation/authorize`, and
 `POST /v1/bundle-catalog/authorize-successor`. The authority must share the
 release node's CAS or import every returned coordinate into it before replying;

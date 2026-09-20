@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T04:05:59Z:c64527caabd8be9317e626206dc76c5f8af94d47b41372784b877c0f79d28b80:kGuQGLmnuzLK4AQ2dSguYNHdTBQeTD7/feYgmEPzUbwHBmD0peIbD7gBX15vd9x9XswL40yLCM+uWZOHjJ29Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-19T05:44:42Z:89fbd16ca807910ce98a2e0c0b56bc9d65612aedc116cfe03dbfba5fbac6710b:5mcXAjy4DPCCIMq5i2TrKLxKKXVJE7ZXKvjwVcNidR1i9k+wL0+fhyyaj11EFEa6AU7SPwTZpvBSCY6Z5950Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -93,8 +93,8 @@ policies:
     bundle_source_caps:
       browser: []
       bundle-release:
-        - ryeos.execute.service.bundle-release/catalog-request-publication
         - ryeos.execute.service.bundle-release/catalog-remote-publish
+        - ryeos.execute.service.bundle-release/catalog-request-publication
         - ryeos.execute.service.bundle-release/generation-build
         - ryeos.execute.service.bundle-release/generation-capture
         - ryeos.execute.service.bundle-release/generation-finalize

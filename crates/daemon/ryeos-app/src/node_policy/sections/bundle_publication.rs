@@ -26,6 +26,9 @@ pub const MAX_CATALOGS: usize = 64;
 pub struct BundleCatalogPolicy {
     pub namespace: String,
     pub publisher_fingerprint: String,
+    /// Node principals allowed to transport already publisher-signed content.
+    /// This grants neither signing authority nor service invocation capability.
+    pub authorized_uploaders: Vec<String>,
     pub generation_claim: String,
     pub set_claim: String,
     pub catalog_publication_claim: String,
@@ -49,6 +52,22 @@ pub struct BundlePublicationPolicy {
     pub catalogs: Vec<BundleCatalogPolicy>,
 }
 
+impl BundleCatalogPolicy {
+    pub fn require_uploader(&self, fingerprint: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.frozen, "catalog namespace is frozen");
+        require_authorized_uploader(&self.authorized_uploaders, fingerprint)
+    }
+}
+
+fn require_authorized_uploader(uploaders: &[String], fingerprint: &str) -> anyhow::Result<()> {
+    validate_hash(fingerprint, "catalog uploader fingerprint")?;
+    anyhow::ensure!(
+        uploaders.iter().any(|allowed| allowed == fingerprint),
+        "authenticated principal is not an authorized catalog uploader"
+    );
+    Ok(())
+}
+
 impl TypedNodePolicy for BundlePublicationPolicy {
     const SECTION_NAME: &'static str = SECTION_NAME;
 }
@@ -70,6 +89,17 @@ impl BundlePublicationPolicy {
                 &catalog.publisher_fingerprint,
                 "catalog publisher fingerprint",
             )?;
+            anyhow::ensure!(
+                catalog.authorized_uploaders.len() <= 64
+                    && catalog
+                        .authorized_uploaders
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1]),
+                "catalog uploaders must be bounded, sorted and unique"
+            );
+            for uploader in &catalog.authorized_uploaders {
+                validate_hash(uploader, "catalog uploader fingerprint")?;
+            }
             if catalog.generation_claim != BUNDLE_GENERATION_RELEASE_CLAIM
                 || catalog.set_claim != BUNDLE_SET_RELEASE_CLAIM
                 || catalog.catalog_publication_claim != BUNDLE_CATALOG_RELEASE_CLAIM
@@ -222,5 +252,16 @@ mod tests {
         };
         policy.validate().unwrap();
         assert!(policy.require_catalog("official").is_err());
+    }
+
+    #[test]
+    fn upload_permission_is_explicit_and_distinct_from_publisher_trust() {
+        let publisher = "a".repeat(64);
+        let uploader = "b".repeat(64);
+        let allowed = vec![uploader.clone()];
+        assert!(require_authorized_uploader(&allowed, &uploader).is_ok());
+        assert!(require_authorized_uploader(&allowed, &publisher).is_err());
+        assert!(require_authorized_uploader(&[], &uploader).is_err());
+        assert!(require_authorized_uploader(&allowed, "not-a-fingerprint").is_err());
     }
 }

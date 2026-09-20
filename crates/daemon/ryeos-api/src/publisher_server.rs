@@ -1,6 +1,6 @@
 //! Narrow HTTP transport for an externally-custodied bundle publisher.
 //!
-//! This router deliberately exposes only the three typed operations consumed
+//! This router deliberately exposes only the four typed operations consumed
 //! by `AuthenticatedPublisherClient`. It is not part of the ordinary daemon
 //! API and must be served on loopback or behind an HTTPS terminator.
 
@@ -61,6 +61,14 @@ impl PublisherServerState {
 /// signing route through this API.
 pub fn router(state: PublisherServerState) -> Router {
     Router::new()
+        .route(
+            "/v1/bundle-recipe/authorize-build",
+            post(authorize_build_recipe),
+        )
+        .route(
+            "/v1/bundle-recipe/authorize-capture",
+            post(authorize_capture_recipe),
+        )
         .route("/v1/bundle-tree/sign", post(sign_tree))
         .route(
             "/v1/bundle-generation/authorize",
@@ -72,6 +80,46 @@ pub fn router(state: PublisherServerState) -> Router {
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
+}
+
+async fn authorize_build_recipe(
+    State(state): State<PublisherServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ryeos_app::bundle_publication::recipe::AuthorizeBuildRecipeRequest>,
+) -> Response {
+    if !authorized(&headers, state.bearer.as_str()) {
+        return error(StatusCode::UNAUTHORIZED, "publisher authentication failed");
+    }
+    if let Err(validation_error) = request.validate() {
+        return error(StatusCode::BAD_REQUEST, &validation_error.to_string());
+    }
+    match state.authority.authorize_build_recipe(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(validation_error) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &validation_error.to_string(),
+        ),
+    }
+}
+
+async fn authorize_capture_recipe(
+    State(state): State<PublisherServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ryeos_app::bundle_publication::recipe::AuthorizeCaptureRecipeRequest>,
+) -> Response {
+    if !authorized(&headers, state.bearer.as_str()) {
+        return error(StatusCode::UNAUTHORIZED, "publisher authentication failed");
+    }
+    if let Err(validation_error) = request.validate() {
+        return error(StatusCode::BAD_REQUEST, &validation_error.to_string());
+    }
+    match state.authority.authorize_capture_recipe(request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(validation_error) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &validation_error.to_string(),
+        ),
+    }
 }
 
 async fn sign_tree(
@@ -125,8 +173,8 @@ async fn execute(
     if !authorized(headers, state.bearer.as_str()) {
         return error(StatusCode::UNAUTHORIZED, "publisher authentication failed");
     }
-    if let Err(error) = operation.validate() {
-        return error(StatusCode::BAD_REQUEST, &error.to_string());
+    if let Err(validation_error) = operation.validate() {
+        return error(StatusCode::BAD_REQUEST, &validation_error.to_string());
     }
     match future.await {
         Ok(value) => Json(value).into_response(),

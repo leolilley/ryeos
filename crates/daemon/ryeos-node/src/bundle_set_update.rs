@@ -273,11 +273,13 @@ pub trait StoppedBundleSetUpdateAuthority {
     /// Resolve/fetch/verify/admit while retaining only exact CAS identities.
     /// The key path is explicit so an implementation cannot silently borrow
     /// daemon or publisher signing custody.
-    async fn prepare(
+    /// This offline coordinator polls in place; implementations need not
+    /// provide a Send future or transfer thread-bound transaction authority.
+    fn prepare(
         &self,
         app_root: &Path,
         request: &StoppedBundleSetUpdateRequest,
-    ) -> anyhow::Result<PreparedStoppedBundleSetUpdate>;
+    ) -> impl std::future::Future<Output = anyhow::Result<PreparedStoppedBundleSetUpdate>>;
 
     /// Recheck the admitted immutable roots from the transaction journal at
     /// the last boundary before local mutation.

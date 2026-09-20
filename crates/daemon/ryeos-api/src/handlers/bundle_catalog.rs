@@ -71,9 +71,7 @@ pub async fn upload(
     }
     let policy = state.node_policy.require::<BundlePublicationPolicy>()?;
     let catalog = policy.require_catalog(&req.catalog_namespace)?;
-    if ctx.fingerprint != catalog.publisher_fingerprint {
-        bail!("authenticated principal is not the current catalog publisher");
-    }
+    catalog.require_uploader(&ctx.fingerprint)?;
     let policy_digest = policy.section_digest()?;
     let publication_key = ryeos_state::DurableCasPublicationKey::bundle_catalog(
         &catalog.publisher_fingerprint,
@@ -314,7 +312,7 @@ pub async fn restore_genesis(
 }
 
 macro_rules! descriptor {
-    ($name:ident, $service:literal, $endpoint:literal, $cap:literal, $request:ty, $handler:ident $(, context)?) => {
+    ($name:ident, $service:literal, $endpoint:literal, $cap:literal, $request:ty, $handler:ident $(, $context:ident)?) => {
         pub const $name: ServiceDescriptor = ServiceDescriptor {
             service_ref: $service,
             endpoint: $endpoint,
@@ -322,7 +320,7 @@ macro_rules! descriptor {
             required_caps: &[$cap],
             handler: |params, ctx, state| Box::pin(async move {
                 let request: $request = crate::handler_error::parse_request(params)?;
-                descriptor!(@call $handler, request, ctx, state $(, context)?)
+                descriptor!(@call $handler, request, ctx, state $(, $context)?)
             }),
         };
     };
@@ -381,3 +379,30 @@ descriptor!(
     restore_genesis,
     context
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptors_expand_with_and_without_handler_context() {
+        for (descriptor, name) in [
+            (UPLOAD, "upload"),
+            (STAGE_LOCAL, "stage-local"),
+            (INSPECT, "inspect"),
+            (RESOLVE, "resolve"),
+            (EXPORT_RECOVERY, "export-recovery"),
+            (RESTORE_GENESIS, "restore-genesis"),
+        ] {
+            assert_eq!(
+                descriptor.service_ref,
+                format!("service:bundle-catalog/{name}")
+            );
+            assert_eq!(descriptor.required_caps.len(), 1);
+            assert_eq!(
+                descriptor.required_caps[0],
+                format!("ryeos.execute.service.bundle-catalog/{name}")
+            );
+        }
+    }
+}

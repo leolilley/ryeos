@@ -173,7 +173,8 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
     fn verify_release_evidence(
         &self,
         generation: &ryeos_bundle_publication_contract::BundleGeneration,
-        accepted: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        _accepted: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        accepted_capture: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
         materialization: &ryeos_bundle_publication_contract::PublisherMaterializationResult,
         binding: &ReleasePolicyBinding,
     ) -> anyhow::Result<()> {
@@ -200,14 +201,14 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
             "publisher tool identity violates pinned policy"
         );
         let hash = &generation.qualification_evidence_hashes[0];
-        let selected = accepted
+        let selected = accepted_capture
             .products
             .iter()
-            .find(|product| product.product_name == generation.selected_product_identity)
-            .context("accepted result omits selected generation product")?;
+            .find(|product| product.product_name == generation.selected_signed_product_identity)
+            .context("capture result omits selected signed generation product")?;
         anyhow::ensure!(
-            selected.qualification_hash.as_deref() == Some(hash),
-            "generation qualification is not the qualification accepted for its product"
+            selected.witness_hash == generation.selected_signed_product_witness,
+            "generation qualification subject is not the captured signed product"
         );
         let value = self
             .cas
@@ -229,11 +230,11 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
             "qualification subject is not the released tree"
         );
         anyhow::ensure!(
-            evidence.product_witness_hash == generation.selected_product_witness,
+            evidence.product_witness_hash == generation.selected_signed_product_witness,
             "qualification product witness differs from generation"
         );
         anyhow::ensure!(
-            evidence.product_coordinate.owner_principal == accepted.owner_principal,
+            evidence.product_coordinate.owner_principal == accepted_capture.owner_principal,
             "qualification belongs to another product owner"
         );
         evidence.validate_current_policy(
@@ -269,6 +270,50 @@ impl ManifestOnlyTreePublisher {
 }
 
 impl ConstrainedBundleTreePublisher for ManifestOnlyTreePublisher {
+    fn authorize_build_recipe(
+        &self,
+        request: &super::recipe::AuthorizeBuildRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        request.require_policy(
+            &self.policy.catalog_namespace,
+            &self.policy.bundle_publication_policy_section_digest,
+            self.policy.trust_epoch,
+        )?;
+        let body = request.config_body()?;
+        let signed = lillux::signature::sign_content(&body, self.identity.signing_key(), "#", None);
+        let blob = self.cas.put_blob(signed.as_bytes())?;
+        Ok(serde_json::json!({
+            "schema": "ryeos.bundle_build_recipe_authorization.v1",
+            "canonical_ref": "config:bundle-release/native-build-products",
+            "publisher_fingerprint": self.identity.fingerprint(),
+            "body_hash": lillux::signature::content_hash(&body),
+            "signed_blob_hash": blob.hash,
+            "signed_config": signed
+        }))
+    }
+
+    fn authorize_capture_recipe(
+        &self,
+        request: &super::recipe::AuthorizeCaptureRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        request.require_policy(
+            &self.policy.catalog_namespace,
+            &self.policy.bundle_publication_policy_section_digest,
+            self.policy.trust_epoch,
+        )?;
+        let body = request.config_body()?;
+        let signed = lillux::signature::sign_content(&body, self.identity.signing_key(), "#", None);
+        let blob = self.cas.put_blob(signed.as_bytes())?;
+        Ok(serde_json::json!({
+            "schema": "ryeos.bundle_capture_recipe_authorization.v1",
+            "canonical_ref": super::recipe::CAPTURE_RECIPE_REF,
+            "publisher_fingerprint": self.identity.fingerprint(),
+            "body_hash": lillux::signature::content_hash(&body),
+            "signed_blob_hash": blob.hash,
+            "signed_config": signed
+        }))
+    }
+
     fn materialize_and_sign(
         &self,
         candidate: &VerifiedPublisherCandidate,

@@ -1,0 +1,19 @@
+# ryeos:signed:2026-09-20T01:47:43Z:fcb26f0d2b7c5af0f7c0894396a9e1e4513e93cfb786cbc914d615562828ad56:I0tM0DDb4VxJZWwltjIp1VJFOg2jA0tkxrJZMvXWVqahEl8SqQ1qiwprl+p0zLWt5JMa02Z3IXddeH4W+WfpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: signed-capture
+version: "1.0.0"
+description: Copy the admitted unsigned product and apply only the exact publisher-signed manifest.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory]
+  materialization: read_only
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/signed-capture.py"]
+  input_data: "${params_json}"
+  timeout_secs: 300

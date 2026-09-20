@@ -93,7 +93,7 @@ pub struct AdmittedReleaseInput {
 }
 
 impl AdmittedReleaseInput {
-    fn from_value(value: &Value) -> anyhow::Result<Self> {
+    pub(crate) fn from_value(value: &Value) -> anyhow::Result<Self> {
         let input: Self = serde_json::from_value(value.clone())?;
         validate_bundle_name(&input.bundle_name)?;
         anyhow::ensure!(

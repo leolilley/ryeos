@@ -1229,7 +1229,8 @@ fn remove_file_if_present(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            lillux::remove_file_durable(path)
+            lillux::remove_file_durable(path)?;
+            Ok(())
         }
         Ok(_) => bail!("bundle-set recovery registration target is not a safe file"),
         Err(error) => Err(error.into()),
@@ -1238,7 +1239,8 @@ fn remove_file_if_present(path: &Path) -> anyhow::Result<()> {
 
 fn write_completion(app_root: &Path, encoded: &str) -> anyhow::Result<()> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-    lillux::atomic_write_private(&init_completion_path(app_root), &bytes)
+    lillux::atomic_write_private(&init_completion_path(app_root), &bytes)?;
+    Ok(())
 }
 
 pub fn recover_for_bootstrap(

@@ -221,7 +221,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     if options.force || !user_auth_entry.exists() {
         write_operator_authorized(
             &user_auth_entry,
-            &user_identity,
+            user_identity.verifying_key(),
             node_identity.signing_key(),
         )?;
     }
@@ -321,13 +321,14 @@ pem = "ed25519:{key_b64}"
 /// so there is exactly one TOML emitter.
 fn write_operator_authorized(
     entry_path: &Path,
-    user_identity: &NodeIdentity,
+    operator_key: &lillux::crypto::VerifyingKey,
     node_signing_key: &lillux::crypto::SigningKey,
 ) -> Result<()> {
-    let fp = user_identity.fingerprint();
-    let vk = user_identity.verifying_key();
-    let key_b64 =
-        base64::engine::Engine::encode(&base64::engine::general_purpose::STANDARD, vk.as_bytes());
+    let fp = ryeos_engine::trust::compute_fingerprint(operator_key);
+    let key_b64 = base64::engine::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        operator_key.as_bytes(),
+    );
 
     let auth_dir = entry_path
         .parent()
@@ -336,11 +337,11 @@ fn write_operator_authorized(
 
     let _path = ryeos_app::identity::write_authorized_key_toml(
         auth_dir,
-        fp,
+        &fp,
         &key_b64,
         &["*".to_string()],
         "bootstrap-authorized-user",
-        fp,
+        &fp,
         &now,
         node_signing_key,
         ryeos_app::identity::WildcardPolicy::AllowBootstrap,
@@ -544,11 +545,23 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     })?;
     let user_auth_entry = config
         .authorized_keys_dir
-        .join(format!("{}.toml", user_identity.fingerprint()));
+        .join(format!("{}.toml", completion.operator_fingerprint));
     if !user_auth_entry.exists() {
+        // Repair authenticates the operator from pinned public trust, never
+        // by loading operator private custody or substituting the node key.
+        let trust_store = TrustStore::load(None, &config.runtime_config_dir())
+            .context("load pinned operator public authority for authorization repair")?;
+        let operator = trust_store
+            .get(&completion.operator_fingerprint)
+            .context("init completion operator is absent from pinned trust")?;
+        anyhow::ensure!(
+            ryeos_engine::trust::compute_fingerprint(&operator.verifying_key)
+                == completion.operator_fingerprint,
+            "pinned operator public key disagrees with initialization"
+        );
         write_operator_authorized(
             &user_auth_entry,
-            &user_identity,
+            &operator.verifying_key,
             node_identity.signing_key(),
         )?;
     }

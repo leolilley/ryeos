@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-20T01:14:46Z:83d5ff7ed5e2beb6186caa5dc76dcabf7a3359aa54c019379f2b69870c9192c8:XtEdsSUT8HnTXVhlWj7lKsy+lzIhzNG02CNAezYXTbMf8nwaNuFck9CIj6YfdIqvfwU1if+TpLPvTdBgpHx9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Materialize the publisher-signed bundle tree as a second admitted product.
+effects: live
+external_product_slots:
+  - id: unsigned_bundle
+    relationship_ref: config:bundle-release/native-build-products
+    relationship: native_bundle_to_signed_capture
+    kind: tree
+    mount_root: execution_runtime
+    mount: unsigned-native-bundle
+product_recipe: config:bundle-release/signed-capture-products
+config:
+  start: capture
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest]
+    properties:
+      release_input: {type: object}
+      materialization_result_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      signed_tree_manifest_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      manifest_item_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      signed_manifest: {type: string}
+  state: {}
+  nodes:
+    capture:
+      action:
+        item_id: tool:ryeos/bundle-release/signed-capture
+        params:
+          release_input: "${inputs.release_input}"
+          materialization_result_hash: "${inputs.materialization_result_hash}"
+          signed_tree_manifest_hash: "${inputs.signed_tree_manifest_hash}"
+          manifest_item_hash: "${inputs.manifest_item_hash}"
+          signed_manifest: "${inputs.signed_manifest}"
+      assign: {capture: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.capture}"
