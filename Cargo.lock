@@ -2816,6 +2816,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-external-candidate-connector"
+version = "0.5.99"
+dependencies = [
+ "anyhow",
+ "base64",
+ "lillux",
+ "ryeos-state",
+ "tempfile",
+]
+
+[[package]]
 name = "ryeos-external-candidate-launcher"
 version = "0.5.99"
 dependencies = [

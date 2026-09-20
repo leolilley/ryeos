@@ -1,0 +1,20 @@
+[package]
+name = "ryeos-external-candidate-connector"
+version = "0.5.99"
+edition = "2024"
+description = "Authenticated controller-side connector for RyeOS external candidates"
+license.workspace = true
+repository = "https://github.com/leolilley/ryeos"
+
+[[bin]]
+name = "ryeos-external-candidate-connector"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+lillux = { workspace = true }
+ryeos-state = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -354,6 +354,29 @@ impl LocalDuplexStream {
             Ok(Self { stream })
         }
     }
+
+    /// Wake every alias blocked in local-channel I/O. The descriptor remains
+    /// owned by this value; shutdown is used only to coordinate terminal
+    /// protocol failure between the connector's reader and writer.
+    pub fn shutdown(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: `self.stream` retains the connected socket for the
+            // complete call and shutdown neither closes nor transfers it.
+            if unsafe { libc::shutdown(self.stream.as_raw_fd(), libc::SHUT_RDWR) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "local duplex shutdown is unavailable",
+            ))
+        }
+    }
 }
 
 impl Read for LocalDuplexStream {
@@ -702,5 +725,16 @@ mod peer_process_tests {
     fn unix_peer_refuses_non_socket_descriptors() {
         let file = tempfile::tempfile().unwrap();
         assert!(AuthenticatedUnixPeer::capture(file.as_fd()).is_err());
+    }
+
+    #[test]
+    #[ignore = "native Unix-socket shutdown qualification; tool sandboxes may deny shutdown"]
+    fn local_duplex_shutdown_wakes_blocked_alias() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut reader = LocalDuplexStream { stream };
+        let interrupt = reader.try_clone().unwrap();
+        let blocked = std::thread::spawn(move || reader.read(&mut [0_u8; 1]));
+        interrupt.shutdown().unwrap();
+        assert_eq!(blocked.join().unwrap().unwrap(), 0);
     }
 }
