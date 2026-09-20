@@ -14,9 +14,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSET = ROOT / "bundles/bundle-release/.ai"
-QUALIFIER = ASSET / "tools/ryeos/bundle-release/core-seed-qualify.py"
-CAPTURE = ASSET / "tools/ryeos/bundle-release/core-seed-capture.py"
-BUILD = ASSET / "tools/ryeos/bundle-release/core-seed-build.py"
+QUALIFIER = ASSET / "tools/ryeos/bundle-release/lib/core-seed-qualify.py"
+CAPTURE = ASSET / "tools/ryeos/bundle-release/lib/core-seed-capture.py"
+BUILD = ASSET / "tools/ryeos/bundle-release/lib/core-seed-build.py"
 
 
 def release_input(name="core"):

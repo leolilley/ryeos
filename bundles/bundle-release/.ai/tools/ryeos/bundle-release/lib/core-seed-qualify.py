@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T11:15:48Z:3f738c26fc7198096880ca906cd1d2233a7f4f89f0568e622d46e492572d641c:8DLPUe0WXqLjNWwZD6aeD8MXqFjV/Xo/DeI+gSB15IuoS0uKSKcL8lJnECFj8Km22UZx1NBa3egrm3U9RNacAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-#!/usr/bin/python3
+# ryeos:signed:2026-09-20T12:43:58Z:163c86b820349fb209387acb7adbe9765d7a20cc1c68d53a4ec855532dea18e4:ZgAlMNaFf+l7xFZbqqwToEz3lwDbx+fcgw3fN7q2HEggsBdH/Ec3jf12XTLkou3ftEV9hO8zDzUk2cnn1CTkCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+#!/usr/bin/env python3
 """Qualify one exact admitted signed substrate Core seed."""
 import json
 import os

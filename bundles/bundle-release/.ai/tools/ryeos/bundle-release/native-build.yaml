@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T03:51:22Z:f61f06e075947f9e433ccf87d469781f55a819bd0733e41bd0919ec32a9a05c7:8hmtmiaPtT4vRFVyB1WhCrpQc/7bueIifE9EwP1nViPY/xoBtiMcpAIRDbNYy5ksBOXRcXrqdYQGLTFCPQ84DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:52245df7320d007242d25cd24eb98bc2c756588b84c485556bca3c2bd4efd5d0:tAA/tabUtwvuLYukQi7TLVxL1yot+BfjV1gXAsCq9pxes66+jcU9cMy9lNL6xZv+iyUBdpVib4rQDI7ETDctBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: native-build
 version: "1.0.0"
@@ -14,7 +14,7 @@ source_scope:
   materialization: read_only
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/native-build.py"]
+  args: ["${tool_dir}/lib/native-build.py"]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

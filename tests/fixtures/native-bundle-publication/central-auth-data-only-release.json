@@ -13,9 +13,9 @@
   ],
   "qualification_checks": [
     "captured-product-binding",
-    "bundle-name-binding",
     "bundle-manifest-present",
-    "portable-data-only-plan",
-    "no-symbolic-links"
+    "non-core-bundle",
+    "no-symbolic-links",
+    "no-hard-links"
   ]
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:de21fa8fbba6327b228db714a174d516c22f9e3f8f7327e91220df045774411e:k2r5/biBrsOhruOIFy6w3g64v3Z2CBBKfMOPMa2R6ekUQguUQZ3APTStzw2FSF1jtIAu8j4mZPXdyNps1/THDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:7ca52274fdb559de588ecc78c8132bbbf85bdfa1408b5e668291a12295070ec4:uXdo9ZFgMNYFeW0dE7hTOlhHdZch1VyHKbVzZM5VTiXAz6LAsvpLEu5q/RGvokOYJQSbvQYd7VPit6pKczq6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-capture
 version: "1.0.0"
@@ -14,6 +14,6 @@ source_scope:
   materialization: read_only
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/core-seed-capture.py"]
+  args: ["${tool_dir}/lib/core-seed-capture.py"]
   input_data: "${params_json}"
   timeout_secs: 300

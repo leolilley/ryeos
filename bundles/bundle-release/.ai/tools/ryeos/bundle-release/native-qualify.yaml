@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T01:47:43Z:c2870216d2b2ade287df71ef6e515ea94e2f886c9bc8d83790bbcb76c90b86c2:zDyb/UCEgtrEru8o0iXoCbE1XUYiSmw9hhiRjyPgMePsVLfm4+nYp1i2GLYmiXGfXK27twzADX5Fn3/cVkLZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:fa74d2c90140614b7226ade9c59b025909a7a7d51b6f3c8fea0fd48d7868be58:k7eczN8z1OLym4wEopZ70WfMARpqvTaRdWN4q+cZfYRhY8ow7ONAVRU5aQ8LomGowQJDz+8zrT0K2HakNYzECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: native-qualify
 version: "1.0.0"
@@ -21,6 +21,6 @@ external_product_slots:
     mount: native-bundle
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/native-qualify.py"]
+  args: ["${tool_dir}/lib/native-qualify.py"]
   input_data: "${params_json}"
   timeout_secs: 300

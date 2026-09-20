@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T01:47:43Z:fcb26f0d2b7c5af0f7c0894396a9e1e4513e93cfb786cbc914d615562828ad56:I0tM0DDb4VxJZWwltjIp1VJFOg2jA0tkxrJZMvXWVqahEl8SqQ1qiwprl+p0zLWt5JMa02Z3IXddeH4W+WfpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:6a6e7b9195f6b596918a252aaad20c3983d454a10f9dcbc839d499b93beb644f:WTaUxrLi4p6P/hG3OPieLFb5RWNAQ2sGAOGpep1vO5PQa1uSMqGYBBMINF5L/qwCiLAIoWc6AvK760nIluoGBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: signed-capture
 version: "1.0.0"
@@ -14,6 +14,6 @@ source_scope:
   materialization: read_only
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/signed-capture.py"]
+  args: ["${tool_dir}/lib/signed-capture.py"]
   input_data: "${params_json}"
   timeout_secs: 300

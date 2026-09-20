@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:36511e0e97639c730fce4b3bed2939fd6d1c59b2a668908a093d7672ace3584c:i3oOrUPKvUiGtdbDf0dz6x1I9YPBLKUVRrOc6Xx8ikXWJ2jm9+rCUkI18r+n7W/z11yE1z71PGPEPVHZCn57BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:f34a051bdf81e22b7942e4937773456951953d90b6810ce5bf14d0ab9c72fce0://U0zxKrvVXO+7+D4+lWLKNf987mTQmSDP2PAh67y/vIR1i6EGfeUmd8zIajdMLUgEiPOzBDzhi16wH+NAveBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-build
 version: "1.0.0"
@@ -14,6 +14,6 @@ source_scope:
   materialization: read_only
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/substrate-build.py"]
+  args: ["${tool_dir}/lib/substrate-build.py"]
   input_data: "${params_json}"
   timeout_secs: 60

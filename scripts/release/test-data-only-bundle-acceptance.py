@@ -2,7 +2,6 @@
 """Non-Cargo acceptance proof for a real data-only bundle release."""
 
 import json
-import hashlib
 import io
 import os
 from pathlib import Path
@@ -11,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 import runpy
+import shutil
 from unittest.mock import patch
 import yaml
 
@@ -18,9 +18,16 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/fixtures/native-bundle-publication/central-auth-data-only-release.json"
 INSPECTOR = ROOT / "scripts/release/inspect-native-bundle-input.py"
-BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/native-build.py"
-QUALIFY = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/native-qualify.py"
+BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-build.py"
+QUALIFY = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-qualify.py"
 GRAPH = ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/publish.yaml"
+
+
+def materialize_execution_source(work: Path) -> None:
+    shutil.copytree(ROOT / "bundles", work / "bundles")
+    parser = work / "scripts/release/bundle-payload-ownership.py"
+    parser.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/release/bundle-payload-ownership.py", parser)
 
 
 def inspect_central_auth(bundle="central-auth"):
@@ -72,6 +79,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         plan = envelope[projection.removeprefix("${result.").removesuffix("}")]
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
+            materialize_execution_source(work)
             fake_bin = work / "bin"
             fake_bin.mkdir()
             cargo_marker = work / "cargo-was-invoked"
@@ -120,16 +128,16 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
                 mode = stat.S_IMODE((product / relative).stat().st_mode)
                 self.assertIn(mode, {0o644, 0o755})
             self.assertEqual(sorted(path.name for path in product.parent.iterdir()), ["tree"])
-            qualification_request = {
-                "release_input": plan,
-                "release_input_digest": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-                "captured_tree_manifest_hash": "c" * 64,
-                "manifest_item_hash": hashlib.sha256((product / ".ai/manifest.yaml").read_bytes()).hexdigest(),
-            }
+            subprocess.run(
+                [str(ROOT / "scripts/dev/sign-dev.sh"), str(product / ".ai/manifest.yaml")],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             evidence = io.StringIO()
             def realized_path(*parts):
                 return product if parts == ("/ryeos/realizations/native-bundle",) else Path(*parts)
-            with patch("pathlib.Path", side_effect=realized_path), patch("sys.stdin", io.StringIO(json.dumps(qualification_request))), patch("sys.stdout", evidence), patch.dict(os.environ, {
+            with patch("pathlib.Path", side_effect=realized_path), patch("sys.stdin", io.StringIO("{}")), patch("sys.stdout", evidence), patch.dict(os.environ, {
                 "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([{"id": "subject", "manifest_hash": "c" * 64}]),
                 "RYE_THREAD_ID": "test-qualification",
             }):
@@ -168,6 +176,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         plan = inspect_central_auth("bundle-release")
         self.assertFalse((ROOT / "bundles/bundle-release/.ai/manifest.yaml").exists())
         with tempfile.TemporaryDirectory() as directory:
+            materialize_execution_source(Path(directory))
             result = subprocess.run(
                 ["/usr/bin/python3", str(BUILD)],
                 input=json.dumps({"release_input": plan}), cwd=directory,
@@ -190,13 +199,12 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("release input shape changed", result.stderr)
 
-    def test_qualification_has_distinct_truthful_data_only_claims(self):
+    def test_qualification_has_distinct_truthful_captured_tree_checks(self):
         source = QUALIFY.read_text(encoding="utf-8")
         for check in self.case["qualification_checks"]:
             self.assertIn(check, source)
-        self.assertIn("data_only", source)
-        self.assertIn("requires_binary_build", source)
-        self.assertIn("manifest_name", source)
+        self.assertIn("native_bundle_release_checks_v1", source)
+        self.assertNotIn("portable-data-only-plan", source)
 
     def test_data_only_uses_the_same_signing_and_remote_catalog_flow(self):
         graph = GRAPH.read_text(encoding="utf-8")

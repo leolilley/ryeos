@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:f09709e1660e6c2f70940bf42f59820a51344fdb6c66a159649c1c026c5daf4a:Q/PbM+Vcx6n4AuaLR3oFyXnPOAO5nLf5KhRvxab34nD5zE1I8HiyUeKrN2bFKpc6Z5WjA4fM+Vo0jh4hJB3AAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:a619b75f2ffb752c94c41db5c81d7f26e00f297abac987b2413517ca1338f7a1:X3i6H43RgNsYJwZSuiqW51aH1x2wAL3HIcgKnGq2lAmJ1OzzHisCOuJhdiXhIU5PaOH/spG2AxsxEXjWLuJICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-build
 version: "1.0.0"
@@ -14,7 +14,7 @@ source_scope:
   materialization: read_only
 config:
   command: /usr/bin/python3
-  args: ["${tool_dir}/core-seed-build.py"]
+  args: ["${tool_dir}/lib/core-seed-build.py"]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

@@ -14,7 +14,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSET = ROOT / "bundles/bundle-release/.ai"
-VERIFIER = ASSET / "tools/ryeos/bundle-release/substrate-qualify.py"
+VERIFIER = ASSET / "tools/ryeos/bundle-release/lib/substrate-qualify.py"
 
 
 def receipt():

@@ -1,5 +1,6 @@
-# ryeos:signed:2026-09-19T03:51:22Z:ffc8269c25e96e906913142677d421854444d024af88e414b73e32325c4b814d:Z9rmVBUYslRs/AjAw6t6pT2wdsOXYAVbgkUspqkI72f91LJS8Mvm+sZZfUp8fNx9MRviuhlNABM/BEjhpvPiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T12:43:58Z:489422db049c855806e76c3cc57ac55d299e034b06fc4b1759cc6515a8ea6369:JU1TnqB2LRHvk+oEWsJ0fD9te1Zhn1t0YzawqJQrU4KRTVEL9q8z9VMuAbdwGkNaY2EUxnlRE86lnH6Qa1fDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: ryeos.bundle-set-update-request.v1
+category: bundle-release
 operation: stopped_exact_set_update
 catalog_remote: production-bundle-source
 catalog_namespace: ryeos-official

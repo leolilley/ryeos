@@ -11,7 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/fixtures/native-bundle-publication/web-bundle-only-release.json"
 GRAPH = ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/publish.yaml"
-BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/native-build.py"
+BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-build.py"
 INSPECTOR = ROOT / "scripts/release/inspect-native-bundle-input.py"
 CONSUMER = ROOT / "crates/daemon/ryeos-app/src/bundle_publication/consumer.rs"
 RELEASE_HANDLER = ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs"
@@ -119,7 +119,7 @@ class WebBundleOnlyAcceptance(unittest.TestCase):
         self.assertIn("const MAX_UPLOAD_ENTRIES", catalog_handler)
         self.assertIn("const MAX_BLOB_CHUNK_BYTES", catalog_handler)
         self.assertIn("ctx.require_verified()", catalog_handler)
-        self.assertIn("authenticated principal is not the current catalog publisher", catalog_handler)
+        self.assertIn("catalog.require_uploader(&ctx.fingerprint)?", catalog_handler)
 
     def test_exact_resolve_fetch_and_apply_are_complete(self):
         coordinate = self.case["resolved_coordinate"]

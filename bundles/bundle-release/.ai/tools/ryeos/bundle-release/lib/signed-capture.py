@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T01:14:46Z:c9f092979f6e8efcb527e1712b67cba0d14adaff48a6c7d1ac015b28cd3238a8:UoN909aneefrmwUx+3yRG+1FTAEOkwW5imrHbLpmk04X7rUeRQUmUcjSDSdfl2Gxs7sT/AfqWIH+CyNSmt8rBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-#!/usr/bin/python3
+# ryeos:signed:2026-09-20T12:43:58Z:ebee1de21aecb41a2607e84a2c26af6fe6579098587f483a9b5e09085eb6bdf0:aKvRCQFPbkgecmXRbqgkD3LYnssjAqYocoiWZiXPdtAfvi6mcxuJiNTKKvuIOa9HaWXDY8pchifu0JpVJqkXDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+#!/usr/bin/env python3
 """Apply the exact publisher manifest to one admitted unsigned bundle product."""
 import hashlib, json, os, pathlib, re, shutil, stat, sys
 

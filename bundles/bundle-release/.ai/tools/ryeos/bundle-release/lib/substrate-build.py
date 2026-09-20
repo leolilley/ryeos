@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T11:15:48Z:4559c6fc1427a36be5490c0592e9269f63642d33c67a20bde1e0d88e8698a55b:JC9lb1YdoKKG8mI7s1Z8ggpZry2S1TKZBmceZvS+cM0Utjq+s0F5gANdM8z+C6+Uc3gnMs+wrkJG00YRNS01CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-#!/usr/bin/python3
+# ryeos:signed:2026-09-20T12:43:58Z:cafc4de5a6df93a9e77f7f2fd64dd300f2a1a66d55ce1321d508c06509b39cef:OG6scWT34PSwfif3gSlVrPTBMocNq+MxRTlm6uP7QYse6W61XeGH+49hBZAE++1DTvPwUZ5X8nFmumLdCvWfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+#!/usr/bin/env python3
 """Materialize one canonical receipt-only substrate release product."""
 import json
 import pathlib
