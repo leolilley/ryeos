@@ -13841,6 +13841,12 @@ impl StateStore {
             .claim_external_allocation_contact(placement, request_digest)
     }
 
+    pub(crate) fn cancel_uncontacted_external_allocation(&self, placement: &str) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .cancel_external_allocation(placement)
+    }
+
     pub(crate) fn bind_external_allocation(
         &self,
         placement: &str,
@@ -13858,6 +13864,16 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .register_external_execution_channel(binding)
+    }
+
+    pub(crate) fn admit_external_ready_and_author_release(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<ryeos_state::external_execution::AuthenticatedExecutionFrame>> {
+        self.lock()?
+            .runtime_db
+            .admit_external_ready_and_author_release(placement, signing_key)
     }
 
     pub fn external_execution_channel(

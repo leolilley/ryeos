@@ -590,6 +590,168 @@ impl RuntimeDb {
         Ok(frame)
     }
 
+    /// Atomically accept the exact supervisor readiness observation and
+    /// author the one controller release which opens candidate protocol I/O.
+    ///
+    /// Readiness validation has no process side effect, so claim, finish and
+    /// release authoring share one SQLite transaction.  A failed commit leaves
+    /// all three absent; an exact replay returns the retained release instead
+    /// of minting a later sequence.
+    pub(crate) fn admit_external_ready_and_author_release(
+        &self,
+        placement: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let binding = load_binding(&tx, placement)?;
+        let binding_digest = binding.digest()?;
+        let ready_rows = {
+            let mut statement = tx.prepare(
+                "SELECT sequence,frame_digest,application,frame_json
+                   FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='ready'
+                  ORDER BY sequence",
+            )?;
+            statement
+                .query_map([&binding_digest], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        ensure!(
+            ready_rows.len() <= 1,
+            "external channel retained competing readiness observations"
+        );
+        let Some((ready_sequence, ready_digest, ready_application, ready_wire)) =
+            ready_rows.into_iter().next()
+        else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        NodeJournalOwner.require_owner(&tx, &binding)?;
+        NodeJournalOwner.authorize_frame(&tx, &binding, &ExecutionChannelPayload::Release)?;
+        require_launch_ready_session(&tx, placement)?;
+        ensure!(
+            !revoked(&tx, &binding_digest)?,
+            "revoked external execution cannot regain connector readiness"
+        );
+        ensure!(
+            lillux::time::timestamp_millis() < binding.execution_deadline_ms,
+            "external execution deadline passed before connector readiness"
+        );
+        ensure!(
+            ryeos_state::external_execution::encode_channel_public_key(
+                &signing_key.verifying_key()
+            )? == binding.owner_public_key,
+            "protected external readiness signer changed its channel binding"
+        );
+        let ready_sequence = u64::try_from(ready_sequence)?;
+        let ready = SignedExecutionFrame::decode_and_verify(
+            ready_wire.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )?;
+        ensure!(
+            ready.digest() == ready_digest
+                && ready.frame().sequence == ready_sequence
+                && matches!(ready.frame().payload, ExecutionChannelPayload::Ready { .. }),
+            "external readiness observation changed after retention"
+        );
+        match ready_application.as_str() {
+            "pending" => match journal::claim_application(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::SupervisorToOwner,
+                ready_sequence,
+                &ready_digest,
+            )? {
+                journal::ApplicationClaim::New(_) => journal::finish_application(
+                    &tx,
+                    &NodeJournalOwner,
+                    placement,
+                    ChannelDirection::SupervisorToOwner,
+                    ready_sequence,
+                    &ready_digest,
+                )?,
+                _ => bail!("external readiness claim changed during its transaction"),
+            },
+            "applied" => {}
+            "claimed" => bail!("external readiness retained an uncertain application"),
+            "revoked" => bail!("external readiness was unexpectedly revoked"),
+            _ => bail!("external readiness retained an unknown application state"),
+        }
+
+        let releases = {
+            let mut statement = tx.prepare(
+                "SELECT sequence,frame_digest,frame_json
+                   FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'
+                  ORDER BY sequence",
+            )?;
+            statement
+                .query_map([&binding_digest], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        ensure!(
+            releases.len() <= 1,
+            "external channel retained competing candidate releases"
+        );
+        let channel_phase: String = tx.query_row(
+            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+            [placement],
+            |row| row.get(0),
+        )?;
+        let release = if let Some((sequence, digest, wire)) = releases.into_iter().next() {
+            ensure!(
+                ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
+                    == ryeos_state::external_execution::transcript::ChannelPhase::Running,
+                "retained external release is not current connector readiness"
+            );
+            let retained = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &binding,
+                binding.issued_at_ms,
+            )?;
+            ensure!(
+                retained.frame().sequence == u64::try_from(sequence)?
+                    && retained.digest() == digest
+                    && matches!(retained.frame().payload, ExecutionChannelPayload::Release),
+                "retained external candidate release changed"
+            );
+            retained
+        } else {
+            ensure!(
+                ryeos_state::external_execution::transcript::ChannelPhase::parse(&channel_phase)?
+                    == ryeos_state::external_execution::transcript::ChannelPhase::Ready,
+                "external channel is not ready for its first release"
+            );
+            journal::author_frame(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                ChannelDirection::OwnerToSupervisor,
+                signing_key,
+                ExecutionChannelPayload::Release,
+            )?
+        };
+        tx.commit()?;
+        Ok(Some(release))
+    }
+
     /// Commit sticky cancellation before attempting its contiguous transcript
     /// append. Recovery reuses the exact retained signed frame; it never mints
     /// another cancel sequence after an uncertain commit.
@@ -1378,6 +1540,279 @@ mod tests {
                 .unwrap()
         );
         digest
+    }
+
+    #[test]
+    fn readiness_is_applied_only_with_one_exact_controller_release() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .unwrap()
+                .is_none()
+        );
+        let ready_digest = ready(&db, &binding, &supervisor);
+        let release = db
+            .admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            release.frame().payload,
+            ExecutionChannelPayload::Release
+        ));
+        let application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+                    AND sequence=1 AND frame_digest=?2",
+                params![binding.digest().unwrap(), ready_digest],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(application, "applied");
+
+        let replay = db
+            .admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.frame().sequence, release.frame().sequence);
+        assert_eq!(replay.digest(), release.digest());
+        assert_eq!(replay.canonical(), release.canonical());
+        let releases: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(releases, 1);
+    }
+
+    #[test]
+    fn failed_release_authoring_rolls_back_readiness_application() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+
+        let wrong_owner = lillux::crypto::generate_signing_key();
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &wrong_owner)
+                .is_err()
+        );
+        let application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=1",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(application, "pending");
+        let releases: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(releases, 0);
+
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn uncertain_readiness_application_never_authors_release() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let ready_digest = ready(&db, &binding, &supervisor);
+        assert!(
+            db.claim_external_frame_application(
+                placement,
+                ChannelDirection::SupervisorToOwner,
+                1,
+                &ready_digest,
+            )
+            .unwrap()
+        );
+
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .is_err()
+        );
+        let releases: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(releases, 0);
+    }
+
+    #[test]
+    fn readiness_release_replays_exactly_after_database_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let (placement, expected_sequence, expected_digest, expected_wire) = {
+            let db = RuntimeDb::open(&path).unwrap();
+            let (binding, owner, supervisor) = setup(&db);
+            ready(&db, &binding, &supervisor);
+            let release = db
+                .admit_external_ready_and_author_release(&binding.placement_thread_id, &owner)
+                .unwrap()
+                .unwrap();
+            (
+                binding.placement_thread_id,
+                release.frame().sequence,
+                release.digest().to_owned(),
+                release.canonical().to_owned(),
+            )
+        };
+
+        let db = RuntimeDb::open(&path).unwrap();
+        let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
+        let replay = db
+            .admit_external_ready_and_author_release(&placement, &owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.frame().sequence, expected_sequence);
+        assert_eq!(replay.digest(), expected_digest);
+        assert_eq!(replay.canonical(), expected_wire);
+        let releases: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [replay.frame().binding_digest.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(releases, 1);
+    }
+
+    #[test]
+    fn historical_release_is_not_live_readiness_after_cancel_or_quiesce() {
+        for terminal in ["cancel", "quiesce"] {
+            let root = tempfile::tempdir().unwrap();
+            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let (binding, owner, supervisor) = setup(&db);
+            let placement = &binding.placement_thread_id;
+            ready(&db, &binding, &supervisor);
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .unwrap()
+                .unwrap();
+            if terminal == "cancel" {
+                db.author_external_owner_revocation(placement, &owner)
+                    .unwrap();
+            } else {
+                db.author_external_owner_frame(
+                    placement,
+                    &owner,
+                    ExecutionChannelPayload::Quiesce {
+                        completion_request_digest: "7".repeat(64),
+                    },
+                )
+                .unwrap();
+            }
+
+            assert!(
+                db.admit_external_ready_and_author_release(placement, &owner)
+                    .is_err(),
+                "{terminal} unexpectedly restored connector readiness"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_release_is_not_live_readiness_after_execution_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (_, _, _, mut binding, owner, supervisor) =
+            pending_channel(&db, "short-ready", "short-ready", 100, 1024 * 1024);
+        binding.execution_deadline_ms = binding.issued_at_ms + 500;
+        binding.expires_at_ms = binding.issued_at_ms + 1_500;
+        db.register_external_execution_channel(&binding).unwrap();
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        db.admit_external_ready_and_author_release(placement, &owner)
+            .unwrap()
+            .unwrap();
+        let remaining = binding
+            .execution_deadline_ms
+            .saturating_sub(lillux::time::timestamp_millis());
+        if remaining >= 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                u64::try_from(remaining).unwrap() + 2,
+            ));
+        }
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn orphaned_workspace_cannot_apply_ready_or_author_release() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        ready(&db, &binding, &supervisor);
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET state='orphaned' WHERE thread_id=?1",
+                [placement],
+            )
+            .unwrap();
+
+        assert!(
+            db.admit_external_ready_and_author_release(placement, &owner)
+                .is_err()
+        );
+        let application: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=1",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(application, "pending");
+        let releases: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                  WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                    AND json_extract(frame_json,'$.frame.payload.kind')='release'",
+                [binding.digest().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(releases, 0);
     }
 
     #[test]

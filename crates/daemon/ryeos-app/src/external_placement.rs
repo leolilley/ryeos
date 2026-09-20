@@ -182,6 +182,78 @@ pub struct ExternalChannelExchangeResult {
     urgent_revocation: Option<ExternalChannelOutboundFrame>,
 }
 
+/// One bounded advance of the controller-owned external start state machine.
+///
+/// This is deliberately not a generic provider result.  Each call may consume
+/// at most one durable lifecycle decision and at most one corresponding
+/// adapter mutation/observation.  Callers may poll the retained state, but
+/// cannot turn a pending or ambiguous result into another allocation or
+/// supervisor start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalCandidateStartProgress {
+    /// The unique allocator request may have been accepted; only exact
+    /// reconciliation may advance it.
+    AllocationPending,
+    /// One exact occurrence is retained.  A later call owns the separately
+    /// journaled supervisor activation decision.
+    OccurrenceBound,
+    /// The activation request is retained but the adapter has not yet supplied
+    /// authoritative started/not-started evidence.
+    SupervisorPending,
+    /// The adapter proved the supervisor start, but the occurrence has not yet
+    /// authenticated and attached its exact execution channel.
+    AttachmentPending,
+    /// The exact occurrence-authenticated channel exists, but the supervisor's
+    /// signed readiness observation has not yet been applied.  Candidate
+    /// protocol I/O remains closed and no connector may be exposed.
+    ChannelAttached,
+    /// The signed supervisor readiness observation was atomically applied and
+    /// the controller retained the exact Release which opens candidate
+    /// protocol I/O.  Only this state may expose the protected connector.
+    Ready(ryeos_state::external_execution::ExecutionChannelBinding),
+    /// No external occurrence can remain: the allocation was never contacted,
+    /// exact no-occurrence evidence was retained, or exact termination was
+    /// independently observed.
+    CleanupProved,
+    /// An occurrence or possible occurrence is quarantined and must complete
+    /// the independent termination/reconciliation path before capacity or the
+    /// dedicated-session credential fence can be released.
+    CleanupRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalCandidateStartCleanup {
+    Proved,
+    Unproved,
+}
+
+/// Typed start failure.  The cleanup classification is derived from durable
+/// placement state inside this module; daemon callers must never infer it from
+/// an `anyhow` type or message.
+#[derive(Debug)]
+pub struct ExternalCandidateStartFailure {
+    source: anyhow::Error,
+    cleanup: ExternalCandidateStartCleanup,
+}
+
+impl ExternalCandidateStartFailure {
+    pub fn cleanup(&self) -> ExternalCandidateStartCleanup {
+        self.cleanup
+    }
+}
+
+impl std::fmt::Display for ExternalCandidateStartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.source)
+    }
+}
+
+impl std::error::Error for ExternalCandidateStartFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
 impl AuthenticatedExternalChannelFrame {
     pub fn placement_thread_id(&self) -> &str {
         &self.placement_thread_id
@@ -1029,6 +1101,101 @@ impl<'a> ExternalPlacementOwner<'a> {
     }
 }
 
+/// Advance one exact external candidate placement from the authoritative
+/// dedicated-session owner.  This is the only public start surface: raw
+/// prepared/contact/reconciliation capabilities remain crate-private.
+pub fn advance_external_candidate_start(
+    state: &AppState,
+    placement: &str,
+) -> std::result::Result<ExternalCandidateStartProgress, ExternalCandidateStartFailure> {
+    let prepared = ExternalPlacementOwner::new(state)
+        .prepare(placement)
+        .map_err(|error| classify_external_start_failure(state, placement, error))?;
+    advance_prepared_external_start(prepared)
+        .map_err(|error| classify_external_start_failure(state, placement, error))
+}
+
+fn advance_prepared_external_start(
+    prepared: PreparedExternalPlacement,
+) -> Result<ExternalCandidateStartProgress> {
+    match prepared.claim()? {
+        ExternalPlacementContactDecision::Contact(permit) => {
+            let record = permit.contact()?;
+            progress_from_allocation_record(&record)
+        }
+        ExternalPlacementContactDecision::Reconcile(reconciliation) => {
+            match reconciliation.record.phase {
+                ExternalAllocationPhase::ContactPending => {
+                    let record = reconciliation.reconcile()?;
+                    progress_from_allocation_record(&record)
+                }
+                ExternalAllocationPhase::Bound => reconciliation.advance_start(),
+                ExternalAllocationPhase::Quarantined => {
+                    Ok(ExternalCandidateStartProgress::CleanupRequired)
+                }
+                phase => bail!(
+                    "external placement reconciliation returned invalid start phase {phase:?}"
+                ),
+            }
+        }
+        ExternalPlacementContactDecision::Settled(record) => {
+            progress_from_allocation_record(&record)
+        }
+    }
+}
+
+fn progress_from_allocation_record(
+    record: &ExternalAllocationRecord,
+) -> Result<ExternalCandidateStartProgress> {
+    match record.phase {
+        ExternalAllocationPhase::ContactPending => {
+            Ok(ExternalCandidateStartProgress::AllocationPending)
+        }
+        ExternalAllocationPhase::Bound => Ok(ExternalCandidateStartProgress::OccurrenceBound),
+        ExternalAllocationPhase::Quarantined => Ok(ExternalCandidateStartProgress::CleanupRequired),
+        ExternalAllocationPhase::NoContact
+        | ExternalAllocationPhase::ContactedNoOccurrence
+        | ExternalAllocationPhase::Terminated => Ok(ExternalCandidateStartProgress::CleanupProved),
+        ExternalAllocationPhase::Reserved => {
+            bail!("external placement start retained an unclaimed reservation")
+        }
+    }
+}
+
+fn classify_external_start_failure(
+    state: &AppState,
+    placement: &str,
+    source: anyhow::Error,
+) -> ExternalCandidateStartFailure {
+    let cleanup = classify_external_start_cleanup(&state.state_store, placement);
+    ExternalCandidateStartFailure { source, cleanup }
+}
+
+fn classify_external_start_cleanup(
+    state_store: &crate::state_store::StateStore,
+    placement: &str,
+) -> ExternalCandidateStartCleanup {
+    match state_store.external_allocation(placement) {
+        Ok(None) => ExternalCandidateStartCleanup::Proved,
+        Ok(Some(record)) if record.phase == ExternalAllocationPhase::Reserved => {
+            match state_store
+                .cancel_uncontacted_external_allocation(placement)
+                .and_then(|()| {
+                    state_store
+                        .external_allocation(placement)?
+                        .context("cancelled external reservation disappeared")
+                }) {
+                Ok(settled) if settled.phase == ExternalAllocationPhase::NoContact => {
+                    ExternalCandidateStartCleanup::Proved
+                }
+                _ => ExternalCandidateStartCleanup::Unproved,
+            }
+        }
+        Ok(Some(record)) if record.phase.is_settled() => ExternalCandidateStartCleanup::Proved,
+        Ok(Some(_)) | Err(_) => ExternalCandidateStartCleanup::Unproved,
+    }
+}
+
 fn require_fresh_contact_owner(
     session: &crate::runtime_db::DedicatedSessionRecord,
     workspace: &WorkspaceRecord,
@@ -1236,6 +1403,50 @@ impl ExternalPlacementReconciliation {
     /// an occurrence. An exact replay or daemon restart observes the retained
     /// request and can only reconcile that mutation.
     pub(crate) fn activate_or_reconcile(self) -> Result<ExternalSupervisorActivationRecord> {
+        self.activate_or_reconcile_retained()
+    }
+
+    /// Advance activation and readiness while retaining the non-serializable
+    /// owner signer inside this placement owner.  An attached channel is not
+    /// executable authority: only an applied signed Ready plus the exact
+    /// controller Release may produce `Ready`.
+    fn advance_start(self) -> Result<ExternalCandidateStartProgress> {
+        let activation = self.activate_or_reconcile_retained()?;
+        let placement = &self.record.reservation.placement_thread_id;
+        let Some(binding) = self
+            .state_store
+            .optional_external_execution_channel(placement)?
+        else {
+            return match activation
+                .observation
+                .as_ref()
+                .map(|observation| observation.activation_state.as_str())
+            {
+                Some("started") => Ok(ExternalCandidateStartProgress::AttachmentPending),
+                Some("not_started") => Ok(ExternalCandidateStartProgress::CleanupRequired),
+                None => Ok(ExternalCandidateStartProgress::SupervisorPending),
+                Some(_) => bail!("external supervisor activation retained an unknown observation"),
+            };
+        };
+        ensure!(
+            activation
+                .observation
+                .as_ref()
+                .is_none_or(|observation| observation.activation_state == "started"),
+            "attached external channel contradicts supervisor activation"
+        );
+        let release = self.state_store.admit_external_ready_and_author_release(
+            placement,
+            self.channel_authority.owner_signing_key(),
+        )?;
+        if release.is_some() {
+            Ok(ExternalCandidateStartProgress::Ready(binding))
+        } else {
+            Ok(ExternalCandidateStartProgress::ChannelAttached)
+        }
+    }
+
+    fn activate_or_reconcile_retained(&self) -> Result<ExternalSupervisorActivationRecord> {
         ensure!(
             self.contact_gate
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1577,6 +1788,7 @@ mod tests {
         allocation_observations: AtomicUsize,
         activation_calls: AtomicUsize,
         activation_observations: AtomicUsize,
+        reconciled_activation: &'static str,
         terminate_calls: AtomicUsize,
         termination_observations: AtomicUsize,
     }
@@ -1589,8 +1801,16 @@ mod tests {
                 allocation_observations: AtomicUsize::new(0),
                 activation_calls: AtomicUsize::new(0),
                 activation_observations: AtomicUsize::new(0),
+                reconciled_activation: "started",
                 terminate_calls: AtomicUsize::new(0),
                 termination_observations: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_reconciled_activation(reconciled_activation: &'static str) -> Self {
+            Self {
+                reconciled_activation,
+                ..Self::new()
             }
         }
     }
@@ -1667,8 +1887,15 @@ mod tests {
             _intent: &ExternalSupervisorActivationIntent,
         ) -> Result<ExternalSupervisorActivationResolution> {
             self.activation_observations.fetch_add(1, Ordering::SeqCst);
-            Ok(ExternalSupervisorActivationResolution::Started {
-                provider_observation_digest: "3".repeat(64),
+            Ok(match self.reconciled_activation {
+                "started" => ExternalSupervisorActivationResolution::Started {
+                    provider_observation_digest: "3".repeat(64),
+                },
+                "not_started" => ExternalSupervisorActivationResolution::NotStarted {
+                    provider_observation_digest: "4".repeat(64),
+                },
+                "pending" => ExternalSupervisorActivationResolution::Pending,
+                _ => bail!("fixture selected an unknown activation resolution"),
             })
         }
 
@@ -2347,6 +2574,351 @@ mod tests {
         assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
         assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bounded_start_driver_never_repeats_an_ambiguous_mutation() {
+        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        let backend = Arc::new(FaultBackend::new());
+        let gate = Arc::new(AtomicBool::new(false));
+
+        let first = advance_prepared_external_start(prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        ));
+        assert!(first.is_err());
+        assert_eq!(
+            store.external_allocation("T-one").unwrap().unwrap().phase,
+            ExternalAllocationPhase::ContactPending
+        );
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &binding,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::OccurrenceBound
+        );
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.allocation_observations.load(Ordering::SeqCst), 1);
+
+        let activation = advance_prepared_external_start(prepared_fixture(
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        ));
+        assert!(activation.is_err());
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store,
+                backend.clone(),
+                &reservation,
+                &binding,
+                gate,
+                controller_lifetime,
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::AttachmentPending
+        );
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unresolved_or_negative_activation_never_opens_the_channel() {
+        for (resolution, expected) in [
+            ("pending", ExternalCandidateStartProgress::SupervisorPending),
+            (
+                "not_started",
+                ExternalCandidateStartProgress::CleanupRequired,
+            ),
+        ] {
+            let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+            let backend = Arc::new(FaultBackend::with_reconciled_activation(resolution));
+            let gate = Arc::new(AtomicBool::new(false));
+            assert!(
+                advance_prepared_external_start(prepared_fixture(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate.clone(),
+                    controller_lifetime.clone(),
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                advance_prepared_external_start(prepared_fixture(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate.clone(),
+                    controller_lifetime.clone(),
+                ))
+                .unwrap(),
+                ExternalCandidateStartProgress::OccurrenceBound
+            );
+            assert!(
+                advance_prepared_external_start(prepared_fixture(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate.clone(),
+                    controller_lifetime.clone(),
+                ))
+                .is_err()
+            );
+            assert_eq!(
+                advance_prepared_external_start(prepared_fixture(
+                    store.clone(),
+                    backend.clone(),
+                    &reservation,
+                    &binding,
+                    gate,
+                    controller_lifetime,
+                ))
+                .unwrap(),
+                expected
+            );
+            assert!(
+                store
+                    .optional_external_execution_channel(&reservation.placement_thread_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn start_driver_opens_execution_only_after_signed_readiness() {
+        let (store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
+        let backend = Arc::new(FaultBackend::new());
+        let gate = Arc::new(AtomicBool::new(false));
+
+        assert!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::OccurrenceBound
+        );
+        assert!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::AttachmentPending
+        );
+
+        let occurrence = store
+            .external_allocation(&reservation.placement_thread_id)
+            .unwrap()
+            .unwrap()
+            .occurrence
+            .unwrap();
+        let candidate_program = program();
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let channel = ryeos_state::external_execution::ExecutionChannelBinding {
+            schema: 3,
+            placement_thread_id: reservation.placement_thread_id.clone(),
+            allocation_request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id,
+            admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+            base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+            execution_binding_hash: reservation.binding_hash.clone(),
+            supervisor_runtime_hash: candidate_program.runtime_manifest_hash.clone(),
+            candidate_program_digest: candidate_program.digest().unwrap(),
+            channel_nonce: "8".repeat(64),
+            owner_public_key: reservation.channel_owner_public_key.clone(),
+            supervisor_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &supervisor.verifying_key(),
+            )
+            .unwrap(),
+            issued_at_ms: now,
+            execution_deadline_ms: now + 60_000,
+            expires_at_ms: now + 120_000,
+            candidate_export_max_bytes: 512,
+            max_frames: 64,
+            max_bytes: 2048,
+        };
+        store.register_external_execution_channel(&channel).unwrap();
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate.clone(),
+                controller_lifetime.clone(),
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::ChannelAttached
+        );
+
+        let ready = ryeos_state::external_execution::SignedExecutionFrame::sign(
+            ryeos_state::external_execution::ExecutionFrame {
+                schema: 1,
+                binding_digest: channel.digest().unwrap(),
+                direction: ryeos_state::external_execution::ChannelDirection::SupervisorToOwner,
+                sequence: 1,
+                previous_frame_digest: None,
+                acknowledged_peer_sequence: 0,
+                payload: ryeos_state::external_execution::ExecutionChannelPayload::Ready {
+                    supervisor_runtime_hash: channel.supervisor_runtime_hash.clone(),
+                    base_snapshot_hash: channel.base_snapshot_hash.clone(),
+                },
+            },
+            &channel,
+            &supervisor,
+        )
+        .unwrap();
+        let ready_wire = lillux::canonical_json(&serde_json::to_value(ready).unwrap()).unwrap();
+        let authority =
+            ExternalChannelAuthority::test_fixture(&reservation.channel_authority_generation);
+        store
+            .exchange_external_supervisor_frame(
+                &reservation.placement_thread_id,
+                ready_wire.as_bytes(),
+                authority.owner_signing_key(),
+                16,
+                1024 * 1024,
+            )
+            .unwrap();
+
+        assert_eq!(
+            advance_prepared_external_start(prepared_fixture(
+                store,
+                backend.clone(),
+                &reservation,
+                &retained,
+                gate,
+                controller_lifetime,
+            ))
+            .unwrap(),
+            ExternalCandidateStartProgress::Ready(channel)
+        );
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cleanup_classification_is_derived_only_from_durable_external_state() {
+        let (store, reservation, binding, controller_lifetime, _) = placement_store_fixture();
+        assert_eq!(
+            classify_external_start_cleanup(&store, "T-one"),
+            ExternalCandidateStartCleanup::Proved
+        );
+        assert_eq!(
+            store.external_allocation("T-one").unwrap().unwrap().phase,
+            ExternalAllocationPhase::NoContact
+        );
+
+        let root = tempfile::tempdir().unwrap().keep();
+        let lock_path = crate::state_lock::default_lock_path(&root);
+        let controller = crate::state_lock::StateLock::acquire(&lock_path).unwrap();
+        let lifetime = Arc::new(controller.retain());
+        drop(controller);
+        let state_dir = root.join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let contacted = Arc::new(
+            crate::state_store::StateStore::new_with_head_trust(
+                root,
+                state_dir.clone(),
+                state_dir.join("runtime.sqlite3"),
+                signer,
+                crate::write_barrier::WriteBarrier::new(),
+                Arc::new(trust),
+            )
+            .unwrap(),
+        );
+        contacted
+            .install_external_placement_test_fixture(&reservation, &binding)
+            .unwrap();
+        let decision = prepared_fixture(
+            contacted.clone(),
+            Arc::new(FaultBackend::new()),
+            &reservation,
+            &binding,
+            Arc::new(AtomicBool::new(false)),
+            lifetime,
+        )
+        .claim()
+        .unwrap();
+        let ExternalPlacementContactDecision::Contact(permit) = decision else {
+            panic!("fixture did not retain the unique contact permit");
+        };
+        assert!(permit.contact().is_err());
+        assert_eq!(
+            classify_external_start_cleanup(&contacted, "T-one"),
+            ExternalCandidateStartCleanup::Unproved
+        );
+        assert_eq!(
+            contacted
+                .external_allocation("T-one")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::ContactPending
+        );
+
+        drop(controller_lifetime);
     }
 
     #[test]
