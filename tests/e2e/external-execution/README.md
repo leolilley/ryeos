@@ -21,8 +21,11 @@ The Rust API additionally validates exact dedicated-session/capsule/workspace
 ownership, canonical bounded records, contact deadlines, capacity across binding
 generations, unique occurrence binding and CAS retention roots. The initial
 12-test Rust allocation/channel group passed after Cargo was authorized.
-Runtime schema epoch 40 is provisional until
+Runtime schema epoch 41 is provisional until
 integration with the then-current `next`; it must not collide with another cut.
+Epoch 40 first introduced the stable external-obligation reset guard; epoch 41
+adds shared-journal initial-state constraints, so old stores are not silently
+reinterpreted under a changed SQLite contract.
 Schema mismatch is checked before decoding version-specific journal rows. The
 independent stable reset guard refuses destructive history reset even when the
 controller's own host lifetime has ended.
@@ -428,3 +431,26 @@ continuing execution authority. Preserve the 14 node regressions through this
 extraction, then add guest fresh/reopen, uncertain-claim, cancellation-gap and
 export-retention cases. This is reviewed implementation direction, not an
 implemented guest journal or network supervisor.
+
+### Continuation checkpoint — 2026-09-20
+
+The ordered continuation handoff is retained locally at
+`.tmp/external-candidate-continuation-20260920.md` in the feature worktree.
+It records the six-file uncommitted journal extraction, invariant/owner boundaries
+and the remaining composed-runtime gates. The corrected extraction now passes
+21 state external-execution tests (13 independent shared-journal tests), all 14
+node allocation/channel regressions and 22 exact-DDL SQLite checks. Independent
+architecture, security/recovery and tests/schema re-reviews found no remaining
+blocker in this extraction after terminal-close recovery was corrected.
+
+The shared core binds every selected row back to authenticated digest/direction/
+sequence, requires exact retained export coordinates, refuses advanced initial
+rows, and reconstructs terminal-close, quiescence and lifecycle invariants on
+reopen. Runtime epoch 41 records the trigger change; the external obligation
+reset guard still begins at epoch 40. No supervisor, transport or complete remote
+worker is enabled by this evidence.
+
+The prior disk blocker is resolved: the latest filesystem read showed 62 GiB
+available on the project filesystem. Cargo remains permitted with one job and
+the feature-local target; no target relocation, installation or lifecycle action
+was performed. Recheck available space before resuming builds.

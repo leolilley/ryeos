@@ -15,6 +15,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 RUNTIME = ROOT / "crates/daemon/ryeos-app/src/runtime_db.rs"
 EXTERNAL = RUNTIME.with_suffix("") / "external_execution.rs"
+CHANNEL = ROOT / "crates/state/ryeos-state/src/external_execution/journal.rs"
 
 
 def raw_constant(path, name):
@@ -30,6 +31,7 @@ def database(path=":memory:"):
     connection.executescript(raw_constant(RUNTIME, "SCHEMA_SQL"))
     connection.executescript(raw_constant(EXTERNAL, "GUARD_SQL") + ";")
     connection.execute("INSERT INTO external_execution_guard VALUES(1,1,0)")
+    connection.executescript(raw_constant(CHANNEL, "CHANNEL_SQL"))
     connection.executescript(raw_constant(EXTERNAL, "JOURNAL_SQL"))
     connection.execute("""
         INSERT INTO credential_profile(profile_id,owner_principal,home_id,
@@ -197,6 +199,24 @@ class ExternalAllocationSqlTests(unittest.TestCase):
                            "placement_thread_id='T-other'"):
             with self.assertRaises(sqlite3.IntegrityError):
                 self.db.execute(f"UPDATE external_execution_channel SET {assignment}")
+
+    def test_channel_and_frame_must_begin_in_unapplied_state(self):
+        self.reserve()
+        for state in ("ready", "running", "stopped"):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute("""INSERT INTO external_execution_channel
+                    VALUES('T-one','binding','{}',?,NULL,NULL,NULL)""", (state,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("""INSERT INTO external_execution_channel
+                VALUES('T-one','binding','{}','prepared',?,NULL,NULL)""",
+                ("completion",))
+        self.db.execute("""INSERT INTO external_execution_channel
+            VALUES('T-one','binding','{}','prepared',NULL,NULL,NULL)""")
+        for application in ("claimed", "applied", "revoked"):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute("""INSERT INTO external_execution_frame
+                    VALUES('binding','owner_to_supervisor',1,1,'digest','{}',2,0,?)""",
+                    (application,))
 
     def test_retained_import_is_immutable_and_cannot_be_collected_early(self):
         self.channel_and_frame()

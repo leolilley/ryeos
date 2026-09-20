@@ -33,32 +33,6 @@ CREATE TABLE external_execution_allocation (
 );
 CREATE INDEX idx_external_execution_capacity
     ON external_execution_allocation(capacity_owner, phase);
-CREATE TABLE external_execution_channel (
-    placement_thread_id TEXT PRIMARY KEY,
-    binding_digest TEXT NOT NULL UNIQUE,
-    binding_json TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN
-        ('prepared','ready','running','quiescing','exported','stopping','stopped')),
-    completion_request_digest TEXT,
-    export_snapshot_hash TEXT,
-    export_evidence_hash TEXT,
-    CHECK ((export_snapshot_hash IS NULL AND export_evidence_hash IS NULL)
-        OR (export_snapshot_hash IS NOT NULL AND export_evidence_hash IS NOT NULL
-            AND completion_request_digest IS NOT NULL))
-);
-CREATE TABLE external_execution_frame (
-    binding_digest TEXT NOT NULL,
-    direction TEXT NOT NULL CHECK (direction IN ('owner_to_supervisor','supervisor_to_owner')),
-    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    ordinal INTEGER NOT NULL CHECK (ordinal > 0),
-    frame_digest TEXT NOT NULL,
-    frame_json TEXT NOT NULL,
-    frame_bytes INTEGER NOT NULL CHECK (frame_bytes > 0),
-    acknowledged_peer_sequence INTEGER NOT NULL CHECK (acknowledged_peer_sequence >= 0),
-    application TEXT NOT NULL CHECK (application IN ('pending','claimed','applied','revoked')),
-    PRIMARY KEY(binding_digest,direction,sequence),
-    UNIQUE(binding_digest,ordinal)
-);
 CREATE TABLE external_execution_import (
     binding_digest TEXT PRIMARY KEY,
     snapshot_hash TEXT NOT NULL,
@@ -66,45 +40,21 @@ CREATE TABLE external_execution_import (
     completion_request_digest TEXT NOT NULL,
     export_frame_digest TEXT NOT NULL
 );
-CREATE TABLE external_execution_revocation (
-    binding_digest TEXT PRIMARY KEY,
-    frame_digest TEXT NOT NULL,
-    frame_json TEXT NOT NULL
-);
-CREATE TRIGGER external_execution_revocation_no_update
-BEFORE UPDATE ON external_execution_revocation
-BEGIN SELECT RAISE(ABORT, 'external revocation is sticky and immutable'); END;
-CREATE TRIGGER external_execution_revocation_no_delete
-BEFORE DELETE ON external_execution_revocation
-BEGIN SELECT RAISE(ABORT, 'external revocation requires explicit cleanup retention handoff'); END;
+
+
 CREATE TRIGGER external_execution_import_no_update
 BEFORE UPDATE ON external_execution_import
 BEGIN SELECT RAISE(ABORT, 'retained external import is immutable'); END;
 CREATE TRIGGER external_execution_import_no_delete
 BEFORE DELETE ON external_execution_import
 BEGIN SELECT RAISE(ABORT, 'external import requires explicit completion retention handoff'); END;
-CREATE TRIGGER external_execution_channel_no_rebinding
-BEFORE UPDATE ON external_execution_channel
-WHEN NEW.placement_thread_id != OLD.placement_thread_id
- OR NEW.binding_digest != OLD.binding_digest OR NEW.binding_json != OLD.binding_json
-BEGIN SELECT RAISE(ABORT, 'external channel cannot change its occurrence or keys'); END;
+
 CREATE TRIGGER external_execution_channel_no_delete
 BEFORE DELETE ON external_execution_channel
 WHEN EXISTS(SELECT 1 FROM external_execution_allocation a
     WHERE a.placement_thread_id=OLD.placement_thread_id AND a.phase!='no_contact')
 BEGIN SELECT RAISE(ABORT, 'external execution retains its channel'); END;
-CREATE TRIGGER external_execution_frame_immutable
-BEFORE UPDATE ON external_execution_frame
-WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
- OR NEW.sequence != OLD.sequence OR NEW.frame_digest != OLD.frame_digest
- OR NEW.ordinal != OLD.ordinal
- OR NEW.frame_json != OLD.frame_json OR NEW.frame_bytes != OLD.frame_bytes
- OR NEW.acknowledged_peer_sequence != OLD.acknowledged_peer_sequence
- OR NOT ((OLD.application='pending' AND NEW.application='claimed')
-     OR (OLD.application='pending' AND NEW.application='revoked'
-         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes'),0))
-     OR (OLD.application='claimed' AND NEW.application='applied'))
-BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
+
 CREATE TRIGGER external_execution_frame_no_delete
 BEFORE DELETE ON external_execution_frame
 WHEN EXISTS(SELECT 1 FROM external_execution_channel c

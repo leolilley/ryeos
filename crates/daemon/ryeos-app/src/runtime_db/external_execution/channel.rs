@@ -1,9 +1,8 @@
 //! Subordinate channel/transcript state, never a second worker scheduler.
 use super::*;
-use ryeos_state::external_execution::transcript::{ChannelPhase, FrameFrontier, urgent_control};
+use ryeos_state::external_execution::journal::{self, JournalOwner, load_binding, revoked};
 use ryeos_state::external_execution::{
-    ChannelDirection, ExecutionChannelBinding, ExecutionChannelBudget, ExecutionChannelPayload,
-    SignedExecutionFrame,
+    ChannelDirection, ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
 };
 
 impl RuntimeDb {
@@ -17,46 +16,9 @@ impl RuntimeDb {
         wire: &[u8],
     ) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        let verified = SignedExecutionFrame::decode_and_verify(
-            wire,
-            &binding,
-            lillux::time::timestamp_millis(),
-        )?;
-        if verified.frame().direction != ChannelDirection::OwnerToSupervisor
-            || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
-            || wire.len() as u64 > ryeos_state::external_execution::TERMINAL_CONTROL_BYTES
-        {
-            bail!("external fast path accepts only bounded owner revocation");
-        }
-        let allocation = read(&tx, placement)?.context("external allocation absent")?;
-        require_session_owner(&tx, &allocation.reservation)?;
-        let prior: Option<(String, String)> = tx
-            .query_row(
-                "SELECT frame_digest,frame_json
-            FROM external_execution_revocation WHERE binding_digest=?1",
-                [binding.digest()?],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some(prior) = prior {
-            if prior.0 != verified.digest() || prior.1 != verified.canonical() {
-                bail!("external cancellation changed its exact retained frame");
-            }
-            return Ok(false);
-        }
-        tx.execute(
-            "INSERT INTO external_execution_revocation VALUES(?1,?2,?3)",
-            params![binding.digest()?, verified.digest(), verified.canonical()],
-        )?;
-        tx.execute(
-            "UPDATE external_execution_frame SET application='revoked'
-            WHERE binding_digest=?1 AND application='pending'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
-            [binding.digest()?],
-        )?;
+        let result = journal::record_revocation(&tx, &NodeJournalOwner, placement, wire)?;
         tx.commit()?;
-        Ok(true)
+        Ok(result)
     }
 
     pub fn external_execution_revoked(&self, placement: &str) -> Result<bool> {
@@ -97,8 +59,16 @@ impl RuntimeDb {
             "SELECT frame_digest FROM external_execution_frame
             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
             AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
+            AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?2
+            AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?3
+            AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?4
             AND application IN ('claimed','applied')",
-            [imported.channel_binding_digest()],
+            params![
+                imported.channel_binding_digest(),
+                imported.snapshot_hash(),
+                imported.completion_request_digest(),
+                imported.claimed_writer_exclusion_evidence_hash()
+            ],
             |row| row.get(0),
         )?;
         let expected = (
@@ -194,128 +164,19 @@ impl RuntimeDb {
     /// false is an exact duplicate, never permission to forward bytes again.
     pub fn record_external_execution_frame(&self, placement: &str, wire: &[u8]) -> Result<bool> {
         let binding = load_binding(&self.conn, placement)?;
-        let now = lillux::time::timestamp_millis();
-        let verified = SignedExecutionFrame::decode_and_verify(wire, &binding, now)?;
-        let frame = verified.frame();
-        if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
-            // Commit revocation even if contiguous transcript reconciliation
-            // below rejects a gap/fork. History cannot reopen execution.
+        let verified = SignedExecutionFrame::decode_and_verify(
+            wire,
+            &binding,
+            lillux::time::timestamp_millis(),
+        )?;
+        if matches!(verified.frame().payload, ExecutionChannelPayload::Cancel) {
+            // Independent commit: a subsequent gap/fork cannot undo revocation.
             self.record_external_execution_revocation(placement, wire)?;
         }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let allocation = read(&tx, placement)?.context("external allocation absent")?;
-        require_session_owner(&tx, &allocation.reservation)?;
-        let direction = frame.direction.as_str();
-        let prior: Option<String> = tx
-            .query_row(
-                "SELECT frame_digest FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
-                params![
-                    frame.binding_digest,
-                    direction,
-                    i64::try_from(frame.sequence)?
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(prior) = prior {
-            if prior != verified.digest() {
-                bail!("external frame sequence was reused with different bytes");
-            }
-            return Ok(false);
-        }
-        let last: Option<(i64, String, i64)> = tx.query_row(
-            "SELECT sequence,frame_digest,acknowledged_peer_sequence FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction=?2 ORDER BY sequence DESC LIMIT 1",
-            params![frame.binding_digest, direction], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
-            .optional()?;
-        let (sequence, predecessor, last_ack) = match last {
-            None => (0, None, 0),
-            Some((sequence, digest, ack)) => (sequence, Some(digest), ack),
-        };
-        let peer_sequence: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sequence),0) FROM external_execution_frame WHERE binding_digest=?1 AND direction=?2",
-            params![frame.binding_digest, frame.direction.opposite().as_str()], |row|row.get(0))?;
-        FrameFrontier::from_retained(
-            u64::try_from(sequence)?,
-            predecessor,
-            u64::try_from(last_ack)?,
-        )?
-        .require_successor(frame, u64::try_from(peer_sequence)?)?;
-        let mut budget = retained_budget(&tx, &frame.binding_digest, direction)?;
-        budget.retain(&binding, &frame.payload, wire.len() as u64)?;
-        let (state, completion): (String, Option<String>) = tx.query_row(
-            "SELECT state,completion_request_digest FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement], |row|Ok((row.get(0)?,row.get(1)?)))?;
-        if allocation.phase != ExternalAllocationPhase::Bound
-            && !matches!(
-                frame.payload,
-                ExecutionChannelPayload::Cancel
-                    | ExecutionChannelPayload::Stopped { .. }
-                    | ExecutionChannelPayload::Acknowledge
-            )
-        {
-            bail!("quarantined allocation cannot execute or author a candidate export");
-        }
-        let next = ChannelPhase::parse(&state)?.advance(
-            completion.as_deref(),
-            &frame.payload,
-            now < binding.execution_deadline_ms,
-        )?;
-        let ordinal: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(ordinal),0)+1 FROM external_execution_frame WHERE binding_digest=?1",
-            [&frame.binding_digest], |row|row.get(0))?;
-        tx.execute(
-            "INSERT INTO external_execution_frame VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pending')",
-            params![
-                frame.binding_digest,
-                direction,
-                i64::try_from(frame.sequence)?,
-                ordinal,
-                verified.digest(),
-                verified.canonical(),
-                i64::try_from(wire.len())?,
-                i64::try_from(frame.acknowledged_peer_sequence)?
-            ],
-        )?;
-        tx.execute(
-            "UPDATE external_execution_channel SET state=?2 WHERE placement_thread_id=?1",
-            params![placement, next.as_str()],
-        )?;
-        if revoked(&tx, &frame.binding_digest)? {
-            tx.execute("UPDATE external_execution_frame SET application='revoked'
-                WHERE binding_digest=?1 AND application='pending'
-                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
-                [&frame.binding_digest])?;
-        }
-        match &frame.payload {
-            ExecutionChannelPayload::Cancel | ExecutionChannelPayload::Stopped { .. } => {
-                // Pending input has provably not been applied. Claimed input
-                // remains unknown; cancellation may overtake it but cannot
-                // relabel it as uncontacted or completed.
-                tx.execute("UPDATE external_execution_frame SET application='revoked'
-                    WHERE binding_digest=?1 AND application='pending'
-                    AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
-                    [&frame.binding_digest])?;
-            }
-            ExecutionChannelPayload::Quiesce {
-                completion_request_digest,
-            } => {
-                tx.execute("UPDATE external_execution_channel SET completion_request_digest=?2 WHERE placement_thread_id=?1",
-                    params![placement,completion_request_digest])?;
-            }
-            ExecutionChannelPayload::ExportSealed {
-                candidate_snapshot_hash,
-                writer_exclusion_evidence_hash,
-                ..
-            } => {
-                tx.execute("UPDATE external_execution_channel SET export_snapshot_hash=?2,export_evidence_hash=?3 WHERE placement_thread_id=?1",
-                    params![placement,candidate_snapshot_hash,writer_exclusion_evidence_hash])?;
-            }
-            _ => {}
-        }
+        let result = journal::append_frame(&tx, &NodeJournalOwner, placement, wire)?;
         tx.commit()?;
-        Ok(true)
+        Ok(result)
     }
 
     /// Claim one already-authenticated frame for application. A crash after
@@ -329,93 +190,16 @@ impl RuntimeDb {
         digest: &str,
     ) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        let binding_digest = binding.digest()?;
-        let allocation = read(&tx, placement)?.context("external allocation absent")?;
-        require_session_owner(&tx, &allocation.reservation)?;
-        let sequence = i64::try_from(sequence)?;
-        let (stored_digest, application, wire): (String, String, String) = tx.query_row(
-            "SELECT frame_digest,application,frame_json FROM external_execution_frame
-             WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
-            params![binding_digest, direction.as_str(), sequence],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        if digest != stored_digest {
-            bail!("external application claim changed its frame");
-        }
-        if application != "pending" {
-            return Ok(false);
-        }
-        let verified = SignedExecutionFrame::decode_and_verify(
-            wire.as_bytes(),
-            &binding,
-            lillux::time::timestamp_millis(),
-        )?;
-        if allocation.phase != ExternalAllocationPhase::Bound
-            && !matches!(
-                verified.frame().payload,
-                ExecutionChannelPayload::Cancel
-                    | ExecutionChannelPayload::Stopped { .. }
-                    | ExecutionChannelPayload::Acknowledge
-            )
-        {
-            bail!("quarantined external frame is not executable");
-        }
-        if revoked(&tx, &binding_digest)? && !urgent_control(&verified.frame().payload) {
-            bail!("external execution is durably revoked");
-        }
-        if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
-            && matches!(
-                verified.frame().payload,
-                ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
-            )
-        {
-            bail!("external execution deadline passed before application");
-        }
-        let state: String = tx.query_row(
-            "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
-            [placement],
-            |row| row.get(0),
-        )?;
-        if matches!(
-            verified.frame().payload,
-            ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
-        ) && !ChannelPhase::parse(&state)?.permits_pending_input()
-        {
-            bail!("external execution was revoked before pending application");
-        }
-        let pending_prior: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame WHERE binding_digest=?1
-             AND direction=?2 AND sequence<?3 AND application NOT IN ('applied','revoked'))",
-            params![binding_digest, direction.as_str(), sequence],
-            |row| row.get(0),
-        )?;
-        if pending_prior && !urgent_control(&verified.frame().payload) {
-            bail!("external frame has an unsettled predecessor application");
-        }
-        // Projection describes authored observations, not applied operations.
-        // An export can be retained early, but cannot be imported before the
-        // exact owner quiesce (and all its preceding input) has been applied.
-        if matches!(
-            verified.frame().payload,
-            ExecutionChannelPayload::ExportObjectChunk { .. }
-                | ExecutionChannelPayload::ExportSealed { .. }
-        ) {
-            let quiesced: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM external_execution_frame
-                WHERE binding_digest=?1 AND direction='owner_to_supervisor'
-                AND application='applied' AND json_extract(frame_json,'$.frame.payload.kind')='quiesce')",
-                [&binding_digest], |row|row.get(0))?;
-            if !quiesced {
-                bail!("external export precedes applied owner quiescence");
-            }
-        }
-        let changed = tx.execute(
-            "UPDATE external_execution_frame SET application='claimed'
-            WHERE binding_digest=?1 AND direction=?2 AND sequence=?3 AND application='pending'",
-            params![binding_digest, direction.as_str(), sequence],
+        let result = journal::claim_application(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            direction,
+            sequence,
+            digest,
         )?;
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(result)
     }
 
     /// Called by the protected relay only after its exact application completes.
@@ -428,124 +212,24 @@ impl RuntimeDb {
         digest: &str,
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let binding = load_binding(&tx, placement)?;
-        let allocation = read(&tx, placement)?.context("external allocation absent")?;
-        require_session_owner(&tx, &allocation.reservation)?;
-        let stored: (String, String) = tx.query_row(
-            "SELECT frame_digest,application FROM external_execution_frame
-            WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
-            params![
-                binding.digest()?,
-                direction.as_str(),
-                i64::try_from(sequence)?
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if stored.0 != digest || !matches!(stored.1.as_str(), "claimed" | "applied") {
-            bail!("external frame completion has no exact claimed application");
-        }
-        if stored.1 == "applied" {
-            return Ok(());
-        }
-        let export_unretained: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM external_execution_frame f
-            WHERE f.binding_digest=?1 AND f.direction=?2 AND f.sequence=?3
-            AND json_extract(f.frame_json,'$.frame.payload.kind')='export_sealed'
-            AND NOT EXISTS(SELECT 1 FROM external_execution_import i
-                WHERE i.binding_digest=f.binding_digest AND i.export_frame_digest=f.frame_digest))",
-            params![
-                binding.digest()?,
-                direction.as_str(),
-                i64::try_from(sequence)?
-            ],
-            |row| row.get(0),
-        )?;
-        if export_unretained {
-            bail!("external export cannot be acknowledged before durable content retention");
-        }
-        tx.execute(
-            "UPDATE external_execution_frame SET application='applied'
-            WHERE binding_digest=?1 AND direction=?2 AND sequence=?3 AND application='claimed'",
-            params![
-                binding.digest()?,
-                direction.as_str(),
-                i64::try_from(sequence)?
-            ],
+        let result = journal::finish_application(
+            &tx,
+            &NodeJournalOwner,
+            placement,
+            direction,
+            sequence,
+            digest,
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(result)
     }
 }
 
-fn load_binding(conn: &Connection, placement: &str) -> Result<ExecutionChannelBinding> {
-    let (digest,raw): (String,String) = conn.query_row(
-        "SELECT binding_digest,binding_json FROM external_execution_channel WHERE placement_thread_id=?1",
-        [placement], |row|Ok((row.get(0)?,row.get(1)?)))?;
-    if raw.len() > 8192 {
-        bail!("external binding exceeds bound");
-    }
-    let binding: ExecutionChannelBinding = serde_json::from_str(&raw)?;
-    if binding.placement_thread_id != placement
-        || binding.digest()? != digest
-        || lillux::canonical_json(&serde_json::to_value(&binding)?)? != raw
-    {
-        bail!("external channel row contradicts canonical binding");
-    }
-    Ok(binding)
-}
+struct NodeJournalOwner;
 
-fn revoked(conn: &Connection, digest: &str) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM external_execution_revocation WHERE binding_digest=?1)",
-        [digest],
-        |row| row.get(0),
-    )?)
-}
-
-/// Validate retained signed transcripts after the runtime schema was accepted.
-/// Historical authentication uses the binding's issue instant; its expiration
-/// refuses new use, not retention/recovery of already recorded observations.
-pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
-    let mut revocations = conn.prepare("SELECT r.binding_digest,r.frame_digest,r.frame_json,c.placement_thread_id
-        FROM external_execution_revocation r LEFT JOIN external_execution_channel c ON c.binding_digest=r.binding_digest")?;
-    let mut rows = revocations.query([])?;
-    while let Some(row) = rows.next()? {
-        let placement = row
-            .get::<_, Option<String>>(3)?
-            .context("external revocation has no channel owner")?;
-        let binding = load_binding(conn, &placement)?;
-        let wire: String = row.get(2)?;
-        let verified = SignedExecutionFrame::decode_and_verify(
-            wire.as_bytes(),
-            &binding,
-            binding.issued_at_ms,
-        )?;
-        if row.get::<_, String>(0)? != binding.digest()?
-            || row.get::<_, String>(1)? != verified.digest()
-            || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
-            || verified.frame().direction != ChannelDirection::OwnerToSupervisor
-            || wire.len() as u64 > ryeos_state::external_execution::TERMINAL_CONTROL_BYTES
-        {
-            bail!("retained external revocation changed authority");
-        }
-    }
-    let mut statement = conn.prepare(
-        "SELECT placement_thread_id,state,completion_request_digest,
-        export_snapshot_hash,export_evidence_hash FROM external_execution_channel",
-    )?;
-    let channels = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (placement, stored_state, stored_completion, stored_snapshot, stored_evidence) in channels {
-        let binding = load_binding(conn, &placement)?;
+impl JournalOwner for NodeJournalOwner {
+    fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()> {
+        let placement = &binding.placement_thread_id;
         let allocation = read(conn, &placement)?.context("orphan external channel")?;
         let reservation = &allocation.reservation;
         let occurrence = allocation
@@ -560,116 +244,74 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
         {
             bail!("retained external channel changed its allocation authority");
         }
-        let binding_digest = binding.digest()?;
-        let mut frames = conn.prepare(
-            "SELECT ordinal,direction,sequence,frame_digest,frame_json,
-            frame_bytes,acknowledged_peer_sequence,application FROM external_execution_frame
-            WHERE binding_digest=?1 ORDER BY ordinal",
-        )?;
-        let mut rows = frames.query([&binding_digest])?;
-        let mut ordinal = 0_i64;
-        let mut frontiers = [FrameFrontier::default(), FrameFrontier::default()];
-        let mut budgets = [
-            ExecutionChannelBudget::default(),
-            ExecutionChannelBudget::default(),
-        ];
-        let mut unsettled = [false; 2];
-        let mut state = ChannelPhase::Prepared;
-        let mut completion: Option<String> = None;
-        let mut snapshot: Option<String> = None;
-        let mut evidence: Option<String> = None;
-        while let Some(row) = rows.next()? {
-            ordinal += 1;
-            let wire: String = row.get(4)?;
-            let verified = SignedExecutionFrame::decode_and_verify(
-                wire.as_bytes(),
-                &binding,
-                binding.issued_at_ms,
-            )?;
-            let frame = verified.frame();
-            if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
-                let retained: Option<String> = conn
-                    .query_row(
-                        "SELECT frame_digest FROM external_execution_revocation
-                    WHERE binding_digest=?1",
-                        [&binding_digest],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if retained.as_deref() != Some(verified.digest()) {
-                    bail!("external transcript cancellation lost its sticky revocation");
-                }
-            }
-            let index = match frame.direction {
-                ChannelDirection::OwnerToSupervisor => 0,
-                ChannelDirection::SupervisorToOwner => 1,
-            };
-            let application: String = row.get(7)?;
-            if row.get::<_, i64>(0)? != ordinal
-                || row.get::<_, String>(1)? != frame.direction.as_str()
-                || row.get::<_, i64>(2)? != i64::try_from(frame.sequence)?
-                || row.get::<_, String>(3)? != verified.digest()
-                || row.get::<_, i64>(5)? != i64::try_from(wire.len())?
-                || row.get::<_, i64>(6)? != i64::try_from(frame.acknowledged_peer_sequence)?
-                || (unsettled[index]
-                    && !matches!(application.as_str(), "pending" | "revoked")
-                    && !urgent_control(&frame.payload))
-            {
-                bail!("retained external transcript ordering, application or identity mismatch");
-            }
-            frontiers[index].require_successor(frame, frontiers[1 - index].sequence())?;
-            if !matches!(
-                application.as_str(),
-                "pending" | "claimed" | "applied" | "revoked"
-            ) {
-                bail!("retained external application has unknown state");
-            }
-            if application == "revoked"
-                && !matches!(
-                    frame.payload,
-                    ExecutionChannelPayload::Release
-                        | ExecutionChannelPayload::ProtocolBytes { .. }
-                )
-            {
-                bail!("external control observation was incorrectly revoked");
-            }
-            unsettled[index] |= !matches!(application.as_str(), "applied" | "revoked");
-            frontiers[index] = FrameFrontier::from_retained(
-                frame.sequence,
-                Some(verified.digest().to_owned()),
-                frame.acknowledged_peer_sequence,
-            )?;
-            budgets[index].retain(&binding, &frame.payload, wire.len() as u64)?;
-            state = state.advance(completion.as_deref(), &frame.payload, true)?;
-            match &frame.payload {
-                ExecutionChannelPayload::Quiesce {
-                    completion_request_digest,
-                } => completion = Some(completion_request_digest.clone()),
-                ExecutionChannelPayload::ExportSealed {
-                    candidate_snapshot_hash,
-                    writer_exclusion_evidence_hash,
-                    ..
-                } => {
-                    snapshot = Some(candidate_snapshot_hash.clone());
-                    evidence = Some(writer_exclusion_evidence_hash.clone());
-                }
-                _ => {}
-            }
-        }
-        if state != ChannelPhase::parse(&stored_state)?
-            || completion != stored_completion
-            || snapshot != stored_snapshot
-            || evidence != stored_evidence
+        require_session_owner(conn, reservation)?;
+        Ok(())
+    }
+
+    fn authorize_frame(
+        &self,
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        payload: &ExecutionChannelPayload,
+    ) -> Result<()> {
+        let allocation =
+            read(conn, &binding.placement_thread_id)?.context("external allocation absent")?;
+        if allocation.phase != ExternalAllocationPhase::Bound
+            && !matches!(
+                payload,
+                ExecutionChannelPayload::Cancel
+                    | ExecutionChannelPayload::Stopped { .. }
+                    | ExecutionChannelPayload::Acknowledge
+            )
         {
-            bail!("external lifecycle projection contradicts signed transcript");
+            bail!("quarantined allocation cannot execute or author a candidate export");
         }
+        Ok(())
     }
-    let orphan: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM external_execution_frame f
-        LEFT JOIN external_execution_channel c ON c.binding_digest=f.binding_digest WHERE c.binding_digest IS NULL)",
-        [], |row|row.get(0))?;
-    if orphan {
-        bail!("external transcript has no channel owner");
+
+    fn require_export_retention(
+        &self,
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        frame_digest: &str,
+        candidate_snapshot_hash: &str,
+        completion_request_digest: &str,
+        writer_exclusion_evidence_hash: &str,
+    ) -> Result<()> {
+        let retained: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_import i
+             JOIN external_execution_frame f ON f.binding_digest=i.binding_digest
+                AND f.frame_digest=i.export_frame_digest
+             JOIN external_execution_channel c ON c.binding_digest=i.binding_digest
+             WHERE i.binding_digest=?1 AND i.export_frame_digest=?2
+               AND i.snapshot_hash=?3 AND i.completion_request_digest=?4
+               AND i.evidence_blob_hash=?5
+               AND c.export_snapshot_hash=?3 AND c.completion_request_digest=?4
+               AND c.export_evidence_hash=?5
+               AND f.direction='supervisor_to_owner'
+               AND f.application IN ('claimed','applied')
+               AND json_extract(f.frame_json,'$.frame.payload.kind')='export_sealed'
+               AND json_extract(f.frame_json,'$.frame.payload.candidate_snapshot_hash')=?3
+               AND json_extract(f.frame_json,'$.frame.payload.completion_request_digest')=?4
+               AND json_extract(f.frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?5)",
+            params![
+                binding.digest()?,
+                frame_digest,
+                candidate_snapshot_hash,
+                completion_request_digest,
+                writer_exclusion_evidence_hash
+            ],
+            |row| row.get(0),
+        )?;
+        if !retained {
+            bail!("external export cannot be acknowledged before durable content retention");
+        }
+        Ok(())
     }
+}
+
+pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
+    journal::validate_channels(conn, &NodeJournalOwner)?;
     let invalid_import: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM external_execution_import i
         LEFT JOIN external_execution_channel c ON c.binding_digest=i.binding_digest
         LEFT JOIN external_execution_frame f ON f.binding_digest=i.binding_digest AND f.frame_digest=i.export_frame_digest
@@ -683,33 +325,6 @@ pub(super) fn validate_channels(conn: &Connection) -> Result<()> {
         bail!("retained external import lost its authenticated application");
     }
     Ok(())
-}
-
-fn retained_budget(
-    conn: &Connection,
-    digest: &str,
-    direction: &str,
-) -> Result<ExecutionChannelBudget> {
-    let mut budget = ExecutionChannelBudget::default();
-    let mut statement = conn.prepare(
-        "SELECT json_extract(frame_json,'$.frame.payload.kind'),
-        COUNT(*),SUM(frame_bytes) FROM external_execution_frame
-        WHERE binding_digest=?1 AND direction=?2 GROUP BY 1",
-    )?;
-    let mut rows = statement.query(params![digest, direction])?;
-    while let Some(row) = rows.next()? {
-        let kind: String = row.get(0)?;
-        let count = u64::try_from(row.get::<_, i64>(1)?)?;
-        let bytes = u64::try_from(row.get::<_, i64>(2)?)?;
-        if matches!(kind.as_str(), "cancel" | "stopped") {
-            budget.terminal_frames += count;
-            budget.terminal_bytes += bytes;
-        } else {
-            budget.ordinary_frames += count;
-            budget.ordinary_bytes += bytes;
-        }
-    }
-    Ok(budget)
 }
 
 #[cfg(test)]
