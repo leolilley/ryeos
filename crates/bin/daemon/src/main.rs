@@ -1189,6 +1189,7 @@ async fn run(
                 services,
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
+                external_placement_backends: Arc::new(Default::default()),
                 node_policy: node_policy_snapshot,
                 vault,
                 command_registry,
@@ -3499,6 +3500,7 @@ async fn run_service_standalone(
         services,
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
+        external_placement_backends: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(
             ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)

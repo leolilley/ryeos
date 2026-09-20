@@ -767,11 +767,20 @@ mod tests {
         let dir = system.path().join(".ai/node").join(SECTION_NAME);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("primary.yaml");
-        let mut body = serde_json::json!({"kind":"node", "schema":1,
+        let mut body = serde_json::json!({"kind":"node", "schema":2,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
-            "backend":"qualified-backend", "account":"account-1", "credential_generation":"a".repeat(64),
+            "backend":"qualified-backend", "account":"account-1",
+            "capacity_group":"candidate-workers", "region":"singapore", "plan":"standard",
+            "credential_generation":"a".repeat(64),
             "runtime_manifest_hash":"b".repeat(64), "runtime_selection_identity":"c".repeat(64),
-            "backend_artifact_hash":"d".repeat(64), "max_active":2, "timeout_seconds":300 });
+            "backend_artifact_hash":"d".repeat(64),
+            "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
+            "storage_policy":"ephemeral_private_candidate_v1",
+            "cleanup_proof":"provider_terminal_occurrence_v1",
+            "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
+            "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
+            "max_workspace_bytes":1048576, "max_export_bytes":524288,
+            "max_transfer_bytes":2097152 });
         let write = |body: &Value| {
             fs::write(
                 &path,
@@ -877,6 +886,12 @@ mod tests {
             ("max_active", 65),
             ("timeout_seconds", 0),
             ("timeout_seconds", 3601),
+            ("contact_timeout_seconds", 0),
+            ("contact_timeout_seconds", 61),
+            ("observation_timeout_seconds", 0),
+            ("observation_timeout_seconds", 301),
+            ("cleanup_timeout_seconds", 0),
+            ("cleanup_timeout_seconds", 601),
         ] {
             let original = body[field].clone();
             body[field] = Value::from(invalid);
@@ -893,7 +908,28 @@ mod tests {
                 binding.capacity_owner()
             );
         }
-        for field in ["backend", "account"] {
+        for field in ["network_policy", "storage_policy", "cleanup_proof"] {
+            let original = body[field].clone();
+            body[field] = Value::String("unsupported".into());
+            write(&body);
+            assert!(load().is_err(), "unsupported {field} was admitted");
+            body[field] = original;
+        }
+        for (field, invalid) in [
+            ("max_workspace_bytes", 0_u64),
+            ("max_workspace_bytes", (1_u64 << 40) + 1),
+            ("max_export_bytes", 0),
+            ("max_export_bytes", 1_048_577),
+            ("max_transfer_bytes", 524_287),
+            ("max_transfer_bytes", (1_u64 << 40) + 1),
+        ] {
+            let original = body[field].clone();
+            body[field] = Value::from(invalid);
+            write(&body);
+            assert!(load().is_err(), "invalid {field} budget was admitted");
+            body[field] = original;
+        }
+        for field in ["backend", "account", "capacity_group"] {
             let original = body[field].clone();
             body[field] = Value::String("other".into());
             write(&body);

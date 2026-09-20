@@ -4722,6 +4722,34 @@ impl StateStore {
         self.state_authority.try_clone()
     }
 
+    /// Resolve current admitted persistent-session authority from the exact
+    /// pinned CAS generation. Callers never reopen a project or source path.
+    pub fn admitted_persistent_session_capsule(
+        &self,
+        capsule_hash: &str,
+    ) -> Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
+        if !lillux::valid_hash(capsule_hash) {
+            bail!("admitted session capsule hash is not canonical");
+        }
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object(capsule_hash)?
+            .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+        authority.ensure_guard(&guard)?;
+        if ryeos_state::objects::canonical_value_digest(&value)? != capsule_hash {
+            bail!("admitted session capsule content hash changed");
+        }
+        let capsule =
+            ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+        if capsule.content_hash()? != capsule_hash {
+            bail!("admitted session capsule content hash changed");
+        }
+        Ok(capsule)
+    }
+
     /// Verify immutable replay evidence without holding the node-wide state
     /// mutex. The index is read under the mutex, CAS verification happens on
     /// descriptor-pinned authority, and an exact-row retention touch closes
@@ -13773,6 +13801,44 @@ impl StateStore {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn external_allocation(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalAllocationRecord>> {
+        self.lock()?.runtime_db.external_allocation(placement)
+    }
+
+    pub(crate) fn retained_external_binding(
+        &self,
+        binding_hash: &str,
+    ) -> Result<
+        Option<crate::node_config::sections::external_execution::RetainedExternalExecutionBinding>,
+    > {
+        self.lock()?
+            .runtime_db
+            .retained_external_binding(binding_hash)
+    }
+
+    pub(crate) fn reserve_external_allocation(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        self.lock()?
+            .runtime_db
+            .reserve_external_allocation(reservation, binding)
+    }
+
+    pub(crate) fn claim_external_allocation_contact(
+        &self,
+        placement: &str,
+        request_digest: &str,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationContactClaim> {
+        self.lock()?
+            .runtime_db
+            .claim_external_allocation_contact(placement, request_digest)
     }
 
     /// Content-only retention under the existing write/CAS guard owner. The

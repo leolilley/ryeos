@@ -1374,6 +1374,7 @@ mod tests {
             services: std::sync::Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: std::sync::Arc::new(snapshot.clone()),
+            external_placement_backends: std::sync::Arc::new(Default::default()),
             node_policy: std::sync::Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![
                     std::sync::Arc::new(

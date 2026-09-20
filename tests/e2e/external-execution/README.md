@@ -17,12 +17,13 @@ the signed product relationship; bare manifest hashes are insufficient.
 This is program identity only. It does not grant cloud lifecycle authority.
 `reservation.binding_hash` and `channel.execution_binding_hash` retain their
 meaning as the protected operator binding generation, separate from the program
-digest. The next integration needs a node-owned binding provider and a retained
-placement admission joining that generation to the capsule, selected runtime,
-and narrowed capacity/deadline limits. Existing host-runtime process-scope
+digest. A node-owned binding and retained placement owner now join that
+generation to the capsule, selected runtime, backend artifact, credential and
+narrowed capacity/deadline/byte limits. Existing host-runtime process-scope
 bindings do not supply cloud account or credential authority. Fresh admission,
 recovered execution, pooled execution, exclusive launch and the bridge must
-refuse external profiles until that owner and protected connector are supplied.
+continue refusing external profiles until the protected connector and qualified
+lifecycle adapter are supplied.
 Historical capsule inspection remains distinct from permission to execute it.
 
 ## Protected placement-binding retention checkpoint
@@ -38,19 +39,32 @@ Binding generations are immutable while their obligation-aware collection path
 remains intentionally unavailable. A failed reservation rolls the generation
 insert back with the session-owner transaction.
 
-Runtime operator schema epoch 42 contains this exact retained-generation table
-and its immutability triggers. Focused evidence on 2026-09-20: 16 application
+Runtime operator schema epoch 43 contains this exact retained-generation table,
+its immutability triggers, and the schema-2 binding document carrying exact
+backend artifact, region/plan, lifecycle policies/deadlines and byte budgets.
+Epoch 42 is not decoded under that stronger authority shape. Focused evidence
+on 2026-09-20: 17 application
 allocation/channel tests, 19 signed node-config loader tests, 21 schema-filtered
 application tests and 22 independent Python/SQLite tests passed. The corruption
 case widens an otherwise canonical retained allocation after bypassing its SQL
 transition trigger and proves startup validation still rejects it against the
 signed binding limit.
 
-This checkpoint is retention integrity, not placement admission or provider
-readiness. The production owner still must load the exact owning session capsule,
-qualify the backend, artifact and protected credential generation, reserve the
-joined authority, and mint the one-shot allocator-contact capability. No cloud
-call, model call, worker execution or cleanup claim is enabled by this slice.
+The application placement owner now loads the authoritative born thread, exact
+owning session capsule, retained product selections and workspace generation;
+qualifies the backend artifact and protected canonical account credential;
+reserves the joined authority; and turns the durable claim into either a
+non-cloneable one-shot allocator-contact permit or recovery-only authority.
+First contact still requires the binding to be currently installed and the
+session/workspace to remain unreleased and launch-ready. Existing contacted or
+uncertain obligations instead use the retained binding, credential and exact
+adapter artifact generation even after rotation. Adapter generations are keyed
+by backend plus artifact identity so an upgrade cannot strand cleanup.
+
+This checkpoint remains offline placement admission, not provider readiness.
+The production registry is empty and fail-closed; no lifecycle adapter consumes
+the permit, no allocator is called, and no cloud/model/worker execution or
+cleanup claim is enabled by this slice.
 
 The supervisor/launcher implementation through `f08547e9f` retains native capture
 under a durable occurrence receipt and reconciles exact quiesce/export replay.
@@ -93,11 +107,13 @@ Binding identity changes with signed authority; credential and limit rotation
 do not reset the node/backend/account capacity domain. All 26 node-config tests
 pass, including real signed admission, forbidden bundle contribution, duplicate
 filename identities, limit boundaries and program-coordinate mismatches.
-The installed value is not an allocation permit. Source retention is currently
-in memory: durable private generation retention, canonical backend account
-qualification and actual placement ownership remain required before contact.
-The snapshot fixture updates outside ryeos-app have not had broad cross-crate
-compilation qualification yet; disk headroom is below 500 MiB.
+The installed value is not an allocation permit. The exact generation is
+retained atomically with its first reservation and reverified during recovery;
+only the application owner can convert that reservation into a one-shot contact
+permit after the full born-thread/session/capsule/workspace/backend/credential
+join succeeds. The first-contact CAS transaction independently rechecks that
+the exact owning workspace is still Ready, so a prepared permit cannot cross a
+later Active/Orphaned transition.
 
 Protected credentials (inactive placement integration): the existing sealed
 NodeVault now has a separate placement domain addressed by an opaque app-created
@@ -116,11 +132,11 @@ Protected-owner wiring checkpoint: node-config admission retains the exact
 verified signed source bytes and signer without reopening the source path.
 All 18 loader tests pass, including signed-fixture admission after in-place
 overwrite and atomic pathname replacement. Raw allocation reservation, contact
-claim, occurrence binding and channel registration are app-private; this closes
-the cross-crate mutation surface but does not implement the placement owner.
-The planned owner must independently load the capsule/products and join the
-installed lifecycle binding before granting a one-shot contact permit. All 14
-allocation/channel Rust regressions also pass after the visibility change.
+claim, occurrence binding and channel registration are app-private. The owner
+now performs the independent capsule/products and installed-lifecycle join.
+Its backend registry remains empty in production until an independently
+qualified adapter is installed, so this source boundary cannot contact a cloud
+provider yet.
 
 `test_allocation_journal.py` executes the exact production SQLite DDL extracted
 from `ryeos-app`, with no Rust build, node, credentials or cloud contact:
@@ -137,11 +153,11 @@ The Rust API additionally validates exact dedicated-session/capsule/workspace
 ownership, canonical bounded records, contact deadlines, capacity across binding
 generations, unique occurrence binding and CAS retention roots. The initial
 12-test Rust allocation/channel group passed after Cargo was authorized.
-Runtime schema epoch 41 is provisional until
-integration with the then-current `next`; it must not collide with another cut.
 Epoch 40 first introduced the stable external-obligation reset guard; epoch 41
 adds shared-journal initial-state constraints, so old stores are not silently
-reinterpreted under a changed SQLite contract.
+reinterpreted under a changed SQLite contract. Epoch 42 retains exact signed
+binding generations, and epoch 43 cuts those generations to the complete
+schema-2 backend contract rather than decoding prior rows as stronger authority.
 Schema mismatch is checked before decoding version-specific journal rows. The
 independent stable reset guard refuses destructive history reset even when the
 controller's own host lifetime has ended.

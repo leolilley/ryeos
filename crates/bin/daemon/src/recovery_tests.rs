@@ -700,6 +700,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         services: Arc::new(ryeos_api::registry::build_service_registry()),
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(node_config),
+        external_placement_backends: Arc::new(Default::default()),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                 ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),

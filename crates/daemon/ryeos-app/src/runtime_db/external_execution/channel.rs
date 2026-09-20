@@ -136,7 +136,7 @@ impl RuntimeDb {
             }
             return Ok(());
         }
-        require_unreleased_session(&tx, &binding.placement_thread_id)?;
+        require_launch_ready_session(&tx, &binding.placement_thread_id)?;
         let now = lillux::time::timestamp_millis();
         if now < binding.issued_at_ms
             || now >= binding.execution_deadline_ms

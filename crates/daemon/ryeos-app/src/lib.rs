@@ -33,6 +33,7 @@ pub mod execution_provenance;
 pub mod execution_resources;
 pub mod extension_state;
 pub mod external_content_admission;
+pub mod external_placement;
 pub mod federated_follow;
 pub mod handler_context;
 pub mod handler_error;

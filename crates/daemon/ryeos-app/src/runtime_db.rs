@@ -2390,7 +2390,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // refuses channels/frames that are inserted directly in advanced state.
 // Epoch 42 retains exact signed placement-binding generations before any
 // allocation contact so restart cleanup never depends on the current config.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 42;
+// Epoch 43 cuts retained placement binding documents to the complete backend,
+// lifecycle and byte-budget contract; epoch-42 rows must not be decoded under
+// that stronger authority shape.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 43;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

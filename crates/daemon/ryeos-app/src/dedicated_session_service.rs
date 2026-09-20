@@ -3200,24 +3200,9 @@ fn admitted_session_capsule(
     state: &AppState,
     capsule_hash: &str,
 ) -> Result<ryeos_state::objects::AdmittedPersistentSessionCapsule> {
-    let authority = state.state_store.pinned_state_authority()?;
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let value = authority
-        .cas_store()?
-        .get_object(capsule_hash)?
-        .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
-    // Check the retained bytes before even classifying an unsupported envelope.
-    // A schema mismatch must not hide CAS corruption.
-    if ryeos_state::objects::canonical_value_digest(&value)? != capsule_hash {
-        bail!("admitted session capsule content hash changed");
-    }
-    let capsule =
-        ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
-    if capsule.content_hash()? != capsule_hash {
-        bail!("admitted session capsule content hash changed");
-    }
-    Ok(capsule)
+    state
+        .state_store
+        .admitted_persistent_session_capsule(capsule_hash)
 }
 
 /// An already-terminal, detached placement has no command recovery authority.

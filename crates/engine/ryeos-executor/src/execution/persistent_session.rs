@@ -2232,9 +2232,9 @@ fn admit_session_capsule(
         .flatten()
         .map(|requirement| requirement.resolve(retained_product_selections.as_ref()))
         .transpose()?;
-    // Program content cannot grant allocator authority. Until node composition
-    // supplies a protected placement admission, refuse before provider launch.
-    require_candidate_placement_ready(external_candidate.as_ref())?;
+    if let Some(program) = external_candidate.as_ref() {
+        ryeos_app::external_placement::preflight_external_candidate_program(state, program)?;
+    }
     let execution_closure = {
         let _permit = state
             .write_barrier
@@ -2331,8 +2331,10 @@ fn verify_session_capsule(
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule =
         load_capsule(state, capsule_hash).context(SessionCapsuleVerificationStage::Load)?;
-    require_candidate_placement_ready(capsule.external_candidate.as_ref())
-        .context(SessionCapsuleVerificationStage::Load)?;
+    if let Some(program) = capsule.external_candidate.as_ref() {
+        ryeos_app::external_placement::preflight_external_candidate_program(state, program)
+            .context(SessionCapsuleVerificationStage::Load)?;
+    }
     validate_capsule_nested_authority(
         &capsule,
         outer_filesystem_authority_ceiling,
@@ -2508,7 +2510,7 @@ where
     D: FnMut(Value) -> Result<()>,
 {
     let capsule = load_capsule(state, capsule_hash)?;
-    require_candidate_placement_ready(capsule.external_candidate.as_ref())?;
+    require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
     if retained_session_protocol(&state.engine, &capsule)?.process_mode
         != PersistentSessionProcessMode::PooledRequests
@@ -3434,7 +3436,7 @@ pub fn start_exclusive_capsule(
     observation_sink: ryeos_app::persistent_session::PersistentSessionObservationSink,
 ) -> Result<()> {
     let capsule = load_capsule(state, capsule_hash)?;
-    require_candidate_placement_ready(capsule.external_candidate.as_ref())?;
+    require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
     let exact = retained_exact_program(&capsule)?;
     validate_exact_evidence_attachments(&exact)?;
@@ -3888,11 +3890,11 @@ fn validate_required_session_environment(
     Ok(())
 }
 
-fn require_candidate_placement_ready(
+fn require_candidate_connector_ready(
     program: Option<&ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram>,
 ) -> Result<()> {
     if program.is_some() {
-        bail!("external candidate execution requires an admitted protected placement binding");
+        bail!("external candidate execution requires its protected connector and contact permit");
     }
     Ok(())
 }
@@ -5273,7 +5275,7 @@ session:
         };
         let mut capsule = capsule_fixture(&retained_program_fixture("/fixture/worker.yaml", 'a'));
         capsule.validate().unwrap();
-        require_candidate_placement_ready(capsule.external_candidate.as_ref()).unwrap();
+        require_candidate_connector_ready(capsule.external_candidate.as_ref()).unwrap();
         let original = capsule.authority().digest().unwrap();
         let mut missing = serde_json::to_value(&capsule).unwrap();
         missing
@@ -5301,10 +5303,10 @@ session:
                 .contains("signed profile")
         );
         assert!(
-            require_candidate_placement_ready(capsule.external_candidate.as_ref())
+            require_candidate_connector_ready(capsule.external_candidate.as_ref())
                 .unwrap_err()
                 .to_string()
-                .contains("protected placement binding")
+                .contains("protected connector")
         );
     }
 

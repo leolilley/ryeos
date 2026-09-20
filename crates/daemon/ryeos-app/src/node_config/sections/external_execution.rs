@@ -23,25 +23,43 @@ struct BindingDocument {
     protocol: String,
     backend: String,
     account: String,
+    capacity_group: String,
+    region: String,
+    plan: String,
     credential_generation: String,
     runtime_manifest_hash: String,
     runtime_selection_identity: String,
     backend_artifact_hash: String,
+    network_policy: String,
+    storage_policy: String,
+    cleanup_proof: String,
     max_active: u16,
     timeout_seconds: u32,
+    contact_timeout_seconds: u32,
+    observation_timeout_seconds: u32,
+    cleanup_timeout_seconds: u32,
+    max_workspace_bytes: u64,
+    max_export_bytes: u64,
+    max_transfer_bytes: u64,
 }
 
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 1,
+            self.kind == "node" && self.schema == 2,
             "unsupported external placement binding schema"
         );
         ensure!(
             self.protocol == ryeos_state::external_execution::admission::PROTOCOL,
             "unsupported external placement protocol"
         );
-        for value in [&self.backend, &self.account] {
+        for value in [
+            &self.backend,
+            &self.account,
+            &self.capacity_group,
+            &self.region,
+            &self.plan,
+        ] {
             ensure!(
                 !value.is_empty()
                     && value.len() <= 128
@@ -69,8 +87,72 @@ impl BindingDocument {
             (1..=64).contains(&self.max_active) && (1..=3600).contains(&self.timeout_seconds),
             "placement binding limits exceed allocation bounds"
         );
+        ensure!(
+            (1..=60).contains(&self.contact_timeout_seconds)
+                && (1..=300).contains(&self.observation_timeout_seconds)
+                && (1..=600).contains(&self.cleanup_timeout_seconds),
+            "placement binding lifecycle deadlines exceed bounds"
+        );
+        ensure!(
+            self.network_policy == "supervisor_pinned_owner_only_candidate_denied_v1"
+                && self.storage_policy == "ephemeral_private_candidate_v1"
+                && self.cleanup_proof == "provider_terminal_occurrence_v1",
+            "placement binding requests an unsupported lifecycle contract"
+        );
+        const MAX_BYTES: u64 = 1 << 40;
+        ensure!(
+            (1..=MAX_BYTES).contains(&self.max_workspace_bytes)
+                && (1..=self.max_workspace_bytes).contains(&self.max_export_bytes)
+                && (self.max_export_bytes..=MAX_BYTES).contains(&self.max_transfer_bytes),
+            "placement binding storage or transfer budgets exceed bounds"
+        );
         Ok(())
     }
+
+    fn backend_contract(&self) -> ExternalPlacementBackendContract {
+        ExternalPlacementBackendContract {
+            backend: self.backend.clone(),
+            account: self.account.clone(),
+            capacity_group: self.capacity_group.clone(),
+            region: self.region.clone(),
+            plan: self.plan.clone(),
+            backend_artifact_hash: self.backend_artifact_hash.clone(),
+            network_policy: self.network_policy.clone(),
+            storage_policy: self.storage_policy.clone(),
+            cleanup_proof: self.cleanup_proof.clone(),
+            max_active: self.max_active,
+            timeout_seconds: self.timeout_seconds,
+            contact_timeout_seconds: self.contact_timeout_seconds,
+            observation_timeout_seconds: self.observation_timeout_seconds,
+            cleanup_timeout_seconds: self.cleanup_timeout_seconds,
+            max_workspace_bytes: self.max_workspace_bytes,
+            max_export_bytes: self.max_export_bytes,
+            max_transfer_bytes: self.max_transfer_bytes,
+        }
+    }
+}
+
+/// Exact non-secret adapter contract projected from the signed binding. A
+/// backend may narrow implementation behavior but may not replace any field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ExternalPlacementBackendContract {
+    pub(crate) backend: String,
+    pub(crate) account: String,
+    pub(crate) capacity_group: String,
+    pub(crate) region: String,
+    pub(crate) plan: String,
+    pub(crate) backend_artifact_hash: String,
+    pub(crate) network_policy: String,
+    pub(crate) storage_policy: String,
+    pub(crate) cleanup_proof: String,
+    pub(crate) max_active: u16,
+    pub(crate) timeout_seconds: u32,
+    pub(crate) contact_timeout_seconds: u32,
+    pub(crate) observation_timeout_seconds: u32,
+    pub(crate) cleanup_timeout_seconds: u32,
+    pub(crate) max_workspace_bytes: u64,
+    pub(crate) max_export_bytes: u64,
+    pub(crate) max_transfer_bytes: u64,
 }
 
 fn binding_digest(id: &str, signer: &str, signed_source: &str) -> Result<String> {
@@ -85,6 +167,7 @@ fn capacity_owner(signer: &str, document: &BindingDocument) -> Result<String> {
     ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain": "ryeos.external-placement-capacity.v1", "node": signer,
         "backend": document.backend, "account": document.account,
+        "capacity_group": document.capacity_group,
     }))
 }
 
@@ -191,6 +274,25 @@ impl RetainedExternalExecutionBinding {
     pub(crate) fn capacity_owner(&self) -> &str {
         &self.capacity_owner
     }
+    pub(crate) fn backend_contract(&self) -> ExternalPlacementBackendContract {
+        self.document.backend_contract()
+    }
+    pub(crate) fn credential_access(
+        &self,
+    ) -> Result<crate::vault::placement::PlacementCredentialAccess> {
+        crate::vault::placement::PlacementCredentialAccess::new(
+            &self.capacity_owner,
+            &self.document.credential_generation,
+            &self.document.backend,
+            &self.document.account,
+        )
+    }
+    pub(crate) fn check_program(
+        &self,
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+    ) -> Result<()> {
+        check_program(&self.document, program)
+    }
     pub(crate) fn canonical_json(&self) -> Result<String> {
         self.validate()?;
         Ok(lillux::canonical_json(&serde_json::to_value(self)?)?)
@@ -212,16 +314,28 @@ impl RetainedExternalExecutionBinding {
     pub(crate) fn test_fixture() -> Self {
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 1,
+            schema: 2,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             backend: "fixture".into(),
             account: "account".into(),
+            capacity_group: "candidate-workers".into(),
+            region: "fixture-region".into(),
+            plan: "fixture-plan".into(),
             credential_generation: "a".repeat(64),
             runtime_manifest_hash: "b".repeat(64),
             runtime_selection_identity: "c".repeat(64),
             backend_artifact_hash: "d".repeat(64),
+            network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
+            storage_policy: "ephemeral_private_candidate_v1".into(),
+            cleanup_proof: "provider_terminal_occurrence_v1".into(),
             max_active: 1,
             timeout_seconds: 60,
+            contact_timeout_seconds: 30,
+            observation_timeout_seconds: 60,
+            cleanup_timeout_seconds: 120,
+            max_workspace_bytes: 1024,
+            max_export_bytes: 512,
+            max_transfer_bytes: 2048,
         };
         let id = "fixture".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
@@ -281,7 +395,12 @@ impl InstalledExternalExecutionBinding {
         crate::vault::placement::PlacementCredentialAccess::new(
             &self.capacity_owner,
             &self.document.credential_generation,
+            &self.document.backend,
+            &self.document.account,
         )
+    }
+    pub(crate) fn backend_contract(&self) -> ExternalPlacementBackendContract {
+        self.document.backend_contract()
     }
     pub(crate) fn retained_generation(&self) -> Result<RetainedExternalExecutionBinding> {
         let retained = RetainedExternalExecutionBinding {
@@ -303,15 +422,36 @@ impl InstalledExternalExecutionBinding {
         &self,
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     ) -> Result<()> {
-        program.validate()?;
-        ensure!(
-            program.requirement.protocol == self.document.protocol
-                && program.runtime_manifest_hash == self.document.runtime_manifest_hash
-                && program.selection_identity_digest == self.document.runtime_selection_identity,
-            "external candidate program contradicts installed placement binding"
-        );
-        Ok(())
+        check_program(&self.document, program)
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        let retained = RetainedExternalExecutionBinding::test_fixture();
+        Self {
+            id: retained.id,
+            document: retained.document,
+            signed_source: retained.signed_source.into(),
+            signer: retained.signer,
+            signer_verifying_key: retained.signer_verifying_key,
+            digest: retained.digest,
+            capacity_owner: retained.capacity_owner,
+        }
+    }
+}
+
+fn check_program(
+    document: &BindingDocument,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+) -> Result<()> {
+    program.validate()?;
+    ensure!(
+        program.requirement.protocol == document.protocol
+            && program.runtime_manifest_hash == document.runtime_manifest_hash
+            && program.selection_identity_digest == document.runtime_selection_identity,
+        "external candidate program contradicts installed placement binding"
+    );
+    Ok(())
 }
 
 struct ParsedBinding {

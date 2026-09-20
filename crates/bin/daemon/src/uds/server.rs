@@ -2049,6 +2049,7 @@ mod tests {
                 routes: vec![],
                 commands: vec![],
             }),
+            external_placement_backends: Arc::new(Default::default()),
             node_policy: Arc::new(
                 ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),

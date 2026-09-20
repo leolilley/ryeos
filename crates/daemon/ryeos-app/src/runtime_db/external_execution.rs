@@ -277,6 +277,16 @@ pub struct ExternalAllocationRecord {
     pub occurrence: Option<ExternalAllocationOccurrence>,
 }
 
+/// Exact result of the durable allocator-contact claim.  A caller may contact
+/// the allocator only when it receives `Contact`; every other result carries
+/// the current journal row and is observation/cleanup authority only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalAllocationContactClaim {
+    Contact(ExternalAllocationRecord),
+    Reconcile(ExternalAllocationRecord),
+    NoContact(ExternalAllocationRecord),
+}
+
 fn read(conn: &Connection, placement: &str) -> Result<Option<ExternalAllocationRecord>> {
     let raw: Option<(String, String, String, Option<String>)> = conn
         .query_row(
@@ -369,6 +379,37 @@ pub(super) fn ensure_resettable(conn: &Connection, epoch: u32) -> Result<()> {
     Ok(())
 }
 
+fn read_retained_binding(
+    conn: &Connection,
+    binding_hash: &str,
+) -> Result<
+    Option<crate::node_config::sections::external_execution::RetainedExternalExecutionBinding>,
+> {
+    validate_sha256("external binding", binding_hash)?;
+    let raw: Option<(String, String)> = conn
+        .query_row(
+            "SELECT capacity_owner,binding_json
+             FROM external_execution_binding_generation WHERE binding_hash=?1",
+            [binding_hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    raw.map(|(capacity_owner, binding_json)| {
+        let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+            serde_json::from_str(&binding_json)
+                .context("decode retained external binding generation")?;
+        retained.validate()?;
+        if retained.digest() != binding_hash
+            || retained.capacity_owner() != capacity_owner
+            || retained.canonical_json()? != binding_json
+        {
+            bail!("retained external binding generation changed");
+        }
+        Ok(retained)
+    })
+    .transpose()
+}
+
 pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     let mut bindings = conn.prepare("SELECT binding_hash,capacity_owner,binding_json FROM external_execution_binding_generation")?;
     for row in bindings.query_map([], |row| {
@@ -407,25 +448,9 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
         if record.phase != ExternalAllocationPhase::NoContact {
             require_session_owner(conn, &record.reservation)?;
         }
-        let retained: Option<(String, String)> = conn
-            .query_row(
-                "SELECT capacity_owner,binding_json
-                 FROM external_execution_binding_generation WHERE binding_hash=?1",
-                [&record.reservation.binding_hash],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (capacity_owner, binding_json) =
-            retained.context("external allocation lost its exact retained binding generation")?;
-        let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
-            serde_json::from_str(&binding_json)
-                .context("decode allocation's retained external binding generation")?;
-        retained.validate()?;
-        if retained.digest() != record.reservation.binding_hash
-            || retained.capacity_owner() != capacity_owner
-            || capacity_owner != record.reservation.capacity_owner
-            || retained.canonical_json()? != binding_json
-        {
+        let retained = read_retained_binding(conn, &record.reservation.binding_hash)?
+            .context("external allocation lost its exact retained binding generation")?;
+        if retained.capacity_owner() != record.reservation.capacity_owner {
             bail!("external allocation contradicts its retained binding generation");
         }
         retained.check_reservation_limits(
@@ -467,10 +492,13 @@ fn require_session_owner(
     Ok(())
 }
 
-fn require_unreleased_session(conn: &Connection, placement: &str) -> Result<()> {
+fn require_launch_ready_session(conn: &Connection, placement: &str) -> Result<()> {
     let admitted: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM dedicated_session WHERE placement_thread_id=?1
-            AND state='admitted' AND send_boundary='none')",
+        "SELECT EXISTS(SELECT 1 FROM dedicated_session s
+            JOIN execution_workspace w ON w.workspace_id=s.workspace_id
+          WHERE s.placement_thread_id=?1 AND s.state='admitted' AND s.send_boundary='none'
+            AND w.thread_id=s.placement_thread_id
+            AND w.launch_owner='dedicated_worker_session' AND w.state='ready')",
         [placement],
         |row| row.get(0),
     )?;
@@ -483,6 +511,15 @@ fn require_unreleased_session(conn: &Connection, placement: &str) -> Result<()> 
 impl RuntimeDb {
     pub fn external_allocation(&self, placement: &str) -> Result<Option<ExternalAllocationRecord>> {
         read(&self.conn, placement)
+    }
+
+    pub(crate) fn retained_external_binding(
+        &self,
+        binding_hash: &str,
+    ) -> Result<
+        Option<crate::node_config::sections::external_execution::RetainedExternalExecutionBinding>,
+    > {
+        read_retained_binding(&self.conn, binding_hash)
     }
 
     /// Idempotent reservation; no allocator may be contacted here. Unknown
@@ -531,7 +568,7 @@ impl RuntimeDb {
             return Ok(existing);
         }
         require_session_owner(&tx, reservation)?;
-        require_unreleased_session(&tx, &reservation.placement_thread_id)?;
+        require_launch_ready_session(&tx, &reservation.placement_thread_id)?;
         if read_guard(&tx)? >= 256 {
             bail!("node external allocation ceiling reached");
         }
@@ -566,23 +603,34 @@ impl RuntimeDb {
         Ok(record)
     }
 
-    /// Only the winner of this durable CAS may contact the allocator.
-    /// false means no new call, including after an ambiguous response/crash.
+    /// Only the winner of this durable CAS may contact the allocator.  The
+    /// returned record is read in the same transaction, so a losing caller
+    /// never reconciles from the stale phase it observed before the claim.
     pub(crate) fn claim_external_allocation_contact(
         &self,
         placement: &str,
         request_digest: &str,
-    ) -> Result<bool> {
+    ) -> Result<ExternalAllocationContactClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation was not reserved")?;
         if record.reservation.request_digest != request_digest {
             bail!("external allocation contact changed its request identity");
         }
         require_session_owner(&tx, &record.reservation)?;
-        if record.phase != ExternalAllocationPhase::Reserved {
-            return Ok(false);
+        match record.phase {
+            ExternalAllocationPhase::NoContact => {
+                tx.commit()?;
+                return Ok(ExternalAllocationContactClaim::NoContact(record));
+            }
+            ExternalAllocationPhase::ContactPending
+            | ExternalAllocationPhase::Bound
+            | ExternalAllocationPhase::Quarantined => {
+                tx.commit()?;
+                return Ok(ExternalAllocationContactClaim::Reconcile(record));
+            }
+            ExternalAllocationPhase::Reserved => {}
         }
-        require_unreleased_session(&tx, placement)?;
+        require_launch_ready_session(&tx, placement)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
         if now >= record.reservation.contact_deadline_ms {
             bail!("external allocation contact deadline expired");
@@ -592,8 +640,16 @@ impl RuntimeDb {
              WHERE placement_thread_id=?1 AND phase='reserved'",
             params![placement, now],
         )?;
+        if changed != 1 {
+            bail!("external allocation contact claim lost its durable CAS");
+        }
+        let current = read(&tx, placement)?
+            .context("external allocation disappeared after its contact claim")?;
+        if current.phase != ExternalAllocationPhase::ContactPending {
+            bail!("external allocation contact claim did not retain its current phase");
+        }
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(ExternalAllocationContactClaim::Contact(current))
     }
 
     /// Bind the exact returned occurrence to the original pending contact.
@@ -776,14 +832,39 @@ mod tests {
             reserve(&db, &reserved).unwrap().phase,
             ExternalAllocationPhase::Reserved
         );
-        assert!(
+        assert!(matches!(
             db.claim_external_allocation_contact("T-one", &reserved.request_digest)
-                .unwrap()
-        );
-        assert!(
-            !db.claim_external_allocation_contact("T-one", &reserved.request_digest)
-                .unwrap()
-        );
+                .unwrap(),
+            ExternalAllocationContactClaim::Contact(ExternalAllocationRecord {
+                phase: ExternalAllocationPhase::ContactPending,
+                ..
+            })
+        ));
+        assert!(matches!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Reconcile(ExternalAllocationRecord {
+                phase: ExternalAllocationPhase::ContactPending,
+                ..
+            })
+        ));
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reserved.binding_hash.clone(),
+            request_digest: reserved.request_digest.clone(),
+            occurrence_id: "fixture-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation("T-one", &occurrence).unwrap();
+        assert!(matches!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Reconcile(ExternalAllocationRecord {
+                phase: ExternalAllocationPhase::Bound,
+                occurrence: Some(ref current),
+                ..
+            }) if current == &occurrence
+        ));
         assert!(db.discard_all_thread_history(true).is_err());
         drop(db);
         let db = RuntimeDb::open(&path).unwrap();
@@ -793,10 +874,14 @@ mod tests {
         let retained: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
             serde_json::from_str(&retained_json).unwrap();
         retained.validate().unwrap();
-        assert!(
-            !db.claim_external_allocation_contact("T-one", &reserved.request_digest)
-                .unwrap()
-        );
+        assert!(matches!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Reconcile(ExternalAllocationRecord {
+                phase: ExternalAllocationPhase::Bound,
+                ..
+            })
+        ));
         db.cancel_external_allocation("T-one").unwrap();
         assert_eq!(
             db.external_allocation("T-one").unwrap().unwrap().phase,
@@ -847,6 +932,9 @@ mod tests {
                 "backend_artifact_hash",
                 serde_json::Value::String("f".repeat(64)),
             ),
+            ("region", serde_json::Value::String("other".into())),
+            ("network_policy", serde_json::Value::String("other".into())),
+            ("max_workspace_bytes", serde_json::Value::from(2048)),
             ("max_active", serde_json::Value::from(2)),
             ("timeout_seconds", serde_json::Value::from(61)),
         ] {
@@ -929,10 +1017,14 @@ mod tests {
         reserve(&db, &reserved).unwrap();
         db.cancel_external_allocation("T-one").unwrap();
         db.cancel_external_allocation("T-one").unwrap();
-        assert!(
-            !db.claim_external_allocation_contact("T-one", &reserved.request_digest)
-                .unwrap()
-        );
+        assert!(matches!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::NoContact(ExternalAllocationRecord {
+                phase: ExternalAllocationPhase::NoContact,
+                ..
+            })
+        ));
         assert_eq!(read_guard(&db.conn).unwrap(), 0);
         db.release_credential_profile("P-one", "worker-one")
             .unwrap();
@@ -943,13 +1035,38 @@ mod tests {
     }
 
     #[test]
+    fn external_contact_rechecks_workspace_readiness_in_claim_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reserved = reservation(&db, "one");
+        reserve(&db, &reserved).unwrap();
+        db.conn
+            .execute(
+                "UPDATE execution_workspace SET state='orphaned' WHERE workspace_id='W-one'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .is_err()
+        );
+        assert_eq!(
+            db.external_allocation("T-one").unwrap().unwrap().phase,
+            ExternalAllocationPhase::Reserved
+        );
+    }
+
+    #[test]
     fn external_late_occurrence_identifies_cleanup_without_releasing_quarantine() {
         let dir = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
         reserve(&db, &reserved).unwrap();
-        db.claim_external_allocation_contact("T-one", &reserved.request_digest)
-            .unwrap();
+        assert!(matches!(
+            db.claim_external_allocation_contact("T-one", &reserved.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Contact(_)
+        ));
         db.cancel_external_allocation("T-one").unwrap();
         let occurrence = ExternalAllocationOccurrence {
             schema: 1,

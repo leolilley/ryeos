@@ -736,9 +736,7 @@ impl NodeVault for SealedEnvelopeVault {
         value: &str,
     ) -> Result<()> {
         validate_secret_value(value)?;
-        if value.is_empty() {
-            bail!("placement credential must not be empty");
-        }
+        access.validate_value(value)?;
         self.read_modify_write(|map| {
             if let Some(existing) = map.get(access.physical_key()) {
                 if existing != value {

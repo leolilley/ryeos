@@ -97,6 +97,10 @@ pub struct AppState {
     pub service_descriptors: &'static [ServiceDescriptor],
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,
+    /// Installed trusted lifecycle adapters. Empty is a fail-closed supported
+    /// state: external profiles cannot reserve or contact an allocator.
+    pub external_placement_backends:
+        Arc<crate::external_placement::ExternalPlacementBackendRegistry>,
     /// Exact atomic node-owned semantic policy generation loaded at startup.
     pub node_policy: Arc<NodePolicySnapshot>,
     /// Operator-secret store. Read at request-build time and merged
