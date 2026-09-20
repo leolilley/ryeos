@@ -62,9 +62,48 @@ adapter artifact generation even after rotation. Adapter generations are keyed
 by backend plus artifact identity so an upgrade cannot strand cleanup.
 
 This checkpoint remains offline placement admission, not provider readiness.
-The production registry is empty and fail-closed; no lifecycle adapter consumes
-the permit, no allocator is called, and no cloud/model/worker execution or
-cleanup claim is enabled by this slice.
+The production registry is empty and fail-closed; no cloud/model/worker
+execution is enabled by this slice.
+
+The generic lifecycle boundary now distinguishes provider contact from cleanup
+settlement. Runtime epoch 44 adds immutable authoritative no-occurrence
+evidence, immutable termination intent, and immutable terminal-occurrence
+observation. `no_contact` remains possible only before the allocator claim.
+After contact, capacity can settle only as `contacted_no_occurrence` from exact
+adapter reconciliation, or as `terminated` after an exact occurrence, a
+controller-derived termination request, and independent terminal observation.
+SQL transition guards require the corresponding retained evidence before they
+decrement the stable obligation counter. Timeout, 404, local process death,
+request acknowledgement and caller-authored success remain insufficient.
+
+The adapter contract keeps allocate, allocation reconciliation, termination and
+terminal reconciliation separate. Only the non-cloneable contact permit can
+reach allocate. A process-local contact gate serializes the durable claim with
+that call: exact negative reconciliation cannot settle while a delayed original
+create remains possible, and the gate cannot create another permit after
+`contact_pending` is durable. Recovery authority has no conversion back into
+that permit. Every prepared contact or reconciliation authority also retains a
+non-acquirable lease on the controller's exact OS-backed operator lock. A
+bounded Tokio shutdown therefore cannot release controller exclusion while an
+uncancellable blocking allocator, observer or terminator call remains alive;
+replacement admission waits for the actual last mutator to stop.
+The deterministic fault backend proves a create accepted with its response lost
+is reconciled to the same occurrence after database reopen with one create
+mutation; the equivalent termination-response loss settles from terminal
+observation after reopen with one termination mutation. The composed owner test
+also drives the actual permit, reconciliation and cleanup methods. Termination
+intent atomically quarantines execution and requires sticky channel revocation
+when a channel exists. Settled channels reopen as immutable history without a
+live session lock, while new frames and application claims remain refused.
+Focused evidence: 20 allocation/channel tests, 6 placement-adapter tests, 9
+operator-lock tests, 36 shared state/journal tests, and 24 independent
+Python/SQLite tests pass. This
+remains an inactive generic adapter contract:
+the installed registry has no production backend and the executor's protected
+connector still refuses launch.
+Independent recovery review found no remaining cross-controller handoff defect
+after the operator-lock lease was added; the review remains source-level and
+does not qualify an installed provider adapter.
 
 The supervisor/launcher implementation through `f08547e9f` retains native capture
 under a durable occurrence receipt and reconciles exact quiesce/export replay.
@@ -162,11 +201,12 @@ Schema mismatch is checked before decoding version-specific journal rows. The
 independent stable reset guard refuses destructive history reset even when the
 controller's own host lifetime has ended.
 
-The only settlement implemented so far is cancellation **before** external
-contact. A contacted allocation cannot be released through elapsed TTL, local
-worker death, a caller-supplied success flag, or a missing provider response.
-The qualified external terminal-observation path is not implemented. Do not wire
-this partial journal into live allocation until that path exists.
+Contacted settlement is now represented, but not yet connected to a production
+adapter or the compound candidate completion owner. A contacted allocation
+cannot be released through elapsed TTL, local worker death, a caller-supplied
+success flag, or a missing provider response. Do not enable live allocation
+until the composed transport/capture/completion path and installed adapter
+qualification exist.
 
 ## Authenticated channel and application journal
 
@@ -328,7 +368,8 @@ isolation or substitute the diagnostic bwrap fixture.
 - Protected admission binding and actual authenticated outbound transport.
 - Guest supervisor executable/control loop and exact runtime/bootstrap realization.
 - Wiring and qualification of native capture and candidate-only content transfer.
-- Verified external termination, journal settlement, restart reconciliation.
+- Connect verified external termination/restart reconciliation to the compound
+  completion owner and qualify it through an installed adapter.
 - Compound completion/capture admission through existing candidate owners.
 - Thin provider lifecycle adapter, signed profile and coherent bundle refresh.
 - Real isolated B -> C -> evaluation acceptance and failure/recovery matrix.

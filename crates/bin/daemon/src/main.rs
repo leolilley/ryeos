@@ -408,8 +408,10 @@ fn main() -> Result<()> {
     // abandoned request work keep a lifecycle-complete daemon alive holding
     // projection/CAS descriptors indefinitely.
     runtime.shutdown_timeout(Duration::from_secs(5));
-    // Keep replacement daemons and standalone tools out until every bounded
-    // worker teardown opportunity has finished.
+    // Release the composition root's owner only after bounded runtime drain.
+    // Any admitted blocking placement mutator retains a lease on this exact
+    // lock and continues excluding replacement controllers until it actually
+    // stops; shutdown_timeout is not treated as proof of cancellation.
     drop(process_state_lock);
     result
 }
@@ -1149,6 +1151,12 @@ async fn run(
                     .matcher
                     .clone(),
             );
+            let operator_state_lease = Arc::new(
+                process_state_lock
+                    .as_ref()
+                    .context("daemon state lock is absent")?
+                    .retain(),
+            );
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
@@ -1172,6 +1180,11 @@ async fn run(
                 thread_auth,
                 extensions: {
                     let mut ext = ryeos_app::extension_state::ExtensionState::new();
+                    // Blocking placement mutations retain this exact OS-backed
+                    // exclusion lease. A bounded Tokio shutdown therefore
+                    // cannot admit a replacement controller while an old
+                    // provider call is still capable of mutation.
+                    ext.insert(operator_state_lease);
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
                     ext.insert(prospective_node_config_validator);
@@ -3486,6 +3499,7 @@ async fn run_service_standalone(
             // retained through service completion. Never install the running
             // daemon's lifecycle lock as standalone authority in extensions.
             extensions.insert(Arc::clone(&standalone_state_lock));
+            extensions.insert(Arc::new(standalone_state_lock.retain()));
             extensions.insert(standalone_ui_state);
             extensions.insert(standalone_node_config_validator);
             Arc::new(extensions)

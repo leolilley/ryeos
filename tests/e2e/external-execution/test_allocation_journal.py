@@ -109,6 +109,41 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.phase("no_contact")
 
+    def test_contacted_settlement_requires_retained_evidence(self):
+        self.reserve()
+        self.phase("contact_pending")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.phase("contacted_no_occurrence")
+        self.db.execute(
+            "INSERT INTO external_execution_no_occurrence VALUES('T-one','{}')")
+        self.phase("contacted_no_occurrence")
+        self.assertEqual(self.guard(), 0)
+        for statement in (
+            "UPDATE external_execution_no_occurrence SET evidence_json='changed'",
+            "DELETE FROM external_execution_no_occurrence",
+        ):
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute(statement)
+
+    def test_terminal_settlement_requires_intent_and_observation(self):
+        self.reserve()
+        self.phase("contact_pending")
+        self.db.execute(
+            "UPDATE external_execution_allocation SET phase='bound', occurrence_json='{}'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.phase("terminated")
+        self.db.execute(
+            "INSERT INTO external_execution_termination_intent VALUES('T-one','{}')")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                "UPDATE external_execution_termination_intent SET intent_json='changed'")
+        self.db.execute(
+            "INSERT INTO external_execution_terminal_observation VALUES('T-one','{}')")
+        self.phase("terminated")
+        self.assertEqual(self.guard(), 0)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("DELETE FROM external_execution_terminal_observation")
+
     def test_contact_claim_cas_has_only_one_winner(self):
         self.reserve()
         command = """UPDATE external_execution_allocation SET phase='contact_pending'

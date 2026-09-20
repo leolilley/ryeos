@@ -244,7 +244,14 @@ impl JournalOwner for NodeJournalOwner {
         {
             bail!("retained external channel changed its allocation authority");
         }
-        require_session_owner(conn, reservation)?;
+        if allocation.phase.is_settled() {
+            if allocation.phase != ExternalAllocationPhase::Terminated {
+                bail!("settled allocation without an occurrence cannot retain a channel");
+            }
+            validate_lifecycle_evidence(conn, &allocation)?;
+        } else {
+            require_session_owner(conn, reservation)?;
+        }
         Ok(())
     }
 
@@ -256,6 +263,9 @@ impl JournalOwner for NodeJournalOwner {
     ) -> Result<()> {
         let allocation =
             read(conn, &binding.placement_thread_id)?.context("external allocation absent")?;
+        if allocation.phase.is_settled() {
+            bail!("settled external channel cannot retain new frames or claims");
+        }
         if allocation.phase != ExternalAllocationPhase::Bound
             && !matches!(
                 payload,
@@ -432,6 +442,95 @@ mod tests {
                 .unwrap()
         );
         digest
+    }
+
+    #[test]
+    fn settled_channel_reopens_as_immutable_history_without_live_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let allocation = db.external_allocation(placement).unwrap().unwrap();
+        let occurrence = allocation.occurrence.as_ref().unwrap();
+        let intent = ExternalTerminationIntent {
+            schema: 1,
+            binding_hash: allocation.reservation.binding_hash.clone(),
+            request_digest: allocation.reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            termination_request_digest: "1".repeat(64),
+        };
+        assert!(db.begin_external_termination(placement, &intent).is_err());
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Bound
+        );
+        let (cancel, cancel_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Cancel,
+        );
+        db.record_external_execution_frame(placement, &cancel)
+            .unwrap();
+        assert!(db.begin_external_termination(placement, &intent).unwrap());
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Quarantined
+        );
+        db.settle_external_terminal(
+            placement,
+            &ExternalTerminalObservation {
+                schema: 1,
+                binding_hash: allocation.reservation.binding_hash.clone(),
+                request_digest: allocation.reservation.request_digest.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                termination_request_digest: intent.termination_request_digest,
+                terminal_state: "terminated".into(),
+                provider_observation_digest: "2".repeat(64),
+            },
+        )
+        .unwrap();
+        db.release_credential_profile("P-channel", "worker-channel")
+            .unwrap();
+        drop(db);
+
+        let db = RuntimeDb::open(&path).unwrap();
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Terminated
+        );
+        assert!(
+            !db.record_external_execution_frame(placement, &cancel)
+                .unwrap()
+        );
+        let (late, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Acknowledge,
+        );
+        assert!(
+            db.record_external_execution_frame(placement, &late)
+                .is_err()
+        );
+        assert_eq!(
+            db.conn
+                .query_row(
+                    "SELECT frame_digest FROM external_execution_revocation
+                     WHERE binding_digest=?1",
+                    [binding.digest().unwrap()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            cancel_digest
+        );
     }
 
     #[test]

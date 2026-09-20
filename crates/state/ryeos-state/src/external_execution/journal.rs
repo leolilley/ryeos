@@ -168,6 +168,7 @@ pub fn record_revocation(
         }
         return Ok(false);
     }
+    owner.authorize_frame(tx, &binding, &verified.frame().payload)?;
     tx.execute(
         "INSERT INTO external_execution_revocation VALUES(?1,?2,?3)",
         params![binding.digest()?, verified.digest(), verified.canonical()],

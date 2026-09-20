@@ -13841,6 +13841,119 @@ impl StateStore {
             .claim_external_allocation_contact(placement, request_digest)
     }
 
+    pub(crate) fn bind_external_allocation(
+        &self,
+        placement: &str,
+        occurrence: &runtime_db::external_execution::ExternalAllocationOccurrence,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .bind_external_allocation(placement, occurrence)
+    }
+
+    pub(crate) fn settle_external_no_occurrence(
+        &self,
+        placement: &str,
+        evidence: &runtime_db::external_execution::ExternalNoOccurrenceEvidence,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .settle_external_no_occurrence(placement, evidence)
+    }
+
+    pub(crate) fn begin_external_termination(
+        &self,
+        placement: &str,
+        intent: &runtime_db::external_execution::ExternalTerminationIntent,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .begin_external_termination(placement, intent)
+    }
+
+    pub(crate) fn external_termination_intent(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalTerminationIntent>> {
+        self.lock()?
+            .runtime_db
+            .external_termination_intent(placement)
+    }
+
+    pub(crate) fn settle_external_terminal(
+        &self,
+        placement: &str,
+        observation: &runtime_db::external_execution::ExternalTerminalObservation,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .settle_external_terminal(placement, observation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_external_placement_test_fixture(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let profile = format!("P-{}", reservation.placement_thread_id);
+        g.runtime_db
+            .create_credential_profile(runtime_db::NewCredentialProfile {
+                profile_id: &profile,
+                owner_principal: "fp:operator",
+                home_id: "external-placement-test",
+            })?;
+        g.runtime_db.acquire_credential_profile(
+            &profile,
+            "fp:operator",
+            &reservation.worker_instance_id,
+        )?;
+        g.runtime_db
+            .admit_dedicated_session(runtime_db::NewDedicatedSession {
+                placement_thread_id: &reservation.placement_thread_id,
+                chain_root_id: "T-test-root",
+                owner_principal: "fp:operator",
+                admitted_capsule_hash: &reservation.admitted_capsule_hash,
+                workspace_id: &reservation.workspace_id,
+                candidate_required: true,
+                candidate_disposition: runtime_db::DedicatedCandidateDisposition::OwnerDecision,
+                credential_profile_id: &profile,
+                credential_generation: 1,
+                credential_lock_owner: &reservation.worker_instance_id,
+            })?;
+        g.runtime_db.reserve_workspace(
+            &reservation.workspace_id,
+            &reservation.base_snapshot_hash,
+            "/external-placement-test",
+        )?;
+        g.runtime_db.transition_workspace(
+            &reservation.workspace_id,
+            &[runtime_db::WorkspaceState::Reserved],
+            runtime_db::WorkspaceState::Constructing,
+            None,
+        )?;
+        g.runtime_db.claim_workspace_construction(
+            &reservation.workspace_id,
+            &reservation.placement_thread_id,
+            "dedicated_worker_session",
+        )?;
+        g.runtime_db.bind_workspace(runtime_db::WorkspaceBinding {
+            workspace_id: &reservation.workspace_id,
+            thread_id: &reservation.placement_thread_id,
+            launch_owner: Some("dedicated_worker_session"),
+            backend_id: Some("fixture"),
+            backend_version: Some("fixture"),
+            pinned_root_identities: Some("fixture"),
+            mount_identity: Some("fixture"),
+            workspace_output_partition_identity: None,
+            base_output_capture_hash: None,
+        })?;
+        g.runtime_db
+            .reserve_external_allocation(reservation, binding)?;
+        Ok(())
+    }
+
     /// Content-only retention under the existing write/CAS guard owner. The
     /// caller must keep its assembly guard until this transaction commits.
     pub fn retain_external_candidate_import(

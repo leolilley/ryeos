@@ -2393,7 +2393,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 43 cuts retained placement binding documents to the complete backend,
 // lifecycle and byte-budget contract; epoch-42 rows must not be decoded under
 // that stronger authority shape.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 43;
+// Epoch 44 adds immutable no-occurrence, termination-intent and independently
+// verified terminal evidence. Epoch 43 cannot decode contacted settlement.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 44;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2487,6 +2489,57 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "export_frame_digest",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_no_occurrence",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "evidence_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_termination_intent",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "intent_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "external_execution_terminal_observation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "placement_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation_json",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
