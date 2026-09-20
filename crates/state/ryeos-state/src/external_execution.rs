@@ -475,6 +475,20 @@ fn key_for(binding: &ExecutionChannelBinding, direction: ChannelDirection) -> Re
         ChannelDirection::SupervisorToOwner => &binding.supervisor_public_key,
     })
 }
+
+/// Validate the canonical Ed25519 public-key spelling shared by bootstrap
+/// reservations and finalized channel bindings without exposing a constructor
+/// for authenticated frames.
+pub fn validate_channel_public_key(value: &str) -> Result<()> {
+    public_key(value).map(|_| ())
+}
+
+/// Canonical spelling for an already-generated channel role key.
+pub fn encode_channel_public_key(value: &VerifyingKey) -> Result<String> {
+    ensure!(!value.is_weak(), "weak external channel key");
+    Ok(STANDARD.encode(value.to_bytes()))
+}
+
 fn public_key(value: &str) -> Result<VerifyingKey> {
     ensure!(value.len() == 44, "external channel key has wrong length");
     let bytes: [u8; 32] = STANDARD

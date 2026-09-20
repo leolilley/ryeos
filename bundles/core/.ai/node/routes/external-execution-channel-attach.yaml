@@ -1,0 +1,15 @@
+# ryeos:signed:2026-09-20T10:28:26Z:8858638be6bcb1c6e8f04be281d0243a35418d75facec9484eddb7796f0d96ce:gMPnSWu9E8BYY/1BKHvCjqeeRLTHPbDKf2YuM+bi9o+KMaBU7v8vAZF9/Ekr/Z7leAV25l4FhBxEdcPUv0F0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: external-execution/channel-attach
+path: /external-execution/channel/attach
+methods:
+  - POST
+auth: external_occurrence
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:external-execution/channel-attach

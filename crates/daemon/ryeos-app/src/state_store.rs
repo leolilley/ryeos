@@ -13851,6 +13851,33 @@ impl StateStore {
             .bind_external_allocation(placement, occurrence)
     }
 
+    pub(crate) fn register_external_execution_channel(
+        &self,
+        binding: &ryeos_state::external_execution::ExecutionChannelBinding,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .register_external_execution_channel(binding)
+    }
+
+    pub fn external_execution_channel(
+        &self,
+        placement: &str,
+    ) -> Result<ryeos_state::external_execution::ExecutionChannelBinding> {
+        self.lock()?
+            .runtime_db
+            .external_execution_channel(placement)
+    }
+
+    pub(crate) fn optional_external_execution_channel(
+        &self,
+        placement: &str,
+    ) -> Result<Option<ryeos_state::external_execution::ExecutionChannelBinding>> {
+        self.lock()?
+            .runtime_db
+            .optional_external_execution_channel(placement)
+    }
+
     pub(crate) fn settle_external_no_occurrence(
         &self,
         placement: &str,
@@ -13969,17 +13996,11 @@ impl StateStore {
         // Hash potentially large reused content outside the global state lock
         // and SQLite write transaction. The CAS guard remains held throughout;
         // the short commit rechecks immutable channel/export coordinates.
-        let verified = imported.validate_retention(
-            &self.state_authority,
-            permit.cas_guard(),
-            &binding,
-        )?;
+        let verified =
+            imported.validate_retention(&self.state_authority, permit.cas_guard(), &binding)?;
         let g = self.lock()?;
-        g.runtime_db.retain_external_candidate_import(
-            placement,
-            &verified,
-            &self.state_authority,
-        )
+        g.runtime_db
+            .retain_external_candidate_import(placement, &verified, &self.state_authority)
     }
 
     pub fn external_execution_blob_roots(&self) -> Result<Vec<String>> {

@@ -134,6 +134,49 @@ NULs and aggregate canonical JSON exceeding the receiver's 256 KiB limit before
 preparing a launch. This closes a sender/receiver admission mismatch; it does not
 establish placement, runtime integrity or native execution qualification.
 
+## Occurrence-authenticated channel attachment checkpoint
+
+Runtime operator epoch 45 cuts allocation reservations to schema 2. Before the
+only allocator contact, each reservation now retains an app-private sealed
+channel-authority generation, the exact controller Ed25519 public key, and the
+digest of one random 256-bit bootstrap capability. The controller private key
+and capability are insert-only generations in the node vault: operator and
+runtime-bundle enumeration, reads, mutation and deletion cannot address them.
+The protected supervisor generates its own distinct signing key; its private key
+never enters the controller vault or candidate inputs.
+
+The signed `/external-execution/channel/attach` route is composed only by the
+daemon with an occurrence-specific verifier. The verifier grants no general
+scopes, authorized-key class, grant authority or node enrollment. The handler
+requires the exact synthetic occurrence principal and re-authenticates the
+capability against the bound allocation before registering the supervisor public
+key. Ordinary or unverified service principals fail before state mutation.
+
+First registration atomically rejoins the exact occurrence, request, session,
+capsule, base, retained lifecycle binding, admitted runtime and both channel
+keys. The bootstrap attachment deadline is recomputed from retained authority
+inside the SQLite writer transaction, with the production clock sampled only
+after acquiring that lock. Lock contention or slow capsule validation therefore
+cannot carry pre-expiry authority across registration. Exact same-key replay
+returns the original binding; a changed supervisor key or any other binding
+coordinate is refused. Channel nonce and execution deadlines are never renewed
+by replay.
+
+Focused source evidence after review corrections: 21 allocation/channel tests,
+6 placement-owner tests, 4 protected channel-vault tests, 35 API tests selected
+by the `external_` filter (including all 4 attach/verifier tests), and 24
+independent Python/SQLite tests passed. The vault
+tests include concurrent creation, operator/runtime invisibility and reopen.
+Independent architecture, security/recovery and test reviews found and corrected
+both expiry races: retained authentication across expiry and a clock sample
+before writer-lock acquisition.
+
+This is an inactive bootstrap and public-binding checkpoint. It does **not**
+qualify a network exchange, TLS/server identity, signed-frame delivery, guest
+supervisor deployment, protected Codex execution, or a production lifecycle
+adapter. The installed backend registry remains empty and no external or model
+contact occurred.
+
 The sections below retain earlier checkpoint evidence. References there to
 missing guest implementation or older schema versions describe those checkpoints.
 

@@ -43,6 +43,7 @@ pub mod external_content_product_receive;
 pub mod external_content_products;
 pub mod external_content_release;
 pub mod external_content_scrub;
+pub mod external_execution_channel;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
@@ -184,6 +185,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_bind::DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
+    external_execution_channel::DESCRIPTOR,
     trace_branch::DESCRIPTOR,
     trace_inspect::DESCRIPTOR,
     commands_submit::DESCRIPTOR,

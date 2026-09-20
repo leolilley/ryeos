@@ -107,6 +107,23 @@ impl RuntimeDb {
         &self,
         binding: &ExecutionChannelBinding,
     ) -> Result<()> {
+        self.register_external_execution_channel_inner(binding, None)
+    }
+
+    #[cfg(test)]
+    fn register_external_execution_channel_at(
+        &self,
+        binding: &ExecutionChannelBinding,
+        now: i64,
+    ) -> Result<()> {
+        self.register_external_execution_channel_inner(binding, Some(now))
+    }
+
+    fn register_external_execution_channel_inner(
+        &self,
+        binding: &ExecutionChannelBinding,
+        test_now: Option<i64>,
+    ) -> Result<()> {
         binding.validate()?;
         let digest = binding.digest()?;
         let canonical = lillux::canonical_json(&serde_json::to_value(binding)?)?;
@@ -124,6 +141,7 @@ impl RuntimeDb {
             || binding.admitted_capsule_hash != reservation.admitted_capsule_hash
             || binding.base_snapshot_hash != reservation.base_snapshot_hash
             || binding.execution_binding_hash != reservation.binding_hash
+            || binding.owner_public_key != reservation.channel_owner_public_key
         {
             bail!("external channel contradicts its allocation owner");
         }
@@ -137,7 +155,21 @@ impl RuntimeDb {
             return Ok(());
         }
         require_launch_ready_session(&tx, &binding.placement_thread_id)?;
-        let now = lillux::time::timestamp_millis();
+        let retained = read_retained_binding(&tx, &reservation.binding_hash)?
+            .context("external channel lost its retained binding generation")?;
+        let contract = retained.backend_contract();
+        // Sample the production clock only after acquiring the writer lock.
+        // Lock contention must not carry stale pre-expiry authority across the
+        // first-registration boundary. Tests inject an exact instant without
+        // exposing clock selection outside this module.
+        let now = test_now.unwrap_or_else(lillux::time::timestamp_millis);
+        let attach_deadline_ms = reservation
+            .contact_deadline_ms
+            .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
+            .context("external channel attachment deadline overflow")?;
+        if now >= attach_deadline_ms {
+            bail!("external channel bootstrap capability expired before registration");
+        }
         if now < binding.issued_at_ms
             || now >= binding.execution_deadline_ms
             || binding
@@ -158,6 +190,22 @@ impl RuntimeDb {
     /// Return the exact public binding; never return an activation secret.
     pub fn external_execution_channel(&self, placement: &str) -> Result<ExecutionChannelBinding> {
         load_binding(&self.conn, placement)
+    }
+
+    pub(crate) fn optional_external_execution_channel(
+        &self,
+        placement: &str,
+    ) -> Result<Option<ExecutionChannelBinding>> {
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_channel WHERE placement_thread_id=?1)",
+            [placement],
+            |row| row.get(0),
+        )?;
+        if exists {
+            Ok(Some(load_binding(&self.conn, placement)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Persist one authenticated frame before it is acknowledged or applied.
@@ -241,6 +289,7 @@ impl JournalOwner for NodeJournalOwner {
             || binding.execution_binding_hash != reservation.binding_hash
             || binding.admitted_capsule_hash != reservation.admitted_capsule_hash
             || binding.base_snapshot_hash != reservation.base_snapshot_hash
+            || binding.owner_public_key != reservation.channel_owner_public_key
         {
             bail!("retained external channel changed its allocation authority");
         }
@@ -371,7 +420,7 @@ mod tests {
             },
         )
         .unwrap();
-        let owner = lillux::crypto::generate_signing_key();
+        let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
         let supervisor = lillux::crypto::generate_signing_key();
         let now = lillux::time::timestamp_millis();
         let binding = ExecutionChannelBinding {
@@ -394,6 +443,63 @@ mod tests {
         };
         db.register_external_execution_channel(&binding).unwrap();
         (binding, owner, supervisor)
+    }
+
+    #[test]
+    fn first_channel_registration_rechecks_bootstrap_expiry_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = super::super::tests::reservation(&db, "expired-attach");
+        super::super::tests::reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact(
+            &reservation.placement_thread_id,
+            &reservation.request_digest,
+        )
+        .unwrap();
+        db.bind_external_allocation(
+            &reservation.placement_thread_id,
+            &ExternalAllocationOccurrence {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: reservation.request_digest.clone(),
+                occurrence_id: "external-expired".into(),
+                provider_observation_digest: "f".repeat(64),
+            },
+        )
+        .unwrap();
+        let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
+        let supervisor = lillux::crypto::generate_signing_key();
+        // Simulate authentication while the bootstrap window was valid, then
+        // delayed attachment after contact + observation expiry. No sleep or
+        // mutable clock is part of the authority contract.
+        let now = reservation.contact_deadline_ms + 60_000;
+        let binding = ExecutionChannelBinding {
+            schema: 1,
+            placement_thread_id: reservation.placement_thread_id.clone(),
+            allocation_request_digest: reservation.request_digest,
+            occurrence_id: "external-expired".into(),
+            admitted_capsule_hash: reservation.admitted_capsule_hash,
+            base_snapshot_hash: reservation.base_snapshot_hash,
+            execution_binding_hash: reservation.binding_hash,
+            supervisor_runtime_hash: "f".repeat(64),
+            channel_nonce: "9".repeat(64),
+            owner_public_key: STANDARD.encode(owner.verifying_key().as_bytes()),
+            supervisor_public_key: STANDARD.encode(supervisor.verifying_key().as_bytes()),
+            issued_at_ms: now,
+            execution_deadline_ms: now + 60_000,
+            expires_at_ms: now + 120_000,
+            max_frames: 100,
+            max_bytes: 1024 * 1024,
+        };
+        assert!(
+            db.register_external_execution_channel_at(&binding, now)
+                .is_err()
+        );
+        assert!(
+            db.optional_external_execution_channel(&reservation.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
     }
     fn wire(
         binding: &ExecutionChannelBinding,
@@ -1144,8 +1250,12 @@ mod tests {
         let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
         let (binding, owner, supervisor) = setup(&db);
         let placement = &binding.placement_thread_id;
+        db.register_external_execution_channel(&binding).unwrap();
         let mut wrong = binding.clone();
-        wrong.channel_nonce = "8".repeat(64);
+        wrong.supervisor_public_key = ryeos_state::external_execution::encode_channel_public_key(
+            &lillux::crypto::generate_signing_key().verifying_key(),
+        )
+        .unwrap();
         assert!(db.register_external_execution_channel(&wrong).is_err());
         let (release, _) = wire(
             &binding,

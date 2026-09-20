@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, Result, bail, ensure};
+use rand::RngCore as _;
+use subtle::ConstantTimeEq as _;
 
 #[cfg(test)]
 use crate::node_config::sections::external_execution::RetainedExternalExecutionBinding;
@@ -25,6 +27,7 @@ use crate::runtime_db::external_execution::{
 use crate::runtime_db::{WorkspaceRecord, WorkspaceState};
 use crate::state::AppState;
 use crate::state_lock::StateLockLease;
+use crate::vault::external_channel::{ExternalChannelAuthority, ExternalChannelAuthorityAccess};
 use crate::vault::placement::PlacementCredential;
 
 /// Trusted controller adapter metadata and offline contract verification. This
@@ -46,6 +49,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _contract: &ExternalPlacementBackendContract,
         _credential: &PlacementCredential,
         _reservation: &ExternalAllocationReservation,
+        _activation: &ExternalPlacementActivation,
     ) -> Result<ExternalAllocationResolution> {
         bail!("external placement backend does not implement allocation")
     }
@@ -104,6 +108,48 @@ pub(crate) enum ExternalAllocationResolution {
 pub(crate) enum ExternalTerminationResolution {
     Terminal { provider_observation_digest: String },
     Pending,
+}
+
+/// Secret-bearing, one-contact bootstrap material passed only to the selected
+/// protected lifecycle adapter.  It contains no node/operator signing key and
+/// has no serialization or cloning surface.
+pub(crate) struct ExternalPlacementActivation {
+    authority_generation: String,
+    owner_public_key: String,
+    bootstrap_capability: zeroize::Zeroizing<String>,
+}
+
+/// Non-secret result of occurrence/bootstrap authentication.  The raw
+/// capability is deliberately not retained in route principals or logs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AuthenticatedExternalOccurrence {
+    placement_thread_id: String,
+    occurrence_id: String,
+    allocation_request_digest: String,
+}
+
+impl AuthenticatedExternalOccurrence {
+    pub fn placement_thread_id(&self) -> &str {
+        &self.placement_thread_id
+    }
+    pub fn occurrence_id(&self) -> &str {
+        &self.occurrence_id
+    }
+    pub fn allocation_request_digest(&self) -> &str {
+        &self.allocation_request_digest
+    }
+}
+
+impl ExternalPlacementActivation {
+    pub(crate) fn authority_generation(&self) -> &str {
+        &self.authority_generation
+    }
+    pub(crate) fn owner_public_key(&self) -> &str {
+        &self.owner_public_key
+    }
+    pub(crate) fn bootstrap_capability(&self) -> &str {
+        self.bootstrap_capability.as_str()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -196,6 +242,193 @@ pub fn preflight_external_candidate_program(
         .external_placement_backends
         .qualify(&contract, &credential)?;
     Ok(())
+}
+
+/// Authenticate the one-use occurrence attachment capability.  This does not
+/// register a key or apply any execution frame.  Callers must still pass the
+/// returned exact occurrence into `attach_external_execution_channel`.
+pub fn authenticate_external_channel_bootstrap(
+    state: &AppState,
+    placement: &str,
+    occurrence_id: &str,
+    bootstrap_capability: &str,
+) -> Result<AuthenticatedExternalOccurrence> {
+    let controller_lifetime = state
+        .extensions
+        .get::<StateLockLease>()
+        .context("external channel controller has no retained state-lock lifetime")?;
+    controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)
+        .context("external channel controller lease has the wrong app root")?;
+    let allocation = state
+        .state_store
+        .external_allocation(placement)?
+        .context("external channel has no retained allocation")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound,
+        "external channel attachment requires one bound occurrence"
+    );
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("bound external allocation lost its occurrence")?;
+    ensure!(
+        occurrence.occurrence_id == occurrence_id,
+        "external channel attachment changed its occurrence"
+    );
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("external channel attachment lost its binding generation")?;
+    let contract = retained.backend_contract();
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let attach_deadline = allocation
+        .reservation
+        .contact_deadline_ms
+        .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
+        .context("external channel attachment deadline overflow")?;
+    ensure!(
+        now < attach_deadline,
+        "external channel bootstrap capability expired before attachment"
+    );
+    let access =
+        ExternalChannelAuthorityAccess::new(&allocation.reservation.channel_authority_generation)?;
+    let authority = access.decode(
+        state
+            .vault
+            .external_channel_authority(&access)
+            .context("read protected external channel authority")?,
+    )?;
+    ensure!(
+        authority.owner_public_key() == allocation.reservation.channel_owner_public_key
+            && authority.bootstrap_capability_hash()
+                == allocation.reservation.channel_bootstrap_capability_hash,
+        "protected external channel authority changed its reservation"
+    );
+    let presented_hash = lillux::sha256_hex(bootstrap_capability.as_bytes());
+    ensure!(
+        bool::from(
+            presented_hash.as_bytes().ct_eq(
+                allocation
+                    .reservation
+                    .channel_bootstrap_capability_hash
+                    .as_bytes()
+            )
+        ),
+        "external channel bootstrap authentication failed"
+    );
+    Ok(AuthenticatedExternalOccurrence {
+        placement_thread_id: placement.to_owned(),
+        occurrence_id: occurrence_id.to_owned(),
+        allocation_request_digest: allocation.reservation.request_digest,
+    })
+}
+
+/// Finalize exactly one occurrence-scoped channel after bootstrap
+/// authentication.  All mutable limits and identities are derived from the
+/// retained session, allocation and signed binding rather than request data.
+pub fn attach_external_execution_channel(
+    state: &AppState,
+    authenticated: &AuthenticatedExternalOccurrence,
+    supervisor_public_key: &str,
+) -> Result<ryeos_state::external_execution::ExecutionChannelBinding> {
+    let controller_lifetime = state
+        .extensions
+        .get::<StateLockLease>()
+        .context("external channel controller has no retained state-lock lifetime")?;
+    controller_lifetime
+        .ensure_protects_app_root(&state.config.app_root)
+        .context("external channel controller lease has the wrong app root")?;
+    ryeos_state::external_execution::validate_channel_public_key(supervisor_public_key)?;
+    let allocation = state
+        .state_store
+        .external_allocation(&authenticated.placement_thread_id)?
+        .context("external channel allocation disappeared before attachment")?;
+    ensure!(
+        allocation.phase == ExternalAllocationPhase::Bound
+            && allocation.reservation.request_digest == authenticated.allocation_request_digest,
+        "external channel authentication no longer names the bound allocation"
+    );
+    let occurrence = allocation
+        .occurrence
+        .as_ref()
+        .context("bound external allocation lost its occurrence")?;
+    ensure!(
+        occurrence.occurrence_id == authenticated.occurrence_id,
+        "external channel authentication no longer names the occurrence"
+    );
+    if let Some(existing) = state
+        .state_store
+        .optional_external_execution_channel(&authenticated.placement_thread_id)?
+    {
+        ensure!(
+            existing.supervisor_public_key == supervisor_public_key,
+            "external channel attachment replay changed the supervisor key"
+        );
+        return Ok(existing);
+    }
+    let capsule = state
+        .state_store
+        .admitted_persistent_session_capsule(&allocation.reservation.admitted_capsule_hash)?;
+    capsule.validate()?;
+    let program = capsule
+        .external_candidate
+        .as_ref()
+        .context("external channel capsule has no admitted candidate program")?;
+    program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    let retained = state
+        .state_store
+        .retained_external_binding(&allocation.reservation.binding_hash)?
+        .context("external channel lost its retained binding generation")?;
+    retained.check_program(program)?;
+    let contract = retained.backend_contract();
+    let issued_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
+    let execution_deadline_ms = issued_at_ms
+        .checked_add(i64::from(allocation.reservation.timeout_seconds) * 1_000)
+        .context("external channel execution deadline overflow")?;
+    let expires_at_ms = execution_deadline_ms
+        .checked_add(
+            i64::from(
+                contract
+                    .observation_timeout_seconds
+                    .saturating_add(contract.cleanup_timeout_seconds),
+            ) * 1_000,
+        )
+        .context("external channel expiry overflow")?;
+    let max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+    let max_frames = u32::try_from(
+        max_bytes
+            .div_ceil(ryeos_state::external_execution::MAX_CHUNK_BYTES as u64)
+            .saturating_mul(4)
+            .clamp(64, 65_536),
+    )?;
+    let mut nonce = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let binding = ryeos_state::external_execution::ExecutionChannelBinding {
+        schema: 1,
+        placement_thread_id: authenticated.placement_thread_id.clone(),
+        allocation_request_digest: allocation.reservation.request_digest,
+        occurrence_id: occurrence.occurrence_id.clone(),
+        admitted_capsule_hash: allocation.reservation.admitted_capsule_hash,
+        base_snapshot_hash: allocation.reservation.base_snapshot_hash,
+        execution_binding_hash: allocation.reservation.binding_hash,
+        supervisor_runtime_hash: program.runtime_manifest_hash.clone(),
+        channel_nonce: lillux::sha256_hex(&nonce),
+        owner_public_key: allocation.reservation.channel_owner_public_key,
+        supervisor_public_key: supervisor_public_key.to_owned(),
+        issued_at_ms,
+        execution_deadline_ms,
+        expires_at_ms,
+        max_frames,
+        max_bytes,
+    };
+    binding.validate()?;
+    state
+        .state_store
+        .register_external_execution_channel(&binding)?;
+    state
+        .state_store
+        .external_execution_channel(&authenticated.placement_thread_id)
 }
 
 pub(crate) struct ExternalPlacementOwner<'a> {
@@ -312,6 +545,36 @@ impl<'a> ExternalPlacementOwner<'a> {
             .state
             .external_placement_backends
             .contact_gate(placement)?;
+        let authority_generation =
+            ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+                "domain":"ryeos.external-channel-authority.v1",
+                "placement_thread_id":placement,
+                "admitted_capsule_hash":session.admitted_capsule_hash,
+                "base_snapshot_hash":workspace.base_snapshot,
+                "binding_hash":binding.digest(),
+            }))?;
+        let authority_access = ExternalChannelAuthorityAccess::new(&authority_generation)?;
+        let channel_authority = if let Some(existing) = &existing {
+            ensure!(
+                existing.reservation.channel_authority_generation == authority_generation,
+                "external placement recovery changed its channel authority generation"
+            );
+            authority_access.decode(
+                self.state
+                    .vault
+                    .external_channel_authority(&authority_access)
+                    .context("read protected external channel authority")?,
+            )?
+        } else {
+            authority_access.decode(
+                self.state
+                    .vault
+                    .ensure_external_channel_authority(&authority_access)
+                    .context("seal protected external channel authority")?,
+            )?
+        };
+        let channel_owner_public_key = channel_authority.owner_public_key();
+        let channel_bootstrap_capability_hash = channel_authority.bootstrap_capability_hash();
         let request_digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
             "domain":"ryeos.external-placement-request.v1",
             "placement_thread_id":placement,
@@ -322,12 +585,15 @@ impl<'a> ExternalPlacementOwner<'a> {
             "base_snapshot_hash":workspace.base_snapshot,
             "binding_hash":binding.digest(),
             "capacity_owner":binding.capacity_owner(),
+            "channel_authority_generation":authority_generation,
+            "channel_owner_public_key":channel_owner_public_key,
+            "channel_bootstrap_capability_hash":channel_bootstrap_capability_hash,
             "program":program,
             "backend_contract":contract,
         }))?;
         let reservation = if let Some(existing) = existing {
             let expected = ExternalAllocationReservation {
-                schema: 1,
+                schema: 2,
                 placement_thread_id: placement.to_owned(),
                 admitted_capsule_hash: session.admitted_capsule_hash.clone(),
                 workspace_id: session.workspace_id.clone(),
@@ -336,6 +602,9 @@ impl<'a> ExternalPlacementOwner<'a> {
                 base_snapshot_hash: workspace.base_snapshot.clone(),
                 binding_hash: binding.digest().to_owned(),
                 capacity_owner: binding.capacity_owner().to_owned(),
+                channel_authority_generation: authority_generation.clone(),
+                channel_owner_public_key: channel_owner_public_key.clone(),
+                channel_bootstrap_capability_hash: channel_bootstrap_capability_hash.clone(),
                 request_digest,
                 max_active: contract.max_active,
                 timeout_seconds: contract.timeout_seconds,
@@ -352,7 +621,7 @@ impl<'a> ExternalPlacementOwner<'a> {
                 .checked_add(i64::from(contract.contact_timeout_seconds) * 1_000)
                 .context("external placement contact deadline overflow")?;
             ExternalAllocationReservation {
-                schema: 1,
+                schema: 2,
                 placement_thread_id: placement.to_owned(),
                 admitted_capsule_hash: session.admitted_capsule_hash.clone(),
                 workspace_id: session.workspace_id.clone(),
@@ -361,6 +630,9 @@ impl<'a> ExternalPlacementOwner<'a> {
                 base_snapshot_hash: workspace.base_snapshot.clone(),
                 binding_hash: binding.digest().to_owned(),
                 capacity_owner: binding.capacity_owner().to_owned(),
+                channel_authority_generation: authority_generation,
+                channel_owner_public_key,
+                channel_bootstrap_capability_hash,
                 request_digest,
                 max_active: contract.max_active,
                 timeout_seconds: contract.timeout_seconds,
@@ -378,6 +650,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             credential,
             contact_gate,
             controller_lifetime,
+            channel_authority,
             record,
         })
     }
@@ -431,6 +704,7 @@ pub(crate) struct PreparedExternalPlacement {
     credential: PlacementCredential,
     contact_gate: Arc<AtomicBool>,
     controller_lifetime: Arc<StateLockLease>,
+    channel_authority: ExternalChannelAuthority,
     record: ExternalAllocationRecord,
 }
 
@@ -466,6 +740,7 @@ impl PreparedExternalPlacement {
                     contact_lease: ExternalContactLease {
                         gate: self.contact_gate,
                     },
+                    channel_authority: self.channel_authority,
                     _controller_lifetime: self.controller_lifetime,
                 }),
             ),
@@ -506,6 +781,7 @@ pub(crate) struct ExternalPlacementContactPermit {
     credential: PlacementCredential,
     reservation: ExternalAllocationReservation,
     contact_lease: ExternalContactLease,
+    channel_authority: ExternalChannelAuthority,
     // Keep the exact OS-backed controller exclusion live across synchronous
     // provider I/O. Tokio's bounded shutdown cannot cancel spawn_blocking.
     _controller_lifetime: Arc<StateLockLease>,
@@ -546,9 +822,27 @@ impl ExternalContactLease {
 // reconstructing authority from public hashes or caller input.
 impl ExternalPlacementContactPermit {
     pub(crate) fn contact(self) -> Result<ExternalAllocationRecord> {
-        let resolution =
-            self.backend
-                .allocate(&self.contract, &self.credential, &self.reservation)?;
+        ensure!(
+            self.channel_authority.generation() == self.reservation.channel_authority_generation
+                && self.channel_authority.owner_public_key()
+                    == self.reservation.channel_owner_public_key
+                && self.channel_authority.bootstrap_capability_hash()
+                    == self.reservation.channel_bootstrap_capability_hash,
+            "external placement activation changed its retained reservation"
+        );
+        let activation = ExternalPlacementActivation {
+            authority_generation: self.channel_authority.generation().to_owned(),
+            owner_public_key: self.channel_authority.owner_public_key(),
+            bootstrap_capability: zeroize::Zeroizing::new(
+                self.channel_authority.bootstrap_capability().to_owned(),
+            ),
+        };
+        let resolution = self.backend.allocate(
+            &self.contract,
+            &self.credential,
+            &self.reservation,
+            &activation,
+        )?;
         // The consuming call has returned, so this process can no longer issue
         // the delayed original request. Release before accepting an exact
         // negative response as settlement evidence.
@@ -768,8 +1062,16 @@ mod tests {
             &self,
             _contract: &ExternalPlacementBackendContract,
             _credential: &PlacementCredential,
-            _reservation: &ExternalAllocationReservation,
+            reservation: &ExternalAllocationReservation,
+            activation: &ExternalPlacementActivation,
         ) -> Result<ExternalAllocationResolution> {
+            ensure!(
+                activation.authority_generation() == reservation.channel_authority_generation
+                    && activation.owner_public_key() == reservation.channel_owner_public_key
+                    && lillux::sha256_hex(activation.bootstrap_capability().as_bytes())
+                        == reservation.channel_bootstrap_capability_hash,
+                "fixture allocator received wrong channel activation"
+            );
             self.allocate_calls.fetch_add(1, Ordering::SeqCst);
             bail!("fixture lost the create response after provider mutation")
         }
@@ -927,8 +1229,11 @@ mod tests {
         })
         .unwrap();
         let binding = RetainedExternalExecutionBinding::test_fixture();
+        let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
+        let channel_owner_public_key = channel_authority.owner_public_key();
+        let channel_bootstrap_capability_hash = channel_authority.bootstrap_capability_hash();
         let reservation = ExternalAllocationReservation {
-            schema: 1,
+            schema: 2,
             placement_thread_id: "T-one".into(),
             admitted_capsule_hash: "a".repeat(64),
             workspace_id: "W-one".into(),
@@ -937,6 +1242,9 @@ mod tests {
             base_snapshot_hash: "b".repeat(64),
             binding_hash: binding.digest().into(),
             capacity_owner: binding.capacity_owner().into(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key,
+            channel_bootstrap_capability_hash,
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -978,8 +1286,9 @@ mod tests {
             .unwrap(),
         );
         let binding = RetainedExternalExecutionBinding::test_fixture();
+        let channel_authority = ExternalChannelAuthority::test_fixture(&"3".repeat(64));
         let reservation = ExternalAllocationReservation {
-            schema: 1,
+            schema: 2,
             placement_thread_id: "T-one".into(),
             admitted_capsule_hash: "a".repeat(64),
             workspace_id: "W-one".into(),
@@ -988,6 +1297,9 @@ mod tests {
             base_snapshot_hash: "b".repeat(64),
             binding_hash: binding.digest().into(),
             capacity_owner: binding.capacity_owner().into(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key: channel_authority.owner_public_key(),
+            channel_bootstrap_capability_hash: channel_authority.bootstrap_capability_hash(),
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -1014,6 +1326,9 @@ mod tests {
             credential: credential(&InstalledExternalExecutionBinding::test_fixture()),
             contact_gate: gate,
             controller_lifetime,
+            channel_authority: ExternalChannelAuthority::test_fixture(
+                &reservation.channel_authority_generation,
+            ),
             record: store
                 .external_allocation(&reservation.placement_thread_id)
                 .unwrap()
@@ -1113,6 +1428,15 @@ mod tests {
         let backend = FaultBackend::new();
         let contract = binding.backend_contract();
         let credential = credential(&InstalledExternalExecutionBinding::test_fixture());
+        let authority =
+            ExternalChannelAuthority::test_fixture(&reservation.channel_authority_generation);
+        let activation = ExternalPlacementActivation {
+            authority_generation: authority.generation().to_owned(),
+            owner_public_key: authority.owner_public_key(),
+            bootstrap_capability: zeroize::Zeroizing::new(
+                authority.bootstrap_capability().to_owned(),
+            ),
+        };
 
         assert!(matches!(
             db.claim_external_allocation_contact("T-one", &reservation.request_digest)
@@ -1121,7 +1445,7 @@ mod tests {
         ));
         assert!(
             backend
-                .allocate(&contract, &credential, &reservation)
+                .allocate(&contract, &credential, &reservation, &activation)
                 .is_err()
         );
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);

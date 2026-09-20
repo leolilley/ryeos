@@ -211,6 +211,12 @@ fn build_route_table(
     let mut extensions = ryeos_api::routes::RouteExtensionRegistry {
         auth: ryeos_api::routes::invokers::AuthInvokerRegistry::with_api_builtins(),
     };
+    extensions.auth.register(
+        "external_occurrence",
+        Arc::new(
+            ryeos_api::routes::invokers::external_occurrence_invocation::ExternalOccurrenceAuthFactory,
+        ),
+    );
 
     ryeos_ui::register_extensions(&mut extensions, &mut mode_registry, ui);
 

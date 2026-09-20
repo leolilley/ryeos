@@ -58,7 +58,9 @@ use anyhow::{Result, anyhow, bail};
 
 use ryeos_engine::roots;
 
+pub mod external_channel;
 pub mod placement;
+use external_channel::ExternalChannelAuthorityAccess;
 use placement::PlacementCredentialAccess;
 
 // Vault key-name policy + write helpers live in
@@ -161,6 +163,35 @@ fn runtime_physical_prefix(bundle_id: &str, namespace: &str) -> Result<String> {
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
+    /// Retrieve one app-private controller signer/bootstrap generation.  It is
+    /// never exposed through operator/runtime secret enumeration.
+    fn external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        bail!("vault backend does not support protected external channel authority")
+    }
+
+    /// Insert-only generation provisioning.  No overwrite or deletion API is
+    /// available to runtime, project or operator-secret callers.
+    fn provision_external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+        _value: &str,
+    ) -> Result<()> {
+        bail!("vault backend does not support protected external channel authority")
+    }
+
+    /// Atomically load or create the exact immutable generation.  This avoids
+    /// a read-then-create race and ensures a crash cannot reserve an allocation
+    /// whose bootstrap plaintext was never durably sealed.
+    fn ensure_external_channel_authority(
+        &self,
+        _access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        bail!("vault backend does not support protected external channel authority")
+    }
+
     /// Only app code can construct this coordinate; callers must keep it inside
     /// the protected placement owner, never construct it from workload inputs.
     /// Unsupported backends refuse; never fall back to workload or host secrets.
@@ -713,6 +744,56 @@ impl SealedEnvelopeVault {
 }
 
 impl NodeVault for SealedEnvelopeVault {
+    fn external_channel_authority(
+        &self,
+        access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        let mut entries = self.read_all_internal()?;
+        let result = entries.remove(access.physical_key());
+        use zeroize::Zeroize;
+        for value in entries.values_mut() {
+            value.zeroize();
+        }
+        result
+            .map(zeroize::Zeroizing::new)
+            .ok_or_else(|| anyhow!("protected external channel authority generation is absent"))
+    }
+
+    fn provision_external_channel_authority(
+        &self,
+        access: &ExternalChannelAuthorityAccess,
+        value: &str,
+    ) -> Result<()> {
+        validate_secret_value(value)?;
+        access.validate_value(value)?;
+        self.read_modify_write(|map| {
+            if let Some(existing) = map.get(access.physical_key()) {
+                if existing != value {
+                    bail!("external channel authority generation is immutable");
+                }
+                return Ok(());
+            }
+            map.insert(access.physical_key().to_owned(), value.to_owned());
+            Ok(())
+        })
+    }
+
+    fn ensure_external_channel_authority(
+        &self,
+        access: &ExternalChannelAuthorityAccess,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        self.read_modify_write(|map| {
+            if let Some(existing) = map.get(access.physical_key()) {
+                access.validate_value(existing)?;
+                return Ok(zeroize::Zeroizing::new(existing.clone()));
+            }
+            let value = access.generate_value()?;
+            access.validate_value(&value)?;
+            map.insert(access.physical_key().to_owned(), value.clone());
+            Ok(zeroize::Zeroizing::new(value))
+        })
+    }
+
     fn placement_credential(
         &self,
         access: &PlacementCredentialAccess,

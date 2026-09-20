@@ -1,0 +1,7 @@
+# ryeos:signed:2026-09-20T10:28:26Z:42b4d8587d3be0bc557466352f93327eccbcbf53ebd3a5a440d23d2bd00833fb:YSCKGCz3KisasIoY9exBRnynyCbmOaLaq474F+M0gxoel7JId++6oa8/4etgyAUACmDdRt64XmMhuzfeXWz0DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external_execution.channel_attach
+availability: daemon_only
+record_thread: false
+required_caps: []
+description: "Attach one authenticated protected supervisor occurrence"

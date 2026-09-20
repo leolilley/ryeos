@@ -268,6 +268,14 @@ pub struct ExternalAllocationReservation {
     pub binding_hash: String,
     /// Stable protected capacity domain across binding/policy generations.
     pub capacity_owner: String,
+    /// Deterministic app-private vault coordinate for the controller signer and
+    /// one-use attachment capability.  This is an identity, never a secret.
+    pub channel_authority_generation: String,
+    /// Exact controller channel signer selected before allocator contact.
+    pub channel_owner_public_key: String,
+    /// Digest of the one-use attachment capability delivered only to the
+    /// protected supervisor bootstrap.
+    pub channel_bootstrap_capability_hash: String,
     pub request_digest: String,
     pub max_active: u16,
     pub timeout_seconds: u32,
@@ -276,7 +284,7 @@ pub struct ExternalAllocationReservation {
 
 impl ExternalAllocationReservation {
     pub fn validate(&self) -> Result<()> {
-        if self.schema != 1
+        if self.schema != 2
             || !(1..=64).contains(&self.max_active)
             || !(1..=3600).contains(&self.timeout_seconds)
             || self.contact_deadline_ms <= 0
@@ -293,10 +301,15 @@ impl ExternalAllocationReservation {
             &self.base_snapshot_hash,
             &self.binding_hash,
             &self.capacity_owner,
+            &self.channel_authority_generation,
+            &self.channel_bootstrap_capability_hash,
             &self.request_digest,
         ] {
             validate_sha256("external allocation identity", hash)?;
         }
+        ryeos_state::external_execution::validate_channel_public_key(
+            &self.channel_owner_public_key,
+        )?;
         Ok(())
     }
 }
@@ -1297,7 +1310,7 @@ mod tests {
             .unwrap();
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         ExternalAllocationReservation {
-            schema: 1,
+            schema: 2,
             placement_thread_id: placement,
             admitted_capsule_hash: "a".repeat(64),
             workspace_id: workspace,
@@ -1306,6 +1319,12 @@ mod tests {
             base_snapshot_hash: "b".repeat(64),
             binding_hash: binding.digest().to_owned(),
             capacity_owner: binding.capacity_owner().to_owned(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &lillux::crypto::SigningKey::from_bytes(&[19; 32]).verifying_key(),
+            )
+            .unwrap(),
+            channel_bootstrap_capability_hash: "4".repeat(64),
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
@@ -1751,6 +1770,9 @@ mod tests {
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
         let mut wrong = reserved.clone();
+        wrong.schema = 1;
+        assert!(reserve(&db, &wrong).is_err());
+        wrong = reserved.clone();
         wrong.base_snapshot_hash = "f".repeat(64);
         assert!(reserve(&db, &wrong).is_err());
         wrong = reserved.clone();
