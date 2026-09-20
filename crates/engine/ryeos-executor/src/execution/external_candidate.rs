@@ -17,7 +17,10 @@ use ryeos_state::external_execution::{
     NativeWriterExclusionMechanism, NativeWriterExclusionObservation,
 };
 use ryeos_state::project_materialization::VerifiedProjectSnapshotClosure;
-use ryeos_state::{CasMutationGuard, PinnedProjectMaterialization, PinnedStateAuthority};
+use ryeos_state::{
+    CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
+    PinnedProjectMaterialization, PinnedStateAuthority,
+};
 
 pub struct NativeExternalCandidate {
     binding: ExecutionChannelBinding,
@@ -140,6 +143,10 @@ impl CandidateProtocolInput {
 /// This value can only be returned after exact native namespace termination
 /// and complete project capture. It is local testimony, not cloud cleanup.
 pub struct NativeCandidateExport {
+    binding_digest: String,
+    completion_request_digest: String,
+    occurrence_digest: String,
+    durable_stage_id: String,
     snapshot_hash: String,
     writer_exclusion_blob_hash: String,
 }
@@ -150,6 +157,18 @@ impl NativeCandidateExport {
     }
     pub fn writer_exclusion_blob_hash(&self) -> &str {
         &self.writer_exclusion_blob_hash
+    }
+    pub fn binding_digest(&self) -> &str {
+        &self.binding_digest
+    }
+    pub fn completion_request_digest(&self) -> &str {
+        &self.completion_request_digest
+    }
+    pub fn occurrence_digest(&self) -> &str {
+        &self.occurrence_digest
+    }
+    pub fn durable_stage_id(&self) -> &str {
+        &self.durable_stage_id
     }
 }
 
@@ -392,6 +411,8 @@ impl NativeExternalCandidate {
         frame: &AuthenticatedExecutionFrame,
         authority: &PinnedStateAuthority,
         guard: &CasMutationGuard,
+        occurrence_stage: &mut DurableCasUploadStage,
+        occurrence_digest: &str,
         timeout: Duration,
     ) -> Result<NativeCandidateExport> {
         self.require_owner(frame)?;
@@ -401,6 +422,12 @@ impl NativeExternalCandidate {
             } => completion_request_digest,
             _ => anyhow::bail!("external capture requires authenticated quiescence"),
         };
+        let binding_digest = self.binding.digest()?;
+        let occurrence_key = DurableCasPublicationKey::external_candidate_occurrence(
+            &binding_digest,
+            occurrence_digest,
+        )?;
+        occurrence_stage.ensure_publication_contract(&occurrence_key, None)?;
         ensure!(
             self.released
                 && !self.terminal
@@ -497,12 +524,33 @@ impl NativeExternalCandidate {
         observation.validate(&self.binding, completion)?;
         let writer_exclusion_blob_hash = cas
             .store_blob(lillux::canonical_json(&serde_json::to_value(observation)?)?.as_bytes())?;
+        let captured = VerifiedProjectSnapshotClosure::load(&cas, &snapshot_hash)?;
+        let mut object_hashes = std::collections::BTreeSet::from([
+            snapshot_hash.clone(),
+            captured.snapshot().project_tree_hash.clone(),
+            captured.snapshot().effective_policy_hash.clone(),
+        ]);
+        let mut blob_hashes =
+            std::collections::BTreeSet::from([writer_exclusion_blob_hash.clone()]);
+        for (path, file) in captured.tree().files() {
+            object_hashes.insert(captured.tree().tree().files[path].clone());
+            blob_hashes.insert(file.blob_hash.clone());
+        }
+        occurrence_stage.protect_cas_closure(
+            guard,
+            object_hashes.iter().map(String::as_str),
+            blob_hashes.iter().map(String::as_str),
+        )?;
         ensure!(
             Instant::now() < capture_deadline,
             "external capture expired before completion"
         );
         // The caller must retain both outputs before releasing its guard.
         Ok(NativeCandidateExport {
+            binding_digest,
+            completion_request_digest: completion.clone(),
+            occurrence_digest: occurrence_digest.to_owned(),
+            durable_stage_id: occurrence_stage.staging_id().to_owned(),
             snapshot_hash,
             writer_exclusion_blob_hash,
         })

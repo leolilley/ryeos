@@ -246,6 +246,17 @@ pub struct PinnedDirectoryIdentity {
     inode: u64,
 }
 
+/// Serializable stable identity of an already-open regular file. This omits
+/// mutable size and timestamp observations so an outer recovery owner can bind
+/// a durable child inode across legitimate in-place SQLite transactions while
+/// still refusing pathname replacement or rollback through a copied inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinnedRegularFileIdentity {
+    containing_device: u64,
+    inode: u64,
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -404,6 +415,25 @@ pub fn observe_open_file_identity(file: &File) -> Result<OpenFileIdentity> {
             owner: metadata.uid(),
         })
     }
+}
+
+pub fn pinned_regular_file_identity(file: &File) -> Result<PinnedRegularFileIdentity> {
+    let identity = observe_open_file_identity(file)?;
+    #[cfg(unix)]
+    if identity.file_type != libc::S_IFREG {
+        anyhow::bail!("descriptor is not a regular file");
+    }
+    Ok(PinnedRegularFileIdentity {
+        containing_device: identity.device,
+        inode: identity.inode,
+    })
+}
+
+pub fn matches_pinned_regular_file_identity(
+    file: &File,
+    expected: PinnedRegularFileIdentity,
+) -> Result<bool> {
+    Ok(pinned_regular_file_identity(file)? == expected)
 }
 
 /// Require the exact open descriptor to remain a current-effective-user-owned
@@ -2431,6 +2461,28 @@ impl PinnedDirectory {
             let metadata = self.directory.metadata()?;
             if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
                 anyhow::bail!("pinned directory is not exactly owner-private and accessible");
+            }
+            self.ensure_path_binding()
+        }
+    }
+
+    /// Prove owner-only access on this exact open directory without changing
+    /// permissions. Recovery and admission use this refusal-only form.
+    pub fn require_owner_private_directory(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("owner-private directory validation is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let metadata = self.directory.metadata()?;
+            if !metadata.is_dir()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.mode() & 0o7777 != 0o700
+            {
+                anyhow::bail!("pinned directory is not exactly current-owner mode 0700");
             }
             self.ensure_path_binding()
         }

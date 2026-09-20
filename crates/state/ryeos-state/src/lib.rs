@@ -109,10 +109,10 @@ pub use provider_call_observation::{
     ProviderCallObservationSource, ProviderCallReplaySource, provider_call_observation_id,
 };
 pub use recovery::{
-    CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage, HeadOperation,
-    PendingChainHeadTransition, PendingTransitionCursor, ProjectionRecoveryGeneration,
-    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, StagedCasRootHashes, StagedCasRootLease,
-    TransitionPhase,
+    CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage,
+    DurableExternalCandidateReceipt, HeadOperation, PendingChainHeadTransition,
+    PendingTransitionCursor, ProjectionRecoveryGeneration, RECOVERY_PROTOCOL_GENERATION,
+    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
 };
 pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;

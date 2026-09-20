@@ -11,6 +11,7 @@ use lillux::crypto::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 pub mod export;
+pub mod guest_journal;
 pub mod journal;
 pub mod transcript;
 

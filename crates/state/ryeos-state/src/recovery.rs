@@ -32,7 +32,7 @@ pub const RECOVERY_PROTOCOL_GENERATION: u32 = 1;
 const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 2;
-const DURABLE_UPLOAD_SCHEMA: u32 = 2;
+const DURABLE_UPLOAD_SCHEMA: u32 = 3;
 const MAX_RECOVERY_RECORD_BYTES: u64 = 1024 * 1024;
 // Staging records carry roots, unlike small transition journals. This structural
 // envelope admits one maximum CAS upload plus one maximum large-content import.
@@ -231,6 +231,10 @@ pub enum DurableCasPublicationKey {
     ExternalContentImport {
         request_digest: String,
     },
+    ExternalCandidateOccurrence {
+        binding_digest: String,
+        occurrence_digest: String,
+    },
 }
 
 impl DurableCasPublicationKey {
@@ -251,6 +255,18 @@ impl DurableCasPublicationKey {
         Ok(key)
     }
 
+    pub fn external_candidate_occurrence(
+        binding_digest: &str,
+        occurrence_digest: &str,
+    ) -> Result<Self> {
+        let key = Self::ExternalCandidateOccurrence {
+            binding_digest: binding_digest.to_owned(),
+            occurrence_digest: occurrence_digest.to_owned(),
+        };
+        key.validate()?;
+        Ok(key)
+    }
+
     fn validate(&self) -> Result<()> {
         match self {
             Self::ProjectHead {
@@ -262,6 +278,13 @@ impl DurableCasPublicationKey {
             }
             Self::ExternalContentImport { request_digest } => {
                 validate_hash("external-content import request digest", request_digest)
+            }
+            Self::ExternalCandidateOccurrence {
+                binding_digest,
+                occurrence_digest,
+            } => {
+                validate_hash("external-candidate binding digest", binding_digest)?;
+                validate_hash("external-candidate occurrence digest", occurrence_digest)
             }
         }
     }
@@ -281,10 +304,55 @@ struct DurableCasUploadRecord {
     admitted_target_hash: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     admitted_at: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    retained_at: Option<String>,
     created_at: String,
     object_hashes: BTreeSet<String>,
     blob_hashes: BTreeSet<String>,
     large_object_hashes: BTreeSet<String>,
+}
+
+/// Immutable coordinates of a retained external-candidate occurrence. The
+/// corresponding recovery record remains a GC root until exact disposition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableExternalCandidateReceipt {
+    staging_id: String,
+    owner_principal: String,
+    publication_key: DurableCasPublicationKey,
+    snapshot_hash: String,
+    object_hashes: BTreeSet<String>,
+    blob_hashes: BTreeSet<String>,
+    large_object_hashes: BTreeSet<String>,
+}
+
+impl DurableExternalCandidateReceipt {
+    pub fn staging_id(&self) -> &str {
+        &self.staging_id
+    }
+
+    pub fn owner_principal(&self) -> &str {
+        &self.owner_principal
+    }
+
+    pub fn publication_key(&self) -> &DurableCasPublicationKey {
+        &self.publication_key
+    }
+
+    pub fn snapshot_hash(&self) -> &str {
+        &self.snapshot_hash
+    }
+
+    pub fn object_hashes(&self) -> &BTreeSet<String> {
+        &self.object_hashes
+    }
+
+    pub fn blob_hashes(&self) -> &BTreeSet<String> {
+        &self.blob_hashes
+    }
+
+    pub fn large_object_hashes(&self) -> &BTreeSet<String> {
+        &self.large_object_hashes
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -344,6 +412,10 @@ impl DurableCasUploadStage {
 
     pub fn staging_id(&self) -> &str {
         &self.record.staging_id
+    }
+
+    pub fn owner_principal(&self) -> &str {
+        &self.record.owner_principal
     }
 
     pub fn expected_previous_hash(&self) -> Option<&str> {
@@ -594,6 +666,7 @@ impl DurableCasUploadStage {
         let mut candidate = self.record.clone();
         candidate.admitted_target_hash = Some(admitted_target_hash.to_string());
         candidate.admitted_at = Some(lillux::time::iso8601_now());
+        candidate.retained_at = None;
         candidate.object_hashes.clear();
         candidate.blob_hashes.clear();
         candidate.large_object_hashes.clear();
@@ -609,6 +682,113 @@ impl DurableCasUploadStage {
                 "admitted upload retained empty blob-part staging for maintenance cleanup"
             );
         }
+        drop(self.lock_file.take());
+        Ok(())
+    }
+
+    /// Convert an external-candidate staging capability into an immutable,
+    /// non-expiring occurrence receipt while preserving its exact GC roots.
+    /// Only an explicit, authenticated disposition may remove this receipt.
+    pub fn retain_external_candidate_occurrence(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        snapshot_hash: &str,
+    ) -> Result<DurableExternalCandidateReceipt> {
+        self.ensure_active()?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        validate_hash("retained external-candidate snapshot", snapshot_hash)?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::ExternalCandidateOccurrence { .. }
+        ) {
+            anyhow::bail!("durable upload is not an external-candidate occurrence");
+        }
+        if !self.record.object_hashes.contains(snapshot_hash) {
+            anyhow::bail!(
+                "retained external-candidate snapshot was not protected by the occurrence stage"
+            );
+        }
+        let retained_at = lillux::time::iso8601_now();
+        let mut candidate = self.record.clone();
+        candidate.admitted_target_hash = Some(snapshot_hash.to_owned());
+        candidate.admitted_at = Some(retained_at.clone());
+        candidate.retained_at = Some(retained_at);
+        self.persist_record(&candidate)?;
+        self.record = candidate;
+        let receipt = self.external_candidate_receipt()?;
+        if let Err(error) = self
+            .recovery
+            .retire_durable_blob_parts(&self.record.staging_id)
+        {
+            tracing::warn!(
+                staging_id = %self.record.staging_id,
+                %error,
+                "retained external candidate kept empty blob-part staging for maintenance cleanup"
+            );
+        }
+        drop(self.lock_file.take());
+        Ok(receipt)
+    }
+
+    /// Reconstruct the exact immutable receipt after reopening it for the
+    /// authenticated owner. Active uploads and ordinary admitted publications
+    /// cannot masquerade as retained external candidates.
+    pub fn external_candidate_receipt(&self) -> Result<DurableExternalCandidateReceipt> {
+        ensure_staging_publication_certain(&self.publication_uncertain)?;
+        if !matches!(
+            self.record.publication_key,
+            DurableCasPublicationKey::ExternalCandidateOccurrence { .. }
+        ) || self.record.retained_at.is_none()
+        {
+            anyhow::bail!("durable upload is not a retained external-candidate occurrence");
+        }
+        let snapshot_hash = self
+            .record
+            .admitted_target_hash
+            .clone()
+            .context("retained external-candidate occurrence has no snapshot")?;
+        Ok(DurableExternalCandidateReceipt {
+            staging_id: self.record.staging_id.clone(),
+            owner_principal: self.record.owner_principal.clone(),
+            publication_key: self.record.publication_key.clone(),
+            snapshot_hash,
+            object_hashes: self.record.object_hashes.clone(),
+            blob_hashes: self.record.blob_hashes.clone(),
+            large_object_hashes: self.record.large_object_hashes.clone(),
+        })
+    }
+
+    /// Remove an exact retained occurrence after a durable downstream owner
+    /// has accepted the same receipt. Consuming the handle prevents reuse.
+    pub fn dispose_external_candidate_occurrence(
+        mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        expected: &DurableExternalCandidateReceipt,
+    ) -> Result<()> {
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        let actual = self.external_candidate_receipt()?;
+        if actual != *expected {
+            anyhow::bail!("external-candidate disposition receipt does not match");
+        }
+        let record_name = format!("{}.json", self.record.staging_id);
+        let lock_name = format!("{}.lock", self.record.staging_id);
+        let record_file = self
+            .directory
+            .open_pinned_regular(std::ffi::OsStr::new(&record_name), false)?
+            .context("retained external-candidate record is absent")?;
+        let lock_file = self
+            .directory
+            .open_pinned_regular(std::ffi::OsStr::new(&lock_name), true)?
+            .context("retained external-candidate lock is absent")?;
+        self.recovery
+            .retire_durable_blob_parts(&self.record.staging_id)?;
+        self.directory
+            .remove_pinned_regular_if_same(&record_file)
+            .context("dispose retained external-candidate record")?;
+        self.directory
+            .remove_pinned_regular_if_same(&lock_file)
+            .context("dispose retained external-candidate lock")?;
+        self.directory.sync()?;
         drop(self.lock_file.take());
         Ok(())
     }
@@ -1706,6 +1886,7 @@ impl RecoveryStore {
             expected_previous_hash: expected_previous_hash.map(str::to_string),
             admitted_target_hash: None,
             admitted_at: None,
+            retained_at: None,
             created_at: lillux::time::iso8601_now(),
             object_hashes: BTreeSet::new(),
             blob_hashes: BTreeSet::new(),
@@ -1797,6 +1978,9 @@ impl RecoveryStore {
                 anyhow::anyhow!("durable CAS upload {} has no lock file", record.staging_id)
             })?;
             if record.created_at.as_str() >= created_before {
+                continue;
+            }
+            if record.retained_at.is_some() {
                 continue;
             }
             if !lock_entry
@@ -2563,9 +2747,10 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
     match (
         record.admitted_target_hash.as_deref(),
         record.admitted_at.as_deref(),
+        record.retained_at.as_deref(),
     ) {
-        (None, None) => {}
-        (Some(hash), Some(admitted_at)) => {
+        (None, None, None) => {}
+        (Some(hash), Some(admitted_at), None) => {
             validate_hash("durable upload admitted target", hash)?;
             crate::objects::parse_canonical_timestamp(admitted_at)
                 .context("durable upload admitted_at is not canonical")?;
@@ -2574,6 +2759,25 @@ fn validate_durable_upload_record(record: &DurableCasUploadRecord) -> Result<()>
                 || !record.large_object_hashes.is_empty()
             {
                 anyhow::bail!("admitted durable upload receipt still carries staging roots");
+            }
+        }
+        (Some(hash), Some(admitted_at), Some(retained_at)) => {
+            validate_hash("retained external-candidate snapshot", hash)?;
+            crate::objects::parse_canonical_timestamp(admitted_at)
+                .context("retained external-candidate admitted_at is not canonical")?;
+            crate::objects::parse_canonical_timestamp(retained_at)
+                .context("retained external-candidate retained_at is not canonical")?;
+            if admitted_at != retained_at {
+                anyhow::bail!("retained external-candidate timestamps do not match");
+            }
+            if !matches!(
+                record.publication_key,
+                DurableCasPublicationKey::ExternalCandidateOccurrence { .. }
+            ) {
+                anyhow::bail!("only an external-candidate occurrence may retain CAS roots");
+            }
+            if !record.object_hashes.contains(hash) {
+                anyhow::bail!("retained external-candidate snapshot is not a protected root");
             }
         }
         _ => anyhow::bail!("durable upload admission receipt is incomplete"),
@@ -2741,6 +2945,7 @@ mod tests {
             "expected_previous_hash": null,
             "admitted_target_hash": null,
             "admitted_at": null,
+            "retained_at": null,
             "created_at": "2026-07-14T12:00:00Z",
             "object_hashes": [],
             "blob_hashes": [],
@@ -2758,6 +2963,7 @@ mod tests {
             "expected_previous_hash",
             "admitted_target_hash",
             "admitted_at",
+            "retained_at",
         ] {
             let mut wire = durable_upload_wire();
             wire.as_object_mut()
@@ -2812,6 +3018,68 @@ mod tests {
                 .blob_hashes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn retained_external_candidate_is_a_non_expiring_root_until_exact_disposition() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let owner = hash("c");
+        let key = DurableCasPublicationKey::external_candidate_occurrence(&hash("a"), &hash("b"))
+            .unwrap();
+        let snapshot = hash("d");
+        let evidence = hash("e");
+        let staging_id;
+        let receipt;
+        {
+            let guard = CasMutationGuard::acquire_existing_shared_in_pinned_runtime(
+                store.runtime_directory(),
+            )
+            .unwrap();
+            let mut stage = store
+                .begin_durable_cas_upload_admitted(
+                    &guard,
+                    &owner,
+                    "external-candidate-capture",
+                    &key,
+                    None,
+                )
+                .unwrap();
+            stage
+                .protect_cas_closure(&guard, [snapshot.as_str()], [evidence.as_str()])
+                .unwrap();
+            receipt = stage
+                .retain_external_candidate_occurrence(&guard, &snapshot)
+                .unwrap();
+            staging_id = receipt.staging_id().to_owned();
+            assert_eq!(receipt.publication_key(), &key);
+            assert_eq!(receipt.snapshot_hash(), snapshot);
+            assert!(receipt.object_hashes().contains(&snapshot));
+            assert!(receipt.blob_hashes().contains(&evidence));
+        }
+
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+        let roots = store.active_staged_cas_root_hashes().unwrap();
+        assert!(roots.object_hashes.contains(&snapshot));
+        assert!(roots.blob_hashes.contains(&evidence));
+        assert_eq!(
+            store
+                .retire_durable_cas_uploads_created_before("9999-12-31T23:59:59Z", &guard)
+                .unwrap(),
+            0,
+            "retained occurrence receipts are never age-retired"
+        );
+        let reopened = store
+            .open_durable_cas_upload_admitted(&guard, &staging_id, &owner)
+            .unwrap();
+        assert_eq!(reopened.external_candidate_receipt().unwrap(), receipt);
+        reopened
+            .dispose_external_candidate_occurrence(&guard, &receipt)
+            .unwrap();
+        let roots = store.active_staged_cas_root_hashes().unwrap();
+        assert!(!roots.object_hashes.contains(&snapshot));
+        assert!(!roots.blob_hashes.contains(&evidence));
     }
 
     #[test]

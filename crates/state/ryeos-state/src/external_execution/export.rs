@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use super::*;
 use crate::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use crate::project_materialization::VerifiedProjectSnapshotClosure;
-use crate::{CasMutationGuard, PinnedStateAuthority};
+use crate::{
+    CasMutationGuard, DurableCasUploadStage, DurableExternalCandidateReceipt, PinnedStateAuthority,
+};
 
 const MAX_TRANSFER_MEMBERS: usize = 100_000;
 const MAX_SINGLE_MEMBER_BYTES: u64 = 32 * 1024 * 1024;
@@ -244,24 +246,44 @@ mod tests {
                 .is_err()
         );
         assert!(assembler.accept(&sealed).is_err());
-        let roots = crate::gc::AdditionalCasRoots {
-            object_hashes: vec![imported.snapshot_hash().to_owned()],
-            blob_hashes: vec![imported.claimed_writer_exclusion_evidence_hash().to_owned()],
-        };
+        let retention_owner = "7".repeat(64);
+        let occurrence_digest = "8".repeat(64);
+        let publication_key = crate::DurableCasPublicationKey::external_candidate_occurrence(
+            &binding.digest().unwrap(),
+            &occurrence_digest,
+        )
+        .unwrap();
+        let mut stage = authority
+            .require_recovery()
+            .unwrap()
+            .begin_durable_cas_upload_admitted(
+                &guard,
+                &retention_owner,
+                "external-candidate-capture",
+                &publication_key,
+                None,
+            )
+            .unwrap();
+        let receipt = retained
+            .retain_external_candidate_occurrence(&authority, &mut stage)
+            .unwrap();
+        let staging_id = receipt.staging_id().to_owned();
         let unused = cas.store_blob(b"unretained-transfer-fragment").unwrap();
         drop(assembler);
         drop(guard);
-        // Exercise actual object traversal and separate blob-root retention.
-        // RuntimeDb/StateStore must persist these roots before this release;
-        // this unit test is not a substitute for installed-owner acceptance.
-        crate::gc::run_gc_with_additional_roots(
-            root.path(),
-            &crate::TrustStore::new(),
+        // Exercise the production GC root traversal, not a test-only supplied
+        // AdditionalCasRoots list. The retained receipt survives while an
+        // unrelated blob is collected.
+        let exclusive = authority.acquire_exclusive_guard(false).unwrap();
+        crate::gc::run_gc_with_pinned_authority(
+            &authority,
+            &exclusive,
             None,
             &crate::gc::GcParams::default(),
-            &roots,
+            &crate::gc::AdditionalCasRoots::default(),
         )
         .unwrap();
+        drop(exclusive);
         assert!(cas.open_blob(&unused).unwrap().is_none());
         drop(db);
         let reopened =
@@ -317,6 +339,33 @@ mod tests {
                 &quiesce,
             )
             .is_err()
+        );
+        drop(reopened_guard);
+        let exclusive = reopened_authority.acquire_exclusive_guard(false).unwrap();
+        let stage = reopened_authority
+            .require_recovery()
+            .unwrap()
+            .open_durable_cas_upload_admitted(&exclusive, &staging_id, &retention_owner)
+            .unwrap();
+        stage
+            .dispose_external_candidate_occurrence(&exclusive, &receipt)
+            .unwrap();
+        crate::gc::run_gc_with_pinned_authority(
+            &reopened_authority,
+            &exclusive,
+            None,
+            &crate::gc::GcParams::default(),
+            &crate::gc::AdditionalCasRoots::default(),
+        )
+        .unwrap();
+        assert!(
+            reopened_authority
+                .cas_store()
+                .unwrap()
+                .get_object(imported.snapshot_hash())
+                .unwrap()
+                .is_none(),
+            "explicit disposition must permit later candidate collection"
         );
     }
 
@@ -398,6 +447,41 @@ impl ValidatedCandidateRetention<'_> {
         authority.ensure_guard(self.guard)?;
         Ok(self.imported)
     }
+
+    /// Install the exact candidate closure and writer-exclusion observation
+    /// into the central recovery root before the validating CAS guard can be
+    /// released. The resulting receipt survives process death and ordinary GC.
+    pub(super) fn retain_external_candidate_occurrence(
+        &self,
+        authority: &PinnedStateAuthority,
+        stage: &mut DurableCasUploadStage,
+    ) -> Result<DurableExternalCandidateReceipt> {
+        authority.ensure_guard(self.guard)?;
+        let imported = self.content_for_store(authority)?;
+        let (objects, blobs) = candidate_retention_roots(imported);
+        stage.protect_cas_closure(
+            self.guard,
+            objects.iter().map(String::as_str),
+            blobs.iter().map(String::as_str),
+        )?;
+        stage.retain_external_candidate_occurrence(self.guard, imported.snapshot_hash())
+    }
+}
+
+fn candidate_retention_roots(
+    imported: &ImportedCandidateContent,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut objects = BTreeSet::from([
+        imported.closure.snapshot_hash().to_owned(),
+        imported.closure.snapshot().project_tree_hash.clone(),
+        imported.closure.snapshot().effective_policy_hash.clone(),
+    ]);
+    let mut blobs = BTreeSet::from([imported.claimed_writer_exclusion_evidence_hash().to_owned()]);
+    for (path, file) in imported.closure.tree().files() {
+        objects.insert(imported.closure.tree().tree().files[path].clone());
+        blobs.insert(file.blob_hash.clone());
+    }
+    (objects, blobs)
 }
 
 impl ImportedCandidateContent {
@@ -428,38 +512,83 @@ impl ImportedCandidateContent {
             self.channel_binding_digest == binding.digest()?,
             "import changed channel"
         );
-        let cas = authority.cas_store()?;
-        let base = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
-        let candidate = VerifiedProjectSnapshotClosure::load(&cas, self.snapshot_hash())?;
-        verify_closure_blobs(&cas, &[&base, &candidate])?;
-        ensure!(
-            candidate.snapshot().parent_hashes == [binding.base_snapshot_hash.clone()]
-                && candidate.snapshot().effective_policy_hash
-                    == base.snapshot().effective_policy_hash,
-            "import changed base policy"
-        );
-        let (file, size) = cas
-            .open_blob(self.claimed_writer_exclusion_evidence_hash())?
-            .context("import lost writer observation")?;
-        ensure!(size <= 8192, "import observation exceeds bound");
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::Read::take(file, 8193), &mut bytes)?;
-        ensure!(
-            bytes.len() <= 8192
-                && lillux::sha256_hex(&bytes) == self.claimed_writer_exclusion_evidence_hash,
-            "import observation bytes changed"
-        );
-        let observation: NativeWriterExclusionObservation = serde_json::from_slice(&bytes)?;
-        observation.validate(binding, self.completion_request_digest())?;
-        ensure!(
-            lillux::canonical_json(&serde_json::to_value(observation)?)?.as_bytes() == bytes,
-            "import observation is noncanonical"
-        );
+        validate_retained_candidate_coordinates(
+            authority,
+            guard,
+            binding,
+            self.snapshot_hash(),
+            self.completion_request_digest(),
+            self.claimed_writer_exclusion_evidence_hash(),
+        )?;
         Ok(ValidatedCandidateRetention {
             imported: self,
             guard,
         })
     }
+}
+
+/// Revalidate exact durable receiver-CAS retention during supervisor reopen.
+/// A retention row alone is never evidence that its bytes survived.
+pub(super) fn validate_retained_candidate_coordinates(
+    authority: &PinnedStateAuthority,
+    guard: &CasMutationGuard,
+    binding: &ExecutionChannelBinding,
+    snapshot_hash: &str,
+    completion_request_digest: &str,
+    writer_exclusion_evidence_hash: &str,
+) -> Result<()> {
+    validated_retained_candidate_root_sets(
+        authority,
+        guard,
+        binding,
+        snapshot_hash,
+        completion_request_digest,
+        writer_exclusion_evidence_hash,
+    )?;
+    Ok(())
+}
+
+pub(super) fn validated_retained_candidate_root_sets(
+    authority: &PinnedStateAuthority,
+    guard: &CasMutationGuard,
+    binding: &ExecutionChannelBinding,
+    snapshot_hash: &str,
+    completion_request_digest: &str,
+    writer_exclusion_evidence_hash: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
+    let base = VerifiedProjectSnapshotClosure::load(&cas, &binding.base_snapshot_hash)?;
+    let candidate = VerifiedProjectSnapshotClosure::load(&cas, snapshot_hash)?;
+    verify_closure_blobs(&cas, &[&base, &candidate])?;
+    ensure!(
+        candidate.snapshot().parent_hashes == [binding.base_snapshot_hash.clone()]
+            && candidate.snapshot().effective_policy_hash == base.snapshot().effective_policy_hash,
+        "import changed base policy"
+    );
+    let (file, size) = cas
+        .open_blob(writer_exclusion_evidence_hash)?
+        .context("import lost writer observation")?;
+    ensure!(size <= 8192, "import observation exceeds bound");
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, 8193), &mut bytes)?;
+    ensure!(
+        bytes.len() <= 8192 && lillux::sha256_hex(&bytes) == writer_exclusion_evidence_hash,
+        "import observation bytes changed"
+    );
+    let observation: NativeWriterExclusionObservation = serde_json::from_slice(&bytes)?;
+    observation.validate(binding, completion_request_digest)?;
+    ensure!(
+        lillux::canonical_json(&serde_json::to_value(observation)?)?.as_bytes() == bytes,
+        "import observation is noncanonical"
+    );
+    let imported = ImportedCandidateContent {
+        closure: candidate,
+        channel_binding_digest: binding.digest()?,
+        completion_request_digest: completion_request_digest.to_owned(),
+        claimed_writer_exclusion_evidence_hash: writer_exclusion_evidence_hash.to_owned(),
+    };
+    Ok(candidate_retention_roots(&imported))
 }
 
 impl<'a> CandidateExportAssembler<'a> {
