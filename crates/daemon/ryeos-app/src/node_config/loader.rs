@@ -771,7 +771,7 @@ mod tests {
             &base64::engine::general_purpose::STANDARD,
             b"fixture controller TLS root",
         )];
-        let mut body = serde_json::json!({"kind":"node", "schema":5,
+        let mut body = serde_json::json!({"kind":"node", "schema":6,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "backend":"qualified-backend", "account":"account-1",
             "capacity_group":"candidate-workers", "region":"singapore", "plan":"standard",
@@ -779,6 +779,9 @@ mod tests {
             "runtime_manifest_hash":"b".repeat(64), "runtime_selection_identity":"c".repeat(64),
             "backend_artifact_hash":"d".repeat(64),
             "launcher_artifact_hash":"e".repeat(64),
+            "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+            "connector_artifact_hash":"f".repeat(64),
+            "connector_artifact_bytes":4096,
             "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
             "storage_policy":"ephemeral_private_candidate_v1",
             "cleanup_proof":"provider_terminal_occurrence_v1",
@@ -845,8 +848,11 @@ mod tests {
             ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
                 requirement:
                     ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                        schema: 2,
+                        schema: 3,
                         protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                        connector_protocol:
+                            ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                        execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                         runtime_product_declaration_id: "runtime".into(),
                         runtime_recipe,
                     },
@@ -857,12 +863,21 @@ mod tests {
                 runtime_recipe_digest,
             };
         binding.check_program(&program).unwrap();
-        for field in ["runtime", "selection", "protocol", "malformed"] {
+        for field in [
+            "runtime",
+            "selection",
+            "protocol",
+            "connector_protocol",
+            "requirement_schema",
+            "malformed",
+        ] {
             let mut changed = program.clone();
             match field {
                 "runtime" => changed.runtime_manifest_hash = "f".repeat(64),
                 "selection" => changed.selection_identity_digest = "f".repeat(64),
                 "protocol" => changed.requirement.protocol = "other".into(),
+                "connector_protocol" => changed.requirement.connector_protocol = "other".into(),
+                "requirement_schema" => changed.requirement.schema = 2,
                 _ => changed.runtime_witness_hash = "not-a-hash".into(),
             }
             assert!(binding.check_program(&changed).is_err());
@@ -898,6 +913,12 @@ mod tests {
                 "/controller_transport/maximum_response_bytes",
                 serde_json::json!(4_095),
             ),
+            ("/connector_protocol", serde_json::json!("other")),
+            (
+                "/connector_artifact_hash",
+                serde_json::json!("not-a-digest"),
+            ),
+            ("/connector_artifact_bytes", serde_json::json!(0)),
         ] {
             let mut invalid = body.clone();
             *invalid.pointer_mut(field).unwrap() = value;

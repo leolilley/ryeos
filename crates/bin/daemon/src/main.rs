@@ -1215,6 +1215,10 @@ async fn run(
                 service_descriptors: service_descriptors(),
                 node_config: node_config_snapshot,
                 external_placement_backends: Arc::new(Default::default()),
+                external_candidate_connectors: Arc::new(
+                    ryeos_app::external_placement::ExternalCandidateConnectorRegistry::discover_current_install()
+                        .context("discover installed external candidate connector")?,
+                ),
                 external_candidate_imports: Arc::new(Default::default()),
                 node_policy: node_policy_snapshot,
                 vault,
@@ -3589,6 +3593,10 @@ async fn run_service_standalone(
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
         external_placement_backends: Arc::new(Default::default()),
+        external_candidate_connectors: Arc::new(
+            ryeos_app::external_placement::ExternalCandidateConnectorRegistry::discover_current_install()
+                .context("discover installed external candidate connector")?,
+        ),
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: node_policy_snapshot.clone(),
         vault: Arc::new(

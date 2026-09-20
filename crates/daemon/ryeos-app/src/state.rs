@@ -101,6 +101,10 @@ pub struct AppState {
     /// state: external profiles cannot reserve or contact an allocator.
     pub external_placement_backends:
         Arc<crate::external_placement::ExternalPlacementBackendRegistry>,
+    /// Exact controller-side connector artifacts. Empty is fail-closed and
+    /// external profile admission refuses before provider contact.
+    pub external_candidate_connectors:
+        Arc<crate::external_placement::ExternalCandidateConnectorRegistry>,
     /// Process-local coalescing for durable controller-side candidate import.
     /// The signed transcript and CAS remain authoritative across restart.
     pub external_candidate_imports:

@@ -11,6 +11,7 @@ use crate::external_content::products::composition::ResolvedExternalProductSelec
 use crate::objects::{EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentKind, canonical_value_digest};
 
 pub const PROTOCOL: &str = "ryeos.external-candidate.stdio.v1";
+pub const CONNECTOR_PROTOCOL: &str = super::connector::EXTERNAL_CONNECTOR_PROTOCOL;
 /// The initial runtime must qualify the whole routed execution boundary.
 pub const REQUIRED_CLAIMS: &[&str] = &[
     "bounded_candidate_capture",
@@ -189,14 +190,28 @@ fn require_relative_normalized(path: &Path, label: &str) -> Result<()> {
 pub struct ExternalCandidateRequirement {
     pub schema: u32,
     pub protocol: String,
+    pub connector_protocol: String,
+    pub execution_route: ExternalCandidateExecutionRoute,
     pub runtime_product_declaration_id: String,
     pub runtime_recipe: ExternalCandidateRuntimeRecipe,
+}
+
+/// Closed provider-side routing policy. `ConnectorOnly` compiles to a single
+/// command-backed environment with local execution disabled; there is no
+/// compatibility spelling that can silently re-enable the controller host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCandidateExecutionRoute {
+    ConnectorOnly,
 }
 
 impl ExternalCandidateRequirement {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 2 && self.protocol == PROTOCOL,
+            self.schema == 3
+                && self.protocol == PROTOCOL
+                && self.connector_protocol == CONNECTOR_PROTOCOL
+                && self.execution_route == ExternalCandidateExecutionRoute::ConnectorOnly,
             "external candidate protocol is not admitted"
         );
         crate::external_content::products::validate_name(&self.runtime_product_declaration_id)?;
@@ -323,8 +338,10 @@ mod tests {
 
     fn requirement() -> ExternalCandidateRequirement {
         ExternalCandidateRequirement {
-            schema: 2,
+            schema: 3,
             protocol: PROTOCOL.into(),
+            connector_protocol: CONNECTOR_PROTOCOL.into(),
+            execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
             runtime_product_declaration_id: "auxiliary".into(),
             runtime_recipe: runtime_recipe(),
         }

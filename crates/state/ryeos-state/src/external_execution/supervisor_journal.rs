@@ -24,12 +24,16 @@ use super::{ExecutionChannelBinding, encode_channel_public_key};
 
 const DATABASE_NAME: &str = "external-supervisor.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4553; // RYES
-const SCHEMA_EPOCH: i64 = 3;
+// Epoch 4 cuts the retained bootstrap to candidate-program requirement schema
+// 3, including its exact connector protocol and connector-only route.  An
+// epoch-3 journal must remain historical evidence rather than being reopened
+// under this stronger execution authority.
+const SCHEMA_EPOCH: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_supervisor_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=3),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=4),
     journal_nonce TEXT NOT NULL UNIQUE,
     directory_identity_json TEXT NOT NULL,
     database_identity_json TEXT NOT NULL,
@@ -847,8 +851,12 @@ mod tests {
             launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
                 requirement: ExternalCandidateRequirement {
-                    schema: 2,
+                    schema: 3,
                     protocol: PROTOCOL.into(),
+                    connector_protocol:
+                        crate::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                    execution_route:
+                        crate::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                     runtime_product_declaration_id: "runtime".into(),
                     runtime_recipe: recipe,
                 },
@@ -1181,6 +1189,19 @@ mod tests {
                 "mutated exact schema was not diagnosed"
             );
         }
+    }
+
+    #[test]
+    fn predecessor_schema_epoch_is_not_reopened_as_current_authority() {
+        let (root, identity) = fresh_journal();
+        let conn = Connection::open(root.path().join(DATABASE_NAME)).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_EPOCH - 1)
+            .unwrap();
+        drop(conn);
+        assert!(
+            recovery_error(&root, &identity).contains("not the exact current schema"),
+            "predecessor outer-supervisor authority was reinterpreted"
+        );
     }
 
     #[test]

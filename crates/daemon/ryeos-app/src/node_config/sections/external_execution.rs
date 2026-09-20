@@ -32,6 +32,9 @@ struct BindingDocument {
     runtime_selection_identity: String,
     backend_artifact_hash: String,
     launcher_artifact_hash: String,
+    connector_protocol: String,
+    connector_artifact_hash: String,
+    connector_artifact_bytes: u64,
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
@@ -50,7 +53,7 @@ struct BindingDocument {
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 5,
+            self.kind == "node" && self.schema == 6,
             "unsupported external placement binding schema"
         );
         ensure!(
@@ -79,6 +82,7 @@ impl BindingDocument {
             &self.runtime_selection_identity,
             &self.backend_artifact_hash,
             &self.launcher_artifact_hash,
+            &self.connector_artifact_hash,
         ] {
             ensure!(
                 value.len() == 64
@@ -88,6 +92,12 @@ impl BindingDocument {
                 "placement binding requires canonical content identities"
             );
         }
+        ensure!(
+            self.connector_protocol
+                == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL
+                && (1..=1024 * 1024 * 1024).contains(&self.connector_artifact_bytes),
+            "placement binding requires the exact bounded connector contract"
+        );
         ensure!(
             (1..=64).contains(&self.max_active) && (1..=3600).contains(&self.timeout_seconds),
             "placement binding limits exceed allocation bounds"
@@ -132,6 +142,9 @@ impl BindingDocument {
             runtime_selection_identity: self.runtime_selection_identity.clone(),
             backend_artifact_hash: self.backend_artifact_hash.clone(),
             launcher_artifact_hash: self.launcher_artifact_hash.clone(),
+            connector_protocol: self.connector_protocol.clone(),
+            connector_artifact_hash: self.connector_artifact_hash.clone(),
+            connector_artifact_bytes: self.connector_artifact_bytes,
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
@@ -164,6 +177,9 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) runtime_selection_identity: String,
     pub(crate) backend_artifact_hash: String,
     pub(crate) launcher_artifact_hash: String,
+    pub(crate) connector_protocol: String,
+    pub(crate) connector_artifact_hash: String,
+    pub(crate) connector_artifact_bytes: u64,
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
@@ -342,7 +358,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 5,
+            schema: 6,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             backend: "fixture".into(),
             account: "account".into(),
@@ -354,6 +370,10 @@ impl RetainedExternalExecutionBinding {
             runtime_selection_identity: "c".repeat(64),
             backend_artifact_hash: "d".repeat(64),
             launcher_artifact_hash: "e".repeat(64),
+            connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL
+                .into(),
+            connector_artifact_hash: "f".repeat(64),
+            connector_artifact_bytes: 4096,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
@@ -492,6 +512,7 @@ fn check_program(
     program.validate()?;
     ensure!(
         program.requirement.protocol == document.protocol
+            && program.requirement.connector_protocol == document.connector_protocol
             && program.runtime_manifest_hash == document.runtime_manifest_hash
             && program.selection_identity_digest == document.runtime_selection_identity,
         "external candidate program contradicts installed placement binding"

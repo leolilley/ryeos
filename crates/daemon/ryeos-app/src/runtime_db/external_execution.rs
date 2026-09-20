@@ -2279,6 +2279,15 @@ mod tests {
                 "backend_artifact_hash",
                 serde_json::Value::String("f".repeat(64)),
             ),
+            (
+                "connector_protocol",
+                serde_json::Value::String("other".into()),
+            ),
+            (
+                "connector_artifact_hash",
+                serde_json::Value::String("0".repeat(64)),
+            ),
+            ("connector_artifact_bytes", serde_json::Value::from(8192)),
             ("region", serde_json::Value::String("other".into())),
             ("network_policy", serde_json::Value::String("other".into())),
             ("max_workspace_bytes", serde_json::Value::from(2048)),

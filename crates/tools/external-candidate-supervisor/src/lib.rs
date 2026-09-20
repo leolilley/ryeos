@@ -354,8 +354,11 @@ mod tests {
             launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
                 requirement: ExternalCandidateRequirement {
-                    schema: 2,
+                    schema: 3,
                     protocol: PROTOCOL.into(),
+                    connector_protocol:
+                        ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                    execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                     runtime_product_declaration_id: "runtime".into(),
                     runtime_recipe,
                 },

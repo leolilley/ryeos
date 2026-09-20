@@ -2442,8 +2442,10 @@ mod tests {
             .unwrap()
             .remove("external_candidate");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
-        profile["external_candidate"] = json!({"schema":2,
+        profile["external_candidate"] = json!({"schema":3,
         "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+        "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+        "execution_route":"connector_only",
         "runtime_product_declaration_id":"candidate_runtime",
         "runtime_recipe":{
             "schema":1,
@@ -2466,6 +2468,8 @@ mod tests {
         for field in [
             "schema",
             "protocol",
+            "connector_protocol",
+            "execution_route",
             "runtime_product_declaration_id",
             "runtime_recipe",
         ] {
@@ -2479,6 +2483,9 @@ mod tests {
         let mut invalid = valid.clone();
         invalid["external_candidate"]["runtime_recipe"]["executable_relative_path"] =
             json!("../bin/codex");
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["execution_route"] = json!("local_or_connector");
         assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
         profile["external_candidate"]["url"] = json!("https://arbitrary.invalid");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());

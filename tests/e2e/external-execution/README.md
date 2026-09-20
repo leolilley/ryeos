@@ -4,6 +4,47 @@ Status: source implementation in progress; **not a supported execution backend**
 No external profile is enabled, no allocator is connected, and these tests must
 not be used as evidence that a remote worker can safely run.
 
+## Signed connector admission checkpoint
+
+Runtime operator epoch 54, signed external-binding schema 6, external-candidate
+requirement schema 3, and outer-supervisor journal epoch 4 make the controller
+connector part of exact execution authority. The signed structured-session
+requirement admits only `ryeos.external-candidate.connector.v1` with the closed
+`connector_only` route; there is no local or automatic fallback spelling. The
+node-signed placement generation independently binds that protocol to one exact
+connector artifact hash and byte length.
+
+At daemon composition, an installed companion executable is opened and pinned
+beside the daemon. Admission joins the signed coordinates to that exact open
+file and rechecks both pathname identity and stable bytes before reading a
+placement credential or qualifying a provider adapter. Missing installation,
+wrong hash, wrong size, pathname replacement, and same-inode byte mutation all
+fail closed. The retained connector can also verify an authenticated Unix peer
+against the exact executable name, size, and digest; the future start owner must
+perform that peer check before authenticating a one-use connector capability.
+
+The persisted-format cut is intentional. Epoch-53 runtime stores can contain
+schema-5 placement generations without connector authority, and epoch-3 outer
+supervisor journals can contain requirement-schema-2 bootstraps. Neither is
+decoded or migrated as current authority. Existing explicit predecessor-reset
+classification remains the only runtime-store transition; outer occurrence
+journals remain historical/recovery evidence and cannot reopen under epoch 4.
+
+Focused source evidence on 2026-09-21: the bounded daemon/app/API/executor check
+passed; 4 state admission tests, all 15 structured-profile tests, all 19 signed
+node-loader tests, 16 placement/admission tests, 13 external runtime-journal
+tests, 7 outer-supervisor journal tests, and all 25 persistent-session tests
+passed. Coverage includes invalid connector routes, exact signed artifact
+coordinates, missing and drifted installed artifacts, pre-credential refusal,
+retained-generation replay, and predecessor-epoch refusal. No external service,
+provider/model, lifecycle API, credential, grant, installation, deployment,
+release, or paid resource was contacted or changed.
+
+This checkpoint is admission only. It does not yet mint the occurrence-private
+connector capability, start or authenticate a connector peer, generate the
+protected provider environment, enable an external session, or qualify the
+complete B -> C -> evaluation -> D workflow.
+
 ## Protected supervisor executable checkpoint
 
 Runtime operator epoch 53, signed external-binding schema 5, supervisor

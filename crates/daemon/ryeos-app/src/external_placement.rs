@@ -7,6 +7,7 @@
 //! claim receives a non-cloneable credential-bearing permit.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -181,6 +182,143 @@ pub struct ExternalChannelExchangeResult {
     acknowledgement_digest: Option<String>,
     outbound: Vec<ExternalChannelOutboundFrame>,
     urgent_revocation: Option<ExternalChannelOutboundFrame>,
+}
+
+/// Exact installed controller-side connector generation. The open descriptor
+/// pins the bytes used for admission; the pathname is only the launch spelling
+/// supplied to the provider and must still select this inode when used. A
+/// connected process is independently checked against the exact hash/size.
+pub struct InstalledExternalCandidateConnector {
+    executable: lillux::PinnedRegularFile,
+    artifact_hash: String,
+    artifact_bytes: u64,
+}
+
+impl std::fmt::Debug for InstalledExternalCandidateConnector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstalledExternalCandidateConnector")
+            .field("artifact_hash", &self.artifact_hash)
+            .field("artifact_bytes", &self.artifact_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstalledExternalCandidateConnector {
+    fn open(path: &Path) -> Result<Self> {
+        let executable = lillux::secure_fs::open_pinned_regular_file_no_follow(path)
+            .context("open installed external candidate connector")?;
+        executable.require_executable()?;
+        let observation = executable.observation()?;
+        let artifact_bytes = observation.size();
+        ensure!(
+            (1..=1024 * 1024 * 1024).contains(&artifact_bytes),
+            "installed external candidate connector exceeds its byte bound"
+        );
+        let artifact_hash = executable.digest_stable_exact(&observation)?;
+        Ok(Self {
+            executable,
+            artifact_hash,
+            artifact_bytes,
+        })
+    }
+
+    fn ensure_path_binding(&self) -> Result<()> {
+        let current = lillux::secure_fs::open_pinned_regular_file_no_follow(self.executable.path())
+            .context("reopen installed external candidate connector")?;
+        ensure!(
+            lillux::secure_fs::same_open_file_identity(
+                &self.executable.try_clone_descriptor()?,
+                &current.try_clone_descriptor()?,
+            )?,
+            "installed external candidate connector pathname changed"
+        );
+        let observation = current.observation()?;
+        ensure!(
+            observation.size() == self.artifact_bytes
+                && current.digest_stable_exact(&observation)? == self.artifact_hash,
+            "installed external candidate connector bytes changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn executable_path(&self) -> Result<PathBuf> {
+        self.ensure_path_binding()?;
+        Ok(self.executable.path().to_path_buf())
+    }
+
+    pub(crate) fn verify_peer(
+        &self,
+        peer: &lillux::local_ipc::AuthenticatedUnixPeer,
+    ) -> Result<()> {
+        peer.require_executable_name(self.executable.name())?;
+        ensure!(
+            peer.executable_digest_exact(self.artifact_bytes)? == self.artifact_hash,
+            "external candidate connector peer has the wrong executable bytes"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ExternalCandidateConnectorRegistry {
+    artifacts: BTreeMap<(String, u64), Arc<InstalledExternalCandidateConnector>>,
+}
+
+impl ExternalCandidateConnectorRegistry {
+    /// Discover the immutable packaging companion beside the running daemon.
+    /// Absence is a supported fail-closed state for nodes that do not execute
+    /// external candidates; exact profile admission later requires a match.
+    pub fn discover_current_install() -> Result<Self> {
+        let daemon = std::env::current_exe().context("locate running RyeOS daemon")?;
+        let path = daemon
+            .parent()
+            .context("running RyeOS daemon has no installation directory")?
+            .join("ryeos-external-candidate-connector");
+        if !path.try_exists()? {
+            return Ok(Self::default());
+        }
+        Self::from_paths([path])
+    }
+
+    fn from_paths(paths: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
+        let mut artifacts = BTreeMap::new();
+        for path in paths {
+            let artifact = Arc::new(InstalledExternalCandidateConnector::open(&path)?);
+            let coordinate = (artifact.artifact_hash.clone(), artifact.artifact_bytes);
+            ensure!(
+                artifacts.insert(coordinate, artifact).is_none(),
+                "installed external candidate connector generation is duplicated"
+            );
+        }
+        Ok(Self { artifacts })
+    }
+
+    pub(crate) fn qualify(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+    ) -> Result<Arc<InstalledExternalCandidateConnector>> {
+        ensure!(
+            contract.connector_protocol
+                == ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+            "signed external connector protocol is unsupported"
+        );
+        let artifact = self
+            .artifacts
+            .get(&(
+                contract.connector_artifact_hash.clone(),
+                contract.connector_artifact_bytes,
+            ))
+            .cloned()
+            .context("exact signed external candidate connector is not installed")?;
+        artifact.ensure_path_binding()?;
+        Ok(artifact)
+    }
+
+    #[cfg(test)]
+    fn from_test_path(path: &Path) -> Result<Self> {
+        Self::from_paths([path.to_path_buf()])
+    }
 }
 
 /// One bounded advance of the controller-owned external start state machine.
@@ -460,18 +598,37 @@ pub fn preflight_external_candidate_program(
     state: &AppState,
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
 ) -> Result<()> {
-    let binding = select_binding(&state.node_config.external_execution, program)?;
+    preflight_external_candidate_dependencies(
+        &state.node_config.external_execution,
+        &state.external_candidate_connectors,
+        &state.external_placement_backends,
+        program,
+        |binding| {
+            let access = binding.credential_access()?;
+            access.decode(
+                state
+                    .vault
+                    .placement_credential(&access)
+                    .context("read protected external placement credential")?,
+            )
+        },
+    )
+}
+
+fn preflight_external_candidate_dependencies(
+    bindings: &[InstalledExternalExecutionBinding],
+    connectors: &ExternalCandidateConnectorRegistry,
+    backends: &ExternalPlacementBackendRegistry,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+    load_credential: impl FnOnce(&InstalledExternalExecutionBinding) -> Result<PlacementCredential>,
+) -> Result<()> {
+    let binding = select_binding(bindings, program)?;
     let contract = binding.backend_contract();
-    let access = binding.credential_access()?;
-    let credential = access.decode(
-        state
-            .vault
-            .placement_credential(&access)
-            .context("read protected external placement credential")?,
-    )?;
-    state
-        .external_placement_backends
-        .qualify(&contract, &credential)?;
+    // The exact installed connector is an admission prerequisite, not an
+    // observation made after credential access or provider qualification.
+    connectors.qualify(&contract)?;
+    let credential = load_credential(binding)?;
+    backends.qualify(&contract, &credential)?;
     Ok(())
 }
 
@@ -2127,8 +2284,11 @@ mod tests {
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
             requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 2,
+                schema: 3,
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                 runtime_product_declaration_id: "runtime".into(),
                 runtime_recipe,
             },
@@ -2400,6 +2560,81 @@ mod tests {
         let mut newer = binding.backend_contract();
         newer.backend_artifact_hash = "e".repeat(64);
         rotated.qualify(&newer, &credential).unwrap();
+    }
+
+    #[test]
+    fn connector_registry_joins_exact_signed_artifact_and_live_path_binding() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ryeos-external-candidate-connector");
+        std::fs::write(&path, b"exact connector fixture").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = ExternalCandidateConnectorRegistry::from_test_path(&path).unwrap();
+        let artifact = registry.artifacts.values().next().unwrap();
+        let mut contract = RetainedExternalExecutionBinding::test_fixture().backend_contract();
+        contract.connector_artifact_hash = artifact.artifact_hash.clone();
+        contract.connector_artifact_bytes = artifact.artifact_bytes;
+        assert!(
+            ExternalCandidateConnectorRegistry::default()
+                .qualify(&contract)
+                .is_err()
+        );
+        let mut wrong_hash = contract.clone();
+        wrong_hash.connector_artifact_hash = "0".repeat(64);
+        assert!(registry.qualify(&wrong_hash).is_err());
+        let mut wrong_size = contract.clone();
+        wrong_size.connector_artifact_bytes += 1;
+        assert!(registry.qualify(&wrong_size).is_err());
+        let admitted = registry.qualify(&contract).unwrap();
+        assert_eq!(admitted.executable_path().unwrap(), path);
+
+        let retained = root.path().join("retained-old-connector");
+        std::fs::rename(&path, retained).unwrap();
+        std::fs::write(&path, b"replacement connector fixture").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(registry.qualify(&contract).is_err());
+    }
+
+    #[test]
+    fn connector_registry_refuses_in_place_byte_mutation() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ryeos-external-candidate-connector");
+        std::fs::write(&path, b"exact connector fixture").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = ExternalCandidateConnectorRegistry::from_test_path(&path).unwrap();
+        let artifact = registry.artifacts.values().next().unwrap();
+        let mut contract = RetainedExternalExecutionBinding::test_fixture().backend_contract();
+        contract.connector_artifact_hash = artifact.artifact_hash.clone();
+        contract.connector_artifact_bytes = artifact.artifact_bytes;
+
+        std::fs::write(&path, b"mutated connector bytes").unwrap();
+        assert!(registry.qualify(&contract).is_err());
+    }
+
+    #[test]
+    fn missing_connector_refuses_before_credential_or_backend_qualification() {
+        let credential_read = AtomicBool::new(false);
+        let bindings = [InstalledExternalExecutionBinding::test_fixture()];
+        let error = preflight_external_candidate_dependencies(
+            &bindings,
+            &ExternalCandidateConnectorRegistry::default(),
+            &ExternalPlacementBackendRegistry::default(),
+            &program(),
+            |_| -> Result<PlacementCredential> {
+                credential_read.store(true, Ordering::SeqCst);
+                bail!("credential access must remain unreachable")
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exact signed external candidate connector is not installed")
+        );
+        assert!(!credential_read.load(Ordering::SeqCst));
     }
 
     #[test]

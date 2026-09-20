@@ -4456,8 +4456,11 @@ mod tests {
         let mut profile = gating_approval_profile();
         profile.external_candidate = Some(
             ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                schema: 2,
+                schema: 3,
                 protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                 runtime_product_declaration_id: "candidate_runtime".into(),
                 runtime_recipe: ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                     schema: 1,

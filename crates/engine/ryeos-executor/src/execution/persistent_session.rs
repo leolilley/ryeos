@@ -5301,8 +5301,11 @@ session:
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
         capsule.external_candidate = Some(AdmittedExternalCandidateProgram {
             requirement: ExternalCandidateRequirement {
-                schema: 2,
+                schema: 3,
                 protocol: PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
                 runtime_product_declaration_id: "candidate_runtime".into(),
                 runtime_recipe,
             },

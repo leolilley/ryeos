@@ -2407,7 +2407,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 48 retains the admitted TLS-root bytes and separates provider
 // allocation from an immutable, independently reconcilable supervisor-start
 // mutation. Epoch-47 rows cannot construct that protected bootstrap.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 53;
+// Epoch 54 cuts retained external placement bindings to schema 6.  Schema-5
+// generations do not authorize the exact controller-side connector protocol,
+// artifact bytes, or connector-only provider route and must not be decoded as
+// current execution authority.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 54;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
