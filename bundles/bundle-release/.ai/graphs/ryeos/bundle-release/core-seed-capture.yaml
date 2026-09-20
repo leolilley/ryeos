@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-20T11:15:48Z:0a0f39138735aa84988e3ab5fc696a4e7af609ee3af2f86e5a823c0f6bc24680:qSNx5048W7+Ls0ltjzFkEVaiJKNSeCQDkRaJ7UwXyMzYCwp4so9Xc8lBhcF82FHu8de/AODy4AWQsRXjIoUjBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Capture the admitted unsigned Core seed with only its exact publisher-signed manifest changed.
+effects: live
+external_product_slots:
+  - id: unsigned_core
+    relationship_ref: config:bundle-release/core-seed-build-products
+    relationship: core_seed_to_signed_capture
+    kind: tree
+    mount_root: execution_runtime
+    mount: unsigned-core-seed
+product_recipe: config:bundle-release/core-seed-capture-products
+config:
+  start: capture
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest]
+    properties:
+      release_input: {type: object}
+      materialization_result_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      signed_tree_manifest_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      manifest_item_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      signed_manifest: {type: string}
+  state: {}
+  nodes:
+    capture:
+      action:
+        item_id: tool:ryeos/bundle-release/core-seed-capture
+        params:
+          release_input: "${inputs.release_input}"
+          materialization_result_hash: "${inputs.materialization_result_hash}"
+          signed_tree_manifest_hash: "${inputs.signed_tree_manifest_hash}"
+          manifest_item_hash: "${inputs.manifest_item_hash}"
+          signed_manifest: "${inputs.signed_manifest}"
+      assign: {capture: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.capture}"

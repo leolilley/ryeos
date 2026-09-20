@@ -26,6 +26,7 @@ pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_release;
+pub(crate) mod bundle_release_execution;
 pub mod bundle_remove;
 pub mod bundle_smoke;
 pub mod bundle_verify;
@@ -232,14 +233,26 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_catalog::EXPORT_RECOVERY,
     bundle_catalog::RESTORE_GENESIS,
     bundle_release::INPUT_INSPECT,
+    bundle_release::AUTHORITY_CALIBRATE,
+    bundle_release::AUTHORITY_MEASURE,
+    bundle_release::CORE_SEED_BUILD,
+    bundle_release::CORE_SEED_INSPECT,
+    bundle_release::CORE_SEED_CAPTURE,
+    bundle_release::CORE_SEED_QUALIFY,
     bundle_release::GENERATION_BUILD,
     bundle_release::REQUEST_TREE_SIGNING,
     bundle_release::GENERATION_CAPTURE,
     bundle_release::GENERATION_QUALIFY,
     bundle_release::GENERATION_FINALIZE,
+    bundle_release::SUBSTRATE_BUILD,
+    bundle_release::SUBSTRATE_QUALIFY,
+    bundle_release::SUBSTRATE_RELEASE_FINALIZE,
+    bundle_release::SUBSTRATE_RELEASE_AUTHORIZATION,
     bundle_release::REQUEST_AUTHORIZATION,
     bundle_release::SET_COMPOSE,
+    bundle_release::GENESIS_SET_COMPOSE,
     bundle_release::CATALOG_REQUEST_PUBLICATION,
+    bundle_release::CATALOG_REMOTE_PUBLISH,
     bundle_release::SUBMIT,
     bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,

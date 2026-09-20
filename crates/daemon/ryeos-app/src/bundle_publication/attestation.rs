@@ -4,9 +4,11 @@ use ryeos_state::objects::Attestation;
 use ryeos_state::signer::Signer;
 
 use super::VerifiedBundleGeneration;
+use ryeos_bundle_publication_contract::SubstrateRelease;
 
 pub const BUNDLE_GENERATION_RELEASE_CLAIM: &str = "ryeos.bundle-generation.release.v1";
 pub const BUNDLE_SET_RELEASE_CLAIM: &str = "ryeos.bundle-set.release.v1";
+pub const SUBSTRATE_RELEASE_CLAIM: &str = "ryeos.substrate-release.v1";
 pub const BUNDLE_CATALOG_RELEASE_CLAIM: &str = "ryeos.bundle-catalog-publication.v1";
 pub const BUNDLE_PUBLICATION_POLICY: &str = "ryeos.bundle-publication.v1";
 
@@ -14,6 +16,7 @@ pub const BUNDLE_PUBLICATION_POLICY: &str = "ryeos.bundle-publication.v1";
 pub enum ReleaseSubjectKind {
     BundleGeneration,
     BundleSet,
+    SubstrateRelease,
     BundleCatalogPublication,
 }
 
@@ -22,6 +25,7 @@ impl ReleaseSubjectKind {
         match self {
             Self::BundleGeneration => BUNDLE_GENERATION_RELEASE_CLAIM,
             Self::BundleSet => BUNDLE_SET_RELEASE_CLAIM,
+            Self::SubstrateRelease => SUBSTRATE_RELEASE_CLAIM,
             Self::BundleCatalogPublication => BUNDLE_CATALOG_RELEASE_CLAIM,
         }
     }
@@ -93,9 +97,46 @@ pub fn authorize_generation_release(
     .sign(signer)
 }
 
+/// Purpose-owned authorization for one immutable substrate/Core binding.
+/// Callers must first verify the referenced Core generation and prove that it
+/// is the exact generation carried by the measured substrate release.
+pub fn authorize_substrate_release(
+    release: &SubstrateRelease,
+    signer: &dyn Signer,
+    issued_at: &str,
+) -> anyhow::Result<Attestation> {
+    release.validate()?;
+    let verifying_key = signer.verifying_key();
+    if lillux::crypto::fingerprint(&verifying_key) != signer.fingerprint() {
+        anyhow::bail!("substrate release signer fingerprint disagrees with its key");
+    }
+    Attestation::unsigned(
+        release.content_hash()?,
+        SUBSTRATE_RELEASE_CLAIM.to_owned(),
+        BUNDLE_PUBLICATION_POLICY.to_owned(),
+        issued_at.to_owned(),
+        None,
+        serde_json::json!({
+            "core_generation_hash": release.core_generation_hash,
+            "core_generation_attestation_hash": release.core_generation_attestation_hash,
+            "substrate_image_digest": release.substrate_image_digest,
+            "substrate_build_accepted_result_hash": release.substrate_build_accepted_result_hash,
+            "substrate_build_receipt_hash": release.substrate_build_receipt_hash,
+            "selected_substrate_product_witness": release.selected_substrate_product_witness,
+            "qualification_evidence_hashes": release.qualification_evidence_hashes,
+            "bundle_publication_policy_section_digest": release.bundle_publication_policy_section_digest,
+            "trust_epoch": release.trust_epoch,
+        }),
+    )
+    .sign(signer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_bundle_publication_contract::{
+        BundleTarget, SUBSTRATE_RELEASE_KIND, SUBSTRATE_RELEASE_SCHEMA,
+    };
     use serde_json::json;
 
     struct TestSigner {
@@ -174,5 +215,37 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn substrate_release_authorization_uses_closed_claim_and_exact_subject() {
+        let signer = TestSigner::new();
+        let release = SubstrateRelease {
+            schema: SUBSTRATE_RELEASE_SCHEMA.into(),
+            kind: SUBSTRATE_RELEASE_KIND.into(),
+            catalog_namespace: "official".into(),
+            bundle_publication_policy_section_digest: "8".repeat(64),
+            trust_epoch: 1,
+            substrate_image_digest: format!("sha256:{}", "a".repeat(64)),
+            substrate_protocol: 1,
+            target: BundleTarget::Portable,
+            substrate_build_accepted_result_hash: "d".repeat(64),
+            substrate_build_receipt_hash: "1".repeat(64),
+            selected_substrate_product_identity: "substrate".into(),
+            selected_substrate_product_witness: "e".repeat(64),
+            qualification_evidence_hashes: vec!["f".repeat(64)],
+            core_generation_hash: "b".repeat(64),
+            core_generation_attestation_hash: "c".repeat(64),
+        };
+        let attestation =
+            authorize_substrate_release(&release, &signer, "2026-01-01T00:00:00Z").unwrap();
+        verify_release_attestation(
+            &attestation,
+            &release.content_hash().unwrap(),
+            ReleaseSubjectKind::SubstrateRelease,
+            signer.fingerprint(),
+            &signer.verifying_key(),
+        )
+        .unwrap();
     }
 }

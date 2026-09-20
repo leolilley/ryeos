@@ -1,0 +1,19 @@
+# ryeos:signed:2026-09-20T11:15:48Z:7cfeedf07f2fafa392285034d86232c835ffcb213e2b210c5f337284bf56d626:PsGw+rlQ1dmCnsF9XSMYJ5P36ve6eK43HFvD8tEgKrrvew2IcSkiz0xt7S8iWFc5gbx0ZPdBo+8g/z2w3brBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: substrate-build
+version: "1.0.0"
+description: Materialize one exact substrate release receipt as a retained, signed product.
+endpoint: bundle_release.substrate_build
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/substrate-build"]
+schema:
+  project_path: string
+  source_snapshot_hash: string
+  catalog_namespace: string
+  bundle_publication_policy_section_digest: string
+  trust_epoch: integer
+  core_generation_hash: string
+  core_generation_attestation_hash: string

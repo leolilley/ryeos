@@ -22,6 +22,9 @@ fn generation_value() -> Value {
         "selected_product_identity": "bundle",
         "selected_product_witness": h('d'),
         "publisher_materialization_result_hash": h('e'),
+        "accepted_capture_result_hash": h('f'),
+        "selected_signed_product_identity": "signed-bundle",
+        "selected_signed_product_witness": h('9'),
         "source_snapshot_hash": null,
         "qualification_evidence_hashes": [h('1'), h('2')],
         "provenance_hash": null,
@@ -53,11 +56,43 @@ fn set_value() -> Value {
         "set_name": "stable",
         "target": {"kind":"portable"},
         "substrate_protocol": 1,
+        "substrate_release_attestation_hash": h('5'),
         "entries": [
             {"bundle_name":"core","generation_hash":h('1'),"publisher_attestation_hash":h('2')},
             {"bundle_name":"standard","generation_hash":h('3'),"publisher_attestation_hash":h('4')}
         ],
         "migration_requirement": "none"
+    })
+}
+
+fn substrate_release_value() -> Value {
+    json!({
+        "schema": SUBSTRATE_RELEASE_SCHEMA,
+        "kind": SUBSTRATE_RELEASE_KIND,
+        "catalog_namespace": "official",
+        "bundle_publication_policy_section_digest": h('8'),
+        "trust_epoch": 1,
+        "substrate_image_digest": format!("sha256:{}", h('a')),
+        "substrate_protocol": 1,
+        "target": {"kind":"portable"},
+        "substrate_build_accepted_result_hash": h('b'),
+        "substrate_build_receipt_hash": h('e'),
+        "selected_substrate_product_identity": "substrate",
+        "selected_substrate_product_witness": h('c'),
+        "qualification_evidence_hashes": [h('d')],
+        "core_generation_hash": h('1'),
+        "core_generation_attestation_hash": h('2')
+    })
+}
+
+fn substrate_build_receipt_value() -> Value {
+    json!({
+        "schema": SUBSTRATE_BUILD_RECEIPT_SCHEMA,
+        "kind": SUBSTRATE_BUILD_RECEIPT_KIND,
+        "substrate_image_digest": format!("sha256:{}", h('a')),
+        "substrate_protocol": 1,
+        "target": {"kind":"portable"},
+        "core_generation_hash": h('1')
     })
 }
 
@@ -142,6 +177,8 @@ fn all_current_wires_round_trip_and_hash_canonically() {
     check!(BundleGeneration, generation_value());
     check!(PublisherMaterializationResult, materialization_value());
     check!(BundleSet, set_value());
+    check!(SubstrateRelease, substrate_release_value());
+    check!(SubstrateBuildReceipt, substrate_build_receipt_value());
     check!(NodeBundleSelection, selection_value());
     check!(BundleCatalogSnapshot, snapshot_value());
     check!(BundleCatalogPublication, publication_value());
@@ -254,6 +291,21 @@ fn catalog_sequence_has_clean_genesis_and_successor_shapes() {
     assert!(BundleCatalogPublication::from_current_value(&value).is_err());
     value["sequence"] = json!(1);
     assert!(BundleCatalogPublication::from_current_value(&value).is_ok());
+}
+
+#[test]
+fn substrate_release_is_exactly_bound_to_image_protocol_and_core() {
+    let mut value = substrate_release_value();
+    value["substrate_protocol"] = json!(0);
+    assert!(SubstrateRelease::from_current_value(&value).is_err());
+
+    let mut value = substrate_release_value();
+    value["substrate_image_digest"] = json!(h('a'));
+    assert!(SubstrateRelease::from_current_value(&value).is_err());
+
+    let mut value = substrate_release_value();
+    value["core_generation_hash"] = json!(h('A'));
+    assert!(SubstrateRelease::from_current_value(&value).is_err());
 }
 
 #[test]

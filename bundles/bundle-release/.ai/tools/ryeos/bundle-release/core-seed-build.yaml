@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-20T11:15:48Z:f09709e1660e6c2f70940bf42f59820a51344fdb6c66a159649c1c026c5daf4a:Q/PbM+Vcx6n4AuaLR3oFyXnPOAO5nLf5KhRvxab34nD5zE1I8HiyUeKrN2bFKpc6Z5WjA4fM+Vo0jh4hJB3AAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: core-seed-build
+version: "1.0.0"
+description: Materialize the initial Core bundle from pinned source into a fresh captured product root.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory]
+  materialization: read_only
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/core-seed-build.py"]
+  input_data: "${params_json}"
+  timeout_secs: 7200
+input_schema:
+  type: object
+  additionalProperties: false
+  required: [release_input]
+  properties:
+    release_input: {type: object}

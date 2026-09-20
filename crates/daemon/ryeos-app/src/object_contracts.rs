@@ -38,6 +38,16 @@ fn install_once() -> anyhow::Result<()> {
             set_links,
         ),
         registration(
+            ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_KIND,
+            validate_substrate_release,
+            substrate_release_links,
+        ),
+        registration(
+            ryeos_bundle_publication_contract::SUBSTRATE_BUILD_RECEIPT_KIND,
+            validate_substrate_build_receipt,
+            no_links,
+        ),
+        registration(
             ryeos_bundle_publication_contract::NODE_BUNDLE_SELECTION_KIND,
             validate_selection,
             selection_links,
@@ -81,6 +91,16 @@ fn validate_materialization(value: &Value) -> anyhow::Result<()> {
 }
 fn validate_set(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::BundleSet::from_current_value(value).map(|_| ())
+}
+fn validate_substrate_release(value: &Value) -> anyhow::Result<()> {
+    ryeos_bundle_publication_contract::SubstrateRelease::from_current_value(value).map(|_| ())
+}
+fn validate_substrate_build_receipt(value: &Value) -> anyhow::Result<()> {
+    ryeos_bundle_publication_contract::SubstrateBuildReceipt::from_current_value(value).map(|_| ())
+}
+
+fn no_links(_value: &Value) -> Result<RegisteredObjectLinks, String> {
+    Ok(RegisteredObjectLinks::default())
 }
 fn validate_selection(value: &Value) -> anyhow::Result<()> {
     ryeos_bundle_publication_contract::NodeBundleSelection::from_current_value(value).map(|_| ())
@@ -158,6 +178,11 @@ fn set_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
     let object = ryeos_bundle_publication_contract::BundleSet::from_current_value(value)
         .map_err(|error| error.to_string())?;
     let mut links = RegisteredObjectLinks::default();
+    push_kind(
+        &mut links,
+        &object.substrate_release_attestation_hash,
+        "attestation",
+    );
     for entry in &object.entries {
         push_kind(
             &mut links,
@@ -166,6 +191,41 @@ fn set_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
         );
         push_kind(&mut links, &entry.publisher_attestation_hash, "attestation");
     }
+    Ok(links)
+}
+
+fn substrate_release_links(value: &Value) -> Result<RegisteredObjectLinks, String> {
+    let object = ryeos_bundle_publication_contract::SubstrateRelease::from_current_value(value)
+        .map_err(|error| error.to_string())?;
+    let mut links = RegisteredObjectLinks::default();
+    push_kind(
+        &mut links,
+        &object.substrate_build_accepted_result_hash,
+        ryeos_state::external_content::products::accepted_result::PRODUCT_BUILD_ACCEPTED_RESULT_KIND,
+    );
+    push_kind(
+        &mut links,
+        &object.selected_substrate_product_witness,
+        "attestation",
+    );
+    push_kind(
+        &mut links,
+        &object.substrate_build_receipt_hash,
+        ryeos_bundle_publication_contract::SUBSTRATE_BUILD_RECEIPT_KIND,
+    );
+    for hash in &object.qualification_evidence_hashes {
+        push_kind(&mut links, hash, "attestation");
+    }
+    push_kind(
+        &mut links,
+        &object.core_generation_hash,
+        ryeos_bundle_publication_contract::BUNDLE_GENERATION_KIND,
+    );
+    push_kind(
+        &mut links,
+        &object.core_generation_attestation_hash,
+        "attestation",
+    );
     Ok(links)
 }
 

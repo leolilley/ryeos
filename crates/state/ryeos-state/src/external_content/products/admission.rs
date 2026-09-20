@@ -8,10 +8,12 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 
 use super::composition::ProductRelationships;
-use super::{ProductDeclarations, ProductProducerAdmission, validate_binding_name};
+use super::{
+    ProductDeclarations, ProductProducerAdmission, ProductRecipePurpose, validate_binding_name,
+};
 use crate::objects::{AdmittedExecutionClosure, AdmittedLaunchCapsule};
 
-pub const PRODUCT_RECIPE_BINDING_SCHEMA: &str = "ryeos.admitted_product_recipe_binding.v1";
+pub const PRODUCT_RECIPE_BINDING_SCHEMA: &str = "ryeos.admitted_product_recipe_binding.v2";
 pub const MAX_ADMITTED_PRODUCT_RECIPE_BYTES: usize = 16 * 1024;
 
 /// Derive the compact producer projection exclusively from one validated
@@ -68,6 +70,7 @@ pub struct AdmittedProductRecipeBinding {
     pub binding_name: String,
     pub recipe_ref: String,
     pub recipe_raw_content_digest: String,
+    pub purpose: ProductRecipePurpose,
     pub declarations: ProductDeclarations,
     pub declarations_hash: String,
     pub relationships: ProductRelationships,
@@ -215,6 +218,7 @@ mod tests {
             binding_name: "product_recipe".to_owned(),
             recipe_ref: "config:test/two-products".to_owned(),
             recipe_raw_content_digest: "a".repeat(64),
+            purpose: ProductRecipePurpose::GeneralProductV1,
             declarations_hash: declarations.content_hash().unwrap(),
             declarations,
             relationships: ProductRelationships::empty(),

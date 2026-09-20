@@ -77,15 +77,17 @@ class NativeBundleProducerSurfaceTests(unittest.TestCase):
 
     def test_compiled_handlers_fail_closed_behind_typed_authority_adapter(self):
         handler = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
+        execution = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release_execution.rs").read_text()
+        implementation = handler + "\n" + execution
         owner = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/producer.rs").read_text()
-        self.assertEqual(handler.count("descriptor!("), 4)
+        self.assertEqual(handler.count("descriptor!("), 5)
         for custom in ["INPUT_INSPECT", "GENERATION_BUILD", "GENERATION_CAPTURE", "GENERATION_QUALIFY", "GENERATION_FINALIZE", "SET_COMPOSE"]:
             self.assertIn(f"pub const {custom}: ServiceDescriptor", handler)
-        self.assertIn("run_pinned_release_graph", handler)
-        self.assertIn("product_qualification::qualify", handler)
-        self.assertNotIn("store_object(&result)", handler)
+        self.assertIn("execute_pinned_graph", implementation)
+        self.assertIn("product_qualification::qualify", implementation)
+        self.assertNotIn("store_object(&result)", implementation)
         self.assertIn("pub const SUBMIT: ServiceDescriptor", handler)
-        self.assertIn("dispatch_with_handler_context", handler)
+        self.assertIn("dispatch_with_handler_context", implementation)
         self.assertIn("begin_external", handler)
         self.assertIn("BundleReleaseAuthorities", handler)
         self.assertIn("has no explicit build/publisher/qualification/catalog authority adapter", handler)

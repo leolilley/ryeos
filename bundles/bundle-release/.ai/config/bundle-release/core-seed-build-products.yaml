@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-20T11:15:48Z:8bd32d11ef51a635c8e9b490189b960b979cc15e3f45d1e4ed9d9157a86fa282:2WgN0K60WNRpbukSk2EAfBMGOVHOlYvO1a+HL+CCSwSAzL1vLcAbje5WyyJKFDJlpxB/SsegFcOVKXyKRnxiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Purpose-owned captured output contract for the unsigned substrate Core seed.
+recipe_purpose: bundle_release_v1
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: core_tree
+      path: products/core-seed
+      storage: content
+      bounds: &core_bounds
+        maximum_entries: 4096
+        maximum_depth: 32
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
+  products:
+    - name: core_seed
+      source: {kind: workspace_output, root: core_tree}
+      path: products/core-seed/tree
+      shape: tree
+      storage: content
+      required: true
+      bounds: *core_bounds
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: core_seed_to_signed_capture
+      producer:
+        canonical_ref: graph:ryeos/bundle-release/core-seed-build
+        recipe_binding: product_recipe
+        product_name: core_seed
+        parameters: {}
+      consumer:
+        canonical_ref: graph:ryeos/bundle-release/core-seed-capture
+        declaration_id: unsigned_core
+      required_product:
+        shape: tree
+        storage: content
+        bounds: *core_bounds
+      qualification:
+        policy_ref: null
+        required_claims: []

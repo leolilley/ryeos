@@ -60,6 +60,12 @@ pub struct SignedBundleTree {
 }
 
 pub trait ConstrainedBundleTreePublisher: Send + Sync {
+    fn authorize_core_seed_recipe(
+        &self,
+        _request: &super::core_seed::CoreSeedRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("publisher has no explicit Core seed recipe authority")
+    }
     fn authorize_build_recipe(
         &self,
         _request: &super::recipe::AuthorizeBuildRecipeRequest,

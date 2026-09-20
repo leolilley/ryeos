@@ -25,8 +25,8 @@ use sha2::{Digest as _, Sha256};
 use super::{
     PublicationObjectReader,
     producer::{
-        BundleBuildAuthority, BundleQualificationAuthority, GenerationBuildRequest,
-        GenerationQualifyRequest, InputInspectRequest, ProducerFuture,
+        BundleBuildAuthority, BundleQualificationAuthority, CoreSeedInspectRequest,
+        GenerationBuildRequest, GenerationQualifyRequest, InputInspectRequest, ProducerFuture,
     },
 };
 
@@ -94,7 +94,16 @@ pub struct AdmittedReleaseInput {
 
 impl AdmittedReleaseInput {
     pub(crate) fn from_value(value: &Value) -> anyhow::Result<Self> {
+        Self::from_value_for_purpose(value, false)
+    }
+
+    pub(crate) fn from_core_seed_value(value: &Value) -> anyhow::Result<Self> {
+        Self::from_value_for_purpose(value, true)
+    }
+
+    fn from_value_for_purpose(value: &Value, core_seed: bool) -> anyhow::Result<Self> {
         let input: Self = serde_json::from_value(value.clone())?;
+        input.target.validate()?;
         validate_bundle_name(&input.bundle_name)?;
         anyhow::ensure!(
             input.authored_manifest.name == input.bundle_name,
@@ -125,10 +134,19 @@ impl AdmittedReleaseInput {
             "release input permits an ambient build output"
         );
         anyhow::ensure!(input.payloads.len() <= 256, "too many owned payloads");
-        anyhow::ensure!(
-            input.bundle_name != "core",
-            "core is substrate-owned and cannot use bundle-only publication"
-        );
+        if core_seed {
+            anyhow::ensure!(
+                input.bundle_name == "core"
+                    && input.predecessor_generation_hash.is_none()
+                    && matches!(input.target, BundleTarget::Triple { .. }),
+                "Core seed requires Core, an exact native target and no predecessor"
+            );
+        } else {
+            anyhow::ensure!(
+                input.bundle_name != "core",
+                "core is substrate-owned and cannot use bundle-only publication"
+            );
+        }
         anyhow::ensure!(
             input.payloads.iter().all(|p| p.bundle == input.bundle_name),
             "release input contains another bundle's payload"
@@ -414,16 +432,106 @@ pub fn inspect_release_input(
     source: &dyn BundleSourceSnapshotAuthority,
     request: InputInspectRequest,
 ) -> anyhow::Result<Value> {
-    validate_bundle_name(&request.bundle_name)?;
+    inspect_release_input_for_purpose(
+        ownership,
+        source,
+        request.project_path,
+        request.bundle_name,
+        request.source_snapshot_hash,
+        request.target,
+        request.build_profile,
+        false,
+    )
+}
+
+pub fn inspect_core_seed_input(
+    ownership: &BundlePayloadOwnership,
+    source: &dyn BundleSourceSnapshotAuthority,
+    request: CoreSeedInspectRequest,
+) -> anyhow::Result<Value> {
+    inspect_release_input_for_purpose(
+        ownership,
+        source,
+        request.project_path,
+        request.bundle_name,
+        request.source_snapshot_hash,
+        request.target,
+        request.build_profile,
+        true,
+    )
+}
+
+/// Derive a non-Core calibration fixture from a verified source snapshot.
+/// This shape deliberately has no catalog, epoch, or predecessor coordinate:
+/// calibration measures producer/verifier authority and is not a release.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationBundleInspectRequest {
+    pub project_path: String,
+    pub bundle_name: String,
+    pub source_snapshot_hash: String,
+    pub target: Value,
+    pub build_profile: String,
+}
+
+pub fn inspect_calibration_bundle_input(
+    ownership: &BundlePayloadOwnership,
+    source: &dyn BundleSourceSnapshotAuthority,
+    request: CalibrationBundleInspectRequest,
+) -> anyhow::Result<Value> {
+    inspect_release_input_for_purpose(
+        ownership,
+        source,
+        request.project_path,
+        request.bundle_name,
+        request.source_snapshot_hash,
+        request.target,
+        request.build_profile,
+        false,
+    )
+}
+
+pub fn inspect_calibration_core_input(
+    ownership: &BundlePayloadOwnership,
+    source: &dyn BundleSourceSnapshotAuthority,
+    request: CalibrationBundleInspectRequest,
+) -> anyhow::Result<Value> {
+    inspect_release_input_for_purpose(
+        ownership,
+        source,
+        request.project_path,
+        request.bundle_name,
+        request.source_snapshot_hash,
+        request.target,
+        request.build_profile,
+        true,
+    )
+}
+
+fn inspect_release_input_for_purpose(
+    ownership: &BundlePayloadOwnership,
+    source: &dyn BundleSourceSnapshotAuthority,
+    project_path: String,
+    bundle_name: String,
+    source_snapshot_hash: String,
+    target: Value,
+    build_profile: String,
+    core_seed: bool,
+) -> anyhow::Result<Value> {
+    validate_bundle_name(&bundle_name)?;
     anyhow::ensure!(
-        request.bundle_name != "core",
-        "core is substrate-owned and cannot use bundle-only publication"
+        (core_seed && bundle_name == "core") || (!core_seed && bundle_name != "core"),
+        if core_seed {
+            "Core seed inspection requires the Core bundle"
+        } else {
+            "core is substrate-owned and cannot use bundle-only publication"
+        }
     );
-    let project = PathBuf::from(&request.project_path).canonicalize()?;
-    source.verify_project_snapshot(&project, &request.source_snapshot_hash)?;
+    let project = PathBuf::from(&project_path).canonicalize()?;
+    source.verify_project_snapshot(&project, &source_snapshot_hash)?;
     ownership.validate()?;
     let payloads = ownership
-        .owner(&request.bundle_name)
+        .owner(&bundle_name)
         .map(|owner| {
             owner
                 .payloads
@@ -448,19 +556,19 @@ pub fn inspect_release_input(
     let mut classes: Vec<_> = payloads.iter().map(|p| p.build_class.clone()).collect();
     classes.sort();
     classes.dedup();
-    let target: BundleTarget = serde_json::from_value(request.target)?;
+    let target: BundleTarget = serde_json::from_value(target)?;
     if !payloads.is_empty() && matches!(target, BundleTarget::Portable) {
         bail!("a native-payload bundle requires an exact target triple");
     }
     let input = AdmittedReleaseInput {
         schema: RELEASE_INPUT_SCHEMA.to_owned(),
         project_path: project.display().to_string(),
-        authored_manifest: materialize_release_manifest(&project, &request.bundle_name)?,
-        bundle_name: request.bundle_name,
-        source_snapshot_hash: request.source_snapshot_hash,
+        authored_manifest: materialize_release_manifest(&project, &bundle_name)?,
+        bundle_name,
+        source_snapshot_hash,
         predecessor_generation_hash: None,
         target,
-        build_profile: request.build_profile,
+        build_profile,
         payload_ownership_item_ref: PAYLOAD_OWNERSHIP_ITEM_REF.to_owned(),
         payload_ownership_content_hash: ownership.content_hash()?,
         requires_binary_build: !payloads.is_empty(),
@@ -470,7 +578,11 @@ pub fn inspect_release_input(
         cargo_packages: packages,
         build_classes: classes,
     };
-    AdmittedReleaseInput::from_value(&serde_json::to_value(&input)?)?;
+    if core_seed {
+        AdmittedReleaseInput::from_core_seed_value(&serde_json::to_value(&input)?)?;
+    } else {
+        AdmittedReleaseInput::from_value(&serde_json::to_value(&input)?)?;
+    }
     Ok(serde_json::to_value(input)?)
 }
 
@@ -496,7 +608,7 @@ pub fn materialize_release_manifest(
     ryeos_bundle::manifest::materialize_manifest(source, &ai_dir, name)
 }
 
-fn validate_bundle_name(name: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_bundle_name(name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !name.is_empty()
             && name.len() <= 128

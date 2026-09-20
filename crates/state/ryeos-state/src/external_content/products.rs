@@ -31,10 +31,38 @@ pub mod transfer;
 
 pub const PRODUCT_DECLARATIONS_SCHEMA: &str = "ryeos.build_products.v1";
 pub const PRODUCT_CAPTURE_POLICY: &str = "ryeos.retained_product_capture.v3";
-pub const PRODUCT_CAPTURE_EVIDENCE_SCHEMA: u32 = 3;
+pub const PRODUCT_CAPTURE_EVIDENCE_SCHEMA: u32 = 4;
 pub const PRODUCT_CAPTURE_CLAIM: &str = "retained_product_captured";
 pub const MAX_PRODUCTS: usize = 32;
 pub const MAX_PRODUCT_DECLARATIONS_BYTES: usize = 64 * 1024;
+
+/// Domain in which an admitted recipe and its retained product evidence may
+/// be consumed. This is an authenticated fact, not a caller hint: launch
+/// admission copies it into the recipe binding and capture copies it into the
+/// signed evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductRecipePurpose {
+    GeneralProductV1,
+    BundleReleaseV1,
+    AuthorityCalibrationV1,
+}
+
+impl ProductRecipePurpose {
+    pub fn require_bundle_release(self) -> anyhow::Result<()> {
+        if self != Self::BundleReleaseV1 {
+            bail!("product evidence is not admitted for bundle release")
+        }
+        Ok(())
+    }
+
+    pub fn require_authority_calibration(self) -> anyhow::Result<()> {
+        if self != Self::AuthorityCalibrationV1 {
+            bail!("product evidence is not admitted for authority calibration")
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -372,6 +400,7 @@ pub struct ProductCaptureEvidence {
     /// was admitted. A Config ref found elsewhere in the project is not an
     /// admitted recipe.
     pub recipe_binding: String,
+    pub recipe_purpose: ProductRecipePurpose,
     pub recipe_ref: String,
     pub recipe_raw_content_digest: String,
     /// Bounded admitted declaration block, retained inline so its identity and

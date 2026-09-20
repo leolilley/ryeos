@@ -1,0 +1,255 @@
+# ryeos:signed:2026-09-20T11:15:48Z:18190da541e9fcef4da2bebbc99e931dd4c5ef80e2150f9ee727ca23c1707ecd:FFdMNjhWB1IArKQuoUuQfT3j0kWivdsyQTGB09lV90wE530WhPfSb+5UrNnYJE2ij4juX6HWfaktpYoByfDECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
+effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.bundle-release/core-seed-inspect
+      - ryeos.execute.service.bundle-release/core-seed-build
+      - ryeos.execute.service.bundle-release/request-tree-signing
+      - ryeos.execute.service.bundle-release/core-seed-capture
+      - ryeos.execute.service.bundle-release/core-seed-qualify
+      - ryeos.execute.service.bundle-release/generation-finalize
+      - ryeos.execute.service.bundle-release/request-authorization
+      - ryeos.execute.service.bundle-release/substrate-build
+      - ryeos.execute.service.bundle-release/substrate-qualify
+      - ryeos.execute.service.bundle-release/substrate-release-finalize
+      - ryeos.execute.service.bundle-release/substrate-release-authorization
+      - ryeos.execute.service.bundle-release/genesis-set-compose
+      - ryeos.execute.service.bundle-release/catalog-request-publication
+      - ryeos.execute.service.bundle-release/catalog-remote-publish
+config:
+  start: inspect_core
+  max_steps: 16
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [project_path, catalog_remote, source_snapshot_hash, target, catalog_namespace, channel, set_name]
+    properties:
+      project_path: {type: string}
+      catalog_remote: {type: string}
+      source_snapshot_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      target: {type: object}
+      catalog_namespace: {type: string}
+      channel: {type: string}
+      set_name: {type: string}
+  state: {}
+  nodes:
+    inspect_core:
+      action:
+        item_id: service:bundle-release/core-seed-inspect
+        params:
+          project_path: "${inputs.project_path}"
+          bundle_name: core
+          source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          target: "${inputs.target}"
+          build_profile: release
+          catalog_namespace: "${inputs.catalog_namespace}"
+      assign: {core_input: "${result.release_input}", release: "${result}"}
+      next: {type: unconditional, to: build_core}
+    build_core:
+      action:
+        item_id: service:bundle-release/core-seed-build
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          release_input: "${state.core_input}"
+      assign: {core_build: "${result}"}
+      next: {type: unconditional, to: sign_core_tree}
+    sign_core_tree:
+      action:
+        item_id: service:bundle-release/request-tree-signing
+        params:
+          accepted_product_result_hash: "${state.core_build.accepted_product_result_hash}"
+          selected_product_identity: "${state.core_build.selected_product_identity}"
+          selected_product_witness: "${state.core_build.selected_product_witness}"
+          input_content_manifest_hash: "${state.core_build.input_content_manifest_hash}"
+      assign: {materialization: "${result}"}
+      next: {type: unconditional, to: capture_core}
+    capture_core:
+      action:
+        item_id: service:bundle-release/core-seed-capture
+        params:
+          build:
+            catalog_namespace: "${inputs.catalog_namespace}"
+            bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+            trust_epoch: "${state.release.trust_epoch}"
+            release_input: "${state.core_input}"
+          selected_product_witness: "${state.core_build.selected_product_witness}"
+          build_recipe_signed_config: "${state.core_build.build_recipe_signed_config}"
+          build_recipe_raw_digest: "${state.core_build.build_recipe_raw_digest}"
+          materialization_result_hash: "${state.materialization.materialization_result_hash}"
+          signed_tree_manifest_hash: "${state.materialization.output_content_manifest_hash}"
+      assign: {core_capture: "${result}"}
+      next: {type: unconditional, to: qualify_core}
+    qualify_core:
+      action:
+        item_id: service:bundle-release/core-seed-qualify
+        params:
+          build:
+            catalog_namespace: "${inputs.catalog_namespace}"
+            bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+            trust_epoch: "${state.release.trust_epoch}"
+            release_input: "${state.core_input}"
+          signed_product_witness: "${state.core_capture.signed_product_witness}"
+          build_recipe_signed_config: "${state.core_build.build_recipe_signed_config}"
+          capture_recipe_signed_config: "${state.core_capture.capture_recipe_signed_config}"
+          capture_recipe_raw_digest: "${state.core_capture.capture_recipe_raw_digest}"
+      assign: {core_qualification: "${result}"}
+      next: {type: unconditional, to: finalize_core}
+    finalize_core:
+      action:
+        item_id: service:bundle-release/generation-finalize
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          generation:
+            schema: ryeos.bundle_generation.v1
+            kind: bundle_generation
+            bundle_name: core
+            authored_version: "${state.release.authored_version}"
+            content_manifest_hash: "${state.core_capture.content_manifest_hash}"
+            manifest_item_hash: "${state.core_capture.manifest_item_hash}"
+            target: "${inputs.target}"
+            build_profile: release
+            substrate_protocol: "${state.release.substrate_protocol}"
+            bundle_manifest_format: "${state.release.bundle_manifest_format}"
+            accepted_product_result_hash: "${state.core_build.accepted_product_result_hash}"
+            selected_product_identity: "${state.core_build.selected_product_identity}"
+            selected_product_witness: "${state.core_build.selected_product_witness}"
+            publisher_materialization_result_hash: "${state.materialization.materialization_result_hash}"
+            accepted_capture_result_hash: "${state.core_capture.accepted_capture_result_hash}"
+            selected_signed_product_identity: "${state.core_capture.signed_product_identity}"
+            selected_signed_product_witness: "${state.core_capture.signed_product_witness}"
+            source_snapshot_hash: "${inputs.source_snapshot_hash}"
+            qualification_evidence_hashes: "${state.core_qualification.qualification_evidence_hashes}"
+            provenance_hash: null
+            sbom_hash: null
+      assign: {core_generation: "${result}"}
+      next: {type: unconditional, to: authorize_core}
+    authorize_core:
+      action:
+        item_id: service:bundle-release/request-authorization
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          generation_hash: "${state.core_generation.generation_hash}"
+          qualification_evidence_hashes: "${state.core_qualification.qualification_evidence_hashes}"
+          expected_publisher_fingerprint: "${state.materialization.publisher_fingerprint}"
+      assign: {core_authorization: "${result}"}
+      next: {type: unconditional, to: build_substrate_receipt}
+    build_substrate_receipt:
+      action:
+        item_id: service:bundle-release/substrate-build
+        params:
+          project_path: "${inputs.project_path}"
+          source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          core_generation_hash: "${state.core_generation.generation_hash}"
+          core_generation_attestation_hash: "${state.core_authorization.generation_attestation_hash}"
+      assign: {substrate_build: "${result}"}
+      next: {type: unconditional, to: qualify_substrate}
+    qualify_substrate:
+      action:
+        item_id: service:bundle-release/substrate-qualify
+        params:
+          project_path: "${inputs.project_path}"
+          source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          substrate_build_recipe_signed_config: "${state.substrate_build.substrate_build_recipe_signed_config}"
+          substrate_build_recipe_raw_digest: "${state.substrate_build.substrate_build_recipe_raw_digest}"
+          substrate_product_witness: "${state.substrate_build.selected_product_witness}"
+      assign: {substrate_qualification: "${result}"}
+      next: {type: unconditional, to: finalize_substrate}
+    finalize_substrate:
+      action:
+        item_id: service:bundle-release/substrate-release-finalize
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          substrate_image_digest: "${state.substrate_build.substrate_image_digest}"
+          substrate_protocol: "${state.substrate_build.substrate_protocol}"
+          target: "${state.substrate_build.target}"
+          substrate_build_accepted_result_hash: "${state.substrate_build.accepted_result_hash}"
+          substrate_build_receipt_hash: "${state.substrate_build.substrate_build_receipt_hash}"
+          selected_substrate_product_identity: "${state.substrate_build.selected_product_identity}"
+          selected_substrate_product_witness: "${state.substrate_build.selected_product_witness}"
+          qualification_evidence_hashes: "${state.substrate_qualification.qualification_evidence_hashes}"
+          core_generation_hash: "${state.core_generation.generation_hash}"
+          core_generation_attestation_hash: "${state.core_authorization.generation_attestation_hash}"
+      assign: {substrate_release: "${result}"}
+      next: {type: unconditional, to: authorize_substrate}
+    authorize_substrate:
+      action:
+        item_id: service:bundle-release/substrate-release-authorization
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          substrate_release_hash: "${state.substrate_release.substrate_release_hash}"
+          expected_publisher_fingerprint: "${state.materialization.publisher_fingerprint}"
+      assign: {substrate_authorization: "${result}"}
+      next: {type: unconditional, to: compose_genesis}
+    compose_genesis:
+      action:
+        item_id: service:bundle-release/genesis-set-compose
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          bundle_set:
+            schema: ryeos.bundle_set.v1
+            kind: bundle_set
+            set_name: "${inputs.set_name}"
+            target: "${state.substrate_build.target}"
+            substrate_protocol: "${state.substrate_build.substrate_protocol}"
+            substrate_release_attestation_hash: "${state.substrate_authorization.substrate_release_attestation_hash}"
+            entries:
+              - bundle_name: core
+                generation_hash: "${state.core_generation.generation_hash}"
+                publisher_attestation_hash: "${state.core_authorization.generation_attestation_hash}"
+            migration_requirement: none
+      assign: {genesis_set: "${result}"}
+      next: {type: unconditional, to: authorize_catalog_genesis}
+    authorize_catalog_genesis:
+      action:
+        item_id: service:bundle-release/catalog-request-publication
+        params:
+          catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release.trust_epoch}"
+          channel: "${inputs.channel}"
+          bundle_name: core
+          generation_attestation_hash: "${state.core_authorization.generation_attestation_hash}"
+          bundle_set_hash: "${state.genesis_set.bundle_set_hash}"
+          predecessor_publication_attestation_hash: null
+          expected_sequence: 0
+      assign: {catalog_genesis: "${result}"}
+      next: {type: unconditional, to: publish_catalog_genesis}
+    publish_catalog_genesis:
+      action:
+        item_id: service:bundle-release/catalog-remote-publish
+        params:
+          remote: "${inputs.catalog_remote}"
+          catalog_namespace: "${inputs.catalog_namespace}"
+          candidate_publication_attestation_hash: "${state.catalog_genesis.publication_attestation_hash}"
+          expected_catalog_head: null
+      assign: {catalog_commit: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output:
+        core_generation_hash: "${state.core_generation.generation_hash}"
+        core_generation_attestation_hash: "${state.core_authorization.generation_attestation_hash}"
+        substrate_release_hash: "${state.substrate_release.substrate_release_hash}"
+        substrate_release_attestation_hash: "${state.substrate_authorization.substrate_release_attestation_hash}"
+        bundle_set_hash: "${state.genesis_set.bundle_set_hash}"
+        catalog_publication_attestation_hash: "${state.catalog_commit.catalog_publication_attestation_hash}"

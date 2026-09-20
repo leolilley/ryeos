@@ -196,6 +196,8 @@ fn fixture_with_remote_owner(
         workspace_output_capture_hash: None,
         producer_partition_identity: None,
         recipe_binding: "product_recipe".to_owned(),
+        recipe_purpose:
+            ryeos_state::external_content::products::ProductRecipePurpose::GeneralProductV1,
         recipe_ref: "config:test/products".to_owned(),
         recipe_raw_content_digest: "c".repeat(64),
         declarations_hash: declarations.content_hash().unwrap(),

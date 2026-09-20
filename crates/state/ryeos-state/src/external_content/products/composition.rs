@@ -1014,6 +1014,8 @@ mod tests {
             workspace_output_capture_hash: None,
             producer_partition_identity: None,
             recipe_binding: relationship.producer.recipe_binding.clone(),
+            recipe_purpose:
+                crate::external_content::products::ProductRecipePurpose::GeneralProductV1,
             recipe_ref: "config:test/recipe".to_owned(),
             recipe_raw_content_digest: "d".repeat(64),
             declarations_hash: declarations.content_hash().unwrap(),

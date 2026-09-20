@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-20T11:15:48Z:a6bb0c9ebfb37fab83d5f35a2570c3e06ecfe14627d513f602e44b8a2ca978d6:lZJV7UHO4wda9n3PO3ucbAJVgnUpvfoDySJqIJzE9Mn9c+rijtw+L00UGA5nG4JHPzIJ3+s2RidlEGUpR3hxBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: authority-calibrate
+version: "1.0.0"
+description: Execute the fixed, operator-only native, Core seed, and substrate calibration lanes and retain one node-authenticated calibration run; this service cannot finalize, authorize, compose, or publish a release.
+endpoint: bundle_release.authority_calibrate
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/authority-calibrate"]
+schema:
+  project_path: string
+  source_snapshot_hash: string

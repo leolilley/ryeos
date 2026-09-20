@@ -6,6 +6,7 @@ use ryeos_app::{
         producer::LocalConstrainedPublisherAuthority,
         standalone_publisher::{
             ManifestOnlyTreePublisher, StandalonePublisherPolicy, StandalonePublisherProof,
+            observe_current_publisher_tool, observe_publisher_tool,
         },
     },
     identity::NodeIdentity,
@@ -18,25 +19,37 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 struct Args {
     #[arg(long, default_value = "127.0.0.1:7411")]
     bind: SocketAddr,
-    #[arg(long, required_unless_present = "prepare_policy")]
+    #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
     publisher_key: Option<PathBuf>,
-    #[arg(long, required_unless_present = "prepare_policy")]
+    #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
     bearer_file: Option<PathBuf>,
-    #[arg(long, required_unless_present = "prepare_policy")]
+    #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
     cas_root: Option<PathBuf>,
-    #[arg(long, required_unless_present = "prepare_policy")]
+    #[arg(long, required_unless_present_any = ["prepare_policy", "measure_tool"])]
     policy: Option<PathBuf>,
     /// Validate an operator-authored bundle_publication YAML section and emit
     /// the matching standalone publisher JSON policy; never start a listener.
-    #[arg(long, requires = "catalog_namespace", conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy"])]
+    #[arg(long, requires = "catalog_namespace", conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "measure_tool"])]
     prepare_policy: Option<PathBuf>,
     #[arg(long, requires = "prepare_policy")]
     catalog_namespace: Option<String>,
+    /// Measure this exact publisher executable and emit the closed operation
+    /// definition and artifact identities without loading keys or starting a
+    /// listener.
+    #[arg(long, conflicts_with_all = ["publisher_key", "bearer_file", "cas_root", "policy", "prepare_policy", "catalog_namespace"])]
+    measure_tool: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(path) = &args.measure_tool {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&observe_publisher_tool(path)?)?
+        );
+        return Ok(());
+    }
     if let Some(path) = &args.prepare_policy {
         let section = serde_yaml::from_slice(&std::fs::read(path)?)?;
         let policy = StandalonePublisherPolicy::from_node_policy(
@@ -66,6 +79,12 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("decode standalone publisher policy")?;
     policy.validate()?;
+    require_publisher_identity(
+        &policy.catalog_publisher_fingerprint,
+        identity.fingerprint(),
+    )?;
+    let observed_tool = observe_current_publisher_tool()?;
+    policy.require_observed_tool(&observed_tool)?;
     let cas_root = lillux::PinnedDirectory::open(&cas_root)?.context("pin publication CAS root")?;
     let cas = Arc::new(lillux::CasStore::from_pinned_root(cas_root));
     let proof = Arc::new(StandalonePublisherProof::new(
@@ -87,6 +106,14 @@ async fn main() -> anyhow::Result<()> {
     let state = ryeos_api::publisher_server::PublisherServerState::new(authority, bearer)?;
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     axum::serve(listener, ryeos_api::publisher_server::router(state)).await?;
+    Ok(())
+}
+
+fn require_publisher_identity(expected: &str, actual: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual == expected,
+        "loaded publisher signing key does not match the catalog publisher fingerprint"
+    );
     Ok(())
 }
 
@@ -126,5 +153,27 @@ mod tests {
     fn deny_all_bootstrap_cannot_produce_publisher_authority() {
         let section = serde_yaml::from_str("schema: 1\ncatalogs: []\n").unwrap();
         assert!(StandalonePublisherPolicy::from_node_policy(&section, "official").is_err());
+    }
+
+    #[test]
+    fn tool_measurement_mode_needs_no_secret_or_server_resources() {
+        assert!(Args::try_parse_from(["publisher", "--measure-tool", "/publisher"]).is_ok());
+        assert!(
+            Args::try_parse_from([
+                "publisher",
+                "--measure-tool",
+                "/publisher",
+                "--publisher-key",
+                "/secret"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn publisher_key_must_match_policy_before_serving() {
+        let expected = "a".repeat(64);
+        assert!(require_publisher_identity(&expected, &expected).is_ok());
+        assert!(require_publisher_identity(&expected, &"b".repeat(64)).is_err());
     }
 }

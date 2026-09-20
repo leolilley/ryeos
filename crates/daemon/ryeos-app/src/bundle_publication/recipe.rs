@@ -101,6 +101,7 @@ impl AuthorizeCaptureRecipeRequest {
         let body = json!({
             "category":"bundle-release", "version":"1.0.0",
             "description":"Exact admitted signed-tree capture output recipe.",
+            "recipe_purpose":"bundle_release_v1",
             "release_recipe_authorization": {
                 "catalog_namespace":self.catalog_namespace,
                 "bundle_publication_policy_section_digest":self.bundle_publication_policy_section_digest,
@@ -196,6 +197,7 @@ impl AuthorizeBuildRecipeRequest {
         let body = json!({
             "category":"bundle-release", "version":"1.0.0",
             "description":"Exact admitted release build and signed-capture input recipe.",
+            "recipe_purpose":"bundle_release_v1",
             "release_recipe_authorization": {
                 "catalog_namespace":self.catalog_namespace,
                 "bundle_publication_policy_section_digest":self.bundle_publication_policy_section_digest,
@@ -238,6 +240,7 @@ impl AuthorizeBuildRecipeRequest {
             binding_name: "product_recipe".into(),
             recipe_ref: "config:bundle-release/native-build-products".into(),
             recipe_raw_content_digest: lillux::sha256_hex(encoded.as_bytes()),
+            purpose: ryeos_state::external_content::products::ProductRecipePurpose::BundleReleaseV1,
             declarations_hash: declarations.content_hash()?,
             declarations,
             relationships,

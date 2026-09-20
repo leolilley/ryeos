@@ -1,0 +1,43 @@
+# ryeos:signed:2026-09-20T11:15:48Z:5a64057bc167998e229233c3741849fc9227a2afad538ab2b069726b87932ee4:1D7SUDcGx771kVSky5vNVJffqXS2PQmkkPDUK7NaQIpOIJ33HDBdju4rVeNCOnUBPH7tYXXe1hxtf+YUat9pAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Captured product contract for the exact publisher-signed substrate Core seed.
+recipe_purpose: bundle_release_v1
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: core_tree
+      path: products/signed-core-seed
+      storage: content
+      bounds: &core_bounds
+        maximum_entries: 4096
+        maximum_depth: 32
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
+  products:
+    - name: signed_core_seed
+      source: {kind: workspace_output, root: core_tree}
+      path: products/signed-core-seed/tree
+      shape: tree
+      storage: content
+      required: true
+      bounds: *core_bounds
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: signed_core_seed_to_qualification
+      producer:
+        canonical_ref: graph:ryeos/bundle-release/core-seed-capture
+        recipe_binding: product_recipe
+        product_name: signed_core_seed
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/bundle-release/core-seed-qualify
+        declaration_id: subject
+      required_product:
+        shape: tree
+        storage: content
+        bounds: *core_bounds
+      qualification:
+        policy_ref: config:bundle-release/core-seed-qualification
+        required_claims: [substrate_core_seed_checks_v1]

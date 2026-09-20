@@ -1,6 +1,6 @@
 //! Narrow HTTP transport for an externally-custodied bundle publisher.
 //!
-//! This router deliberately exposes only the four typed operations consumed
+//! This router deliberately exposes only the seven typed operations consumed
 //! by `AuthenticatedPublisherClient`. It is not part of the ordinary daemon
 //! API and must be served on loopback or behind an HTTPS terminator.
 
@@ -15,7 +15,7 @@ use axum::{
 };
 use ryeos_app::bundle_publication::producer::{
     BundlePublisherAuthority, BundleReleaseOperation, CatalogRequestPublicationRequest,
-    RequestAuthorizationRequest, RequestTreeSigningRequest,
+    RequestAuthorizationRequest, RequestTreeSigningRequest, SubstrateReleaseAuthorizationRequest,
 };
 use serde_json::json;
 use subtle::ConstantTimeEq as _;
@@ -77,6 +77,14 @@ pub fn router(state: PublisherServerState) -> Router {
         .route(
             "/v1/bundle-catalog/authorize-successor",
             post(authorize_catalog_successor),
+        )
+        .route(
+            "/v1/substrate-release/authorize",
+            post(authorize_substrate_release),
+        )
+        .route(
+            "/v1/substrate-core/authorize-recipe",
+            post(authorize_core_seed_recipe),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
@@ -160,6 +168,34 @@ async fn authorize_catalog_successor(
         &headers,
         BundleReleaseOperation::CatalogRequestPublication(request.clone()),
         state.authority.authorize_catalog_successor(request),
+    )
+    .await
+}
+
+async fn authorize_substrate_release(
+    State(state): State<PublisherServerState>,
+    headers: HeaderMap,
+    Json(request): Json<SubstrateReleaseAuthorizationRequest>,
+) -> Response {
+    execute(
+        &state,
+        &headers,
+        BundleReleaseOperation::SubstrateReleaseAuthorization(request.clone()),
+        state.authority.authorize_substrate_release(request),
+    )
+    .await
+}
+
+async fn authorize_core_seed_recipe(
+    State(state): State<PublisherServerState>,
+    headers: HeaderMap,
+    Json(request): Json<ryeos_app::bundle_publication::core_seed::CoreSeedRecipeRequest>,
+) -> Response {
+    execute(
+        &state,
+        &headers,
+        BundleReleaseOperation::AuthorizeCoreSeedRecipe(request.clone()),
+        state.authority.authorize_core_seed_recipe(request),
     )
     .await
 }

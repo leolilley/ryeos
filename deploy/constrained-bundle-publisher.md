@@ -1,6 +1,6 @@
 # Constrained bundle publisher
 
-The release-authority node calls a separately composed publisher over five
+The release-authority node calls a separately composed publisher over seven
 purpose-owned HTTP operations. The publisher owns the private publisher key;
 the release-authority daemon never does.
 
@@ -34,6 +34,8 @@ The only accepted paths are:
 - `POST /v1/bundle-recipe/authorize-capture`
 - `POST /v1/bundle-tree/sign`
 - `POST /v1/bundle-generation/authorize`
+- `POST /v1/substrate-release/authorize`
+- `POST /v1/substrate-core/authorize-recipe`
 - `POST /v1/bundle-catalog/authorize-successor`
 
 Every request must use `Authorization: Bearer …`, is limited to 256 KiB, is
@@ -61,13 +63,32 @@ integration are still pending; this endpoint alone does not make releases runnab
 The `ryeos-bundle-publisher` binary is the explicit deployment entrypoint. It
 accepts `--publisher-key`, `--bearer-file`, `--cas-root`, and `--policy`, and
 defaults to `127.0.0.1:7411`. The strict JSON policy pins the catalog namespace,
-bundle-publication policy digest and trust epoch; qualification signer public
+catalog publisher fingerprint, bundle-publication policy digest and trust epoch; qualification signer public
 key, policy, verifier definition and artifact identities, and required claims;
 and publisher-tool definition and artifact identities. Unknown fields are
-rejected. The process constructs `LocalConstrainedPublisherAuthority` and binds
-only after every input validates.
+rejected. Before measuring its executable, opening its CAS, or binding a listener,
+the process requires the loaded publisher signing key to match the policy's exact
+catalog publisher fingerprint. It then constructs `LocalConstrainedPublisherAuthority`
+and binds only after every input validates.
 
-The policy schema is `ryeos.standalone_bundle_publisher_policy.v1`. Public keys
+The standalone measurement mode is available for an operator to preview the
+identity of an installed publisher executable. It loads no signing key or
+bearer, opens no CAS, and starts no listener:
+
+```sh
+ryeos-bundle-publisher \
+  --measure-tool /usr/bin/ryeos-bundle-publisher
+```
+
+The authority-measure service performs the policy-authoring measurement itself
+from the final installed path; it does not accept these hashes from its caller.
+At normal startup the publisher measures its own resolved executable and refuses
+to bind unless both identities match the resulting policy. A development target
+binary and an installed release binary are different artifacts.
+
+The policy schema is `ryeos.standalone_bundle_publisher_policy.v1`. Its native,
+Core-seed, and substrate qualification verifier refs must be pairwise distinct;
+sharing any verifier across those authority domains is rejected. Public keys
 are JSON arrays of exactly 32 Ed25519 bytes. The qualification policy source
 and verifier artifact identity use their existing strict current wire forms;
 operators should export those admitted objects rather than reconstructing
@@ -99,6 +120,46 @@ Pin the actual qualification signer public key/fingerprint, publisher fingerprin
 publisher-tool definition/artifact identity, required claims and nonzero trust
 epoch. These values are deployment-specific and cannot be supplied by the source
 repository. A managed-runtime inference artifact is not a native verifier.
+
+The release-authority node can compose those qualification pins from exact
+retained testimony while directly observing the installed publisher tool:
+
+```sh
+ryeos execute service:bundle-release/authority-measure --no-stream '{
+  "calibration_run_attestation_hash":"<NODE_SIGNED_CALIBRATION_RUN>",
+  "project_path":"/absolute/path/to/clean/ryeos/source",
+  "catalog_namespace":"ryeos-official",
+  "publisher_fingerprint":"<PINNED_PUBLISHER_FINGERPRINT>",
+  "authorized_uploaders":["<RELEASE_NODE_FINGERPRINT>"],
+  "trust_epoch":1,
+  "qualification_owner_principal":"<CAPTURE_OWNER_FINGERPRINT>",
+  "qualification_attestation_hash":"<RETAINED_QUALIFICATION_ATTESTATION>",
+  "substrate_qualification_owner_principal":"<SUBSTRATE_CAPTURE_OWNER_FINGERPRINT>",
+  "substrate_qualification_attestation_hash":"<RETAINED_SUBSTRATE_QUALIFICATION_ATTESTATION>",
+  "core_seed_qualification_owner_principal":"<CORE_SEED_CAPTURE_OWNER_FINGERPRINT>",
+  "core_seed_qualification_attestation_hash":"<RETAINED_CORE_SEED_QUALIFICATION_ATTESTATION>",
+  "substrate_build_witness_hash":"<RETAINED_SUBSTRATE_PRODUCT_WITNESS>",
+  "substrate_build_signer_fingerprint":"<PINNED_SUBSTRATE_BUILD_NODE_FINGERPRINT>",
+  "publisher_executable_path":"/usr/bin/ryeos-bundle-publisher"
+}'
+```
+
+The service descriptor-pins and measures the exact publisher executable path;
+caller-provided hashes are never accepted as publisher identity. It also
+re-admits the retained, node-signed qualifications against the
+currently installed signed policy, verifier definition, launch artifact and
+claims. It independently re-admits substrate qualification testimony and
+requires the native-bundle, Core-seed, and substrate verifiers to be pairwise
+distinct. Their exact closed claims are `native_bundle_release_checks_v1`,
+`substrate_core_seed_checks_v1`, and
+`substrate_release_checks_v1`; native-bundle qualification never
+authorizes a substrate release. The exact substrate build witness is also
+verified under its separately pinned build-node key; transport, product
+capture, qualification, and publisher authority are not conflated. It returns a complete reviewable
+`bundle_publication_policy` candidate
+and its canonical section digest. It does not install the candidate, alter CAS
+state, or grant authority. Review the namespace, publisher, uploader and epoch,
+then apply those exact bytes through the stopped-node policy boundary.
 
 Each catalog must also specify `authorized_uploaders`: a sorted, unique list of
 the release **node** public-key fingerprints permitted to upload and publish

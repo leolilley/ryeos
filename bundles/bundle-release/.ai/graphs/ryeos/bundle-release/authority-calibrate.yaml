@@ -1,0 +1,33 @@
+# ryeos:signed:2026-09-20T11:15:48Z:1fa37d7fee698f675de20b4501e27135b54787343ec368fdb82820197bfe1c7c:8prNUTZe9uUpXqM7m7JyKHnBrZeA/cMFwD2FlvMndlOdNfJ3lkKNjmxTq9YzUVGMV9SbnPrzEB9iHagsLMDJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Run the bounded pre-policy authority calibration against one clean source snapshot without contacting a catalog or publisher.
+effects: live
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.service.bundle-release/authority-calibrate
+config:
+  start: calibrate
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    required: [project_path, source_snapshot_hash]
+    properties:
+      project_path: {type: string}
+      source_snapshot_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+  state: {}
+  nodes:
+    calibrate:
+      action:
+        item_id: service:bundle-release/authority-calibrate
+        params:
+          project_path: "${inputs.project_path}"
+          source_snapshot_hash: "${inputs.source_snapshot_hash}"
+      assign: {calibration: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.calibration}"

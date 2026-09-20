@@ -1,0 +1,18 @@
+# ryeos:signed:2026-09-20T11:15:48Z:e8a9c1ac86c00a72aa8ad55b175cc95723982173f40836c45e172b813cf67bae:Wt7+413qBQ/3SHMwA9uUBLsS0XEMXdwqHche44iYH4b6hHagafh41t2bzbuHLJTycjuHnrxRG6utGT3wVm/fAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: core-seed-capture
+version: "1.0.0"
+description: Capture the publisher-signed Core seed tree under its exact authorized recipe.
+endpoint: bundle_release.core_seed_capture
+ui_read_only: false
+state_access: read_write
+record_thread: true
+availability: daemon_only
+required_caps: ["ryeos.execute.service.bundle-release/core-seed-capture"]
+schema:
+  build: object
+  selected_product_witness: string
+  build_recipe_signed_config: string
+  build_recipe_raw_digest: string
+  materialization_result_hash: string
+  signed_tree_manifest_hash: string

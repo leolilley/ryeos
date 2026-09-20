@@ -1,9 +1,11 @@
 # Bundle-source operations
 
-Readiness: the topology below is the intended operational path, not yet a
-qualified first-run procedure. Initial Core/complete-set production and exact
-per-release product-recipe/signing admission remain implementation blockers.
-Compilation or runtime registration alone does not demonstrate bundle updates.
+Readiness: the implementation now includes measured-authority calibration,
+Core/substrate genesis production, exact per-release recipe admission, remote
+catalog transport, and stopped-node activation. It is not qualified until the
+first complete bundle set and one subsequent single-bundle successor have run
+end to end on the actual target; compilation and registration remain
+insufficient evidence.
 
 Native bundle publication is initiated from an admitted RyeOS development
 project through `service:bundle-release/submit`. That operation invokes the
@@ -44,15 +46,18 @@ root or `AppState`. Its constrained publisher is an independently operated
 authenticated service configured at process startup with
 `RYEOS_BUNDLE_PUBLISHER_URL` and `RYEOS_BUNDLE_PUBLISHER_BEARER` (both or
 neither). The endpoint must use HTTPS, except for a loopback development
-sidecar, and must expose only the five closed operations for exact build-recipe
-authoring, tree signing, generation authorization, and catalog-successor authorization. See
+sidecar, and must expose only the closed operations for exact build/capture
+recipe authoring, Core-seed authorization, tree signing, bundle/substrate
+generation authorization, and catalog-successor authorization. See
 `deploy/release-authority.env.example`; inject the bearer from the deployment
 secret store.
 
 The authenticated JSON endpoints are `POST /v1/bundle-recipe/authorize-build`,
 `POST /v1/bundle-recipe/authorize-capture`,
+`POST /v1/substrate-core/authorize-recipe`,
 `POST /v1/bundle-tree/sign`,
-`POST /v1/bundle-generation/authorize`, and
+`POST /v1/bundle-generation/authorize`,
+`POST /v1/substrate-release/authorize`, and
 `POST /v1/bundle-catalog/authorize-successor`. The authority must share the
 release node's CAS or import every returned coordinate into it before replying;
 the client accepts only bounded responses from the publisher fingerprint pinned
@@ -71,6 +76,14 @@ an empty upload session is never treated as closure evidence.
 The substrate image remains an independently recoverable bootstrap artifact.
 Its seed can start the bundle-source service but is not the live catalog and
 cannot replace persistent catalog state after redeployment.
+
+The bootstrap Graph intentionally publishes a Core-only sequence-0 genesis.
+That is an authority root, not a deployable node set: activating it would remove
+every installed non-Core bundle. Build one successor for every remaining member
+of the exact target bundle set and expose only the final complete head to
+consumers. For the `bundle-source` role this means Core genesis followed by
+`central-auth` and `bundle-source`; only then may a consumer select the head.
+A later publication replacing just one member is the independent-update proof.
 
 At first initialization the deployment must pass the resolved image digest and
 the substrate compatibility protocol explicitly; mutable tags and environment

@@ -245,6 +245,7 @@ pub(in crate::external_content::products) fn evidence(
         workspace_output_capture_hash: None,
         producer_partition_identity: None,
         recipe_binding: "build_recipe".into(),
+        recipe_purpose: super::super::ProductRecipePurpose::GeneralProductV1,
         recipe_ref: "config:test/build".into(),
         recipe_raw_content_digest: "d".repeat(64),
         declarations_hash: declarations.content_hash().unwrap(),

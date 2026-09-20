@@ -11,6 +11,7 @@ use ryeos_handler_protocol::{
     ValidateLaunchPreparerConfigSuccess,
 };
 use ryeos_state::external_content::products::ProductDeclarations;
+use ryeos_state::external_content::products::ProductRecipePurpose;
 use ryeos_state::external_content::products::admission::{
     AdmittedProductRecipeBinding, PRODUCT_RECIPE_BINDING_SCHEMA,
 };
@@ -124,6 +125,21 @@ fn prepare_inner(
                         LaunchPrepareErrorClass::Configuration,
                     )
                 })?;
+            let purpose = bound
+                .composed
+                .composed
+                .get("recipe_purpose")
+                .cloned()
+                .map(serde_json::from_value::<ProductRecipePurpose>)
+                .transpose()
+                .map_err(|error| {
+                    wire_error(
+                        "product_recipe_purpose_invalid",
+                        format!("invalid product recipe purpose: {error}"),
+                        LaunchPrepareErrorClass::Configuration,
+                    )
+                })?
+                .unwrap_or(ProductRecipePurpose::GeneralProductV1);
             let declarations =
                 ProductDeclarations::from_value(declarations_value).map_err(|error| {
                     wire_error(
@@ -183,6 +199,7 @@ fn prepare_inner(
                 binding_name: PRODUCT_RECIPE_BINDING.to_owned(),
                 recipe_ref: bound.canonical_ref.clone(),
                 recipe_raw_content_digest,
+                purpose,
                 declarations_hash: declarations.content_hash().map_err(|error| {
                     wire_error(
                         "product_declarations_invalid",

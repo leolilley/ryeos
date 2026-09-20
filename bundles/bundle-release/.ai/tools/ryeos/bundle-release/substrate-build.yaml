@@ -1,0 +1,19 @@
+# ryeos:signed:2026-09-20T11:15:48Z:36511e0e97639c730fce4b3bed2939fd6d1c59b2a668908a093d7672ace3584c:i3oOrUPKvUiGtdbDf0dz6x1I9YPBLKUVRrOc6Xx8ikXWJ2jm9+rCUkI18r+n7W/z11yE1z71PGPEPVHZCn57BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: substrate-build
+version: "1.0.0"
+description: Materialize one canonical measured substrate receipt without rebuilding the host image.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory]
+  materialization: read_only
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/substrate-build.py"]
+  input_data: "${params_json}"
+  timeout_secs: 60

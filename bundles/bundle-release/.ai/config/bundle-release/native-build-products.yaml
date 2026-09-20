@@ -1,7 +1,8 @@
-# ryeos:signed:2026-09-19T05:44:42Z:0696140f41c62d07f573d9242db9c1c8844f388be73d3a61753f716f191e4cb5:uDS/BRsirAYnI3dANDXLBlBrmicr82QNwxONSAeqa8jQF81tHcb/rHaOJj3id0oy0l98f0Ov8iAtE7WzGr45AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T11:15:48Z:ffc05ffd6ffb225afc0243a3b7bedfca133efe226b4b599bfdaa36dba5d4c6e7:oTg3324/W0wovB01/2bjGJssKarphSOvyen9PcJawDeq3En79GYOTmuXpz1wkW0cn2JHiQpT75obzaJNw+FBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Captured output contract for an admitted non-core binary or data-only bundle producer.
+recipe_purpose: bundle_release_v1
 build_products:
   schema: ryeos.build_products.v1
   output_roots:

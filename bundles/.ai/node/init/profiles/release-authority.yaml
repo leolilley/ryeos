@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-19T05:44:42Z:89fbd16ca807910ce98a2e0c0b56bc9d65612aedc116cfe03dbfba5fbac6710b:5mcXAjy4DPCCIMq5i2TrKLxKKXVJE7ZXKvjwVcNidR1i9k+wL0+fhyyaj11EFEa6AU7SPwTZpvBSCY6Z5950Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T11:28:32Z:35bd67f62a56f516a012710e7cc2cbea4785591ef85c177fbd5fc541ea428361:qr6O0FnQCIb2WB1eW1NohrJZ4Y75f5eWijyYhfEyKa7TDD+1lt9rBDm8wiPtFD3RaJqu65AKv7A2lwimday9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -93,18 +93,29 @@ policies:
     bundle_source_caps:
       browser: []
       bundle-release:
+        - ryeos.execute.service.bundle-release/authority-calibrate
+        - ryeos.execute.service.bundle-release/authority-measure
         - ryeos.execute.service.bundle-release/catalog-remote-publish
         - ryeos.execute.service.bundle-release/catalog-request-publication
+        - ryeos.execute.service.bundle-release/core-seed-build
+        - ryeos.execute.service.bundle-release/core-seed-capture
+        - ryeos.execute.service.bundle-release/core-seed-inspect
+        - ryeos.execute.service.bundle-release/core-seed-qualify
         - ryeos.execute.service.bundle-release/generation-build
         - ryeos.execute.service.bundle-release/generation-capture
         - ryeos.execute.service.bundle-release/generation-finalize
         - ryeos.execute.service.bundle-release/generation-qualify
+        - ryeos.execute.service.bundle-release/genesis-set-compose
         - ryeos.execute.service.bundle-release/input-inspect
         - ryeos.execute.service.bundle-release/request-authorization
         - ryeos.execute.service.bundle-release/request-tree-signing
         - ryeos.execute.service.bundle-release/set-compose
         - ryeos.execute.service.bundle-release/status
         - ryeos.execute.service.bundle-release/submit
+        - ryeos.execute.service.bundle-release/substrate-build
+        - ryeos.execute.service.bundle-release/substrate-qualify
+        - ryeos.execute.service.bundle-release/substrate-release-authorization
+        - ryeos.execute.service.bundle-release/substrate-release-finalize
       central-auth: []
       codex:
         - ryeos.register.command.root.codex
@@ -291,3 +302,6 @@ policies:
       max_active_streams_per_subject: 1
       max_stream_backlog_bytes: 16777216
       max_total_backlog_bytes: 67108864
+  ui_browser_sessions:
+    schema: 1
+    max_live_binding_attachments_per_session: 16

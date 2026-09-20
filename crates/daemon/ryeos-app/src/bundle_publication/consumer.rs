@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context as _, bail};
 use ryeos_bundle_publication_contract::{
     BundleCatalogPublication, BundleCatalogSnapshot, BundleGeneration, BundleSet, BundleTarget,
-    MigrationDecision, MigrationRequirement, NodeBundleSelection,
+    MigrationDecision, MigrationRequirement, NodeBundleSelection, SubstrateRelease,
 };
 use ryeos_state::objects::Attestation;
 use serde_json::Value;
@@ -19,7 +19,7 @@ use super::{
     ReleasePolicyBinding, VerifiedBundleGeneration,
     attestation::{
         BUNDLE_CATALOG_RELEASE_CLAIM, BUNDLE_GENERATION_RELEASE_CLAIM, BUNDLE_PUBLICATION_POLICY,
-        BUNDLE_SET_RELEASE_CLAIM,
+        BUNDLE_SET_RELEASE_CLAIM, SUBSTRATE_RELEASE_CLAIM,
     },
     verify_bundle_generation,
 };
@@ -84,6 +84,16 @@ impl BundleReleaseEvidenceProof for FetchedCasReleaseProof {
             binding,
         )
     }
+
+    fn verify_substrate_release_evidence(
+        &self,
+        release: &SubstrateRelease,
+        accepted_result: &ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult,
+        policy_binding: &ReleasePolicyBinding,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .verify_substrate_release_evidence(release, accepted_result, policy_binding)
+    }
 }
 
 /// Local policy and cryptographic authority. Structural decoding alone never
@@ -142,8 +152,19 @@ impl CurrentConsumerPublicationPolicy {
             bail!("pinned deployment operator key has an inconsistent fingerprint");
         }
         let release_proof_policy = super::standalone_publisher::StandalonePublisherPolicy {
+            core_seed_qualification_policy: catalog.core_seed_qualification_policy.clone(),
+            core_seed_qualification_verifier_effective_definition_digest: catalog
+                .core_seed_qualification_verifier_effective_definition_digest
+                .clone(),
+            core_seed_qualification_verifier_artifact_identity: catalog
+                .core_seed_qualification_verifier_artifact_identity
+                .clone(),
+            required_core_seed_qualification_claims: catalog
+                .required_core_seed_qualification_claims
+                .clone(),
             schema: "ryeos.standalone_bundle_publisher_policy.v1".to_owned(),
             catalog_namespace: namespace.to_owned(),
+            catalog_publisher_fingerprint: catalog.publisher_fingerprint.clone(),
             bundle_publication_policy_section_digest: policy.section_digest()?,
             trust_epoch: catalog.trust_epoch,
             qualification_signer_public_key: catalog.qualification_signer_public_key,
@@ -156,6 +177,18 @@ impl CurrentConsumerPublicationPolicy {
                 .qualification_verifier_artifact_identity
                 .clone(),
             required_qualification_claims: catalog.required_qualification_claims.clone(),
+            substrate_qualification_policy: catalog.substrate_qualification_policy.clone(),
+            substrate_qualification_verifier_effective_definition_digest: catalog
+                .substrate_qualification_verifier_effective_definition_digest
+                .clone(),
+            substrate_qualification_verifier_artifact_identity: catalog
+                .substrate_qualification_verifier_artifact_identity
+                .clone(),
+            required_substrate_qualification_claims: catalog
+                .required_substrate_qualification_claims
+                .clone(),
+            substrate_build_signer_public_key: catalog.substrate_build_signer_public_key,
+            substrate_build_signer_fingerprint: catalog.substrate_build_signer_fingerprint.clone(),
             publisher_tool_effective_definition_digest: catalog
                 .publisher_tool_effective_definition_digest
                 .clone(),
@@ -205,7 +238,10 @@ impl CurrentConsumerPublicationPolicy {
     }
 
     fn require_current_claim(&self, claim: &str) -> anyhow::Result<()> {
-        if claim != self.generation_claim && claim != self.set_claim && claim != self.catalog_claim
+        if claim != self.generation_claim
+            && claim != self.set_claim
+            && claim != self.catalog_claim
+            && claim != SUBSTRATE_RELEASE_CLAIM
         {
             bail!("publisher attestation claim is not authorized for this catalog");
         }
@@ -251,6 +287,7 @@ pub struct VerifiedConsumerSet {
     set_hash: String,
     set_attestation_hash: String,
     set: BundleSet,
+    substrate_release: SubstrateRelease,
     generations: BTreeMap<String, VerifiedBundleGeneration>,
 }
 
@@ -263,6 +300,9 @@ impl VerifiedConsumerSet {
     }
     pub fn set(&self) -> &BundleSet {
         &self.set
+    }
+    pub fn substrate_release(&self) -> &SubstrateRelease {
+        &self.substrate_release
     }
     pub fn generations(&self) -> &BTreeMap<String, VerifiedBundleGeneration> {
         &self.generations
@@ -517,12 +557,74 @@ pub fn verify_prospective_set(
     if !generations.contains_key(CORE_BUNDLE_NAME) {
         bail!("complete bundle set omits core");
     }
+    let substrate_release_attestation =
+        read_attestation(objects, &set.substrate_release_attestation_hash)?;
+    verify_publisher_attestation(
+        policy,
+        &substrate_release_attestation,
+        SUBSTRATE_RELEASE_CLAIM,
+    )?;
+    if expected_publisher.is_some_and(|publisher| substrate_release_attestation.issuer != publisher)
+    {
+        bail!("substrate release and prospective set publishers disagree");
+    }
+    let substrate_release = SubstrateRelease::from_current_value(&read_exact(
+        objects,
+        &substrate_release_attestation.subject_hash,
+    )?)?;
+    if substrate_release.catalog_namespace != policy_binding.catalog_namespace
+        || substrate_release.bundle_publication_policy_section_digest
+            != policy_binding.bundle_publication_policy_section_digest
+        || substrate_release.trust_epoch != policy_binding.trust_epoch
+    {
+        bail!("substrate release differs from current publication policy binding");
+    }
+    let substrate_build =
+        ryeos_state::external_content::products::accepted_result::ProductBuildAcceptedResult::from_value(
+            &read_exact(objects, &substrate_release.substrate_build_accepted_result_hash)?,
+        )?;
+    let selected_substrate = substrate_build
+        .products
+        .iter()
+        .find(|product| {
+            product.product_name == substrate_release.selected_substrate_product_identity
+        })
+        .context("substrate release selected product is absent from accepted result")?;
+    if selected_substrate.witness_hash != substrate_release.selected_substrate_product_witness
+        || substrate_release.qualification_evidence_hashes.len() != 1
+    {
+        bail!("substrate release build and qualification evidence disagree");
+    }
+    release_evidence_proof
+        .verify_substrate_release_evidence(&substrate_release, &substrate_build, policy_binding)
+        .context("substrate release evidence is unproven")?;
+    verify_substrate_release_binding(&set, &substrate_release)?;
     Ok(VerifiedConsumerSet {
         set_hash,
         set_attestation_hash,
         set,
+        substrate_release,
         generations,
     })
+}
+
+fn verify_substrate_release_binding(
+    set: &BundleSet,
+    substrate_release: &SubstrateRelease,
+) -> anyhow::Result<()> {
+    let core = set
+        .entries
+        .iter()
+        .find(|entry| entry.bundle_name == CORE_BUNDLE_NAME)
+        .context("complete bundle set omits core")?;
+    if substrate_release.core_generation_hash != core.generation_hash
+        || substrate_release.core_generation_attestation_hash != core.publisher_attestation_hash
+        || substrate_release.substrate_protocol != set.substrate_protocol
+        || substrate_release.target != set.target
+    {
+        bail!("substrate release does not authorize this set's exact Core and substrate");
+    }
+    Ok(())
 }
 
 pub fn plan_fetch(set: &VerifiedConsumerSet) -> ConsumerFetchPlan {
@@ -628,6 +730,12 @@ pub fn admit_node_bundle_selection(
     if &verified_set.set.target != context.bundle_target {
         bail!("selected bundle set and consumer target disagree");
     }
+    if verified_set.substrate_release.substrate_image_digest != context.substrate_image_digest
+        || verified_set.substrate_release.substrate_protocol != context.substrate_protocol
+        || &verified_set.substrate_release.target != context.bundle_target
+    {
+        bail!("selected bundle set belongs to a different substrate release");
+    }
     Ok(AdmittedNodeBundleSelection {
         selection_hash,
         authorization_hash: authorization_hash.into(),
@@ -725,8 +833,26 @@ mod tests {
                 set_name: "standard".into(),
                 target: BundleTarget::Portable,
                 substrate_protocol: 1,
+                substrate_release_attestation_hash: hash('d'),
                 entries,
                 migration_requirement: MigrationRequirement::None,
+            },
+            substrate_release: SubstrateRelease {
+                schema: ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_SCHEMA.into(),
+                kind: ryeos_bundle_publication_contract::SUBSTRATE_RELEASE_KIND.into(),
+                catalog_namespace: "official".into(),
+                bundle_publication_policy_section_digest: hash('8'),
+                trust_epoch: 1,
+                substrate_image_digest: format!("sha256:{}", hash('c')),
+                substrate_protocol: 1,
+                target: BundleTarget::Portable,
+                substrate_build_accepted_result_hash: hash('9'),
+                substrate_build_receipt_hash: hash('7'),
+                selected_substrate_product_identity: "substrate".into(),
+                selected_substrate_product_witness: hash('a'),
+                qualification_evidence_hashes: vec![hash('b')],
+                core_generation_hash: hash('3'),
+                core_generation_attestation_hash: hash('3'.to_ascii_uppercase()),
             },
             generations: BTreeMap::new(),
         }
@@ -771,5 +897,25 @@ mod tests {
                 .to_string()
                 .contains("core")
         );
+    }
+
+    #[test]
+    fn substrate_release_must_bind_exact_core_protocol_and_target() {
+        let set = verified_set(&[("core", '3'), ("standard", '4')]);
+        assert!(verify_substrate_release_binding(&set.set, &set.substrate_release).is_ok());
+
+        let mut wrong_core = set.substrate_release.clone();
+        wrong_core.core_generation_hash = hash('9');
+        assert!(verify_substrate_release_binding(&set.set, &wrong_core).is_err());
+
+        let mut wrong_protocol = set.substrate_release.clone();
+        wrong_protocol.substrate_protocol = 2;
+        assert!(verify_substrate_release_binding(&set.set, &wrong_protocol).is_err());
+
+        let mut wrong_target = set.substrate_release.clone();
+        wrong_target.target = BundleTarget::Triple {
+            triple: "x86_64-unknown-linux-gnu".into(),
+        };
+        assert!(verify_substrate_release_binding(&set.set, &wrong_target).is_err());
     }
 }

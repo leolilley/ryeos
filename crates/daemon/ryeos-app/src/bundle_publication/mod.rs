@@ -17,9 +17,12 @@ use serde_json::Value;
 pub mod consumer;
 pub mod publisher;
 
+pub mod calibration;
+pub mod calibration_core;
 pub mod catalog;
 
 pub mod admitted_build;
+pub mod core_seed;
 pub mod producer;
 pub mod recipe;
 pub mod standalone_publisher;
@@ -72,6 +75,19 @@ pub trait BundleReleaseEvidenceProof: Send + Sync {
         materialization: &PublisherMaterializationResult,
         policy_binding: &ReleasePolicyBinding,
     ) -> anyhow::Result<()>;
+
+    /// Prove the exact accepted substrate product and its qualification under
+    /// the same policy binding used for bundle generations. The default is
+    /// deliberately fail-closed so an existing bundle-only proof authority
+    /// cannot silently become substrate release authority.
+    fn verify_substrate_release_evidence(
+        &self,
+        _release: &ryeos_bundle_publication_contract::SubstrateRelease,
+        _accepted_result: &ProductBuildAcceptedResult,
+        _policy_binding: &ReleasePolicyBinding,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("substrate release evidence proof is unavailable")
+    }
 }
 
 /// A materialization whose complete referenced identity and closed mutation

@@ -17,6 +17,10 @@ pub const PUBLISHER_MATERIALIZATION_RESULT_SCHEMA: &str =
 pub const PUBLISHER_MATERIALIZATION_RESULT_KIND: &str = "publisher_materialization_result";
 pub const BUNDLE_SET_SCHEMA: &str = "ryeos.bundle_set.v1";
 pub const BUNDLE_SET_KIND: &str = "bundle_set";
+pub const SUBSTRATE_RELEASE_SCHEMA: &str = "ryeos.substrate_release.v1";
+pub const SUBSTRATE_RELEASE_KIND: &str = "substrate_release";
+pub const SUBSTRATE_BUILD_RECEIPT_SCHEMA: &str = "ryeos.substrate_build_receipt.v1";
+pub const SUBSTRATE_BUILD_RECEIPT_KIND: &str = "substrate_build_receipt";
 pub const NODE_BUNDLE_SELECTION_SCHEMA: &str = "ryeos.node_bundle_selection.v1";
 pub const NODE_BUNDLE_SELECTION_KIND: &str = "node_bundle_selection";
 pub const BUNDLE_CATALOG_SNAPSHOT_SCHEMA: &str = "ryeos.bundle_catalog_snapshot.v1";
@@ -163,8 +167,44 @@ pub struct BundleSet {
     pub set_name: String,
     pub target: BundleTarget,
     pub substrate_protocol: u32,
+    pub substrate_release_attestation_hash: String,
     pub entries: Vec<BundleSetEntry>,
     pub migration_requirement: MigrationRequirement,
+}
+
+/// Publisher-authored binding between an immutable substrate release and the
+/// exact Core generation it carries. Normal bundle updates preserve this
+/// coordinate; they cannot use set composition to replace substrate-owned
+/// Core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstrateRelease {
+    pub schema: String,
+    pub kind: String,
+    pub catalog_namespace: String,
+    pub bundle_publication_policy_section_digest: String,
+    pub trust_epoch: u64,
+    pub substrate_image_digest: String,
+    pub substrate_protocol: u32,
+    pub target: BundleTarget,
+    pub substrate_build_accepted_result_hash: String,
+    pub substrate_build_receipt_hash: String,
+    pub selected_substrate_product_identity: String,
+    pub selected_substrate_product_witness: String,
+    pub qualification_evidence_hashes: Vec<String>,
+    pub core_generation_hash: String,
+    pub core_generation_attestation_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubstrateBuildReceipt {
+    pub schema: String,
+    pub kind: String,
+    pub substrate_image_digest: String,
+    pub substrate_protocol: u32,
+    pub target: BundleTarget,
+    pub core_generation_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +291,8 @@ macro_rules! wire_impl {
 wire_impl!(BundleGeneration);
 wire_impl!(PublisherMaterializationResult);
 wire_impl!(BundleSet);
+wire_impl!(SubstrateRelease);
+wire_impl!(SubstrateBuildReceipt);
 wire_impl!(NodeBundleSelection);
 wire_impl!(BundleCatalogSnapshot);
 wire_impl!(BundleCatalogPublication);
@@ -430,6 +472,10 @@ impl BundleSet {
         if self.substrate_protocol == 0 {
             bail!("substrate protocol must be nonzero");
         }
+        hash64(
+            &self.substrate_release_attestation_hash,
+            "substrate release attestation",
+        )?;
         if self.entries.is_empty() || self.entries.len() > MAX_BUNDLES {
             bail!("bundle set requires a bounded nonempty entry list");
         }
@@ -440,6 +486,81 @@ impl BundleSet {
             hash64(&entry.publisher_attestation_hash, "publisher attestation")?;
             strictly_after(&mut previous, &entry.bundle_name, "bundle set entries")?;
         }
+        ensure_encoded_bound(self)
+    }
+}
+
+impl SubstrateRelease {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        exact(
+            &self.schema,
+            SUBSTRATE_RELEASE_SCHEMA,
+            "substrate release schema",
+        )?;
+        exact(&self.kind, SUBSTRATE_RELEASE_KIND, "substrate release kind")?;
+        name(&self.catalog_namespace, "catalog namespace")?;
+        hash64(
+            &self.bundle_publication_policy_section_digest,
+            "bundle publication policy section",
+        )?;
+        if self.trust_epoch == 0 {
+            bail!("trust epoch must be nonzero");
+        }
+        image_digest(&self.substrate_image_digest)?;
+        if self.substrate_protocol == 0 {
+            bail!("substrate protocol must be nonzero");
+        }
+        self.target.validate()?;
+        hash64(
+            &self.substrate_build_accepted_result_hash,
+            "substrate build accepted result",
+        )?;
+        hash64(
+            &self.substrate_build_receipt_hash,
+            "substrate build receipt",
+        )?;
+        name(
+            &self.selected_substrate_product_identity,
+            "selected substrate product identity",
+        )?;
+        hash64(
+            &self.selected_substrate_product_witness,
+            "selected substrate product witness",
+        )?;
+        if self.qualification_evidence_hashes.is_empty() {
+            bail!("substrate release requires qualification evidence");
+        }
+        sorted_hashes(
+            &self.qualification_evidence_hashes,
+            "substrate qualification evidence",
+        )?;
+        hash64(&self.core_generation_hash, "core generation")?;
+        hash64(
+            &self.core_generation_attestation_hash,
+            "core generation attestation",
+        )?;
+        ensure_encoded_bound(self)
+    }
+}
+
+impl SubstrateBuildReceipt {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        exact(
+            &self.schema,
+            SUBSTRATE_BUILD_RECEIPT_SCHEMA,
+            "substrate build receipt schema",
+        )?;
+        exact(
+            &self.kind,
+            SUBSTRATE_BUILD_RECEIPT_KIND,
+            "substrate build receipt kind",
+        )?;
+        image_digest(&self.substrate_image_digest)?;
+        if self.substrate_protocol == 0 {
+            bail!("substrate protocol must be nonzero");
+        }
+        self.target.validate()?;
+        hash64(&self.core_generation_hash, "core generation")?;
         ensure_encoded_bound(self)
     }
 }
@@ -552,7 +673,7 @@ impl BundleCatalogPublication {
 }
 
 impl BundleTarget {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         if let Self::Triple { triple } = self {
             bounded_token(triple, 128, "target triple")?;
             if !triple

@@ -162,6 +162,7 @@ fn evidence(manifest_hash: String) -> ProductCaptureEvidence {
         workspace_output_capture_hash: None,
         producer_partition_identity: None,
         recipe_binding: "build_recipe".into(),
+        recipe_purpose: ProductRecipePurpose::GeneralProductV1,
         recipe_ref: "config:test/build".into(),
         recipe_raw_content_digest: "d".repeat(64),
         declarations: declarations(),
@@ -174,6 +175,44 @@ fn evidence(manifest_hash: String) -> ProductCaptureEvidence {
         entry_count: 4,
         total_bytes: 7,
     }
+}
+
+#[test]
+fn calibration_recipe_evidence_is_not_release_evidence() {
+    assert!(
+        ProductRecipePurpose::BundleReleaseV1
+            .require_bundle_release()
+            .is_ok()
+    );
+    assert!(
+        ProductRecipePurpose::AuthorityCalibrationV1
+            .require_bundle_release()
+            .is_err()
+    );
+    assert!(
+        ProductRecipePurpose::GeneralProductV1
+            .require_bundle_release()
+            .is_err()
+    );
+    assert!(
+        ProductRecipePurpose::AuthorityCalibrationV1
+            .require_authority_calibration()
+            .is_ok()
+    );
+    assert!(
+        ProductRecipePurpose::BundleReleaseV1
+            .require_authority_calibration()
+            .is_err()
+    );
+    assert!(
+        ProductRecipePurpose::GeneralProductV1
+            .require_authority_calibration()
+            .is_err()
+    );
+
+    let mut value = serde_json::to_value(evidence("f".repeat(64))).unwrap();
+    value.as_object_mut().unwrap().remove("recipe_purpose");
+    assert!(serde_json::from_value::<ProductCaptureEvidence>(value).is_err());
 }
 
 #[test]

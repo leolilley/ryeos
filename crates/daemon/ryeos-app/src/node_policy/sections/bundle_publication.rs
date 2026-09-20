@@ -41,6 +41,16 @@ pub struct BundleCatalogPolicy {
     pub qualification_verifier_effective_definition_digest: String,
     pub qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
     pub required_qualification_claims: Vec<String>,
+    pub substrate_qualification_policy: ProductQualificationPolicySource,
+    pub substrate_qualification_verifier_effective_definition_digest: String,
+    pub substrate_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_substrate_qualification_claims: Vec<String>,
+    pub core_seed_qualification_policy: ProductQualificationPolicySource,
+    pub core_seed_qualification_verifier_effective_definition_digest: String,
+    pub core_seed_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_core_seed_qualification_claims: Vec<String>,
+    pub substrate_build_signer_public_key: [u8; 32],
+    pub substrate_build_signer_fingerprint: String,
     pub publisher_tool_effective_definition_digest: String,
     pub publisher_tool_artifact_identity_hash: String,
 }
@@ -121,13 +131,62 @@ impl BundlePublicationPolicy {
             {
                 bail!("qualification signer key and fingerprint disagree");
             }
+            validate_hash(
+                &catalog.substrate_build_signer_fingerprint,
+                "substrate build signer fingerprint",
+            )?;
+            let substrate_build_key = lillux::crypto::VerifyingKey::from_bytes(
+                &catalog.substrate_build_signer_public_key,
+            )?;
+            anyhow::ensure!(
+                lillux::crypto::fingerprint(&substrate_build_key)
+                    == catalog.substrate_build_signer_fingerprint,
+                "substrate build signer key and fingerprint disagree"
+            );
             catalog.qualification_policy.validate()?;
+            catalog.core_seed_qualification_policy.validate()?;
+            catalog
+                .core_seed_qualification_verifier_artifact_identity
+                .validate()?;
+            validate_hash(
+                &catalog.core_seed_qualification_verifier_effective_definition_digest,
+                "Core seed qualification verifier definition",
+            )?;
+            anyhow::ensure!(
+                catalog.core_seed_qualification_policy.canonical_ref
+                    == crate::bundle_publication::core_seed::QUALIFICATION_POLICY
+                    && catalog.core_seed_qualification_policy.policy.verifier_ref
+                        == crate::bundle_publication::core_seed::QUALIFIER
+                    && catalog
+                        .core_seed_qualification_policy
+                        .policy
+                        .verifier_parameters
+                        == serde_json::json!({})
+                    && catalog.required_core_seed_qualification_claims
+                        == vec![
+                            crate::bundle_publication::core_seed::QUALIFICATION_CLAIM.to_owned()
+                        ],
+                "Core seed qualification must use its distinct fixed policy, verifier and claim"
+            );
             catalog
                 .qualification_verifier_artifact_identity
+                .validate()?;
+            catalog.substrate_qualification_policy.validate()?;
+            require_distinct_qualification_verifiers(
+                &catalog.qualification_policy.policy.verifier_ref,
+                &catalog.core_seed_qualification_policy.policy.verifier_ref,
+                &catalog.substrate_qualification_policy.policy.verifier_ref,
+            )?;
+            catalog
+                .substrate_qualification_verifier_artifact_identity
                 .validate()?;
             validate_hash(
                 &catalog.qualification_verifier_effective_definition_digest,
                 "qualification verifier definition",
+            )?;
+            validate_hash(
+                &catalog.substrate_qualification_verifier_effective_definition_digest,
+                "substrate qualification verifier definition",
             )?;
             validate_hash(
                 &catalog.publisher_tool_effective_definition_digest,
@@ -146,6 +205,19 @@ impl BundlePublicationPolicy {
             {
                 bail!("qualification claims must be bounded, sorted, and unique");
             }
+            if catalog.required_substrate_qualification_claims.is_empty()
+                || catalog.required_substrate_qualification_claims.len() > 64
+                || catalog
+                    .required_substrate_qualification_claims
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                bail!("substrate qualification claims must be bounded, sorted, and unique");
+            }
+            anyhow::ensure!(
+                catalog.required_substrate_qualification_claims == ["substrate_release_checks_v1"],
+                "substrate qualification requires the closed substrate release claim"
+            );
             if previous.is_some_and(|value| value >= catalog.namespace.as_str()) {
                 bail!("bundle-publication catalogs must be strictly sorted and unique");
             }
@@ -219,6 +291,18 @@ fn validate_name(value: &str, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn require_distinct_qualification_verifiers(
+    native: &str,
+    core_seed: &str,
+    substrate: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        native != core_seed && native != substrate && core_seed != substrate,
+        "native, Core seed, and substrate qualification policies must use pairwise-distinct verifiers"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +347,13 @@ mod tests {
         assert!(require_authorized_uploader(&allowed, &publisher).is_err());
         assert!(require_authorized_uploader(&[], &uploader).is_err());
         assert!(require_authorized_uploader(&allowed, "not-a-fingerprint").is_err());
+    }
+
+    #[test]
+    fn qualification_verifiers_are_pairwise_distinct() {
+        assert!(require_distinct_qualification_verifiers("native", "core", "substrate").is_ok());
+        assert!(require_distinct_qualification_verifiers("same", "same", "substrate").is_err());
+        assert!(require_distinct_qualification_verifiers("same", "core", "same").is_err());
+        assert!(require_distinct_qualification_verifiers("native", "same", "same").is_err());
     }
 }

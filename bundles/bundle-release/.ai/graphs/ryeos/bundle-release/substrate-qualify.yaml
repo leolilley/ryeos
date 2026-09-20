@@ -1,0 +1,31 @@
+# ryeos:signed:2026-09-20T11:15:48Z:fcade51274ec39b55f1fbb1fd0abe8865713ced4984d7fc13771ff4540002bdf:fOd9YHdI037mqsS+3Ya3qabLVIPu4tipa/bnxsruYaw94kFgR1Zn2lp2IShgtE8CR2nNaSsWOlTcg1+zc4UYBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/bundle-release
+description: Run the exact substrate release verifier against the admitted receipt-only captured product.
+effects: live
+external_product_slots:
+  - id: subject
+    relationship_ref: config:bundle-release/substrate-build-products
+    relationship: substrate_release_to_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: substrate-release
+config:
+  start: qualify
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    additionalProperties: false
+    properties: {}
+  state: {}
+  nodes:
+    qualify:
+      action:
+        item_id: tool:ryeos/bundle-release/substrate-qualify
+        params: {}
+      assign: {qualification: "${result}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.qualification}"

@@ -1,0 +1,32 @@
+# ryeos:signed:2026-09-20T11:15:48Z:496a9df6e74ba1610d3a6c38217ae0310d5fad3635b4a1646450b79f8a9a24af:OExwWVq9eMNZKqtQkQcqkRGBWj6mkydMa0hjm3b2LHIoWZ+rh2tEN2Ooda8HJTVOgs0WqyAPawNH776XcE9QCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Purpose-separated Core authority-calibration producer.
+recipe_purpose: authority_calibration_v1
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: core_tree
+      path: products/core-seed
+      storage: content
+      bounds: &bounds
+        maximum_entries: 4096
+        maximum_depth: 32
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
+  products:
+    - name: core_seed
+      source: {kind: workspace_output, root: core_tree}
+      path: products/core-seed/tree
+      shape: tree
+      storage: content
+      required: true
+      bounds: *bounds
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: core_seed_to_signed_capture
+      producer: {canonical_ref: graph:ryeos/bundle-release/core-seed-build, recipe_binding: product_recipe, product_name: core_seed, parameters: {}}
+      consumer: {canonical_ref: graph:ryeos/bundle-release/core-seed-capture, declaration_id: unsigned_core}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}

@@ -394,6 +394,8 @@ mod tests {
             binding_name: "product_recipe".to_owned(),
             recipe_ref: "config:test/two-products".to_owned(),
             recipe_raw_content_digest: "a".repeat(64),
+            purpose:
+                ryeos_state::external_content::products::ProductRecipePurpose::GeneralProductV1,
             declarations_hash: declarations.content_hash().unwrap(),
             declarations,
             relationships: ProductRelationships::empty(),

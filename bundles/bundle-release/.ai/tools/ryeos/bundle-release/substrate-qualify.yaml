@@ -1,0 +1,26 @@
+# ryeos:signed:2026-09-20T11:15:48Z:7c7cb05c6802df602899f7d7e8c178f77fd394b41e1482ef6a562bf5fdb7761e:nM8lmtGz8hImR6kfRBBYa0XtMmBsArBkBH0176hqC2KNtz7WVkbJtbIill5qFmVdK7xCMJNk/LZEFHAXURQGDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: substrate-qualify
+version: "1.0.0"
+description: Verify one exact receipt-only captured substrate release product without executing it.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_namespace
+  load_roots: [item_directory]
+  materialization: read_only
+external_product_slots:
+  - id: subject
+    relationship_ref: config:bundle-release/substrate-build-products
+    relationship: substrate_release_to_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: substrate-release
+config:
+  command: /usr/bin/python3
+  args: ["${tool_dir}/substrate-qualify.py"]
+  input_data: "${params_json}"
+  timeout_secs: 60

@@ -57,6 +57,19 @@ pub(super) struct CurrentBundleVerifierIdentity {
     realizations: ExternalContentRealizationSet,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MeasuredQualificationAuthority {
+    pub qualified_product_witness_hash: String,
+    pub qualified_product_owner_principal: String,
+    pub qualification_signer_public_key: [u8; 32],
+    pub qualification_signer_fingerprint: String,
+    pub qualification_policy: ProductQualificationPolicySource,
+    pub qualification_verifier_effective_definition_digest: String,
+    pub qualification_verifier_artifact_identity:
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+    pub required_qualification_claims: Vec<String>,
+}
+
 #[derive(Clone, Copy)]
 enum CurrentVerifierContent<'a> {
     Root(Option<&'a ResolvedExternalProductSelections>),
@@ -1251,6 +1264,65 @@ pub fn verify_current_qualification_for_release(
         &proof.evidence,
         &current_verifier,
     )
+}
+
+/// Re-admit one retained qualification and return the exact current authority
+/// pins an operator must review before enabling bundle publication. This is a
+/// read-only measurement: it neither authors policy nor publishes CAS state.
+pub fn measure_current_qualification_authority(
+    state: &AppState,
+    context: &HandlerContext,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    owner_principal: &str,
+    qualification_hash: &str,
+) -> anyhow::Result<MeasuredQualificationAuthority> {
+    let proof = load_current_qualification(
+        state,
+        authority,
+        guard,
+        limits,
+        owner_principal,
+        qualification_hash,
+    )?;
+    let current_policy = resolve_current_bundle_qualification_policy(
+        state,
+        &proof.evidence.policy_source.canonical_ref,
+    )?;
+    let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
+        state,
+        authority,
+        guard,
+        limits,
+        context,
+        &current_policy.policy.verifier_ref,
+        &current_policy.policy.verifier_parameters,
+        &proof.evidence,
+    )?;
+    proof.evidence.validate_current_policy(
+        &current_policy,
+        &current_verifier.effective_definition_digest,
+        &proof.evidence.result.claims,
+    )?;
+    proof
+        .evidence
+        .validate_current_artifact(&current_verifier.artifact_identity)?;
+    Ok(MeasuredQualificationAuthority {
+        qualified_product_witness_hash: proof.evidence.product_witness_hash.clone(),
+        qualified_product_owner_principal: proof
+            .evidence
+            .product_coordinate
+            .owner_principal
+            .clone(),
+        qualification_signer_public_key: state.identity.verifying_key().to_bytes(),
+        qualification_signer_fingerprint: state.identity.fingerprint().to_owned(),
+        qualification_policy: current_policy,
+        qualification_verifier_effective_definition_digest: current_verifier
+            .effective_definition_digest,
+        qualification_verifier_artifact_identity: current_verifier.artifact_identity,
+        required_qualification_claims: proof.evidence.result.claims.clone(),
+    })
 }
 
 /// Recovery authenticates the exact retained proof under its caller's CAS

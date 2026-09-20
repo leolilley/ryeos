@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T01:46:30Z:a9d75a56eb0e23037e527551d74f30c7238eb9d7f5ea5fbbf9eff4e12f5ff003:BeHFb8UQM/9xmlPQTXkNIQnPxmb63i0YoOFmssSz5l3CMNJgoDiYS+/o1km2yuA4x0p6xKAuqeFaQ6Hwqe/kBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T11:15:48Z:b811dcf580a71da8d652c251bd63f756cc3307a3ce93a824ed96ca7e24da7216:ovuauDGys+KmNt9PqtVzekGkW34zhEw1+GzOy6yo6tKaKIAwxhJ/+MuopTFDKefCFLhgi6ArBtlI9sfJscFNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -186,6 +186,8 @@ config:
         item_id: service:bundle-release/catalog-request-publication
         params:
           catalog_namespace: "${inputs.catalog_namespace}"
+          bundle_publication_policy_section_digest: "${state.release_metadata.bundle_publication_policy_section_digest}"
+          trust_epoch: "${state.release_metadata.trust_epoch}"
           channel: "${inputs.channel}"
           bundle_name: "${inputs.bundle_name}"
           generation_attestation_hash: "${state.generation_authorization.generation_attestation_hash}"

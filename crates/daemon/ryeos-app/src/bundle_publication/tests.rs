@@ -74,6 +74,18 @@ impl BundleReleaseEvidenceProof for Proof {
         }
         Ok(())
     }
+
+    fn verify_substrate_release_evidence(
+        &self,
+        _release: &ryeos_bundle_publication_contract::SubstrateRelease,
+        _accepted_result: &ProductBuildAcceptedResult,
+        _policy_binding: &ReleasePolicyBinding,
+    ) -> anyhow::Result<()> {
+        if !self.accept {
+            anyhow::bail!("fixture rejects substrate release evidence");
+        }
+        Ok(())
+    }
 }
 
 fn hash(byte: char) -> String {
