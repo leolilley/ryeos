@@ -1330,6 +1330,7 @@ mod tests {
             events.clone(),
         ));
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            external_execution: Vec::new(),
             bundles: vec![],
             routes: vec![],
             commands: vec![],

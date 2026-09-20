@@ -59,6 +59,19 @@ missing guest implementation or older schema versions describe those checkpoints
 
 ## Allocation journal
 
+Installed binding configuration: `.ai/node/external_execution/*.yaml` is an
+app-root-only, current-node-signed section. It retains the exact signed source
+and a closed runtime/backend/account/credential-generation/limit contract.
+Binding identity changes with signed authority; credential and limit rotation
+do not reset the node/backend/account capacity domain. All 26 node-config tests
+pass, including real signed admission, forbidden bundle contribution, duplicate
+filename identities, limit boundaries and program-coordinate mismatches.
+The installed value is not an allocation permit. Source retention is currently
+in memory: durable private generation retention, canonical backend account
+qualification and actual placement ownership remain required before contact.
+The snapshot fixture updates outside ryeos-app have not had broad cross-crate
+compilation qualification yet; disk headroom is below 500 MiB.
+
 Protected credentials (inactive placement integration): the existing sealed
 NodeVault now has a separate placement domain addressed by an opaque app-created
 owner/generation coordinate. Provisioning inserts immutable generations and

@@ -665,6 +665,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         events.clone(),
     ));
     let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+        external_execution: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],

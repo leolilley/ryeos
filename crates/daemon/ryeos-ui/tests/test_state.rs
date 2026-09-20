@@ -294,6 +294,7 @@ fn build_app_state(
 ) -> (tempfile::TempDir, AppState) {
     let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+        external_execution: Vec::new(),
         bundles: vec![],
         routes: test_ui_routes(),
         commands: vec![],

@@ -215,6 +215,7 @@ fn build_app_state(
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
 ) -> AppState {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+        external_execution: Vec::new(),
         bundles: vec![],
         routes: vec![],
         commands: vec![],

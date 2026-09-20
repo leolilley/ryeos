@@ -2454,6 +2454,7 @@ pub(crate) mod tests {
             events.clone(),
         ));
         let node_config = ryeos_app::node_config::NodeConfigSnapshot {
+            external_execution: Vec::new(),
             bundles: Vec::new(),
             routes: Vec::new(),
             commands: Vec::new(),

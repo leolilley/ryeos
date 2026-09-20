@@ -105,6 +105,7 @@ pub(crate) struct NodeConfigAdmission {
 }
 
 pub(crate) struct NodeConfigSnapshotBuilder {
+    external_execution: Vec<super::sections::external_execution::InstalledExternalExecutionBinding>,
     bundles: Vec<BundleRecord>,
     routes: Vec<RawRouteSpec>,
     commands: Vec<CommandRecord>,
@@ -117,6 +118,7 @@ impl NodeConfigSnapshotBuilder {
         command_registration_authority: CommandRegistrationAuthority,
     ) -> Result<Self> {
         Ok(Self {
+            external_execution: Vec::new(),
             bundles: validate_prospective_bundle_records(bundles)?,
             routes: Vec::new(),
             commands: Vec::new(),
@@ -151,6 +153,21 @@ impl NodeConfigSnapshotBuilder {
         self.routes.push(record);
     }
 
+    pub(crate) fn push_external_execution(
+        &mut self,
+        record: super::sections::external_execution::InstalledExternalExecutionBinding,
+    ) -> Result<()> {
+        if self
+            .external_execution
+            .iter()
+            .any(|prior| prior.id() == record.id())
+        {
+            bail!("duplicate external execution binding identity");
+        }
+        self.external_execution.push(record);
+        Ok(())
+    }
+
     pub(crate) fn push_command(&mut self, record: CommandRecord) {
         self.commands.push(record);
     }
@@ -164,6 +181,7 @@ impl NodeConfigSnapshotBuilder {
         .context("validate loaded command registry")?;
 
         Ok(NodeConfigSnapshot {
+            external_execution: self.external_execution,
             bundles: self.bundles,
             routes: self.routes,
             commands: self.commands,
@@ -719,6 +737,167 @@ fn check_bundle_collisions(records: &[BundleRecord]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_binding_admission_is_node_owned_and_rotation_preserves_capacity() {
+        use super::super::sections::external_execution::{ExternalExecutionSection, SECTION_NAME};
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles").is_dir())
+            .unwrap()
+            .to_path_buf();
+        let trust = TrustStore::load_from_dir(
+            &workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers"),
+        )
+        .unwrap();
+        let system = temp_system_with_command_registration_policy(&workspace);
+        let identity = crate::identity::NodeIdentity::load(
+            &system.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let dir = system.path().join(".ai/node").join(SECTION_NAME);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("primary.yaml");
+        let mut body = serde_json::json!({"kind":"node", "schema":1,
+            "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+            "backend":"qualified-backend", "account":"account-1", "credential_generation":"a".repeat(64),
+            "runtime_manifest_hash":"b".repeat(64), "runtime_selection_identity":"c".repeat(64),
+            "backend_artifact_hash":"d".repeat(64), "max_active":2, "timeout_seconds":300 });
+        let write = |body: &Value| {
+            fs::write(
+                &path,
+                crate::node_document::render_signed_item(SECTION_NAME, "primary", body, &identity)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        write(&body);
+        let loader = BootstrapLoader {
+            app_root: system.path(),
+            trust_store: &trust,
+        };
+        let load = || {
+            loader.load_full(
+                &NodeConfigTable::new(),
+                &[],
+                &command_policy([]),
+                &crate::node_policy::NodePolicyTable::new(),
+            )
+        };
+        let first = load().unwrap();
+        let binding = &first.external_execution[0];
+        assert_eq!(binding.id(), "primary");
+        assert!(binding.credential_access().is_ok());
+        let program =
+            ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+                requirement:
+                    ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+                        schema: 1,
+                        protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                        runtime_product_declaration_id: "runtime".into(),
+                    },
+                runtime_manifest_hash: "b".repeat(64),
+                runtime_witness_hash: "1".repeat(64),
+                qualification_attestation_hash: "2".repeat(64),
+                selection_identity_digest: "c".repeat(64),
+            };
+        binding.check_program(&program).unwrap();
+        for field in ["runtime", "selection", "protocol", "malformed"] {
+            let mut changed = program.clone();
+            match field {
+                "runtime" => changed.runtime_manifest_hash = "f".repeat(64),
+                "selection" => changed.selection_identity_digest = "f".repeat(64),
+                "protocol" => changed.requirement.protocol = "other".into(),
+                _ => changed.runtime_witness_hash = "not-a-hash".into(),
+            }
+            assert!(binding.check_program(&changed).is_err());
+        }
+        assert!(!format!("{binding:?}").contains(&"a".repeat(64)));
+        body["credential_generation"] = Value::String("e".repeat(64));
+        write(&body);
+        let second = load().unwrap();
+        assert_ne!(binding.digest(), second.external_execution[0].digest());
+        assert_eq!(
+            binding.capacity_owner(),
+            second.external_execution[0].capacity_owner()
+        );
+        let section = ExternalExecutionSection;
+        assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
+        let files = scan_yaml_files(&dir, false).unwrap();
+        let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
+        let record = section.parse(&verified.ctx, &verified.body).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
+        let source = NodeConfigSource::Node {
+            command_registration_caps: Vec::new(),
+        };
+        builder.admit(record, &verified, &source).unwrap();
+        assert!(
+            builder
+                .admit(
+                    section.parse(&verified.ctx, &verified.body).unwrap(),
+                    &verified,
+                    &source
+                )
+                .is_err()
+        );
+        fs::copy(&path, dir.join("primary.yml")).unwrap();
+        assert!(load().is_err());
+        fs::remove_file(dir.join("primary.yml")).unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        let bundle_section = bundle.path().join(".ai/node").join(SECTION_NAME);
+        fs::create_dir_all(&bundle_section).unwrap();
+        fs::copy(&path, bundle_section.join("primary.yaml")).unwrap();
+        let contributed = BundleRecord {
+            name: "test".into(),
+            path: bundle.path().into(),
+            source_file: path.clone(),
+        };
+        assert!(
+            loader
+                .load_full(
+                    &NodeConfigTable::new(),
+                    &[contributed],
+                    &command_policy([("test", Vec::new())]),
+                    &crate::node_policy::NodePolicyTable::new()
+                )
+                .is_err()
+        );
+        for (field, invalid) in [
+            ("max_active", 0),
+            ("max_active", 65),
+            ("timeout_seconds", 0),
+            ("timeout_seconds", 3601),
+        ] {
+            let original = body[field].clone();
+            body[field] = Value::from(invalid);
+            write(&body);
+            assert!(load().is_err());
+            body[field] = original;
+        }
+        for (active, timeout) in [(1, 1), (64, 3600)] {
+            body["max_active"] = Value::from(active);
+            body["timeout_seconds"] = Value::from(timeout);
+            write(&body);
+            assert_eq!(
+                load().unwrap().external_execution[0].capacity_owner(),
+                binding.capacity_owner()
+            );
+        }
+        for field in ["backend", "account"] {
+            let original = body[field].clone();
+            body[field] = Value::String("other".into());
+            write(&body);
+            assert_ne!(
+                load().unwrap().external_execution[0].capacity_owner(),
+                binding.capacity_owner()
+            );
+            body[field] = original;
+        }
+        body["secret"] = Value::String("must-not-be-accepted".into());
+        write(&body);
+        assert!(load().is_err());
+    }
 
     #[test]
     fn admission_retains_verified_bytes_after_source_replacement() {
