@@ -725,6 +725,20 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn exact_registered_channel_replays_after_bootstrap_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, _, _) = setup(&db);
+        db.register_external_execution_channel_at(&binding, binding.expires_at_ms + 1)
+            .unwrap();
+        assert_eq!(
+            db.external_execution_channel(&binding.placement_thread_id)
+                .unwrap(),
+            binding
+        );
+    }
     fn wire(
         binding: &ExecutionChannelBinding,
         key: &SigningKey,

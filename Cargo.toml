@@ -34,6 +34,7 @@ members = [
     "crates/tools/workload-client",
     "crates/tools/lillux-isolation-adapter",
     "crates/tools/external-candidate-launcher",
+    "crates/tools/external-candidate-supervisor",
     "crates/host-adapters/lillux-oci-hook",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",

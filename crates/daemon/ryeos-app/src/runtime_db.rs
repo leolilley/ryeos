@@ -2401,7 +2401,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 46 cuts channel acknowledgement payloads to exact peer digest plus
 // retained/claimed/applied/revoked application evidence. Epoch-45 unit
 // acknowledgements cannot authorize replay or application reconciliation.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 46;
+// Epoch 47 retains the exact signed controller HTTPS origin, route contract,
+// TLS-root bundle identity and response bounds in every placement generation.
+// Epoch-46 bindings did not authorize a controller transport.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 47;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

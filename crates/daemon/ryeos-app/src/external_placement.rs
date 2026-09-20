@@ -117,6 +117,8 @@ pub(crate) struct ExternalPlacementActivation {
     authority_generation: String,
     owner_public_key: String,
     bootstrap_capability: zeroize::Zeroizing<String>,
+    controller_transport:
+        ryeos_state::external_execution::transport::ExternalControllerTransportContract,
 }
 
 /// Non-secret result of occurrence/bootstrap authentication.  The raw
@@ -221,6 +223,11 @@ impl ExternalPlacementActivation {
     }
     pub(crate) fn bootstrap_capability(&self) -> &str {
         self.bootstrap_capability.as_str()
+    }
+    pub(crate) fn controller_transport(
+        &self,
+    ) -> &ryeos_state::external_execution::transport::ExternalControllerTransportContract {
+        &self.controller_transport
     }
 }
 
@@ -359,8 +366,13 @@ pub fn authenticate_external_channel_bootstrap(
         .contact_deadline_ms
         .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
         .context("external channel attachment deadline overflow")?;
+    let existing = state
+        .state_store
+        .optional_external_execution_channel(placement)?;
+    let exact_replay =
+        existing_external_channel_matches(existing.as_ref(), &allocation.reservation, occurrence)?;
     ensure!(
-        now < attach_deadline,
+        exact_replay || now < attach_deadline,
         "external channel bootstrap capability expired before attachment"
     );
     let access =
@@ -394,6 +406,27 @@ pub fn authenticate_external_channel_bootstrap(
         occurrence_id: occurrence_id.to_owned(),
         allocation_request_digest: allocation.reservation.request_digest,
     })
+}
+
+fn existing_external_channel_matches(
+    existing: Option<&ryeos_state::external_execution::ExecutionChannelBinding>,
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+) -> Result<bool> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    ensure!(
+        existing.placement_thread_id == reservation.placement_thread_id
+            && existing.allocation_request_digest == reservation.request_digest
+            && existing.occurrence_id == occurrence.occurrence_id
+            && existing.admitted_capsule_hash == reservation.admitted_capsule_hash
+            && existing.base_snapshot_hash == reservation.base_snapshot_hash
+            && existing.execution_binding_hash == reservation.binding_hash
+            && existing.owner_public_key == reservation.channel_owner_public_key,
+        "retained external channel contradicts its bootstrap authority"
+    );
+    Ok(true)
 }
 
 /// Authenticate an attached supervisor solely through its exact channel key.
@@ -1102,6 +1135,7 @@ impl ExternalPlacementContactPermit {
             bootstrap_capability: zeroize::Zeroizing::new(
                 self.channel_authority.bootstrap_capability().to_owned(),
             ),
+            controller_transport: self.contract.controller_transport.clone(),
         };
         let resolution = self.backend.allocate(
             &self.contract,
@@ -1687,6 +1721,55 @@ mod tests {
     }
 
     #[test]
+    fn expired_bootstrap_retry_requires_the_exact_registered_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, reservation, _) = lifecycle_fixture(&dir.path().join("runtime.sqlite3"));
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "external-one".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        let supervisor = lillux::crypto::SigningKey::from_bytes(&[63; 32]);
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        let binding = ryeos_state::external_execution::ExecutionChannelBinding {
+            schema: 1,
+            placement_thread_id: reservation.placement_thread_id.clone(),
+            allocation_request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+            base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+            execution_binding_hash: reservation.binding_hash.clone(),
+            supervisor_runtime_hash: "9".repeat(64),
+            channel_nonce: "8".repeat(64),
+            owner_public_key: reservation.channel_owner_public_key.clone(),
+            supervisor_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &supervisor.verifying_key(),
+            )
+            .unwrap(),
+            issued_at_ms: now,
+            execution_deadline_ms: now + 60_000,
+            expires_at_ms: now + 120_000,
+            max_frames: 64,
+            max_bytes: 1024,
+        };
+        assert!(
+            existing_external_channel_matches(Some(&binding), &reservation, &occurrence).unwrap()
+        );
+        assert!(!existing_external_channel_matches(None, &reservation, &occurrence).unwrap());
+        let mut substituted = binding;
+        substituted.owner_public_key = ryeos_state::external_execution::encode_channel_public_key(
+            &lillux::crypto::SigningKey::from_bytes(&[64; 32]).verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            existing_external_channel_matches(Some(&substituted), &reservation, &occurrence)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn ambiguous_provider_mutations_reconcile_without_duplicate_contact() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");
@@ -1702,6 +1785,7 @@ mod tests {
             bootstrap_capability: zeroize::Zeroizing::new(
                 authority.bootstrap_capability().to_owned(),
             ),
+            controller_transport: contract.controller_transport.clone(),
         };
 
         assert!(matches!(

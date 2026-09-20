@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
+use ryeos_state::external_execution::transport::ExternalControllerTransportContract;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -33,6 +34,7 @@ struct BindingDocument {
     network_policy: String,
     storage_policy: String,
     cleanup_proof: String,
+    controller_transport: ExternalControllerTransportContract,
     max_active: u16,
     timeout_seconds: u32,
     contact_timeout_seconds: u32,
@@ -46,7 +48,7 @@ struct BindingDocument {
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 2,
+            self.kind == "node" && self.schema == 3,
             "unsupported external placement binding schema"
         );
         ensure!(
@@ -106,6 +108,7 @@ impl BindingDocument {
                 && (self.max_export_bytes..=MAX_BYTES).contains(&self.max_transfer_bytes),
             "placement binding storage or transfer budgets exceed bounds"
         );
+        self.controller_transport.validate()?;
         Ok(())
     }
 
@@ -120,6 +123,7 @@ impl BindingDocument {
             network_policy: self.network_policy.clone(),
             storage_policy: self.storage_policy.clone(),
             cleanup_proof: self.cleanup_proof.clone(),
+            controller_transport: self.controller_transport.clone(),
             max_active: self.max_active,
             timeout_seconds: self.timeout_seconds,
             contact_timeout_seconds: self.contact_timeout_seconds,
@@ -145,6 +149,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) network_policy: String,
     pub(crate) storage_policy: String,
     pub(crate) cleanup_proof: String,
+    pub(crate) controller_transport: ExternalControllerTransportContract,
     pub(crate) max_active: u16,
     pub(crate) timeout_seconds: u32,
     pub(crate) contact_timeout_seconds: u32,
@@ -314,7 +319,7 @@ impl RetainedExternalExecutionBinding {
     pub(crate) fn test_fixture() -> Self {
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 2,
+            schema: 3,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             backend: "fixture".into(),
             account: "account".into(),
@@ -328,6 +333,17 @@ impl RetainedExternalExecutionBinding {
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
             storage_policy: "ephemeral_private_candidate_v1".into(),
             cleanup_proof: "provider_terminal_occurrence_v1".into(),
+            controller_transport: ExternalControllerTransportContract {
+                schema: 1,
+                https_origin: "https://controller.example:7443".into(),
+                route_contract:
+                    ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT
+                        .into(),
+                tls_root_bundle_digest: "e".repeat(64),
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 10_000,
+                maximum_response_bytes: 1024 * 1024,
+            },
             max_active: 1,
             timeout_seconds: 60,
             contact_timeout_seconds: 30,
