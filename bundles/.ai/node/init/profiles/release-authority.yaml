@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:01Z:4c383f8da831bc76cb7067cba2a1475b89b9411a0d5e5c80f818a927334472c7:7w1j1FFxt8MpT6ne/GFqcxd96JyAOd4E9qcZ8/+UZ6E0CY82fkwL31iTiVYLMjG+ea5W+D6nhZyUFNch3noTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:37Z:2b8b97fa041fde3251556161cddcb8400e5b0d504f1fc6f7017beb328f317e2a:SEkirPeqinU2j41w9bWhXbIwynHdpfcIRToptGE2kLHn++J2TI6w/TvxCe9PH42Rj/cBAF76n29C1kk9ahwVCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -98,14 +98,6 @@ policies:
         - ryeos.execute.config.bundle-release/native-build-products
         - ryeos.execute.config.bundle-release/signed-capture-products
         - ryeos.execute.config.bundle-release/substrate-build-products
-        - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
-        - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
-        - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
-        - ryeos.execute.tool.ryeos/bundle-release/native-build
-        - ryeos.execute.tool.ryeos/bundle-release/native-qualify
-        - ryeos.execute.tool.ryeos/bundle-release/signed-capture
-        - ryeos.execute.tool.ryeos/bundle-release/substrate-build
-        - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
         - ryeos.execute.service.bundle-release/authority-calibrate
         - ryeos.execute.service.bundle-release/authority-measure
         - ryeos.execute.service.bundle-release/catalog-remote-publish
@@ -129,6 +121,14 @@ policies:
         - ryeos.execute.service.bundle-release/substrate-qualify
         - ryeos.execute.service.bundle-release/substrate-release-authorization
         - ryeos.execute.service.bundle-release/substrate-release-finalize
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
+        - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/native-build
+        - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/signed-capture
+        - ryeos.execute.tool.ryeos/bundle-release/substrate-build
+        - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
       central-auth: []
       codex:
         - ryeos.register.command.root.codex

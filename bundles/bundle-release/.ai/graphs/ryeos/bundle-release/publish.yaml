@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:10Z:d16141377bd41d43f278c3bff2db9f68c94ecd0e1e360ddf8512e26af4e8e4cc:+FyWjBQubvnQv9s6iojwObcnvgrS7cmRtBh+D8yRh9o3C7QAVx9qf4+TsIHBPi5c3YWPyn/Uiagfkztya9PfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:39Z:7da6a5eda6d9e492eb090544fcc1af29dccfb46fe2fd6a7a0bbdc970d58e1a8a:+ydhvQoG8AfDKZSOMu4mUR8/tTyPXdgeMgiPeWjJCQlHDWfGkOsjcpYn/BDnoeHPS8dyU7wDazkINhczanOCAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -8,19 +8,19 @@ requires:
     declared:
       - ryeos.execute.config.bundle-release/native-build-products
       - ryeos.execute.config.bundle-release/signed-capture-products
+      - ryeos.execute.service.bundle-release/catalog-remote-publish
+      - ryeos.execute.service.bundle-release/catalog-request-publication
+      - ryeos.execute.service.bundle-release/generation-build
+      - ryeos.execute.service.bundle-release/generation-capture
+      - ryeos.execute.service.bundle-release/generation-finalize
+      - ryeos.execute.service.bundle-release/generation-qualify
+      - ryeos.execute.service.bundle-release/input-inspect
+      - ryeos.execute.service.bundle-release/request-authorization
+      - ryeos.execute.service.bundle-release/request-tree-signing
+      - ryeos.execute.service.bundle-release/set-compose
       - ryeos.execute.tool.ryeos/bundle-release/native-build
       - ryeos.execute.tool.ryeos/bundle-release/native-qualify
       - ryeos.execute.tool.ryeos/bundle-release/signed-capture
-      - ryeos.execute.service.bundle-release/input-inspect
-      - ryeos.execute.service.bundle-release/generation-build
-      - ryeos.execute.service.bundle-release/request-tree-signing
-      - ryeos.execute.service.bundle-release/generation-capture
-      - ryeos.execute.service.bundle-release/generation-qualify
-      - ryeos.execute.service.bundle-release/generation-finalize
-      - ryeos.execute.service.bundle-release/request-authorization
-      - ryeos.execute.service.bundle-release/set-compose
-      - ryeos.execute.service.bundle-release/catalog-request-publication
-      - ryeos.execute.service.bundle-release/catalog-remote-publish
 config:
   start: inspect
   max_steps: 12

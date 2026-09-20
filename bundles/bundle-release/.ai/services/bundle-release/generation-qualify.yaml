@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:11Z:37129f60294d2ac824d63bd52ca791404893051ca572e36279ab16ad84901fbe:mrodvqBVkpi2GcAaMBdGJ5GyslinN0YzWSLa9u3+QX8CRaLnVnHKOeBbn0wslejVEDdHvy/0ZspzmdX36BAPBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:40Z:f0d0c6539d4d4ab4afa97e2c70980ede0ab2cbf67debb3668a90f591b46068c8:M32T3dSh3PFZ+FNsCPQRWCjhZD3W/tpoasQqWth2jOsFd2GupoTnHDEFJ61u6mpi2zQ6FLjsku9QEgF7YFF/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-qualify
 version: "1.0.0"
@@ -6,8 +6,8 @@ description: Qualify one exact captured signed tree and emit only evidence for c
 endpoint: bundle_release.generation_qualify
 availability: daemon_only
 required_caps:
-  - ryeos.execute.tool.ryeos/bundle-release/native-qualify
   - ryeos.execute.service.bundle-release/generation-qualify
+  - ryeos.execute.tool.ryeos/bundle-release/native-qualify
 schema:
   release_input: object
   captured_tree_manifest_hash: string

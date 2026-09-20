@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:11Z:be9b8d6389ba7e211a537da362ab3649e5f7466fefe3a1e3fa100487ed37fa90:3YhX8L/qAoTfGpcq3dopSL5etDgCCTzcGPDIunPOBxNNA5+gnUPpoNN/PAfYtZZuVwucUUBqDntm7T4psmXGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:40Z:ee195d4518731093f113d04d70d72fc89f304cd655f4208b45f949c7d1685654:nD7dvlVCOtea/cFbkgsaId8diIeiAtqWoVzy+kLPP5sUQc7QgHzPt9l7bhEB7oyzML68TiYt6e5EdqMcM4HfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-build
 version: "1.0.0"
@@ -7,8 +7,8 @@ endpoint: bundle_release.generation_build
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/native-build-products
-  - ryeos.execute.tool.ryeos/bundle-release/native-build
   - ryeos.execute.service.bundle-release/generation-build
+  - ryeos.execute.tool.ryeos/bundle-release/native-build
 schema:
   release_input: object
   catalog_namespace: string

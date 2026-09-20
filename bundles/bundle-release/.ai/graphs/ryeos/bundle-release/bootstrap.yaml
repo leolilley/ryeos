@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:10Z:561e429faa095d2b346bc8b58acf5589477802774dacc7c34f7f73061a10a72a:/rRm+d/SnM4hemaKqniMlJ+FwV29dOTszWhz7SbDVktViLNY8E5TosTrES/vXR417GajihXCApjNsT8qKMzJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:39Z:4d1d8469abba8426660a4dbad3674175bbd4b36d32a34c856695ff48e0550cb2:5hwENPmSNeNEZaEYlRiI87kKvDH5U69gpUZ1Y3709xT3Af9p8srDgkMhz9sO6JZkWtUTzcVU+h42zO6DHbt4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
@@ -9,25 +9,25 @@ requires:
       - ryeos.execute.config.bundle-release/core-seed-build-products
       - ryeos.execute.config.bundle-release/core-seed-capture-products
       - ryeos.execute.config.bundle-release/substrate-build-products
+      - ryeos.execute.service.bundle-release/catalog-remote-publish
+      - ryeos.execute.service.bundle-release/catalog-request-publication
+      - ryeos.execute.service.bundle-release/core-seed-build
+      - ryeos.execute.service.bundle-release/core-seed-capture
+      - ryeos.execute.service.bundle-release/core-seed-inspect
+      - ryeos.execute.service.bundle-release/core-seed-qualify
+      - ryeos.execute.service.bundle-release/generation-finalize
+      - ryeos.execute.service.bundle-release/genesis-set-compose
+      - ryeos.execute.service.bundle-release/request-authorization
+      - ryeos.execute.service.bundle-release/request-tree-signing
+      - ryeos.execute.service.bundle-release/substrate-build
+      - ryeos.execute.service.bundle-release/substrate-qualify
+      - ryeos.execute.service.bundle-release/substrate-release-authorization
+      - ryeos.execute.service.bundle-release/substrate-release-finalize
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
       - ryeos.execute.tool.ryeos/bundle-release/substrate-build
       - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
-      - ryeos.execute.service.bundle-release/core-seed-inspect
-      - ryeos.execute.service.bundle-release/core-seed-build
-      - ryeos.execute.service.bundle-release/request-tree-signing
-      - ryeos.execute.service.bundle-release/core-seed-capture
-      - ryeos.execute.service.bundle-release/core-seed-qualify
-      - ryeos.execute.service.bundle-release/generation-finalize
-      - ryeos.execute.service.bundle-release/request-authorization
-      - ryeos.execute.service.bundle-release/substrate-build
-      - ryeos.execute.service.bundle-release/substrate-qualify
-      - ryeos.execute.service.bundle-release/substrate-release-finalize
-      - ryeos.execute.service.bundle-release/substrate-release-authorization
-      - ryeos.execute.service.bundle-release/genesis-set-compose
-      - ryeos.execute.service.bundle-release/catalog-request-publication
-      - ryeos.execute.service.bundle-release/catalog-remote-publish
 config:
   start: inspect_core
   max_steps: 16

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T14:52:11Z:d8ba39290c849b3e75a82f7092b4cc5fc00c9719bb42d04b445a1162094e3644:E+F5kQQ5RTwtWymRoV/3O0Y3sFAm0+wAU7lVZ9qCoKOF3t2LmzKeHkKqbvAcqhaiVwvcYoY5aM4mDyC2qKkpBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-20T15:22:40Z:b24c292b247a6afda801330a812eb509d1f54adfb7da0f74ffeb8fdd76b6a14c:3ycNrdiHn4tvME7t9xvmp5pBApW7PWlzFZLQLvcvokGO/X+cfS1A5EI04gZUNVjecqyNrtirHQj7cm+Id2KDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-capture
 version: "1.0.0"
@@ -7,8 +7,8 @@ endpoint: bundle_release.generation_capture
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/signed-capture-products
-  - ryeos.execute.tool.ryeos/bundle-release/signed-capture
   - ryeos.execute.service.bundle-release/generation-capture
+  - ryeos.execute.tool.ryeos/bundle-release/signed-capture
 schema:
   release_input: object
   catalog_namespace: string
