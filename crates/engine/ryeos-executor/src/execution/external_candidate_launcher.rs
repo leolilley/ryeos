@@ -60,12 +60,15 @@ impl ExternalCandidateLauncherSpec {
             "external launcher executable is invalid"
         );
         ensure!(
-            !self.argv0.is_empty() && self.argv0.len() <= 4096,
+            !self.argv0.is_empty() && self.argv0.len() <= 4096 && !self.argv0.contains('\0'),
             "external launcher argv0 is invalid"
         );
         ensure!(
             self.arguments.len() <= 256
-                && self.arguments.iter().all(|value| value.len() <= 64 * 1024),
+                && self
+                    .arguments
+                    .iter()
+                    .all(|value| value.len() <= 64 * 1024 && !value.contains('\0')),
             "external launcher arguments exceed bounds"
         );
         ensure!(
@@ -109,6 +112,11 @@ impl ExternalCandidateLauncherSpec {
                 "external runtime mount destination is duplicated"
             );
         }
+        ensure!(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.len()
+                <= MAX_LAUNCHER_BOOTSTRAP_BYTES,
+            "external launcher bootstrap exceeds its encoded byte bound"
+        );
         Ok(())
     }
 
@@ -129,7 +137,10 @@ fn require_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     );
     ensure!(
         path.components()
-            .all(|component| { matches!(component, Component::RootDir | Component::Normal(_)) }),
+            .all(|component| { matches!(component, Component::RootDir | Component::Normal(_)) })
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
+            && path.as_os_str().as_encoded_bytes().len() <= 4096
+            && !path.as_os_str().as_encoded_bytes().contains(&0),
         "external launcher {label} is not normalized"
     );
     Ok(())
@@ -419,6 +430,91 @@ mod tests {
                 .to_string()
                 .contains("output bounds")
         );
+    }
+
+    #[test]
+    fn launcher_spec_refuses_path_aliases_and_unrepresentable_process_strings() {
+        for path in [
+            "/runtime//bin/codex",
+            "/runtime/./bin/codex",
+            "/runtime/bin/codex/",
+            "/runtime/bin/co\0dex",
+        ] {
+            let mut changed = spec();
+            changed.executable = path.into();
+            assert!(changed.canonical_bytes().is_err(), "{path:?}");
+        }
+        for path in [
+            "/workspace//candidate",
+            "/workspace/./candidate",
+            "/workspace/",
+            "/workspace/a\0b",
+        ] {
+            let mut changed = spec();
+            changed.cwd = path.into();
+            assert!(changed.canonical_bytes().is_err(), "{path:?}");
+        }
+        for path in [
+            "/runtime/",
+            "/runtime//tools",
+            "/runtime/./tools",
+            "/runtime/a\0b",
+        ] {
+            let mut changed = spec();
+            changed.runtime_mounts[0].destination = path.into();
+            assert!(changed.canonical_bytes().is_err(), "{path:?}");
+        }
+        let mut changed = spec();
+        changed.argv0 = "co\0dex".into();
+        assert!(changed.canonical_bytes().is_err());
+        let mut changed = spec();
+        changed.arguments.push("exec\0server".into());
+        assert!(changed.canonical_bytes().is_err());
+    }
+
+    #[test]
+    fn launcher_sender_enforces_the_receivers_encoded_bootstrap_ceiling() {
+        let mut boundary = spec();
+        boundary.arguments = vec![String::new(); 4];
+        let mut remaining =
+            MAX_LAUNCHER_BOOTSTRAP_BYTES - boundary.canonical_bytes().unwrap().len();
+        for argument in &mut boundary.arguments {
+            let bytes = remaining.min(64 * 1024);
+            *argument = "a".repeat(bytes);
+            remaining -= bytes;
+        }
+        assert_eq!(remaining, 0);
+        let encoded = boundary.canonical_bytes().unwrap();
+        assert_eq!(encoded.len(), MAX_LAUNCHER_BOOTSTRAP_BYTES);
+        serde_json::from_slice::<ExternalCandidateLauncherSpec>(&encoded)
+            .unwrap()
+            .validate()
+            .unwrap();
+        boundary.arguments.last_mut().unwrap().push('b');
+        assert!(boundary.canonical_bytes().is_err());
+
+        // Every argument fits its individual limit, but JSON escaping makes
+        // this request exceed the descriptor reader's aggregate ceiling.
+        let mut changed = spec();
+        changed.arguments = vec!["\n".repeat(64 * 1024); 2];
+        assert!(
+            changed
+                .arguments
+                .iter()
+                .all(|value| value.len() <= 64 * 1024)
+        );
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("encoded byte bound")
+        );
+        assert!(changed.canonical_bytes().is_err());
+        assert!(changed.digest().is_err());
+
+        let valid = spec();
+        assert!(valid.canonical_bytes().unwrap().len() <= MAX_LAUNCHER_BOOTSTRAP_BYTES);
     }
 
     #[test]
