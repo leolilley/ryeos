@@ -34,7 +34,7 @@ impl<'a> DeadlineDuplexStream<'a> {
 }
 
 #[cfg(unix)]
-pub(super) fn wait_ready(fd: RawFd, events: i16, deadline: MonotonicDeadline) -> io::Result<()> {
+pub(crate) fn wait_ready(fd: RawFd, events: i16, deadline: MonotonicDeadline) -> io::Result<()> {
     loop {
         let remaining = deadline.remaining();
         if remaining.is_zero() {

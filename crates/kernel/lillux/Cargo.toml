@@ -33,6 +33,11 @@ zeroize = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
+[[test]]
+name = "invocation_startup"
+path = "tests/invocation_startup.rs"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

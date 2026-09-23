@@ -13,7 +13,7 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 
 use clap::Subcommand;
 
-mod duplex_deadline;
+pub(crate) mod duplex_deadline;
 pub use duplex_deadline::DeadlineDuplexStream;
 
 #[cfg(target_os = "linux")]

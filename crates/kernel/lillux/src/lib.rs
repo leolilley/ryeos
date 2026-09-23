@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod exec;
 pub mod host_service;
 pub mod identity;
+pub mod invocation;
 pub mod json;
 pub mod local_ipc;
 pub mod locks;
