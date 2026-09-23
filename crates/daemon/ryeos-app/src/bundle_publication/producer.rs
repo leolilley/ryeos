@@ -75,6 +75,7 @@ request!(GenerationCaptureRequest {
 });
 request!(GenerationQualifyRequest {
     release_input: Value,
+    catalog_namespace: String,
     captured_tree_manifest_hash: String,
     manifest_item_hash: String,
     signed_product_witness: String,
@@ -213,6 +214,7 @@ pub enum BundleReleaseOperation {
     InputInspect(InputInspectRequest),
     AuthorizeBuildRecipe(super::recipe::AuthorizeBuildRecipeRequest),
     AuthorizeCaptureRecipe(super::recipe::AuthorizeCaptureRecipeRequest),
+    AuthorizeSubstrateBuildRecipe(super::recipe::AuthorizeSubstrateBuildRecipeRequest),
     GenerationBuild(GenerationBuildRequest),
     RequestTreeSigning(RequestTreeSigningRequest),
     GenerationCapture(GenerationCaptureRequest),
@@ -238,6 +240,7 @@ impl BundleReleaseOperation {
             Self::InputInspect(_) => "input_inspect",
             Self::AuthorizeBuildRecipe(_) => "authorize_build_recipe",
             Self::AuthorizeCaptureRecipe(_) => "authorize_capture_recipe",
+            Self::AuthorizeSubstrateBuildRecipe(_) => "authorize_substrate_build_recipe",
             Self::GenerationBuild(_) => "generation_build",
             Self::RequestTreeSigning(_) => "request_tree_signing",
             Self::GenerationCapture(_) => "generation_capture",
@@ -275,6 +278,7 @@ impl BundleReleaseOperation {
             }
             Self::AuthorizeBuildRecipe(r) => r.validate()?,
             Self::AuthorizeCaptureRecipe(r) => r.validate()?,
+            Self::AuthorizeSubstrateBuildRecipe(r) => r.validate()?,
             Self::GenerationBuild(r) => {
                 bounded_value(&r.release_input)?;
                 name(&r.catalog_namespace)?;
@@ -455,6 +459,7 @@ fn operation_value(operation: &BundleReleaseOperation) -> anyhow::Result<Value> 
         BundleReleaseOperation::InputInspect(v) => serde_json::to_value(v)?,
         BundleReleaseOperation::AuthorizeBuildRecipe(v) => serde_json::to_value(v)?,
         BundleReleaseOperation::AuthorizeCaptureRecipe(v) => serde_json::to_value(v)?,
+        BundleReleaseOperation::AuthorizeSubstrateBuildRecipe(v) => serde_json::to_value(v)?,
         BundleReleaseOperation::GenerationBuild(v) => serde_json::to_value(v)?,
         BundleReleaseOperation::RequestTreeSigning(v) => serde_json::to_value(v)?,
         BundleReleaseOperation::GenerationCapture(v) => serde_json::to_value(v)?,
@@ -580,6 +585,10 @@ pub trait BundlePublisherAuthority: Send + Sync + 'static {
         &'a self,
         request: super::recipe::AuthorizeCaptureRecipeRequest,
     ) -> ProducerFuture<'a>;
+    fn authorize_substrate_build_recipe<'a>(
+        &'a self,
+        request: super::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    ) -> ProducerFuture<'a>;
     fn sign_tree<'a>(&'a self, request: RequestTreeSigningRequest) -> ProducerFuture<'a>;
     fn authorize_generation<'a>(
         &'a self,
@@ -682,6 +691,19 @@ impl AuthenticatedPublisherClient {
 }
 
 impl BundlePublisherAuthority for AuthenticatedPublisherClient {
+    fn authorize_substrate_build_recipe<'a>(
+        &'a self,
+        request: super::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    ) -> ProducerFuture<'a> {
+        Box::pin(async move {
+            request.validate()?;
+            let result = self
+                .post("v1/substrate-build/authorize-recipe", &request)
+                .await?;
+            request.validate_response(&result, &self.expected_publisher_fingerprint)?;
+            Ok(result)
+        })
+    }
     fn authorize_core_seed_recipe<'a>(
         &'a self,
         request: super::core_seed::CoreSeedRecipeRequest,
@@ -948,6 +970,16 @@ impl LocalConstrainedPublisherAuthority {
 }
 
 impl BundlePublisherAuthority for LocalConstrainedPublisherAuthority {
+    fn authorize_substrate_build_recipe<'a>(
+        &'a self,
+        request: super::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    ) -> ProducerFuture<'a> {
+        Box::pin(async move {
+            request.validate()?;
+            self.tree_publisher
+                .authorize_substrate_build_recipe(&request)
+        })
+    }
     fn authorize_core_seed_recipe<'a>(
         &'a self,
         request: super::core_seed::CoreSeedRecipeRequest,
@@ -1746,6 +1778,13 @@ impl BundleReleaseAuthorityRouter {
                 Some(authority) => authority.authorize_capture_recipe(request),
                 None => Self::unavailable("authorize_capture_recipe", "constrained publisher"),
             },
+            BundleReleaseOperation::AuthorizeSubstrateBuildRecipe(request) => match &self.publisher
+            {
+                Some(authority) => authority.authorize_substrate_build_recipe(request),
+                None => {
+                    Self::unavailable("authorize_substrate_build_recipe", "constrained publisher")
+                }
+            },
             BundleReleaseOperation::RequestTreeSigning(request) => match &self.publisher {
                 Some(authority) => authority.sign_tree(request),
                 None => Self::unavailable("request_tree_signing", "constrained publisher"),
@@ -1875,6 +1914,9 @@ impl PersistentBundleReleaseAdapter {
             BundleReleaseOperation::GenesisSetCompose(r) => Some(r.catalog_namespace.as_str()),
             BundleReleaseOperation::AuthorizeBuildRecipe(r) => Some(r.catalog_namespace.as_str()),
             BundleReleaseOperation::AuthorizeCaptureRecipe(r) => Some(r.catalog_namespace.as_str()),
+            BundleReleaseOperation::AuthorizeSubstrateBuildRecipe(r) => {
+                Some(r.catalog_namespace.as_str())
+            }
             BundleReleaseOperation::RequestAuthorization(r) => Some(r.catalog_namespace.as_str()),
             BundleReleaseOperation::CatalogRequestPublication(r) => {
                 Some(r.catalog_namespace.as_str())

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:40Z:ee195d4518731093f113d04d70d72fc89f304cd655f4208b45f949c7d1685654:nD7dvlVCOtea/cFbkgsaId8diIeiAtqWoVzy+kLPP5sUQc7QgHzPt9l7bhEB7oyzML68TiYt6e5EdqMcM4HfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:20:49Z:ae69b567190cfc87b4b3a43115ceb20bfde8975a5435b0240fc529cadbaeb90e:Rp0JnaU1Hhx6/erJ5sRO/gZ9t+9g64PBIzOS9QkB9RWpWqbaeXqv6beT9wfHWV68XPn4a1AqvfSeogSJ8mw6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-build
 version: "1.0.0"
@@ -6,9 +6,13 @@ description: Build exactly the payloads selected by a verified release-input pla
 endpoint: bundle_release.generation_build
 availability: daemon_only
 required_caps:
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
   - ryeos.execute.config.bundle-release/native-build-products
+  - ryeos.execute.config.bundle-release/portable-build-products
   - ryeos.execute.service.bundle-release/generation-build
   - ryeos.execute.tool.ryeos/bundle-release/native-build
+  - ryeos.execute.tool.ryeos/bundle-release/portable-build
 schema:
   release_input: object
   catalog_namespace: string

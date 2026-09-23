@@ -1,0 +1,20 @@
+# ryeos:signed:2026-09-21T01:02:03Z:d41d9f1eaf4cbc8ebfdf54e4245fb463e9cc36a218bb26493521c20d50691015:88aOPVKk+Ej2PJaY+O/WnL2EucLIBkeYZOpVHWCbbfYj645iTTZwte4OZjbL+HNwXRl+WjoRoCB83qoLkTPvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+schema: ryeos.external_content_activation.v3
+consumer_ref: tool:ryeos/environments/qualification/development-platform
+sources:
+  - id: producer-python-archive
+    url: https://github.com/leolilley/ryeos/releases/download/local-inference-qwen3-0.6b-v1/ryeos-local-inference-qwen3-0.6b-runtime-v1.tar.gz
+    sha256: 7d6239902fb584ef27aee8c97f5e9a0e66409750611f74d7e16235ddd4278eef
+    maximum_compressed_bytes: 24389591
+    maximum_expanded_bytes: 72448000
+    maximum_entries: 4481
+    archive_format: tar_gzip
+components:
+  - id: producer-python
+    storage: content
+    shape:
+      kind: whole_archive_tree
+      source: producer-python-archive
+      prefix: ryeos-local-inference-qwen3-0.6b-runtime-v1
+      bounds: {maximum_entries: 4480, maximum_depth: 11, maximum_file_bytes: 22166488, maximum_total_bytes: 68732630}

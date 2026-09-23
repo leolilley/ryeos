@@ -300,6 +300,17 @@ enum Cmd {
         output: Option<PathBuf>,
     },
 
+    /// Pin one explicit publisher/project-author public trust document.
+    TrustPin {
+        /// App root whose operator trust store will receive the public key.
+        #[arg(long)]
+        app_root: PathBuf,
+
+        /// Publisher trust document containing public_key, fingerprint, and owner.
+        #[arg(long = "from")]
+        trust_file: PathBuf,
+    },
+
     /// Author (create or upsert) a signed project item through the daemon
     /// `runtime.author_item` callback.
     ///
@@ -625,6 +636,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             output,
             cli.stdin_json,
         ),
+        Cmd::TrustPin {
+            app_root,
+            trust_file,
+        } => {
+            let report = ryeos_core_tools::actions::trust::run_pin_from(
+                &ryeos_core_tools::actions::trust::PinFromOptions {
+                    app_root,
+                    trust_file,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Cmd::AuthorItem {
             item_ref,
             content,

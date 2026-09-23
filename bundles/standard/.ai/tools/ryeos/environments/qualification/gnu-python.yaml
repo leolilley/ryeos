@@ -1,14 +1,20 @@
-# ryeos:signed:2026-09-18T02:33:39Z:a85ba705fbfd7b877b123592f8da4e676d737bb125fb563db989ba14dfbb6553:mfIEvHKYfOXsfVGfXk+8dQzmaNnvhgUG1SYsqmES29zOqG72Ne+e97cFffbetQ/s9cBVYD0EqFXPyL8drnZjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T07:36:07Z:7f05a4d29832125668d74e165e0200c0aa579c7e6d773e0aa24e176baa472ef0:ZALQfa/gS51p5NvG2I/Q1adWta+ZVl/LCaQW5iL7lEQIzDNMbFAXF6r6hSV4oi1+lQ70ta4JJtbb6CsX9Tt3AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/environments/qualification
 name: gnu-python
 version: "1.0.0"
-description: Execute and qualify the exact selected GNU CPython runtime
+description: Independently qualify the exact selected GNU CPython runtime
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-external_content: []
+external_content:
+  - id: producer-python
+    kind: tree
+    mode: pinned
+    digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf
+    mount_root: execution_runtime
+    mount: producer-python
 external_product_slots:
   - id: subject
     relationship_ref: config:development/ryeos/gnu-python-products
@@ -19,11 +25,15 @@ external_product_slots:
 env_config:
   interpreter:
     type: realization_member
-    realization_id: subject
-    relative_path: python/bin/python3.14
+    realization_id: producer-python
+    # The bootstrap Python is a dynamically linked musl artifact. Execute it
+    # through its admitted loader rather than depending on an ambient
+    # /lib/ld-musl-x86_64.so.1 inside the isolated mount namespace.
+    relative_path: lib/ld-musl-x86_64.so.1
 config:
   command: "${interpreter}"
   args:
+    - /ryeos/realizations/producer-python/python/bin/python3.14
     - -I
     - -S
     - -B
@@ -31,15 +41,89 @@ config:
     - utf8
     - -c
     - literal: |
+        import json, os, re, subprocess, sys
+
+        producer_manifest = "800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf"
+        sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
+        if not isinstance(sealed, list) or len(sealed) != 2:
+            raise SystemExit("qualification requires one verifier runtime and one subject")
+        keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
+        if any(not isinstance(item, dict) or set(item) != keys for item in sealed):
+            raise SystemExit("qualification realization has an incomplete identity")
+        by_id = {item.get("id"): item for item in sealed if isinstance(item, dict)}
+        if set(by_id) != {"producer-python", "subject"}:
+            raise SystemExit("qualification admitted an unexpected realization set")
+        producer, subject = by_id["producer-python"], by_id["subject"]
+        if (producer["kind"] != "tree" or producer["mode"] != "pinned" or
+                producer["mount_root"] != "execution_runtime" or
+                producer["manifest_hash"] != producer_manifest or
+                producer["mount"] != "producer-python"):
+            raise SystemExit("qualification bootstrap Python changed")
+        if (subject["kind"] != "tree" or subject["mode"] != "pinned" or
+                subject["mount_root"] != "execution_runtime" or
+                subject["mount"] != "python-gnu"):
+            raise SystemExit("qualification subject mount changed")
+        if subject["manifest_hash"] == producer_manifest:
+            raise SystemExit("GNU Python may not qualify itself")
+        subject_hash = subject["manifest_hash"]
+        if not isinstance(subject_hash, str) or re.fullmatch(r"[0-9a-f]{64}", subject_hash) is None:
+            raise SystemExit("GNU Python subject has an invalid identity")
+
+        root = "/ryeos/realizations/python-gnu/python"
+        command = [
+            root + "/lib/ld-linux-x86-64.so.2",
+            "--library-path", root + "/lib",
+            root + "/bin/python3.14",
+            "-I", "-S", "-B", "-X", "utf8", "-c", sys.argv[1],
+        ]
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key in {"RYE_THREAD_ID", "RYEOS_EXTERNAL_REALIZATIONS"}
+        }
+        environment.update({
+            "LANG": "C", "LC_ALL": "C", "PATH": "",
+            "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
+        })
+        completed = subprocess.run(
+            command, input=b"", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=environment, timeout=20, check=False)
+        if len(completed.stdout) > 262144:
+            raise SystemExit("GNU Python probe output exceeds its bound")
+        if completed.returncode != 0:
+            raise SystemExit("GNU Python subject probe failed")
+        try:
+            result = json.loads(completed.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit("GNU Python subject returned invalid evidence") from error
+        if (not isinstance(result, dict) or
+                result.get("schema") != "ryeos.product_qualification_result.v1" or
+                result.get("subject_manifest_hash") != subject_hash or
+                result.get("claims") != [
+                    "gnu_python_extension_startup_providers_v1",
+                    "gnu_python_zlib_1_3_2",
+                ]):
+            raise SystemExit("GNU Python subject evidence is not bound to the selection")
+        evidence = result.get("probe_evidence")
+        if (not isinstance(evidence, dict) or
+                evidence.get("schema") != "ryeos.gnu_python_runtime_probe.v2" or
+                evidence.get("executable") != root + "/bin/python3.14" or
+                evidence.get("network_contacted") is not False):
+            raise SystemExit("GNU Python subject evidence is incomplete")
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    - literal: |
         import _ctypes, ctypes, hashlib, json, os, re, stat, sys, sysconfig, zlib
 
         root = "/ryeos/realizations/python-gnu"
         runtime = root + "/python"
         sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
         keys = {"id", "kind", "mode", "manifest_hash", "entry_count", "total_bytes", "mount_root", "mount"}
-        if not isinstance(sealed, list) or len(sealed) != 1:
+        if not isinstance(sealed, list) or len(sealed) != 2:
+            raise SystemExit("qualification requires one verifier runtime and one subject")
+        subjects = [item for item in sealed if isinstance(item, dict) and item.get("id") == "subject"]
+        if len(subjects) != 1:
             raise SystemExit("qualification requires exactly one sealed subject")
-        subject = sealed[0]
+        subject = subjects[0]
         if not isinstance(subject, dict) or set(subject) != keys:
             raise SystemExit("sealed subject has an incomplete identity")
         if (subject["id"] != "subject" or subject["kind"] != "tree" or

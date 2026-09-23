@@ -1,10 +1,16 @@
-# ryeos:signed:2026-09-20T12:43:58Z:7b38657a6986322192e68c087df5899b8f189d80ba963d108d5dc9327569c5da:wI5hm7rDkw4pXxXWowMD27HbyDYLWpUeKgFbSVSaRbFTh3DINYD8AMNnUPajn8ZArHgpJoWxTV40AOkpmoQNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:6c08992e405e76e7027327494e6ef3d2df7a63fccb1056d3aadc9caab7eaaeae:WMATbv4SyB6RuZ97EJ8Wq44e8WMmxQJxrVYIQ1p5+Ve7YaCCrQhj5mhprtY3SRp4aKLAuO943VJBlXtZEcoeBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build one exact non-core bundle selected by the ownership contract."""
-import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile
+import hashlib, importlib.util, json, os, pathlib, re, resource, shutil, stat, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 
 def fail(message): raise ValueError(message)
+
+# This helper is part of the authenticated Tool source closure, not project code.
+elf_spec = importlib.util.spec_from_file_location(
+    "release_elf", pathlib.Path(__file__).with_name("release-elf.py"))
+release_elf = importlib.util.module_from_spec(elf_spec)
+elf_spec.loader.exec_module(release_elf)
 request = json.load(sys.stdin)
 if set(request) != {"release_input"}: fail("closed build request required")
 value = request["release_input"]
@@ -44,7 +50,10 @@ for payload in expected:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", payload[field]): fail(f"invalid owned {field}")
 workspace = pathlib.Path.cwd()
 product = workspace / "products/native-bundle/tree"
-scratch = tempfile.TemporaryDirectory(prefix="ryeos-native-build-")
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
+resource.setrlimit(resource.RLIMIT_NPROC, (512, 512))
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
+scratch = tempfile.TemporaryDirectory(prefix=".ryeos-native-build-", dir=workspace)
 targets = {kind: pathlib.Path(scratch.name) / f"cargo-{kind}-target" for kind in ("release", "static")}
 if product.exists() or any(target.exists() for target in targets.values()): fail("clean product roots already exist")
 product.parent.mkdir(parents=True, exist_ok=False)
@@ -72,30 +81,53 @@ if manifest.is_symlink(): fail("bundle manifest is unsafe")
 # source-manifest materializer before dispatch; the publisher signs it later.
 manifest.write_text(json.dumps(authored_manifest, sort_keys=True, separators=(",", ":")) + "\n")
 processes = []
+payload_transforms = []
 if expected:
     triple = value["target"].get("triple") if value["target"].get("kind") == "triple" else None
     if not triple: fail("exact target triple required")
     for package in packages:
         if len({payload["build_class"] for payload in expected if payload["cargo_package"] == package}) != 1:
             fail("one Cargo package cannot cross build classes")
-    base_env = {"PATH":os.environ.get("PATH", ""), "HOME":os.environ.get("HOME", ""),
-                "RUSTUP_HOME":os.environ.get("RUSTUP_HOME", ""), "CARGO_HOME":os.environ.get("CARGO_HOME", "")}
+    source_cargo = root / ".cargo"
+    if source_cargo.exists() or source_cargo.is_symlink():
+        fail("release source may not provide Cargo configuration")
+    private_root = pathlib.Path(scratch.name) / "environment"
+    cargo_spec = importlib.util.spec_from_file_location(
+        "release_cargo", pathlib.Path(__file__).with_name("release-cargo.py"))
+    release_cargo = importlib.util.module_from_spec(cargo_spec)
+    cargo_spec.loader.exec_module(release_cargo)
+    release_cargo.validate_source_configuration(root)
+    platform = release_cargo.PLATFORM
+    cargo = "/ryeos/realizations/platform/rust/bin/cargo"
+    base_env = release_cargo.build_environment(
+        private_root, triple, "/ryeos/realizations/static-link-inputs")
     for build_class in ("release", "static"):
         selected = sorted({payload["cargo_package"] for payload in expected if payload["build_class"] == build_class})
         if not selected: continue
-        command = ["cargo","build","--release","--locked","--target",triple]
-        for package in selected: command.extend(["-p", package])
-        env = {**base_env, "CARGO_TARGET_DIR":str(targets[build_class])}
-        if build_class == "static": env["RUSTFLAGS"] = "-C target-feature=+crt-static"
-        subprocess.run(command, cwd=root, env=env, check=True)
-        processes.append({"build_class":build_class,"argv":command,"cwd":str(root),"exit_code":0})
+        # Package ownership is not binary ownership: handler-bins is shared
+        # across bundles. Select only this bundle's bins, within one package.
+        for package in selected:
+            command = [cargo, "--config", 'source.crates-io.replace-with="ryeos-vendored"',
+                       "--config", 'source.ryeos-vendored.directory="/ryeos/realizations/cargo-vendor"',
+                       "build", "--release", "--locked", "--frozen", "--offline",
+                       "--jobs", "2", "--target", triple, "-p", package]
+            for binary in sorted(payload["binary"] for payload in expected
+                                 if payload["cargo_package"] == package
+                                 and payload["build_class"] == build_class):
+                command.extend(["--bin", binary])
+            env = {**base_env, "CARGO_TARGET_DIR":str(targets[build_class])}
+            if build_class == "static": env["RUSTFLAGS"] += " -C target-feature=+crt-static"
+            subprocess.run(command, cwd=root, env=env, check=True)
+            processes.append({"build_class":build_class,"argv":command,"cwd":str(root),"exit_code":0})
     destination_root = product / ".ai/bin" / triple
     destination_root.mkdir(parents=True, exist_ok=True)
     for payload in expected:
         source = targets[payload["build_class"]] / triple / "release" / payload["binary"]
-        if not source.is_file(): fail(f"owned build output is absent: {payload['binary']}")
+        if not source.is_file() or source.is_symlink(): fail(f"owned build output is absent: {payload['binary']}")
         destination = destination_root / payload["binary"]
         shutil.copyfile(source, destination)
+        transformation = release_elf.normalize_output_elf(destination, payload["build_class"], platform)
+        payload_transforms.append({"binary": payload["binary"], **transformation})
         destination.chmod(0o755)
 elif value["target"] != {"kind":"portable"}: fail("data-only bundle requires the portable target")
 scratch.cleanup()
@@ -106,5 +138,6 @@ digest = hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).en
 json.dump({"schema":"ryeos.native_bundle_build.v1","release_input_digest":digest,
            "bundle_name":name,"build_kind":"native" if expected else "data_only",
            "cargo_packages":packages,"output_root":"bundle_tree",
-           "product_name":"native_bundle","processes":processes},
+           "product_name":"native_bundle","processes":processes,
+           "payload_transforms":payload_transforms},
           sys.stdout,sort_keys=True,separators=(",",":")); print()

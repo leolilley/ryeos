@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:496a9df6e74ba1610d3a6c38217ae0310d5fad3635b4a1646450b79f8a9a24af:OExwWVq9eMNZKqtQkQcqkRGBWj6mkydMa0hjm3b2LHIoWZ+rh2tEN2Ooda8HJTVOgs0WqyAPawNH776XcE9QCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:18:07Z:647b5cafabddfbe9641d87fb369eac674d4b2e98d0246710ca41b911d0ce2a7a:b3N6ItV1CcCnk2fPXDzcTN3AD7jBPCPyH8d2hkamUO7gLDVlYMk/hbIbDbH2H68hIML/VtOPQqplTQ4UlGw1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Purpose-separated Core authority-calibration producer.
@@ -28,5 +28,10 @@ product_relationships:
     - name: core_seed_to_signed_capture
       producer: {canonical_ref: graph:ryeos/bundle-release/core-seed-build, recipe_binding: product_recipe, product_name: core_seed, parameters: {}}
       consumer: {canonical_ref: graph:ryeos/bundle-release/core-seed-capture, declaration_id: unsigned_core}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}
+    - name: core_seed_to_signed_capture_tool
+      producer: {canonical_ref: graph:ryeos/bundle-release/core-seed-build, recipe_binding: product_recipe, product_name: core_seed, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/core-seed-capture, declaration_id: unsigned_core}
       required_product: {shape: tree, storage: content, bounds: *bounds}
       qualification: {policy_ref: null, required_claims: []}

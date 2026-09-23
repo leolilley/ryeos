@@ -44,7 +44,8 @@ class WebBundleOnlyAcceptance(unittest.TestCase):
             "cargo_package": "ryeos-web-tools", "build_class": "release",
             "bundle_sets": ["central-host", "full", "release-artifacts", "release-authority"]}])
         source = BUILD.read_text()
-        self.assertIn('command = ["cargo","build","--release","--locked","--target",triple]', source)
+        self.assertIn('cargo = "/ryeos/realizations/platform/rust/bin/cargo"', source)
+        self.assertIn('"build", "--release", "--locked", "--frozen", "--offline"', source)
         self.assertNotIn("--workspace", source)
         self.assertIn('payloads != expected', source)
         self.assertIn('name == "core"', source)

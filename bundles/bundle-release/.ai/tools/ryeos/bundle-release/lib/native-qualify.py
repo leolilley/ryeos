@@ -1,11 +1,12 @@
-# ryeos:signed:2026-09-20T12:43:58Z:12d9339aca50c23bd284a65962a08cfaefade77459b7488e915f2b751b8032d7:i1tNOpgYNEZ/a/yhSoZYRXr5eeieeH678HeWLPPEOaDKYRGDVe3z5YcVZi5vNoS43xMWXUU+59Nl5Mreg5X2AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:ceaf5ccccc006fdbe54da36b8db62f28cec8321c95f08b1842e651980a7d9c29:s4YvqkVrzTVd6twu/J2Zx/c2dpeepNyijFEEHheBRJjU392qq9CMI5q+UNWIPYANNGCf6Pf6TCYVh7iH0A7RCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one exact admitted signed bundle-tree realization."""
 import json, os, pathlib, stat, sys
 p=json.load(sys.stdin)
 if p!={}: raise SystemExit("qualification verifier accepts no caller-authored parameters")
 sealed=json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS","null"))
-if not isinstance(sealed,list) or len(sealed)!=1 or sealed[0].get("id")!="subject": raise SystemExit("exact admitted subject required")
+if not isinstance(sealed,list) or len(sealed)!=2 or {entry.get("id") for entry in sealed}!={"python","subject"}: raise SystemExit("exact admitted Python and subject required")
+subject=next(entry for entry in sealed if entry["id"]=="subject")
 root=pathlib.Path("/ryeos/realizations/native-bundle")
 manifest=root/".ai/manifest.yaml"
 if not manifest.is_file() or manifest.is_symlink(): raise SystemExit("bundle manifest is absent or unsafe")
@@ -38,7 +39,7 @@ checks=["captured-product-binding","bundle-manifest-present","non-core-bundle","
 if binary_count: checks.append("native-payloads-executable")
 thread_id=os.environ.get("RYE_THREAD_ID")
 if not thread_id: raise SystemExit("qualification has no admitted thread identity")
-json.dump({"schema":"ryeos.product_qualification_result.v1","subject_manifest_hash":sealed[0]["manifest_hash"],
+json.dump({"schema":"ryeos.product_qualification_result.v1","subject_manifest_hash":subject["manifest_hash"],
            "claims":["native_bundle_release_checks_v1"],
            "probe_evidence":{"schema":"ryeos.native_bundle_qualification.v1",
              "bundle_name":name,"binary_count":binary_count,"checks":checks,"verifier_thread_id":thread_id}},

@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-21T01:02:18Z:3e8ccc284c2b0a2782f20109449407f66696394770e84888c922fd3cba69a532:AVTtGKLjpaL+xpFaDn9m0R+MAAEaBSVdseBJd3J2hLPAPpIhnJJ5lHvgArmbJW5hTvWYqaZB9QgWvwWT7t1BBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: bundle-release
+version: 0.1.0
+description: Source-bound bundle build, qualification, signing, composition, and remote publication
+provides_kinds: []
+requires_kinds:
+- config
+- graph
+- service
+- tool
+uses_kinds:
+- node

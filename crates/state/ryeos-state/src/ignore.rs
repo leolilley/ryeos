@@ -211,6 +211,13 @@ mod tests {
     }
 
     #[test]
+    fn root_target_exclusion_keeps_vendored_package_source() {
+        let m = matcher_from_patterns(&["/target/"]);
+        assert!(m.is_ignored("target/debug/ryeosd"));
+        assert!(!m.is_ignored("products/cargo-vendor/cc-1.2.60/src/target/apple.rs"));
+    }
+
+    #[test]
     fn ignores_env_file() {
         let m = matcher_from_patterns(&[".env"]);
         assert!(m.is_ignored(".env"));

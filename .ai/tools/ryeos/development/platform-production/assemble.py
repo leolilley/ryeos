@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-17T06:36:50Z:a14d06fed3198ea167f63a02df81e039585295becac3bc88b2ef07ec86e21c91:d/Hyq8FmzUuPVxmqHxnbX6CUSzEz4qU9IPLYKd1X7MyBXtxFhXs5vp3xtqqLSOd+Hmc35pQFdNwXPLanctmCAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-22T00:24:35Z:66d7b8432bd8062edc6712703e9e728af00c0a2627643b3535847f8df76f15cf:nykzVSrH5revd0IGp6WTWk8/nvzGMooafO0rwnjee/DILA1urMbK8K4aQBZ4J/SGJBBEZisOAWzDrJLSoDmxAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/platform-production
-#   version: "1.0.0"
+#   version: "1.0.1"
 #   description: Reproduce the exact admitted development platform as a retained product
 #   executor_id: tool:ryeos/development/authoring-environment-production/runtime
 #   execution_protocol: protocol:ryeos/core/opaque
@@ -23,7 +23,7 @@
 #     - id: platform
 #       kind: tree
 #       mode: pinned
-#       digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
+#       digest: b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00
 #       mount_root: execution_runtime
 #       mount: platform
 

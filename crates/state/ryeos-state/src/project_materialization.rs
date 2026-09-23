@@ -352,6 +352,23 @@ impl PinnedProjectMaterialization {
         Ok(files)
     }
 
+    /// Enumerate the complete authoritative file map for a fresh private
+    /// materialization. Callers receive CAS identities and normalized modes,
+    /// never authority derived from walking the mutable checkout pathname.
+    pub fn authoritative_entries(
+        &self,
+        max_entries: usize,
+    ) -> anyhow::Result<Vec<(String, ProjectFile)>> {
+        if self.expected_tree.len() > max_entries {
+            anyhow::bail!("authoritative project exceeds {max_entries} files");
+        }
+        Ok(self
+            .expected_tree
+            .iter()
+            .map(|(relative, file)| (relative.clone(), file.clone()))
+            .collect())
+    }
+
     /// Read one exact project-relative file from the authoritative CAS
     /// closure. The checkout path is never opened, and descriptor size is
     /// rejected before allocating or reading the body.

@@ -6,9 +6,7 @@
 //! testimony to the exact release input before it can cross the release API.
 
 use std::{
-    io::Read as _,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::Arc,
 };
 
@@ -93,7 +91,7 @@ pub struct AdmittedReleaseInput {
 }
 
 impl AdmittedReleaseInput {
-    pub(crate) fn from_value(value: &Value) -> anyhow::Result<Self> {
+    pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         Self::from_value_for_purpose(value, false)
     }
 
@@ -191,117 +189,57 @@ impl AdmittedReleaseInput {
     }
 }
 
-/// Current source authority. It must prove that `project_path` is the retained
-/// tree denoted by `source_snapshot_hash`; pathname existence is insufficient.
+/// Current source authority. The request path is provenance/a project
+/// identity only; all authoritative reads use this retained materialization.
 pub trait BundleSourceSnapshotAuthority: Send + Sync {
+    fn authoritative_project_root(&self) -> &Path;
+
     fn verify_project_snapshot(
         &self,
-        project_path: &Path,
+        project_identity: &Path,
         source_snapshot_hash: &str,
     ) -> anyhow::Result<()>;
 }
 
-/// Exact authority for a clean Git worktree. The public coordinate is the
-/// SHA-256 digest of Git's canonical tar serialization of `HEAD`, not the
-/// repository's potentially SHA-1 object id. Dirty/untracked work and gitlinks
-/// are rejected so a successful check proves the path read by the build is the
-/// same closed source tree named by the request.
-#[derive(Debug, Default)]
-pub struct CleanGitSourceSnapshotAuthority;
+/// Source authority backed by RyeOS's verified immutable project
+/// materialization. No VCS executable or mutable checkout metadata is source
+/// authority.
+#[derive(Debug, Clone)]
+pub struct PinnedProjectSourceSnapshotAuthority {
+    materialization: Arc<ryeos_state::PinnedProjectMaterialization>,
+    project_identity: PathBuf,
+}
 
-impl CleanGitSourceSnapshotAuthority {
-    pub fn snapshot_hash(project_path: &Path) -> anyhow::Result<String> {
-        let project_path = project_path.canonicalize()?;
-        let status = Command::new("git")
-            .args(["status", "--porcelain=v1", "--untracked-files=all"])
-            .current_dir(&project_path)
-            .output()
-            .context("inspect release source worktree")?;
-        anyhow::ensure!(
-            status.status.success(),
-            "release source is not a Git worktree"
-        );
-        anyhow::ensure!(
-            status.stdout.is_empty(),
-            "release source worktree is dirty or contains untracked files"
-        );
-        let ignored = Command::new("git")
-            .args([
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "--directory",
-                "-z",
-            ])
-            .current_dir(&project_path)
-            .output()
-            .context("inspect ignored release source files")?;
-        anyhow::ensure!(
-            ignored.status.success() && ignored.stdout.is_empty(),
-            "release source contains ignored files outside the source snapshot; use a clean release worktree"
-        );
-
-        let index = Command::new("git")
-            .args(["ls-files", "--stage", "-z"])
-            .current_dir(&project_path)
-            .output()
-            .context("inspect release source index")?;
-        anyhow::ensure!(
-            index.status.success(),
-            "could not read release source index"
-        );
-        anyhow::ensure!(
-            !index
-                .stdout
-                .split(|byte| *byte == 0)
-                .any(|record| record.starts_with(b"160000 ")),
-            "release source contains a gitlink whose content is outside the snapshot"
-        );
-
-        let mut child = Command::new("git")
-            .args(["archive", "--format=tar", "HEAD"])
-            .current_dir(&project_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("start release source snapshot")?;
-        let mut digest = Sha256::new();
-        let mut stdout = child.stdout.take().context("Git archive has no stdout")?;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = stdout.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
+impl PinnedProjectSourceSnapshotAuthority {
+    pub fn new(
+        materialization: Arc<ryeos_state::PinnedProjectMaterialization>,
+        project_identity: PathBuf,
+    ) -> Self {
+        Self {
+            materialization,
+            project_identity,
         }
-        let output = child.wait_with_output()?;
-        anyhow::ensure!(
-            output.status.success(),
-            "release source snapshot failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        Ok(format!("{:x}", digest.finalize()))
     }
 }
 
-impl BundleSourceSnapshotAuthority for CleanGitSourceSnapshotAuthority {
+impl BundleSourceSnapshotAuthority for PinnedProjectSourceSnapshotAuthority {
+    fn authoritative_project_root(&self) -> &Path {
+        self.materialization.path()
+    }
+
     fn verify_project_snapshot(
         &self,
-        project_path: &Path,
+        project_identity: &Path,
         source_snapshot_hash: &str,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            source_snapshot_hash.len() == 64
-                && source_snapshot_hash
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-            "invalid source snapshot identity"
+            project_identity == self.project_identity,
+            "release source was relabelled as another project"
         );
+        self.materialization.ensure_path_binding()?;
         anyhow::ensure!(
-            Self::snapshot_hash(project_path)? == source_snapshot_hash,
-            "release source does not match the requested snapshot"
+            self.materialization.snapshot_hash() == source_snapshot_hash,
+            "release source does not select the verified RyeOS project snapshot"
         );
         Ok(())
     }
@@ -387,9 +325,10 @@ impl AdmittedNativeBundleAuthorities {
 
     fn build_exact(&self, request: GenerationBuildRequest) -> anyhow::Result<Value> {
         let input = AdmittedReleaseInput::from_value(&request.release_input)?;
-        let project = Path::new(&input.project_path);
+        let project_identity = Path::new(&input.project_path);
         self.source
-            .verify_project_snapshot(project, &input.source_snapshot_hash)?;
+            .verify_project_snapshot(project_identity, &input.source_snapshot_hash)?;
+        let project = self.source.authoritative_project_root();
         anyhow::ensure!(
             input.authored_manifest == materialize_release_manifest(project, &input.bundle_name)?,
             "release manifest differs from the exact source snapshot"
@@ -527,8 +466,13 @@ fn inspect_release_input_for_purpose(
             "core is substrate-owned and cannot use bundle-only publication"
         }
     );
-    let project = PathBuf::from(&project_path).canonicalize()?;
-    source.verify_project_snapshot(&project, &source_snapshot_hash)?;
+    let project_identity = PathBuf::from(&project_path);
+    anyhow::ensure!(
+        !project_identity.as_os_str().is_empty(),
+        "release project identity is empty"
+    );
+    source.verify_project_snapshot(&project_identity, &source_snapshot_hash)?;
+    let project = source.authoritative_project_root();
     ownership.validate()?;
     let payloads = ownership
         .owner(&bundle_name)
@@ -562,7 +506,7 @@ fn inspect_release_input_for_purpose(
     }
     let input = AdmittedReleaseInput {
         schema: RELEASE_INPUT_SCHEMA.to_owned(),
-        project_path: project.display().to_string(),
+        project_path,
         authored_manifest: materialize_release_manifest(&project, &bundle_name)?,
         bundle_name,
         source_snapshot_hash,
@@ -726,6 +670,49 @@ mod input_contract_tests {
     use super::*;
 
     #[test]
+    fn pinned_source_authority_rejects_project_relabelling_and_snapshot_substitution() {
+        let source = tempfile::tempdir().unwrap();
+        let bytes = b"immutable release source";
+        std::fs::write(source.path().join("source.txt"), bytes).unwrap();
+        let snapshot_hash = "a".repeat(64);
+        let materialization =
+            ryeos_state::PinnedProjectMaterialization::from_observed_tree_for_test(
+                snapshot_hash.clone(),
+                source.path(),
+                std::collections::BTreeMap::from([(
+                    "source.txt".to_owned(),
+                    ryeos_state::objects::ProjectFile {
+                        blob_hash: lillux::sha256_hex(bytes),
+                        normalized_mode: 0o644,
+                        size: bytes.len() as u64,
+                    },
+                )]),
+            )
+            .unwrap();
+        let authority = PinnedProjectSourceSnapshotAuthority::new(
+            Arc::new(materialization),
+            source.path().to_path_buf(),
+        );
+        authority
+            .verify_project_snapshot(source.path(), &snapshot_hash)
+            .unwrap();
+
+        let other = tempfile::tempdir().unwrap();
+        assert!(
+            authority
+                .verify_project_snapshot(other.path(), &snapshot_hash)
+                .is_err()
+        );
+        assert_eq!(authority.authoritative_project_root(), source.path());
+        std::fs::write(source.path().join("source.txt"), b"substituted").unwrap();
+        assert!(
+            authority
+                .verify_project_snapshot(source.path(), &"b".repeat(64))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn source_only_bundle_generates_current_manifest() {
         let source = tempfile::tempdir().unwrap();
         let ai = source.path().join("bundles/example/.ai");
@@ -739,38 +726,6 @@ mod input_contract_tests {
         assert_eq!(manifest.name, "example");
         assert_eq!(manifest.version, "0.1.0");
         assert!(!ai.join("manifest.yaml").exists());
-    }
-
-    #[test]
-    fn ignored_files_are_not_admitted_as_snapshot_content() {
-        let source = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            assert!(
-                Command::new("git")
-                    .args(args)
-                    .current_dir(source.path())
-                    .output()
-                    .unwrap()
-                    .status
-                    .success()
-            );
-        };
-        git(&["init", "--quiet"]);
-        std::fs::write(source.path().join(".gitignore"), "ignored\n").unwrap();
-        git(&["add", ".gitignore"]);
-        git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ]);
-        assert!(CleanGitSourceSnapshotAuthority::snapshot_hash(source.path()).is_ok());
-        std::fs::write(source.path().join("ignored"), "outside snapshot").unwrap();
-        assert!(CleanGitSourceSnapshotAuthority::snapshot_hash(source.path()).is_err());
     }
 
     #[test]

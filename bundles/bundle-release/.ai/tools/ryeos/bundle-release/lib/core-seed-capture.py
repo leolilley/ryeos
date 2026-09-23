@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T12:43:58Z:8becf54c5bce396ab88a9ce56e02370f3fcf1996423942dc7b48d6f903856fd9:j++109BmUxcIapIZeg2BBtNyfL8K13buzhbegYzhwgR2CRz7ZRoXhlFjpQ3ItMAWLpIGqQsqbbOdObJXeP7eDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:fae89090f1b8336b9d60c8cfda498fe51bba3ed34275e8463d6be144be5ea7fa:UxZ7pSfajzE0pfocMsNxnk/wQCJEauZTnUjeLpRx/xaW9YR0dEHARPdX0OwcwL1YQKTbgho/y19OrNQthdhYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Apply the exact publisher manifest to one admitted unsigned Core seed."""
 import hashlib
 import json
@@ -32,9 +32,9 @@ if not isinstance(signed, str) or len(signed.encode()) > 131072:
 if hashlib.sha256(signed.encode()).hexdigest() != request["manifest_item_hash"]:
     raise SystemExit("signed Core manifest bytes changed")
 sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
-if (not isinstance(sealed, list) or len(sealed) != 1
-        or sealed[0].get("id") != "unsigned_core"):
-    raise SystemExit("exact admitted unsigned Core seed required")
+if (not isinstance(sealed, list) or len(sealed) != 2
+        or {entry.get("id") for entry in sealed} != {"python", "unsigned_core"}):
+    raise SystemExit("exact admitted Python and unsigned Core seed required")
 source = pathlib.Path("/ryeos/realizations/unsigned-core-seed")
 target = pathlib.Path.cwd() / "products/signed-core-seed/tree"
 if not source.is_dir() or source.is_symlink() or target.exists():

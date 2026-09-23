@@ -492,14 +492,10 @@ fn select_verified_product(
         bail!("signed product relationship names a different consumer or slot");
     }
     let evidence = &witness.evidence;
-    if relationship_resolution.root.resolved_ref != slot.relationship_ref
-        || evidence.recipe_ref != slot.relationship_ref
-        || evidence.recipe_raw_content_digest != relationship_resolution.root.raw_content_digest
-        || evidence.relationships != relationships
-    {
-        bail!("selected product testimony disagrees with the exact signed relationship Config");
+    if relationship_resolution.root.resolved_ref != slot.relationship_ref {
+        bail!("resolved product relationship disagrees with the exact signed consumer slot");
     }
-    relationship.validate_product_evidence(evidence)?;
+    relationship.validate_compatible_product_evidence(evidence)?;
     let qualification = admit_selected_qualification(
         state,
         context,
@@ -522,7 +518,7 @@ fn select_verified_product(
         declaration_id: slot.id.clone(),
         relationship_name: slot.relationship.clone(),
         relationship_ref: slot.relationship_ref.clone(),
-        relationship_raw_content_digest: evidence.recipe_raw_content_digest.clone(),
+        relationship_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
         relationship,
         witness_hash: selector.witness_hash.clone(),
         witness_source: selector.witness_source.clone(),
@@ -777,19 +773,14 @@ fn verify_witness_projection(
         || selection.witness_coordinate != ProductCaptureCoordinate::from_evidence(evidence)?
         || selection.owner_principal != evidence.owner_principal
         || selection.producer != evidence.root_producer
-        || selection.relationship_ref != evidence.recipe_ref
-        || selection.relationship_raw_content_digest != evidence.recipe_raw_content_digest
-        || !evidence
-            .relationships
-            .relationships
-            .iter()
-            .any(|relationship| relationship == &selection.relationship)
         || selection.manifest_hash != evidence.manifest_hash
         || selection.manifest_kind != evidence.manifest_kind
     {
         bail!("retained product witness contradicts the admitted selection testimony");
     }
-    selection.relationship.validate_product_evidence(evidence)?;
+    selection
+        .relationship
+        .validate_compatible_product_evidence(evidence)?;
     Ok(())
 }
 

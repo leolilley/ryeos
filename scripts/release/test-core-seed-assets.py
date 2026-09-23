@@ -90,12 +90,19 @@ class CoreSeedAssetTests(unittest.TestCase):
         build_graph = yaml.safe_load((ASSET / "graphs/ryeos/bundle-release/core-seed-build.yaml").read_text())
         capture_graph = yaml.safe_load((ASSET / "graphs/ryeos/bundle-release/core-seed-capture.yaml").read_text())
         qualifier = yaml.safe_load((ASSET / "tools/ryeos/bundle-release/core-seed-qualify.yaml").read_text())
-        build_relation, = build["product_relationships"]["relationships"]
+        build_relation = next(relation for relation in build["product_relationships"]["relationships"]
+                              if relation["name"] == "core_seed_to_signed_capture")
+        tool_relation = next(relation for relation in build["product_relationships"]["relationships"]
+                             if relation["name"] == "core_seed_to_signed_capture_tool")
         capture_relation, = capture["product_relationships"]["relationships"]
         self.assertEqual(build_relation["producer"]["canonical_ref"],
                          "graph:ryeos/bundle-release/core-seed-build")
         self.assertEqual(build_relation["consumer"], {
             "canonical_ref": "graph:ryeos/bundle-release/core-seed-capture",
+            "declaration_id": "unsigned_core",
+        })
+        self.assertEqual(tool_relation["consumer"], {
+            "canonical_ref": "tool:ryeos/bundle-release/core-seed-capture",
             "declaration_id": "unsigned_core",
         })
         self.assertEqual(capture_relation["producer"]["canonical_ref"],
@@ -118,7 +125,8 @@ class CoreSeedAssetTests(unittest.TestCase):
             (capture_graph, "unsigned_core", "core_seed_to_signed_capture", "unsigned-core-seed"),
             (qualifier, "subject", "signed_core_seed_to_qualification", "core-seed"),
         ):
-            slot, = owner["external_product_slots"]
+            slot, = [candidate for candidate in owner["external_product_slots"]
+                     if candidate["id"] == slot_id]
             self.assertEqual((slot["id"], slot["relationship"], slot["mount"]),
                              (slot_id, relationship, mount))
 
@@ -142,6 +150,7 @@ class CoreSeedAssetTests(unittest.TestCase):
 
         environment = {
             "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([
+                {"id": "python", "manifest_hash": "a" * 64},
                 {"id": "subject", "manifest_hash": "c" * 64}
             ]),
             "RYE_THREAD_ID": "core-qualification-thread",

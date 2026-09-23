@@ -2432,6 +2432,43 @@ mod tests {
     }
 
     #[test]
+    fn captured_release_authority_cannot_widen_into_live_or_ambient_authority() {
+        let project = tempfile::tempdir().unwrap();
+        let policy = crate::handlers::bundle_release_execution::pinned_release_execution_policy();
+        let snapshot_hash = "a".repeat(64);
+        let authority = resolve_execution_project_authority(
+            &policy,
+            Some(project.path()),
+            Some(&snapshot_hash),
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &[
+                ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY.to_owned(),
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_owned(),
+                "*".to_owned(),
+            ],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &authority,
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+                },
+                environment: ryeos_state::objects::EnvironmentAuthority::None,
+                ..
+            }
+        ));
+        assert!(!matches!(
+            &authority,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        ));
+    }
+
+    #[test]
     fn retain_current_head_consumes_only_the_retained_lookup_destination() {
         let project = tempfile::tempdir().unwrap();
         let snapshot_hash = "a".repeat(64);

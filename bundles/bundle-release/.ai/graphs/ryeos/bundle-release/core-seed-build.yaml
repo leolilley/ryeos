@@ -1,12 +1,19 @@
-# ryeos:signed:2026-09-20T14:52:10Z:9b57d525755ad128a5c04d1e2f71cfac419b2a4d6eaa41045c86d5f28b814cf9:9uJTWTOV6HgOJKdNAlA+WRP4ZNcvFQSxq4iRSBOajrz6PKFNANNylfsbOR+bjjRvNw2J7fIsG1xPwyBzmIRbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-23T04:20:49Z:e075c7a28e16d4f6880e48690424860c346467a26fa174b068146a88f6d799f4:gi6ghResnDgBWlSk8UlsSQi66HYFJ1vBekAcT2UJ9EZuLp/CX1Zz8Przua4Bbs5jypVWQn0K0pBRcezJ2alWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.1"
 category: ryeos/bundle-release
 description: Build the exact unsigned Core generation that will seed a measured RyeOS substrate.
 effects: live
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_core_seed_build, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - {id: platform, relationship_ref: config:bundle-release/execution-environment-products, relationship: platform_to_core_seed_build, kind: tree, mount_root: execution_runtime, mount: platform}
+  - {id: cargo-vendor, relationship_ref: config:bundle-release/execution-environment-products, relationship: cargo_vendor_to_core_seed_build, kind: tree, mount_root: execution_runtime, mount: cargo-vendor}
+  - {id: static-link-inputs, relationship_ref: config:bundle-release/execution-environment-products, relationship: static_link_inputs_to_core_seed_build, kind: tree, mount_root: execution_runtime, mount: static-link-inputs}
 product_recipe: config:bundle-release/core-seed-build-products
 requires:
   capabilities:
     declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
 config:
   start: build
@@ -15,15 +22,17 @@ config:
   config_schema:
     type: object
     additionalProperties: false
-    required: [release_input]
+    required: [release_input, child_product_selections]
     properties:
       release_input: {type: object}
+      child_product_selections: {type: array, minItems: 1, maxItems: 8}
   state: {}
   nodes:
     build:
       action:
         item_id: tool:ryeos/bundle-release/core-seed-build
         ref_bindings: {}
+        product_selections: "${inputs.child_product_selections}"
         params: {release_input: "${inputs.release_input}"}
       assign: {build: "${result}"}
       next: {type: unconditional, to: done}

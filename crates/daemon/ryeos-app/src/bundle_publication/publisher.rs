@@ -80,6 +80,13 @@ pub trait ConstrainedBundleTreePublisher: Send + Sync {
         anyhow::bail!("publisher has no explicit signed-capture recipe authoring authority")
     }
 
+    fn authorize_substrate_build_recipe(
+        &self,
+        _request: &super::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("publisher has no explicit substrate receipt recipe authority")
+    }
+
     fn materialize_and_sign(
         &self,
         candidate: &VerifiedPublisherCandidate,

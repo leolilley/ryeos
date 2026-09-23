@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-11T11:10:34Z:ec9dc39064be49c2f7a4aa0c19a1cd4093e1b879d19e346cba0ddd2b2973e8ea:LiJCOwyAXVcB2twI9i6mrBnZNLEH1ANWZZapnDJ+vJbx/STy78gIywF/ZJel38eIgRdDV5TZsuUaa0n4NYNDAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-22T00:24:35Z:e7377c9b574e18a0ad1a673796054f49238fb4ef5191d4b73300db8eeee07515:nFCPVBU9hpCi5ySqt89S86mndl6gvp3Oy9r1aCSINO/1JE4tUmH1wqJiG/Ass+bNSDtjReNwLpJSSszmnxqgCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
-version: "1.0.0"
+version: "1.1.0"
 description: Named retained exact development platform closure
 build_products:
   schema: ryeos.build_products.v1
@@ -28,33 +28,53 @@ build_products:
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:
+    - name: platform_to_authoring_utility_production
+      producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
+      consumer: {canonical_ref: graph:ryeos/development/authoring-built-utilities-production, declaration_id: platform}
+      required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
+    - name: platform_to_cargo_vendor_production
+      producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
+      consumer: {canonical_ref: graph:ryeos/development/cargo-vendor-production, declaration_id: platform}
+      required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
+    - name: platform_to_qualification_verifier
+      producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/environments/qualification/development-platform, declaration_id: subject}
+      required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
+      qualification: {policy_ref: null, required_claims: []}
+    - name: platform_to_cargo_vendor_verifier
+      producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/environments/qualification/cargo-vendor, declaration_id: verifier-platform}
+      required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_cargo_check
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/cargo-check, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_cargo_test
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/cargo-test, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_cargo_build
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/cargo-build, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_format_check
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/format-check, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_format_file
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/format-file, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}
     - name: platform_to_inspect
       producer: {canonical_ref: graph:ryeos/development/platform-production, recipe_binding: product_recipe, product_name: platform, parameters: {}}
       consumer: {canonical_ref: tool:ryeos/development/platform-inspect, declaration_id: platform}
       required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 25000, maximum_depth: 64, maximum_file_bytes: 268435456, maximum_total_bytes: 1073741824}}
-      qualification: {policy_ref: null, required_claims: []}
+      qualification: {policy_ref: config:ryeos/environments/qualification/development-platform, required_claims: [development_platform_abi_v1, development_platform_target_x86_64_linux_gnu_v1]}

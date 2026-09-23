@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-22T04:12:04Z:b7dc6401ab6e4bca9681da91f69b0924d03012686239287c0382af58a8ba2015:Jqpe5Lfkddps8/cw/xYi2KjkznVH/6mPzzGNM97AuaIYmnJDb9lShVZy7puoDBGRluE3dJQj4yr7+GU8BR4JBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.0"
+category: ryeos/development
+description: Reproduce exact admitted supplementary static-link inputs as one retained product
+effects: recorded
+product_recipe: config:development/ryeos/static-link-input-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.development/ryeos/static-link-input-products
+      - ryeos.execute.tool.ryeos/development/static-link-inputs/assemble
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:ryeos/development/static-link-inputs/assemble
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

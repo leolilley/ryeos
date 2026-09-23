@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T16:04:40Z:a5c6f99c930361cd186d279e56da3358946c9f175e0f08c9ae9d476c5d4b4d07:xCRYsklXGXJZSWdWTVxCZ0Ljmu9f9TA/mpdAYnMkNwY5cfjS0kLY+005N2J0Yj7N5k6912X1GN3exTZmb0keAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:20:49Z:807c65b367420158195a11cf3a93cfa3b7427ae84eed8faae5785f4ed0aba79b:A/+COEDZcM5/aDv91wo5yIv0Y3OGFUWkooEC7RmgzmHTuDK5yhmkOmKZC1G0QrK/4Rvvh+kOofNXsscuuxjjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -95,7 +95,12 @@ policies:
       bundle-release:
         - ryeos.execute.config.bundle-release/core-seed-build-products
         - ryeos.execute.config.bundle-release/core-seed-capture-products
+        - ryeos.execute.config.bundle-release/execution-environment-products
+        - ryeos.execute.config.bundle-release/execution-tool-products
         - ryeos.execute.config.bundle-release/native-build-products
+        - ryeos.execute.config.bundle-release/portable-build-products
+        - ryeos.execute.config.bundle-release/portable-qualification
+        - ryeos.execute.config.bundle-release/portable-signed-capture-products
         - ryeos.execute.config.bundle-release/signed-capture-products
         - ryeos.execute.config.bundle-release/substrate-build-products
         - ryeos.execute.service.bundle-release/authority-calibrate
@@ -126,6 +131,9 @@ policies:
         - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
         - ryeos.execute.tool.ryeos/bundle-release/native-build
         - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/portable-build
+        - ryeos.execute.tool.ryeos/bundle-release/portable-qualify
+        - ryeos.execute.tool.ryeos/bundle-release/portable-signed-capture
         - ryeos.execute.tool.ryeos/bundle-release/signed-capture
         - ryeos.execute.tool.ryeos/bundle-release/substrate-build
         - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
@@ -177,9 +185,17 @@ policies:
     max_object_bytes: 33554432
     max_total_object_bytes: 67108864
     max_blob_bytes: 134217728
-    max_total_blob_bytes: 134217728
-    max_response_bytes: 268435456
+    # Wire transfer remains response-bounded, including base64 and entry
+    # overhead. Local verification has a separate signed aggregate below.
+    max_total_blob_bytes: 738197504
+    max_response_bytes: 1073741824
     max_links_per_object: 100000
+    # The verifier's retained realization jointly names Python, the vendor
+    # subject and its independently qualified platform. This is a local CAS
+    # verification ceiling, never an encoded remote response allowance.
+    local_verification:
+      max_blobs: 65536
+      max_total_blob_bytes: 1073741824
   thread_history:
     schema: 1
     default_retention: durable
@@ -284,17 +300,23 @@ policies:
       - ".svn/"
       - ".venv/"
       - "/.ai/config/remotes/"
+      # Exclude this project's build output, not package source directories
+      # such as a vendored crate's src/target/ required by its checksums.
+      - "/target/"
       - "__pycache__/"
       - "node_modules/"
-      - "target/"
   external_content:
     schema: 1
     roots: {}
     limits:
       max_depth: 11
-      max_entries: 4480
+      # Release production retains the GNU Python runtime, development platform,
+      # and Cargo vendor closure before composing the native build environment.
+      # Match the dedicated development-node capture ceiling; bootstrap archive
+      # cardinality is enforced independently by managed_activation below.
+      max_entries: 65536
       max_file_bytes: 1503300328
-      max_total_bytes: 1514745854
+      max_total_bytes: 2147483648
       store_budget_bytes: 4294967296
       minimum_free_bytes: 2147483648
     managed_activation:

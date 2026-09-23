@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:8bd32d11ef51a635c8e9b490189b960b979cc15e3f45d1e4ed9d9157a86fa282:2WgN0K60WNRpbukSk2EAfBMGOVHOlYvO1a+HL+CCSwSAzL1vLcAbje5WyyJKFDJlpxB/SsegFcOVKXyKRnxiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:21:51Z:159c93aa7a4068a5b383b910652b2c16aeb0fd881dafbc5cb2ef956584e4e060:vcZp4Y20MRRJ5NoleMGHMg/Tl6p5iwdcOcC0kBb+32xsJtt3xS5o/58qpjtvmCpuE2nDwB/w0/M7BO/4xJ6ABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Purpose-owned captured output contract for the unsigned substrate Core seed.
@@ -33,6 +33,22 @@ product_relationships:
         parameters: {}
       consumer:
         canonical_ref: graph:ryeos/bundle-release/core-seed-capture
+        declaration_id: unsigned_core
+      required_product:
+        shape: tree
+        storage: content
+        bounds: *core_bounds
+      qualification:
+        policy_ref: null
+        required_claims: []
+    - name: core_seed_to_signed_capture_tool
+      producer:
+        canonical_ref: graph:ryeos/bundle-release/core-seed-build
+        recipe_binding: product_recipe
+        product_name: core_seed
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/bundle-release/core-seed-capture
         declaration_id: unsigned_core
       required_product:
         shape: tree

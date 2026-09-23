@@ -16,6 +16,8 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 pub const SECTION_NAME: &str = "object_closure";
 const RESPONSE_ENVELOPE_BYTES: u64 = 4 * 1024;
 const RESPONSE_ENTRY_OVERHEAD_BYTES: u64 = 256;
+const LOCAL_VERIFICATION_MAX_BLOBS: usize = 100_000;
+const LOCAL_VERIFICATION_MAX_TOTAL_BLOB_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +32,17 @@ pub struct NodeObjectClosurePolicy {
     pub max_total_blob_bytes: u64,
     pub max_response_bytes: u64,
     pub max_links_per_object: usize,
+    /// A signed, local-only aggregate for verifying retained realizations.
+    /// Wire transfer continues to use the response-bounded fields above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_verification: Option<LocalVerificationBudget>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalVerificationBudget {
+    pub max_blobs: usize,
+    pub max_total_blob_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,20 +71,26 @@ pub struct AdmittedObjectTransferLimits {
 }
 
 impl NodeObjectClosurePolicy {
-    /// Local closure verification uses the same signed resource policy as
-    /// transfer admission. Generic control-plane defaults are not sufficient
-    /// for an operator-admitted large realization, and are not node policy.
+    /// Local closure verification uses the signed local aggregate when present.
+    /// A realized verifier may jointly retain inputs too large for one encoded
+    /// wire response; this does not widen remote transfer admission.
     pub fn closure_limits(
         &self,
     ) -> anyhow::Result<ryeos_state::object_closure::ObjectClosureLimits> {
         let admitted = self.admit(RequestedObjectTransferLimits::default())?;
         Ok(ryeos_state::object_closure::ObjectClosureLimits {
             max_objects: admitted.max_objects,
-            max_blobs: admitted.max_blobs,
+            max_blobs: self
+                .local_verification
+                .map_or(admitted.max_blobs, |local| local.max_blobs),
             max_object_bytes: admitted.max_object_bytes,
             max_total_object_bytes: admitted.max_total_object_bytes,
             max_blob_bytes: admitted.max_blob_bytes,
-            max_total_blob_bytes: admitted.max_total_blob_bytes,
+            max_total_blob_bytes: self
+                .local_verification
+                .map_or(admitted.max_total_blob_bytes, |local| {
+                    local.max_total_blob_bytes
+                }),
             max_links_per_object: admitted.max_links_per_object,
         })
     }
@@ -138,6 +157,23 @@ impl NodeObjectClosurePolicy {
                 self.max_response_bytes,
                 minimum_response
             );
+        }
+        if let Some(local) = self.local_verification {
+            validate_usize_limit(
+                "local_verification.max_blobs",
+                local.max_blobs,
+                LOCAL_VERIFICATION_MAX_BLOBS,
+            )?;
+            validate_u64_limit(
+                "local_verification.max_total_blob_bytes",
+                local.max_total_blob_bytes,
+                LOCAL_VERIFICATION_MAX_TOTAL_BLOB_BYTES,
+            )?;
+            if local.max_blobs < self.max_blobs
+                || local.max_total_blob_bytes < self.max_total_blob_bytes
+            {
+                bail!("local object-closure verification budget cannot narrow transfer admission");
+            }
         }
         Ok(())
     }
@@ -352,6 +388,7 @@ mod tests {
             max_total_blob_bytes: 128 * 1024 * 1024,
             max_response_bytes: 256 * 1024 * 1024,
             max_links_per_object: 100_000,
+            local_verification: None,
         }
     }
 
@@ -385,6 +422,34 @@ mod tests {
             policy.max_staged_payload_bytes().unwrap(),
             192 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn local_verification_budget_does_not_widen_wire_transfer() {
+        let mut policy = valid_policy();
+        policy.local_verification = Some(LocalVerificationBudget {
+            max_blobs: 65_536,
+            max_total_blob_bytes: 1024 * 1024 * 1024,
+        });
+        let local = policy.closure_limits().unwrap();
+        let wire = policy
+            .admit(RequestedObjectTransferLimits::default())
+            .unwrap();
+        assert_eq!(local.max_blobs, 65_536);
+        assert_eq!(local.max_total_blob_bytes, 1024 * 1024 * 1024);
+        assert_eq!(wire.max_blobs, 32_768);
+        assert_eq!(wire.max_total_blob_bytes, 128 * 1024 * 1024);
+        assert_eq!(wire.max_response_bytes, 256 * 1024 * 1024);
+
+        policy.local_verification.as_mut().unwrap().max_blobs = 1;
+        assert!(policy.validate().is_err());
+        policy.local_verification.as_mut().unwrap().max_blobs = 65_536;
+        policy
+            .local_verification
+            .as_mut()
+            .unwrap()
+            .max_total_blob_bytes = LOCAL_VERIFICATION_MAX_TOTAL_BLOB_BYTES + 1;
+        assert!(policy.validate().is_err());
     }
 
     #[test]

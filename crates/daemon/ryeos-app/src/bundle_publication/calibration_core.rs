@@ -2,7 +2,7 @@
 //!
 //! This lane exists only to measure the Core producer before a publication
 //! catalog exists.  Its input is an already captured Core tree, its source is
-//! an exact clean Git snapshot, and its only output is domain-separated
+//! an exact verified RyeOS ProjectSnapshot, and its only output is domain-separated
 //! calibration evidence signed by the node identity.  It deliberately does
 //! not implement the release publisher traits and never returns a
 //! `SignedBundleTree` or `PublisherMaterializationResult`.
@@ -208,15 +208,17 @@ impl CalibrationCoreManifestAuthority {
         request: CalibrationCoreManifestRequest,
     ) -> anyhow::Result<CalibrationCoreManifestResult> {
         request.validate()?;
-        let source_path =
-            source_core_manifest_path(Path::new(&request.project_path), &request.bundle_name);
-        let source_file = lillux::open_pinned_regular_file_no_follow(&source_path)
-            .with_context(|| format!("pin source Core manifest at {}", source_path.display()))?;
-        let source_observation = source_file.observation()?;
         self.source.verify_project_snapshot(
             Path::new(&request.project_path),
             &request.source_snapshot_hash,
         )?;
+        let source_path = source_core_manifest_path(
+            self.source.authoritative_project_root(),
+            &request.bundle_name,
+        );
+        let source_file = lillux::open_pinned_regular_file_no_follow(&source_path)
+            .with_context(|| format!("pin source Core manifest at {}", source_path.display()))?;
+        let source_observation = source_file.observation()?;
         let source_bytes = source_file.read_stable_bounded(&source_observation, 128 * 1024)?;
 
         let mut output = ExternalContentManifestObject::from_value(&read_object(
@@ -381,6 +383,10 @@ mod tests {
     }
 
     impl BundleSourceSnapshotAuthority for ExactSource {
+        fn authoritative_project_root(&self) -> &Path {
+            &self.expected_path
+        }
+
         fn verify_project_snapshot(
             &self,
             project_path: &Path,

@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-23T08:15:01Z:e3a14c960c3825a35fbe44960ca7e6680b5a6435f8875e4ea938172ecca2b410:qXNFsR6LdkOmeFPKa+99SQvpdpWbJxC+NmpRy6K2LLq4kANXUV7gtcIY8y8CwvDt3LtMSUIg822eBn1k4E6+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: runtime
+version: "1.0.0"
+description: Admit the exact adjacent release Tool source directory for isolated Python execution.
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+source_scope:
+  location: item_directory
+  load_roots: [item_directory]
+  materialization: read_only

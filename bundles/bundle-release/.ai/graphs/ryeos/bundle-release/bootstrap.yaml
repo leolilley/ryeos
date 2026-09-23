@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:39Z:4d1d8469abba8426660a4dbad3674175bbd4b36d32a34c856695ff48e0550cb2:5hwENPmSNeNEZaEYlRiI87kKvDH5U69gpUZ1Y3709xT3Af9p8srDgkMhz9sO6JZkWtUTzcVU+h42zO6DHbt4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:29:38Z:bfa95fee7b39297fee9e08d6468dbeb80e269342812df1e5572064b577b4d3b1:teRAkJhBEuChhkBcyHKHE38CDsGLiWkfKH1MtJwyEJSPL02ADLAKKK2TD3FWrQIzzQv49d2p8+7/ziHLAAHyBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Establish the first measured Core, substrate release, bundle set, and remote catalog head.
@@ -8,6 +8,7 @@ requires:
     declared:
       - ryeos.execute.config.bundle-release/core-seed-build-products
       - ryeos.execute.config.bundle-release/core-seed-capture-products
+      - ryeos.execute.config.bundle-release/execution-environment-products
       - ryeos.execute.config.bundle-release/substrate-build-products
       - ryeos.execute.service.bundle-release/catalog-remote-publish
       - ryeos.execute.service.bundle-release/catalog-request-publication
@@ -180,6 +181,7 @@ config:
         params:
           project_path: "${inputs.project_path}"
           source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          catalog_namespace: "${inputs.catalog_namespace}"
           substrate_build_recipe_signed_config: "${state.substrate_build.substrate_build_recipe_signed_config}"
           substrate_build_recipe_raw_digest: "${state.substrate_build.substrate_build_recipe_raw_digest}"
           substrate_product_witness: "${state.substrate_build.selected_product_witness}"

@@ -193,11 +193,12 @@ daemon_scope_output="$(
 daemon_scope_status=$?
 set -e
 [[ "$daemon_scope_status" -eq 2 ]]
-grep -Fq -- 'build --release -p ryeosd' <<<"$daemon_scope_output"
+grep -Fq -- 'build --release -p ryeosd -p ryeos-cli -p ryeos-core-tools' \
+  <<<"$daemon_scope_output"
 ! grep -Fq -- '-p ryeos-session-exec' <<<"$daemon_scope_output"
 ! grep -Fq -- '-p ryeos-structured-session' <<<"$daemon_scope_output"
 grep -Fq -- \
-  "$scope_tmp/repo/bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools" \
+  "$scope_tmp/target/release/ryeos-core-tools" \
   <<<"$daemon_scope_output"
 test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 

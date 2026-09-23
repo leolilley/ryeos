@@ -898,10 +898,7 @@ fn admit_declarations_in_publication(
         });
     }
 
-    if let Some(inherited) = inherited {
-        realized.extend(inherited.iter().cloned());
-    }
-    let realized = RealizedExternalContentSet::new(realized)?;
+    let realized = merge_child_and_inherited_realizations(realized, inherited)?;
     resolution.composed.derived.insert(
         ryeos_engine::external_content::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
         realized.to_value()?,
@@ -931,6 +928,82 @@ fn admit_declarations_in_publication(
         store,
         publication: None,
     }))
+}
+
+/// A child must admit its own declaration before it can execute a realization
+/// command. The parent can already carry those exact bytes for the graph; keep
+/// one retained identity in that case, while refusing any same-id disagreement.
+fn merge_child_and_inherited_realizations(
+    mut child: Vec<RealizedExternalContent>,
+    inherited: Option<&RealizedExternalContentSet>,
+) -> anyhow::Result<RealizedExternalContentSet> {
+    if let Some(inherited) = inherited {
+        for parent in inherited.iter() {
+            match child.iter().find(|entry| entry.id == parent.id) {
+                Some(entry) if entry == parent => {}
+                Some(_) => anyhow::bail!(
+                    "child external realization `{}` conflicts with inherited identity",
+                    parent.id
+                ),
+                None => child.push(parent.clone()),
+            }
+        }
+    }
+    RealizedExternalContentSet::new(child)
+}
+
+#[cfg(test)]
+mod merge_realization_tests {
+    use super::*;
+    use ryeos_engine::external_content::ExternalContentMode;
+    use ryeos_state::objects::ExternalContentMountRoot;
+
+    fn entry(id: &str, hash: char) -> RealizedExternalContent {
+        RealizedExternalContent {
+            id: id.into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: hash.to_string().repeat(64),
+            entry_count: 1,
+            total_bytes: 42,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: id.into(),
+        }
+    }
+
+    #[test]
+    fn exact_child_declaration_reuses_inherited_realization_once() {
+        let parent = RealizedExternalContentSet::new(vec![
+            entry("platform", 'a'),
+            entry("registry-inputs", 'b'),
+        ])
+        .unwrap();
+        let merged =
+            merge_child_and_inherited_realizations(vec![entry("platform", 'a')], Some(&parent))
+                .unwrap();
+        assert_eq!(merged, parent);
+    }
+
+    #[test]
+    fn conflicting_child_identity_cannot_shadow_inherited_realization() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        let error =
+            merge_child_and_inherited_realizations(vec![entry("platform", 'b')], Some(&parent))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with inherited identity")
+        );
+    }
+
+    #[test]
+    fn distinct_child_mount_overlap_remains_forbidden() {
+        let parent = RealizedExternalContentSet::new(vec![entry("platform", 'a')]).unwrap();
+        let mut child = entry("different", 'b');
+        child.mount = "platform".into();
+        assert!(merge_child_and_inherited_realizations(vec![child], Some(&parent)).is_err());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

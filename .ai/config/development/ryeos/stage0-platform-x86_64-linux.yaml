@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T03:27:27Z:4df49095adf9e30e90b9e15be52a7a82951b50060c229e8d081a190552a76ea8:k7BzLACdvRCH5f/3c6t5XaSnUMgaxtlsOYKcV7ti53BHk2QeltgPm+O17VN8rFhybnnDyhkJfQrFoze2AUQjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T23:36:51Z:a989c364904e2348016c389932abd9071d94105ec64e7515c65d20b8e9c7c85b:D8tEsG2AV0Bgpqvlai0MRRtX619PUaUnFp9VCD02ZXsbNcDXkyR325OQHZliVlDJOnK0Dps+HAeXhbGyLmbjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "development/ryeos"
 name: "stage0-platform-x86_64-linux"
 version: "3.0.0"
@@ -49,7 +49,11 @@ image_member_rt: "/usr/lib/x86_64-linux-gnu/librt.so.1 lib/librt.so.1 644 14552 
 image_member_util: "/usr/lib/x86_64-linux-gnu/libutil.so.1 lib/libutil.so.1 644 14408 e3981d10efd152a53f083e38f5f9ddde7a049c85d0ab388a5eec91b52fc98a11"
 image_member_gcc_s: "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1 lib/libgcc_s.so.1 644 182856 30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af"
 image_member_zlib: "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1 lib/libz.so.1 644 125376 85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+image_member_sframe: "/usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0 lib/libsframe.so.1 644 30976 adb0b9a33909e7264ad724e138eb97995832e535b22b192c1a898c349c918a9f"
+image_member_zstd: "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7 lib/libzstd.so.1 644 825336 27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
 image_member_gcc: "/usr/bin/x86_64-linux-gnu-gcc-14 native/bin/gcc 755 1162264 a23ecab8ff08f09ad8c80602c2c5df7f49e09c25905cb8975902e101bf72635f"
+image_member_ar: "/usr/bin/x86_64-linux-gnu-ar native/bin/ar 755 52480 f8fe09d485b40b1d47c534c96f5cbaaa9148e247aa0494c087104421f48ac5eb"
+image_member_bfd: "/usr/lib/x86_64-linux-gnu/libbfd-2.44-system.so lib/libbfd-2.44-system.so 644 1463360 7a27acdd82e38dbddd8568d54de0df4358e71a3c387d5c1d999d369450c1bf6a"
 image_member_collect: "/usr/libexec/gcc/x86_64-linux-gnu/14/collect2 native/bin/collect2 755 422136 ea31a4cebd9df1b6428c463428d461ccecfe66c897936409d5b2cde0b3af9e27"
 image_member_crtbegin: "/usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o lib/crtbeginS.o 644 2736 37af2040527c75078f900a29ea4a71b22576aa5c26f1f29af7b5935cebbe571e"
 image_member_crtend: "/usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o lib/crtendS.o 644 1152 8981687575c10a2e2146947bce387769cbd118f5b8c5dda489f514dc7d2ed4c7"
@@ -60,9 +64,12 @@ image_member_scrt: "/usr/lib/x86_64-linux-gnu/Scrt1.o lib/Scrt1.o 644 1640 4ca31
 image_member_crti: "/usr/lib/x86_64-linux-gnu/crti.o lib/crti.o 644 1072 78acef26a7007f5320c98633376f2903e33895e694fbc2b91d189b38addbca8a"
 image_member_crtn: "/usr/lib/x86_64-linux-gnu/crtn.o lib/crtn.o 644 648 121f2a5f12b13471dd8c7dabe3ff334df08540c270564d1a2b3c47ecbd8d3101"
 image_member_c_nonshared: "/usr/lib/x86_64-linux-gnu/libc_nonshared.a lib/libc_nonshared.a 644 5098 22a836e3aff767b559a703d42bde40fdb0e550297dbd99dd565f6a68b3ae8dda"
+image_member_binutils_notice: "/usr/share/doc/binutils-common/copyright share/licenses/binutils/COPYRIGHT 644 1795 20a9818b14f941467bcc0f459a1b1951e3bfecc1cc259e5004f8b9a80d7dc804"
 image_member_gcc_notice: "/usr/share/doc/gcc-14-base/copyright share/licenses/gcc/COPYRIGHT 644 69004 20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
 image_member_libc_notice: "/usr/share/doc/libc6/copyright share/licenses/glibc/COPYRIGHT 644 51200 f5788886720a2605a946e81d571e6c8162b09f58d2e2ceb8d36e5768fccd850d"
+image_member_sframe_notice: "/usr/share/doc/libsframe1/copyright share/licenses/libsframe/COPYRIGHT 644 1795 20a9818b14f941467bcc0f459a1b1951e3bfecc1cc259e5004f8b9a80d7dc804"
 image_member_zlib_notice: "/usr/share/doc/zlib1g/copyright share/licenses/zlib/COPYRIGHT 644 2927 9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6"
+image_member_zstd_notice: "/usr/share/doc/libzstd1/copyright share/licenses/zstd/COPYRIGHT 644 5332 5cec9fef4d3fa7e0371fbef4ec3fc416e0105dc2a9922117f84e825cb11f50f8"
 image_member_gpl: "/usr/share/common-licenses/GPL-3 share/licenses/GPL-3 644 35149 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
 image_member_lgpl: "/usr/share/common-licenses/LGPL-2.1 share/licenses/LGPL-2.1 644 26419 20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
 # Regular copies of already verified members, not symlinks or new programs.

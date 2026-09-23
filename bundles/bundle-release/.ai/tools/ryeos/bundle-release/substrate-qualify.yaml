@@ -1,26 +1,25 @@
-# ryeos:signed:2026-09-20T12:43:58Z:b515564aae9fe5202e9966bcb47c70120bc78ab9bd8c559098bc10aec8a6285c:D5/3fU32wvpzfxeZRlLbDZrICYJDZb2K2iqGwKfg6WR920E1XIjJyrLI9UMDQ2aWOiWXfW22v+KZuQV2WIDnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:15:01Z:722be898391f3e0806aa4b036df1151c77146c4ba51a15830887880d250472db:Ayn1UMuXesoMpxHNcNFaV0ddjsY+qpS0sAiiLNamFXUtvlX8psEW1CP8+Vf976+Aqi5XCGAoXHGf5s7yVLp6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-qualify
 version: "1.0.0"
 description: Verify one exact receipt-only captured substrate release product without executing it.
-executor_id: "@subprocess"
+executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-source_scope:
-  location: item_namespace
-  load_roots: [item_directory]
-  materialization: read_only
 external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_substrate_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: subject
     relationship_ref: config:bundle-release/substrate-build-products
     relationship: substrate_release_to_qualification
     kind: tree
     mount_root: execution_runtime
     mount: substrate-release
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
-  command: /usr/bin/python3
-  args: ["${tool_dir}/lib/substrate-qualify.py"]
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/substrate-qualify.py"]
   input_data: "${params_json}"
   timeout_secs: 60

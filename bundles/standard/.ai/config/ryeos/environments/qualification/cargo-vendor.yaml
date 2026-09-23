@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-21T01:02:03Z:596d54a615c941b36eb312eff7e9a3bc6ec6a634eee63a6e79d4c1f9b636bc03:wVFvy84i7paOx0HIbb+Wo07ysq4qwCkSKm9t0d3c38A1mZFFFSr4VnmeFpbTDop8lq9M3nK+eq56m3Y8WZQpBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+version: "1.0.0"
+description: Independent policy for an exact offline Cargo vendor closure
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:ryeos/environments/qualification/cargo-vendor
+  subject_declaration_id: subject
+  allowed_claims:
+    - cargo_vendor_lock_closure_v1
+    - cargo_vendor_offline_checksums_v1
+  verifier_parameters: {}

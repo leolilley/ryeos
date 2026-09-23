@@ -1,19 +1,20 @@
-# ryeos:signed:2026-09-20T12:43:58Z:6a6e7b9195f6b596918a252aaad20c3983d454a10f9dcbc839d499b93beb644f:WTaUxrLi4p6P/hG3OPieLFb5RWNAQ2sGAOGpep1vO5PQa1uSMqGYBBMINF5L/qwCiLAIoWc6AvK760nIluoGBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:15:01Z:e493d59ec75c9da20185e05639ae0bab36e30ac40ec62da9e47ac11bdaeb1abf:aNedG35A6AJCiYC20yNssCCFNArsB4Y3ISTP17BedP2I/FCOg6M98TFgPXICZA7U5TllGMo3aGmTxN3tmN6ECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: signed-capture
 version: "1.0.0"
 description: Copy the admitted unsigned product and apply only the exact publisher-signed manifest.
-executor_id: "@subprocess"
+executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-source_scope:
-  location: item_namespace
-  load_roots: [item_directory]
-  materialization: read_only
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-tool-products, relationship: python_to_signed_capture_tool, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - {id: unsigned_bundle, relationship_ref: config:bundle-release/native-build-products, relationship: native_bundle_to_signed_capture_tool, kind: tree, mount_root: execution_runtime, mount: unsigned-native-bundle}
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
-  command: /usr/bin/python3
-  args: ["${tool_dir}/lib/signed-capture.py"]
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/signed-capture.py"]
   input_data: "${params_json}"
   timeout_secs: 300

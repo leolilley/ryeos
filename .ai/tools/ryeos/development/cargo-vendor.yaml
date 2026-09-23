@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-17T06:36:50Z:6abf6bba89e401a550133a05512f349b675d6fed413338dae8184bc22e5737b1:oCxdfbP2O0AdR67WWXt/JtswHdTSRpLJCDHmsi/Bd/w0QoN3RD0Cx4b53dakUVZXTxGDFgjS56khk6JQQo1uCw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-22T06:35:10Z:d90302008d5a82c17fe8315d6439f1896c5b4195a17fbbf4ff3ded2d39836ecc:E4j6MYJYRjC0mdrnIXpkXPfxSlRrsmyWzhb7GngJS9vf2y9oUbNO3P7R2fPFs8gsutuwJGjkrPI0bhgKxV2PDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/development
 name: cargo-vendor
-version: "1.0.2"
+version: "1.1.1"
 description: Produce locked vendored sources using admitted Cargo and exact public registry inputs
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
@@ -9,11 +9,13 @@ effects: live
 workspace_access: immutable_current_generation
 filesystem_authority: captured_execution
 network_authority: isolated
+# The Graph admits the qualified platform product. The child independently
+# declares the exact executable realization it uses for its Cargo command.
 external_content:
   - id: platform
     kind: tree
     mode: pinned
-    digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
+    digest: b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00
     mount_root: execution_runtime
     mount: platform
 env_config:

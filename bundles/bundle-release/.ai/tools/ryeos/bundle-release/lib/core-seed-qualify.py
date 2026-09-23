@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T12:43:58Z:163c86b820349fb209387acb7adbe9765d7a20cc1c68d53a4ec855532dea18e4:ZgAlMNaFf+l7xFZbqqwToEz3lwDbx+fcgw3fN7q2HEggsBdH/Ec3jf12XTLkou3ftEV9hO8zDzUk2cnn1CTkCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:9d89e8217c6807f90652fcf46b96789da0c3de16ce090c4132f732237cd645f4:wemuRTm8+8kq6lNk7DiBYQNTdic+m018BNgqC6bHC4X05ROp8wvyUXJLgWgZFUy0FKhMV0/ApsnmnHdF8FSFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one exact admitted signed substrate Core seed."""
 import json
 import os
@@ -13,10 +13,10 @@ request = json.load(sys.stdin)
 if request != {}:
     raise SystemExit("Core seed qualification accepts no caller-authored parameters")
 sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
-if (not isinstance(sealed, list) or len(sealed) != 1
-        or sealed[0].get("id") != "subject"):
-    raise SystemExit("exact admitted signed Core seed required")
-manifest_hash = sealed[0].get("manifest_hash")
+if (not isinstance(sealed, list) or len(sealed) != 2
+        or {entry.get("id") for entry in sealed} != {"python", "subject"}):
+    raise SystemExit("exact admitted Python and signed Core seed required")
+manifest_hash = next(entry["manifest_hash"] for entry in sealed if entry["id"] == "subject")
 if not isinstance(manifest_hash, str) or not HASH.fullmatch(manifest_hash):
     raise SystemExit("admitted Core seed has no exact manifest identity")
 root = pathlib.Path("/ryeos/realizations/core-seed")

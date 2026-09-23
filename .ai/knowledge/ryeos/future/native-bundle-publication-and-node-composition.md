@@ -1,23 +1,52 @@
-<!-- ryeos:signed:2026-09-20T01:57:09Z:8548aa52993d61b81d1390ceb525a15b4cd12cf3c3196d63567b39380ae59648:y03tRa0gZDH6L7ChSiud5GUDjr5EZcEScPp4HFMP3/C+ofV0H9Z+wCfe/kbHStMJ9kTxWrEMG5oo8nogiKrpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-22T02:52:14Z:4afff42150c42e6febc259d466b5d9a760ade78b3175434d9dde588c54b9390e:wgAQPb471T44tDk4d5jGNdctTIH/QZP0/82MVsw518kaN/mDGDLQBmexJQCy1+sRSrxsSAfr1jY03SFxA9oNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
 title: Native Bundle Publication and Node Composition
 description: Scheduled direction for independently publishing exact RyeOS bundle generations and composing nodes without rebuilding the substrate image
 entry_type: design
-version: "0.3.0"
-status: scheduled_design
+version: "0.5.0"
+status: implementation_under_qualification
 ```
 
 # Native bundle publication and node composition
 
 ## Status
 
-Scheduled design for the next release-distribution slice. The object schemas,
-catalog APIs, bundle-set activation transaction, bundle-source profile, and
-RyeOS-native release Graph described here have not landed. The current GHCR
-release process remains authoritative until this path passes its acceptance
-gates.
+Implementation is under qualification, not merely scheduled design. Publication
+contracts, catalog handlers, calibration and bundle-set transaction source,
+release-authority initialization selection and release Graphs exist in the
+current development tree. Their existence is not end-to-end acceptance.
+The 2026-09-22 checkpoint has a verified and imported corrected Stage-0
+compiler artifact and a retained platform product witness. Independent live
+platform qualification remains open; it does not yet prove this campaign published,
+transferred and activated a bundle on another node without an image rebuild.
+The image/tag release runbook remains the established shipping path until the
+native path passes its acceptance gates.
+
+Continue from the dated checkpoint in
+[`source-local-bundle-development.md`](../development/source-local-bundle-development.md)
+and the ownership rules in
+[`development-operation-ownership.md`](../development/development-operation-ownership.md).
+That checkpoint owns concrete local evidence and pending steps; this document
+owns the architectural direction. The external Stage-0 publisher seeds missing
+compiler bytes once per selected toolchain change. It is neither the normal
+bundle publication workflow nor a reason to rebuild the serving substrate for
+each bundle update. Complete native development execution remains a longer-term
+direction, and bootstrap exceptions must not grow into a second release system.
+
+Current calibration requires qualified Python, platform and Cargo-vendor
+products. This initial authority setup is distinct from recurring updates:
+data-only production uses the Python-only graph; binary-bearing production uses
+the selected build targets and retained compiler/dependency products. Reuse
+calibration while its measured identities and policy remain admissible; changes
+that invalidate the measurement require recalibration. The current completion
+campaign proves both successor classes across nodes, unchanged substrate
+identity, pre-commit recovery and refusal of post-execution rollback in v1.
+The original acceptance properties below remain mandatory. Full worker development acceptance,
+Stage1 reproduction, durable cache optimization and self-hosted CI migration
+remain separate work. The dated execution-closure implementation plan owns the
+remaining sequence, while this document retains the architectural boundaries.
 
 ## Purpose
 

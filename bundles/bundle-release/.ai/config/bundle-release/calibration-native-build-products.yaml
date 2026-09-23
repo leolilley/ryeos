@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:de970aea6fc2a70adfccb4df47f1a2257f1db1e726434f4a649c32afb4711642:92bjWyBJ/jxgM0h3uBKenfdHPs3HsGuuAOVHDHYd9xzQCegXQHcYMHWJgGQkI1cgDpaSyC75b/JcwDRa2LJODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:18:07Z:fab42a7f713f216af1892e3810608435a0520c1c19c40ae2a896dc1fa7c47448:Uw4lqeAaZfXNRoSgrUbq0f/yB+9k6NATYYB9NhNILecupYt/pg5ZUNySXCbG8myG9eSsP16JrMVdyVbg5GWWCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Purpose-separated native authority-calibration producer.
@@ -28,5 +28,10 @@ product_relationships:
     - name: native_bundle_to_signed_capture
       producer: {canonical_ref: graph:ryeos/bundle-release/native-build, recipe_binding: product_recipe, product_name: native_bundle, parameters: {}}
       consumer: {canonical_ref: graph:ryeos/bundle-release/signed-capture, declaration_id: unsigned_bundle}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}
+    - name: native_bundle_to_signed_capture_tool
+      producer: {canonical_ref: graph:ryeos/bundle-release/native-build, recipe_binding: product_recipe, product_name: native_bundle, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/signed-capture, declaration_id: unsigned_bundle}
       required_product: {shape: tree, storage: content, bounds: *bounds}
       qualification: {policy_ref: null, required_claims: []}

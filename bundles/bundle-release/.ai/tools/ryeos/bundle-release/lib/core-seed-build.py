@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T12:43:58Z:bf2c74e74f14bbe6deab52b2049ac7841752d3eed2a5b7cbe616dd5067fe2b13:GKasz0Mv2U/xDNJM12dTkIDrt//89QHKiy6NLQd7qD0KfTi1fLnUlcKfCPuS6RE948SANzdYVOh+kIXfYyayDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:0e28674df307ac64c3b1e0c12160105bbca1764931f3b9f8fcf5796a643ab21e:82Hpw1emPRwoXg0iAX8awTtPAFHxG2rnkuFq2jy0JgRMWSO65TVtUyNTBPrVVrnXQcrk4WrkW4bmR/E48GSJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build the exact initial Core bundle from an admitted pinned source generation."""
 import hashlib
 import importlib.util
@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import resource
 import shutil
 import stat
 import subprocess
@@ -18,6 +19,13 @@ sys.dont_write_bytecode = True
 
 def fail(message):
     raise SystemExit(message)
+
+
+# This helper is part of the authenticated Tool source closure, not project code.
+elf_spec = importlib.util.spec_from_file_location(
+    "release_elf", pathlib.Path(__file__).with_name("release-elf.py"))
+release_elf = importlib.util.module_from_spec(elf_spec)
+elf_spec.loader.exec_module(release_elf)
 
 
 request = json.load(sys.stdin)
@@ -110,35 +118,54 @@ if manifest.is_symlink():
     fail("Core manifest is unsafe")
 manifest.write_text(json.dumps(manifest_value, sort_keys=True, separators=(",", ":")) + "\n")
 
-scratch = tempfile.TemporaryDirectory(prefix="ryeos-core-seed-")
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
+resource.setrlimit(resource.RLIMIT_NPROC, (512, 512))
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 30, 1 << 30))
+scratch = tempfile.TemporaryDirectory(prefix=".ryeos-core-seed-", dir=root)
 targets = {kind: pathlib.Path(scratch.name) / f"cargo-{kind}-target"
            for kind in ("release", "static")}
 processes = []
+payload_transforms = []
 triple = target["triple"]
 for package in packages:
     if len({payload["build_class"] for payload in expected
             if payload["cargo_package"] == package}) != 1:
         fail("one Core Cargo package cannot cross build classes")
-base_env = {
-    "PATH": os.environ.get("PATH", ""),
-    "HOME": os.environ.get("HOME", ""),
-    "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", ""),
-    "CARGO_HOME": os.environ.get("CARGO_HOME", ""),
-}
+source_cargo = root / ".cargo"
+if source_cargo.exists() or source_cargo.is_symlink():
+    fail("release source may not provide Cargo configuration")
+private_root = pathlib.Path(scratch.name) / "environment"
+cargo_spec = importlib.util.spec_from_file_location(
+    "release_cargo", pathlib.Path(__file__).with_name("release-cargo.py"))
+release_cargo = importlib.util.module_from_spec(cargo_spec)
+cargo_spec.loader.exec_module(release_cargo)
+release_cargo.validate_source_configuration(root)
+platform = release_cargo.PLATFORM
+cargo = "/ryeos/realizations/platform/rust/bin/cargo"
+base_env = release_cargo.build_environment(
+    private_root, triple, "/ryeos/realizations/static-link-inputs")
 for build_class in ("release", "static"):
     selected = sorted({payload["cargo_package"] for payload in expected
                        if payload["build_class"] == build_class})
     if not selected:
         continue
-    command = ["cargo", "build", "--release", "--locked", "--target", triple]
+    # A shared package may contain non-Core binaries. Do not build them merely
+    # because Core owns another binary from that package.
     for package in selected:
-        command.extend(["-p", package])
-    environment = {**base_env, "CARGO_TARGET_DIR": str(targets[build_class])}
-    if build_class == "static":
-        environment["RUSTFLAGS"] = "-C target-feature=+crt-static"
-    subprocess.run(command, cwd=root, env=environment, check=True)
-    processes.append({"build_class": build_class, "argv": command,
-                      "cwd": str(root), "exit_code": 0})
+        command = [cargo, "--config", 'source.crates-io.replace-with="ryeos-vendored"',
+                   "--config", 'source.ryeos-vendored.directory="/ryeos/realizations/cargo-vendor"',
+                   "build", "--release", "--locked", "--frozen", "--offline",
+                   "--jobs", "2", "--target", triple, "-p", package]
+        for binary in sorted(payload["binary"] for payload in expected
+                             if payload["cargo_package"] == package
+                             and payload["build_class"] == build_class):
+            command.extend(["--bin", binary])
+        environment = {**base_env, "CARGO_TARGET_DIR": str(targets[build_class])}
+        if build_class == "static":
+            environment["RUSTFLAGS"] += " -C target-feature=+crt-static"
+        subprocess.run(command, cwd=root, env=environment, check=True)
+        processes.append({"build_class": build_class, "argv": command,
+                          "cwd": str(root), "exit_code": 0})
 destination_root = product / ".ai/bin" / triple
 destination_root.mkdir(parents=True, exist_ok=True)
 for payload in expected:
@@ -147,6 +174,8 @@ for payload in expected:
         fail(f"owned Core build output is absent: {payload['binary']}")
     destination = destination_root / payload["binary"]
     shutil.copyfile(source, destination)
+    transformation = release_elf.normalize_output_elf(destination, payload["build_class"], platform)
+    payload_transforms.append({"binary": payload["binary"], **transformation})
     destination.chmod(0o755)
 scratch.cleanup()
 for path in product.rglob("*"):
@@ -166,5 +195,6 @@ json.dump({
     "output_root": "core_tree",
     "product_name": "core_seed",
     "processes": processes,
+    "payload_transforms": payload_transforms,
 }, sys.stdout, sort_keys=True, separators=(",", ":"))
 print()

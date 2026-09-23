@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-23T08:15:01Z:e7c0f97ab07799323ddd420dc2ca32ffabe8dbc7ab8b8bd6a4a1192654475638:gDfNPSoYXdjNNasDQgkGpyP3S1SkfhYnNGNw6Pkm1l4/BsD+IchitdVeAzCxOXgHBX6y+bblaXic+DczmaV2CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/bundle-release
+name: portable-qualify
+version: "1.0.0"
+description: Verify the exact captured portable bundle tree without mutating it.
+executor_id: tool:ryeos/bundle-release/runtime
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_portable_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - id: subject
+    relationship_ref: config:bundle-release/portable-signed-capture-products
+    relationship: signed_portable_bundle_to_release_qualification
+    kind: tree
+    mount_root: execution_runtime
+    mount: native-bundle
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config:
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/portable-qualify.py"]
+  input_data: "${params_json}"
+  timeout_secs: 300

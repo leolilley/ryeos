@@ -5686,6 +5686,48 @@ async fn build_and_launch_inner(
             Some(_) => {}
             None => metadata.effect_authority = Some(effect_authority.clone()),
         }
+    }
+
+    let selected_resources = params
+        .state
+        .execution_resources
+        .select(authority.prepared_launch.target_requirement.as_ref())
+        .map_err(BuildAndLaunchError::Internal)?;
+    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+    let realization_admission = super::execution_realization::admit_or_verify(
+        params.state,
+        authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch lost its admitted metadata"
+            ))
+        })?,
+        authority.effective_program.resolution(),
+        authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        selected_resources.selections(),
+        authority.pending_external_realization.as_mut(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if authority.pending_external_realization.is_none() {
+        authority.pending_external_realization = realization_admission.publication;
+    }
+    authority.launch_metadata = authority
+        .launch_metadata
+        .take()
+        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
+    authority.selected_resources = Some(selected_resources);
+
+    if let Some(effect_authority) = params.effect_authority {
+        let metadata = authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed effect launch lost its realized metadata"
+            ))
+        })?;
         metadata
             .validate()
             .map_err(BuildAndLaunchError::Internal)?;
@@ -5723,40 +5765,6 @@ async fn build_and_launch_inner(
             }
         }
     }
-
-    let selected_resources = params
-        .state
-        .execution_resources
-        .select(authority.prepared_launch.target_requirement.as_ref())
-        .map_err(BuildAndLaunchError::Internal)?;
-    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
-    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
-    let realization_admission = super::execution_realization::admit_or_verify(
-        params.state,
-        authority.launch_metadata.as_ref().ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed launch lost its admitted metadata"
-            ))
-        })?,
-        authority.effective_program.resolution(),
-        authority
-            .effective_program
-            .effective_definition_digest()
-            .as_str(),
-        &realization_contract_ref,
-        &realization_contract_digest,
-        selected_resources.selections(),
-        authority.pending_external_realization.as_mut(),
-    )
-    .map_err(BuildAndLaunchError::Internal)?;
-    if authority.pending_external_realization.is_none() {
-        authority.pending_external_realization = realization_admission.publication;
-    }
-    authority.launch_metadata = authority
-        .launch_metadata
-        .take()
-        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
-    authority.selected_resources = Some(selected_resources);
 
     let initial_events = launch_audit_records(
         params.resolved,

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-20T14:52:10Z:e54db9b6e4af16fd581a9b1eb40f61b7a6fd4976175619089677d6ba18a1c240:3FaOntgyk86V3qBqsAkAEdb6lxQUczwa0Thtaa57n0/OrxWMQru7i8AQr+utiG+zZt0K9pjPKaNXSQH8ecrABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:20:49Z:263cc01a378ab574caae0177550a778bee82f1b1045ddc335393b0ccbbd53164:QOCGovxeHFwfRNZno3HeWd5SWRVD9ZEnuF79SJWLbUN4B+D3GQ6nNkhZiRIXSz0rdSliut47ynjiWcViuWiXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Capture the admitted unsigned Core seed with only its exact publisher-signed manifest changed.
 effects: live
 external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_core_seed_capture, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: unsigned_core
     relationship_ref: config:bundle-release/core-seed-build-products
     relationship: core_seed_to_signed_capture
@@ -14,6 +15,8 @@ product_recipe: config:bundle-release/core-seed-capture-products
 requires:
   capabilities:
     declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
 config:
   start: capture
@@ -22,9 +25,10 @@ config:
   config_schema:
     type: object
     additionalProperties: false
-    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest]
+    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest, child_product_selections]
     properties:
       release_input: {type: object}
+      child_product_selections: {type: array, minItems: 1, maxItems: 8}
       materialization_result_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
       signed_tree_manifest_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
       manifest_item_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
@@ -35,6 +39,7 @@ config:
       action:
         item_id: tool:ryeos/bundle-release/core-seed-capture
         ref_bindings: {}
+        product_selections: "${inputs.child_product_selections}"
         params:
           release_input: "${inputs.release_input}"
           materialization_result_hash: "${inputs.materialization_result_hash}"

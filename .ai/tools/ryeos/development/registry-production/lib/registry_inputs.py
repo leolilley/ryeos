@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T06:36:51Z:2bd857a457d85918294e40e80ad8fd1097d67c2ed83c4833d5f780aee2fb8ddd:T6rpt+tIfGAd3fqGJ9QuODAdeFpfe0z9FYRVrjBodGVo2/E02V42Q/sUtXluu42em6fycRWTCSkObaSfuiIhBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-22T06:20:35Z:2bd857a457d85918294e40e80ad8fd1097d67c2ed83c4833d5f780aee2fb8ddd:skxk0OJ9WjZHuWX4TKT5WZ+6+3w5v0Q3x6iUDR/1XKyO+iNwbBf2Lw7Lfqlg+NAjujN6McEwZe0oVIZOMvK+Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Canonical locked-registry selection and assembly, shared with first bootstrap.
 
 This module never invokes a transport, Cargo, package installer or node API.

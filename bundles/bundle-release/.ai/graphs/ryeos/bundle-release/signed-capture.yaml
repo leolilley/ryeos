@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-20T14:52:10Z:bdb87533bb474901b1b1f35909270b52ace50e5db7a4448efc7b51857874e415:JxL3hWUG+XyKzgduwk6nPtujOx1p+vuqlS8qjG7xu+d/vTWhIO1AgnxNXEgHGEX041A7nk0iNslIydv3mv+NDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:20:49Z:8a45fca75df80df6a34222bcc6d21e5f165eac41a2984012a661c721b8d2e74f:tSJHB9WRatNWIjwBV8Z3I1A+sIz1IEVkmJtUgjT9vEosUaClmaiLSKCXl9Ffpw+K9FyojLAaj260i7zG11uiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Materialize the publisher-signed bundle tree as a second admitted product.
 effects: live
 external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_signed_capture, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: unsigned_bundle
     relationship_ref: config:bundle-release/native-build-products
     relationship: native_bundle_to_signed_capture
@@ -14,6 +15,8 @@ product_recipe: config:bundle-release/signed-capture-products
 requires:
   capabilities:
     declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.tool.ryeos/bundle-release/signed-capture
 config:
   start: capture
@@ -22,9 +25,10 @@ config:
   config_schema:
     type: object
     additionalProperties: false
-    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest]
+    required: [release_input, materialization_result_hash, signed_tree_manifest_hash, manifest_item_hash, signed_manifest, child_product_selections]
     properties:
       release_input: {type: object}
+      child_product_selections: {type: array, minItems: 1, maxItems: 8}
       materialization_result_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
       signed_tree_manifest_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
       manifest_item_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
@@ -35,6 +39,7 @@ config:
       action:
         item_id: tool:ryeos/bundle-release/signed-capture
         ref_bindings: {}
+        product_selections: "${inputs.child_product_selections}"
         params:
           release_input: "${inputs.release_input}"
           materialization_result_hash: "${inputs.materialization_result_hash}"

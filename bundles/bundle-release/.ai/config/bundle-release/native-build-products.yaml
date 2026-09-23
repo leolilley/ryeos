@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:15:48Z:ffc05ffd6ffb225afc0243a3b7bedfca133efe226b4b599bfdaa36dba5d4c6e7:oTg3324/W0wovB01/2bjGJssKarphSOvyen9PcJawDeq3En79GYOTmuXpz1wkW0cn2JHiQpT75obzaJNw+FBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:21:51Z:a9cab026c49d6d46bf3e4b3a124de31e69bb3509835a1f0826f2027e3cb07ba4:98r1heycorhYgG1NcO++fvpfxGbptm/KVnr2F4Ic+/ea2zp2tlpLt+/1WSBEC8CdtAajnQuyNg/YQBNZfr2+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Captured output contract for an admitted non-core binary or data-only bundle producer.
@@ -49,3 +49,23 @@ product_relationships:
       qualification:
         policy_ref: config:bundle-release/native-qualification
         required_claims: [native_bundle_release_checks_v1]
+    - name: native_bundle_to_signed_capture_tool
+      producer:
+        canonical_ref: graph:ryeos/bundle-release/native-build
+        recipe_binding: product_recipe
+        product_name: native_bundle
+        parameters: {}
+      consumer:
+        canonical_ref: tool:ryeos/bundle-release/signed-capture
+        declaration_id: unsigned_bundle
+      required_product:
+        shape: tree
+        storage: content
+        bounds:
+          maximum_entries: 4096
+          maximum_depth: 32
+          maximum_file_bytes: 33554432
+          maximum_total_bytes: 268435456
+      qualification:
+        policy_ref: null
+        required_claims: []

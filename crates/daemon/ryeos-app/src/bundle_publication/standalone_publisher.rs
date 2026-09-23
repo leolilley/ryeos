@@ -20,7 +20,7 @@ use super::{
 /// Closed identity of the standalone publisher operation surface. The
 /// executable artifact is measured separately so a rebuild cannot retain the
 /// authority of another binary merely by repeating this definition.
-const PUBLISHER_TOOL_DEFINITION_V1: &[u8] = b"ryeos.standalone-bundle-publisher.v1\nPOST /v1/bundle-recipe/authorize-build\nPOST /v1/bundle-recipe/authorize-capture\nPOST /v1/substrate-core/authorize-recipe\nPOST /v1/bundle-tree/sign\nPOST /v1/bundle-generation/authorize\nPOST /v1/substrate-release/authorize\nPOST /v1/bundle-catalog/authorize-successor\n";
+const PUBLISHER_TOOL_DEFINITION_V1: &[u8] = b"ryeos.standalone-bundle-publisher.v1\nPOST /v1/bundle-recipe/authorize-build\nPOST /v1/bundle-recipe/authorize-capture\nPOST /v1/substrate-core/authorize-recipe\nPOST /v1/substrate-build/authorize-recipe\nPOST /v1/bundle-tree/sign\nPOST /v1/bundle-generation/authorize\nPOST /v1/substrate-release/authorize\nPOST /v1/bundle-catalog/authorize-successor\n";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -776,6 +776,27 @@ impl ManifestOnlyTreePublisher {
 }
 
 impl ConstrainedBundleTreePublisher for ManifestOnlyTreePublisher {
+    fn authorize_substrate_build_recipe(
+        &self,
+        request: &super::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    ) -> anyhow::Result<serde_json::Value> {
+        request.require_policy(
+            &self.policy.catalog_namespace,
+            &self.policy.bundle_publication_policy_section_digest,
+            self.policy.trust_epoch,
+        )?;
+        let body = request.config_body()?;
+        let signed = lillux::signature::sign_content(&body, self.identity.signing_key(), "#", None);
+        let blob = self.cas.put_blob(signed.as_bytes())?;
+        Ok(serde_json::json!({
+            "schema":"ryeos.substrate_build_recipe_authorization.v1",
+            "canonical_ref":super::recipe::SUBSTRATE_BUILD_RECIPE_REF,
+            "publisher_fingerprint":self.identity.fingerprint(),
+            "body_hash":lillux::signature::content_hash(&body),
+            "signed_blob_hash":blob.hash,
+            "signed_config":signed
+        }))
+    }
     fn authorize_core_seed_recipe(
         &self,
         request: &super::core_seed::CoreSeedRecipeRequest,
@@ -808,7 +829,7 @@ impl ConstrainedBundleTreePublisher for ManifestOnlyTreePublisher {
         let blob = self.cas.put_blob(signed.as_bytes())?;
         Ok(serde_json::json!({
             "schema": "ryeos.bundle_build_recipe_authorization.v1",
-            "canonical_ref": "config:bundle-release/native-build-products",
+            "canonical_ref": request.canonical_ref()?,
             "publisher_fingerprint": self.identity.fingerprint(),
             "body_hash": lillux::signature::content_hash(&body),
             "signed_blob_hash": blob.hash,
@@ -830,7 +851,7 @@ impl ConstrainedBundleTreePublisher for ManifestOnlyTreePublisher {
         let blob = self.cas.put_blob(signed.as_bytes())?;
         Ok(serde_json::json!({
             "schema": "ryeos.bundle_capture_recipe_authorization.v1",
-            "canonical_ref": super::recipe::CAPTURE_RECIPE_REF,
+            "canonical_ref": request.canonical_ref()?,
             "publisher_fingerprint": self.identity.fingerprint(),
             "body_hash": lillux::signature::content_hash(&body),
             "signed_blob_hash": blob.hash,

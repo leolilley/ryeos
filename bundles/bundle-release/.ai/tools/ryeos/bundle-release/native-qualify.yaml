@@ -1,26 +1,25 @@
-# ryeos:signed:2026-09-20T12:43:58Z:fa74d2c90140614b7226ade9c59b025909a7a7d51b6f3c8fea0fd48d7868be58:k7eczN8z1OLym4wEopZ70WfMARpqvTaRdWN4q+cZfYRhY8ow7ONAVRU5aQ8LomGowQJDz+8zrT0K2HakNYzECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:15:01Z:e7102a450fe3389f36fb212a8cd76fa4c075ca0a9e8336e8b0da3b22f54e7317:rfcUwjtl7Lq7q8SnQFxH/HrB2w5zy5C2dzZhZ6yx14Gr6GW/v8VOAKV5NUxbtiVcshYOQhUGi93O2zu0nD2HDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: native-qualify
 version: "1.0.0"
 description: Verify the exact captured web bundle tree without mutating it.
-executor_id: "@subprocess"
+executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-source_scope:
-  location: item_namespace
-  load_roots: [item_directory]
-  materialization: read_only
 external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_native_qualify, kind: tree, mount_root: execution_runtime, mount: python-gnu}
   - id: subject
     relationship_ref: config:bundle-release/signed-capture-products
     relationship: signed_native_bundle_to_release_qualification
     kind: tree
     mount_root: execution_runtime
     mount: native-bundle
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
-  command: /usr/bin/python3
-  args: ["${tool_dir}/lib/native-qualify.py"]
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/native-qualify.py"]
   input_data: "${params_json}"
   timeout_secs: 300

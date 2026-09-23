@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:40Z:dfec87380519684eed2284cb6cf3512c88b4bb33a3fb2db82da9dbccab0ddc4d:hAtq0lugw+6b2K+et44mbyNjeJhuj7ggE1Hkh2FsaDXVo8PUtN6398QMqX/OosrKHQIbWUbZnpRwpHfdOfAGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:25:12Z:2d3f6cd9372e5910e27a0bf4791e7e854ab278d3cbbe7fccbcdfd3b7050114f1:dcBNthtjXZZAaCsmFokexzoOD5hLpS03mWnfA1Hf22ltEmwykI3mR8VwvYGtxEHTUvaFhVbcXEB/8mYq9z5TCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-build
 version: "1.0.0"
@@ -10,6 +10,8 @@ record_thread: true
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/core-seed-build-products
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
   - ryeos.execute.service.bundle-release/core-seed-build
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-build
 schema:

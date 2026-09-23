@@ -14,6 +14,7 @@ class AuthorityCalibrationAssets(unittest.TestCase):
         contract = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/calibration.rs").read_text()
         graph = (ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/authority-calibrate.yaml").read_text()
         service = (ROOT / "bundles/bundle-release/.ai/services/bundle-release/authority-calibrate.yaml").read_text()
+        profile = (ROOT / "bundles/.ai/node/init/profiles/release-authority.yaml").read_text()
 
         self.assertIn("require_local_configured_operator", handler)
         self.assertIn("run_authority_calibration", handler)
@@ -21,6 +22,17 @@ class AuthorityCalibrationAssets(unittest.TestCase):
         self.assertIn("AUTHORITY_CALIBRATION_CLAIM", contract)
         self.assertIn("bundle_publication_authority_calibration_v1", contract)
         self.assertIn("source_snapshot_hash", graph)
+        self.assertIn("required: [project_path, source_snapshot_hash, execution_environment]", graph)
+        self.assertIn('execution_environment: "${inputs.execution_environment}"', graph)
+        self.assertIn("execution_environment: object", service)
+        for capability in (
+            "ryeos.execute.config.bundle-release/execution-environment-products",
+            "ryeos.execute.config.bundle-release/portable-build-products",
+            "ryeos.execute.config.bundle-release/portable-qualification",
+            "ryeos.execute.config.bundle-release/portable-signed-capture-products",
+            "ryeos.execute.tool.ryeos/bundle-release/portable-qualify",
+        ):
+            self.assertIn(capability, profile)
         self.assertNotIn("catalog_namespace", graph)
         self.assertNotIn("publisher_fingerprint:", graph)
         self.assertNotIn("catalog_namespace", service)

@@ -1,0 +1,37 @@
+# ryeos:signed:2026-09-23T04:18:07Z:fd8dfbb30c6bc411b0a9317434a05caf563fbb1260edde433ae549b4b22999ed:JB4rX3sPmcRKI/vv+ttE6kgLJipOQ0A4x48a+9vzd4u/nBKXHRPQngI57TbnHxEX7O9upNk50j0OFZEhV+rgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: bundle-release
+version: "1.0.0"
+description: Purpose-separated portable authority-calibration producer.
+recipe_purpose: authority_calibration_v1
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: bundle_tree
+      path: products/native-bundle
+      storage: content
+      bounds: &bounds
+        maximum_entries: 4096
+        maximum_depth: 32
+        maximum_file_bytes: 33554432
+        maximum_total_bytes: 268435456
+  products:
+    - name: portable_bundle
+      source: {kind: workspace_output, root: bundle_tree}
+      path: products/native-bundle/tree
+      shape: tree
+      storage: content
+      required: true
+      bounds: *bounds
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: portable_bundle_to_signed_capture
+      producer: {canonical_ref: graph:ryeos/bundle-release/portable-build, recipe_binding: product_recipe, product_name: portable_bundle, parameters: {}}
+      consumer: {canonical_ref: graph:ryeos/bundle-release/portable-signed-capture, declaration_id: unsigned_bundle}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}
+    - name: portable_bundle_to_signed_capture_tool
+      producer: {canonical_ref: graph:ryeos/bundle-release/portable-build, recipe_binding: product_recipe, product_name: portable_bundle, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/signed-capture, declaration_id: unsigned_bundle}
+      required_product: {shape: tree, storage: content, bounds: *bounds}
+      qualification: {policy_ref: null, required_claims: []}

@@ -35,6 +35,11 @@ pub struct BundleCatalogPolicy {
     pub policy: String,
     pub trust_epoch: u64,
     pub frozen: bool,
+    /// Exact node-authored calibration retained when this catalog authority was
+    /// measured. Release callers cannot replace its execution products.
+    pub calibration_run_attestation_hash: String,
+    pub calibration_execution_environment:
+        crate::bundle_publication::calibration::CalibrationEnvironmentEvidence,
     pub qualification_signer_public_key: [u8; 32],
     pub qualification_signer_fingerprint: String,
     pub qualification_policy: ProductQualificationPolicySource,
@@ -120,6 +125,11 @@ impl BundlePublicationPolicy {
             if catalog.trust_epoch == 0 {
                 bail!("bundle-publication trust epoch must be nonzero");
             }
+            validate_hash(
+                &catalog.calibration_run_attestation_hash,
+                "catalog authority calibration attestation",
+            )?;
+            catalog.calibration_execution_environment.validate()?;
             validate_hash(
                 &catalog.qualification_signer_fingerprint,
                 "qualification signer fingerprint",

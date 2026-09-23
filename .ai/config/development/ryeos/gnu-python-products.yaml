@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-08T15:36:50Z:3a4bd19f67979fd15441b245246690fa8769739379d6bd0ee3cf713df2649489:8z/WLXieqlZBWYzmc+ob5BM6M/oFNyVIFJtoyahWiOMsK95/Scj0hEHAtVQ5GeutZYQ4E1lO447IhzaDOTWZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T07:57:29Z:3a4bd19f67979fd15441b245246690fa8769739379d6bd0ee3cf713df2649489:8z/WLXieqlZBWYzmc+ob5BM6M/oFNyVIFJtoyahWiOMsK95/Scj0hEHAtVQ5GeutZYQ4E1lO447IhzaDOTWZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: development/ryeos
 version: "1.0.0"
 description: Named retained GNU CPython runtime, notices and canonical ELF inventory

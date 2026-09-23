@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:40Z:3d26b2eb6ea75a3733ab3478ff41e799ed1514bd18d255cb059a072672733821:4jrILQiUqd34OhU6UWVMUJpElTcYjvpCbl/IVX8TCCjtXy2sYZANYgJQvyCP/OiMzutXJLEAxMfjHj9ZDBMHAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:25:12Z:e8678808535c61f8d0d5ed1abc618d8b6a9631d1939bbf8ea9ae6484faad0f57:e4pWlXappjGc46r1TaxLploESPWVwZo3XrIAfXENv0T87nYQpOk9hH2F2Wb57PntFJzhvUphzSD2+DTLov7zAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: core-seed-capture
 version: "1.0.0"
@@ -10,6 +10,8 @@ record_thread: true
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/core-seed-capture-products
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
   - ryeos.execute.service.bundle-release/core-seed-capture
   - ryeos.execute.tool.ryeos/bundle-release/core-seed-capture
 schema:

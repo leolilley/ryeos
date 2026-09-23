@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T06:37:30Z:cb532edcb7cb9ff008fd939a1dff85f9d0e55bd3b80d70e255938d6f4f54086d:IRWFbhx0y4LSjmS9R3NMl7CZjw9YhSKuNYPxoEytLqP5OMVg7NoRS6H1dyyuIAHegBZch16aex32MK1S017MCg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-09-23T08:16:34Z:40a863927bc164c3f7c2cce63b0df2cb62f01b35008b8690c716da3b12680572:qnCwmuMJuZfDcPQusTy/R0EjB3d+N4JrnEO71lDiFpWOEzuFPRCHzIb8FVwvFp7NjZOv48POJn/qog+pmKi4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.14.0"
+version: "1.24.0"
 ```
 
 # Source-Local Bundle Development
@@ -17,6 +17,505 @@ implemented. The project-bundle and development-realization sections below
 also record source-authored work that still has the explicit artifact,
 runtime-root, signing, and qualification gates they name. They must not be read
 as evidence that remote build/test execution is already available.
+
+For continuation of the native release proof, start with the dated checkpoint
+below and `development-operation-ownership.md`. Historical successful compiler
+or binding evidence elsewhere in this document is not evidence for a newly
+produced platform identity.
+
+### Native release proof checkpoint — 2026-09-23
+
+The four release-environment prerequisites (Python, platform, Cargo-vendor and
+static-link inputs) have retained qualifications. The child-owned execution
+binding correction is installed. Calibration at RyeOS ProjectSnapshot
+`ec9f7354dfa822947d446f0895f30a52bf1ac73a66f6f34a41c96c6312685df1`
+launched portable Tool `T-1f4208a6-f276-33bb-381a-4f4a0243102c`, which
+failed because `${tool_dir}` named an invisible installed-host path. A later
+retry at clean snapshot
+`103476e7b4939ce1c5a85e79f3862a166a1bdbfaa310e5812d1c704d57734479`
+launched Tool `T-40964241-4393-f52d-cbd4-a68b6e785678`; its relative
+`.ai/tools/ryeos/bundle-release/lib/native-build.py` argument resolved inside
+the pinned workspace, but the source was not mounted there. Investigation of
+`resolve_executor_source_policy` showed the exact cause: `source_scope` is
+selected from verified executor-chain intermediates, not from the root Tool.
+Root-only declarations therefore provided no source admission. The eleven
+release Tools now point to one signed `tool:ryeos/bundle-release/runtime`
+intermediate. That intermediate owns the narrower `item_directory` scope;
+each root retains its own exact command, interpreter, product slots and
+workspace-relative script argument. The focused asset test covers all eleven.
+This corrected chain is source-signed but not yet installed or live-proven.
+No successful calibration, catalog bootstrap or consumer bundle activation is
+established. Continue from the controlling plan below; do not reproduce
+qualified prerequisites, clear Cargo caches, or treat a host file's existence
+as sandbox visibility.
+
+Audit the whole lane before retrying a live build: each child Tool needs its own
+signed execution declarations, explicit product selections and exact-consumer
+composition. A Graph's sealed input bytes are not authority for the child to
+execute them. Build inputs are stage-specific: compiler/vendor/static inputs
+belong to native build; capture and qualification take Python and their subject.
+Producer relationship parameters must equal the producer's admitted parameters,
+including for calibration. An empty parameter object is not a wildcard.
+Qualification policy, selected subject consumer and retained verifier thread
+must name the same actual verifier. Do not substitute its wrapper Graph's
+thread. Preserve the producer's actual failure before asking for product
+acceptance, so downstream missing-evidence messages do not hide launch failures.
+
+The source correction supplies child-owned declarations and exact selections
+through the signed Graph/Tool handoff; calibration retains a trusted fixed
+template identity and signs only exact invocation parameters. The constrained
+substrate receipt recipe is publisher-signed, and direct qualifier Tools own
+their subject and verifier identity. Focused API, recipe, Core, calibration,
+composition and release-asset checks pass. These are source checks only. Build
+of the coupled daemon/CLI/publisher/core-tools artifacts and population of the
+signed 11-bundle release-authority set completed on 2026-09-23. The live node
+still runs the prior generation. Install the coupled generation with the
+release-authority policy reset, take its exact source snapshot and rebind the
+retained prerequisites before retrying live calibration; only the subsequent
+catalog and distinct-consumer update can close the release proof.
+
+#### Retained prerequisite evidence and ownership
+
+The objective is independently published bundle generations served by a stable
+bundle-source node, with consumer verification and activation without another
+host-image build/publication. The development-toolchain campaign supplies the
+release authority's prerequisite evidence; it is not itself the bundle-transfer
+proof and must not become work repeated for every bundle update.
+
+The controlling implementation continuation is section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+This knowledge checkpoint owns durable evidence and operating boundaries.
+The current stage is release-authority prerequisite qualification. The finish
+line requires both a data-only and a binary-bearing non-Core bundle successor
+published and activated on another node with unchanged substrate identity,
+including failure/retry, pre-commit recovery and explicit refusal of
+post-execution rollback in v1. The original publication acceptance also retains
+a second consumer on the prior selection, restarts source/consumers and restores
+a clean source from exported closure; a single successful update is insufficient.
+The full development-worker proof, Stage1 reproduction, self-hosted CI cutover
+and persistent build-cache work are separate campaigns. Add authoring utilities
+only when an exact remaining release operation declares that dependency.
+
+#### Retained capture and later consumer authority
+
+The capture recipe and consumer relationship are separate signed authorities.
+The witness permanently identifies the admitted producer, recipe binding,
+parameters, product declaration and captured bytes. A consumer relationship may
+be authored later in another trusted Config; selection records that Config's
+exact ref, digest and relationship, then checks that its producer coordinate and
+bounded product requirement match the witness. Adding a release consumer does
+not require recapturing or requalifying unchanged product bytes.
+
+Do not require a consumer slot's relationship Config to be the historical
+capture recipe Config. That collapses production testimony and consumption
+authority, prevents legitimate retained-product reuse, and would make every new
+bundle builder repeat prerequisite production. The current signed consumer
+relationship still owns the exact consumer and slot, producer coordinate,
+product bounds, qualification policy and claims. The authenticated witness still
+owns the exact product bytes and capture provenance. Either side changing must
+fail its own comparison; neither side may overwrite the other's identity.
+
+The operator completed the Stage-0 bootstrap export and canonical artifact
+verification. The second export reused the completed BuildKit solve and finished
+in approximately four seconds. This was cache reuse, not a second independent
+production. The local files are user-owned and their archive digest was also
+checked against the checksum file when recording this checkpoint:
+
+| Coordinate | Recorded value |
+| --- | --- |
+| Output directory | `/tmp/ryeos-development-stage0-verified` |
+| Archive | `ryeos-development-toolchain-stage0-rust-1.95.0-zig-0.15.2-x86_64-unknown-linux-gnu.tar.gz` |
+| Archive bytes | `304969653` |
+| Archive SHA-256 | `29a19fb73c84078ca19c013e62476a075d991b90bed5e65a986f0e1cf4fa0910` |
+| Verification inputs | The output directory's retained `source/` tree |
+| Established | Canonical bootstrap verification of a runtime-closed platform candidate |
+| Not established by this run | RyeOS import, target binding, independent reproduction, isolated acceptance, release calibration, consumer bundle activation |
+
+These are local checkpoint coordinates, not portable Config values or durable
+CAS retention. `/tmp` may be cleared. Confirm the files and hashes still exist
+before proceeding; preserve this verified result through the existing retained
+content path, not by assuming a temporary path is a permanent artifact store.
+The saved `source/` is the input copy used by the bootstrap helper, not a RyeOS
+project snapshot or signed execution receipt.
+
+Historical bootstrap sequence, completed through platform production/capture:
+the coordinates below supersede its initial missing-input observations. Do not
+repeat these steps as the next action.
+
+1. Use the retained `source/` verifier, input Config and producer together to
+   materialize this exact archive under an existing node-policy named root.
+   Inspect that node's current admission and bounds before selecting a path.
+   Do not verify historical output against whichever producer happens to be
+   in the current checkout, rerun population, or rebuild Stage 0 unnecessarily.
+2. Import the actual tree through existing external-content authority. Measure
+   its real entries/bytes and use the admitted content tier. The archive SHA-256
+   above is **not** its RyeOS tree-manifest hash. Record the returned staging,
+   request and manifest coordinates; never invent them.
+3. Reconcile project-owned platform declarations against that actual manifest.
+   `platform-production/assemble.py` initially named the historical
+   `98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316`
+   tree. Do not assume the corrected Stage-0 closure has the same identity.
+   Inspect dependent Config/Tool declarations, sign exact changed items, retain
+   the intended project snapshot and bind its exact consumers. Do not silently
+   reuse a binding or qualification from another manifest or generation.
+4. Complete platform and Cargo-vendor production, capture, independent
+   qualification and composition using existing project relationships and
+   retained generations. Inspect existing Python evidence for reuse at its
+   exact coordinate; do not restart completed prerequisite work by default.
+5. Complete release-authority calibration, then exercise signed publication,
+   authenticated closure transfer and target-local verification/activation on
+   another node. Record before/after substrate identity and installed bundle
+   generation to demonstrate the update did not rebuild or publish a host image.
+   Preserve failure/retry/recovery evidence required by that transaction.
+
+The continuation has now completed the materialization, import and initial
+consumer-binding part of that sequence. These are the exact live coordinates;
+they are operational evidence for this release-authority node, not portable
+values to copy into another node's policy:
+
+| Coordinate | Recorded value |
+| --- | --- |
+| Materialized tree | `/tmp/ryeos-development-stage0-materialized` |
+| Manifest entries | `19551` |
+| Materialized bytes | `1026378565` |
+| Release-authority import root | `/home/leo/.local/share/ryeos-release-authority-imports/development-platform-stage0` |
+| Imported manifest hash | `b74b15f0877a2c4941e8bb5660b9f827091aeeb2b2a50b00311101c903895c00` |
+| Import request hash | `470a49b2ce78aa66e58245d48a098f61dc074571df48ac4c85b2079f83fc7416` |
+| Import staging id | `upload-18d77c7d2ee49a57-5930-1` |
+| Pinned project snapshot | `4d6d1bdb083857747e79b6c5e644b0edced6631f058813eba1d1f02d58a43987` |
+| Stage-0 assembler binding | `ff4005eac6dd891576a6ea36448d91371a034a5b3d076a95a4da2635ac369b59` |
+| Reused Python manifest | `800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf` |
+| Python assembler binding | `c4ff6391725f4b3f4cd21c1472f2b5a45791ffa4a27ecd0180dace79c3679f88` |
+| First expected failed run | `T-ce4ceab9-28bf-c9af-a915-6d55deabfcbb` — no active Python binding for the new snapshot |
+| Corrected platform run | `T-e0b70c8f-a456-7581-3cb5-f4cdb5e5ab05` — Graph completed; terminal retained-result capture was still pending at handoff |
+
+That corrected run subsequently reached durable `thread_completed` success.
+Its result workspace capture is
+`063977fadfe44ba13f7f55da7b21451eaaca6dd000533485d3a04b25a2bc1fc2`.
+Product capture returned witness
+`1dbfc122307ad9741ae776898b376f73ae6c05e5d1b7b7118f007cc38e5042fb`
+and coordinate
+`958fa30ff5af461437db25a28b3d1c3ba77932f37b39546c4de2b0ab52902e95`;
+the captured product reproduces the imported `b74b15...` manifest exactly.
+
+The independent verifier's unqualified `subject` slot was composed at the same
+project snapshot, producing binding
+`50433b61304c67f7c3908a840913359fd0396c9c67d907e4672cbc97ace7d5b4`.
+The verifier's literal bootstrap-Python pin required a separate selected-D1
+binding after composition. Its ordinary installed-bundle D0 binding is
+`25db278f629368378fa85391b983aaf35f610fb324648056d1335c32bfd41c53`;
+the selected-D1 pinned-generation binding is
+`3a294155f142a06edff65ed9f70545e30365ae532b4be9d55453cd6f4f32b7d9`.
+This distinction is intentional: product composition does not silently clone
+literal external-content authority, and an installed bundle with a project
+relationship becomes generation-scoped after selection.
+
+Verifier thread `T-10beede8-be0e-abb7-b0cd-7baad87eb90c` then proved admission
+and isolation reached exec, but failed with exit 125 because the verifier tried
+to execute the dynamically linked bootstrap Python directly. The file existed;
+the isolated namespace correctly lacked its ambient musl interpreter. The
+platform and Cargo-vendor verifier Tools were corrected to enter Python through
+the retained `lib/ld-musl-x86_64.so.1`, matching the established authoring
+runtime contract. Subsequent attempts passed that startup boundary; this is
+historical diagnosis, not a pending instruction to reinstall that correction.
+
+Later verifier thread `T-31b3151b-9ce7-b396-a81c-ce8ca44bb39f` failed at the
+Cargo identity probe with insufficient diagnostics. Thread
+`T-bb23222c-4ad9-cdff-04c7-f98ce7161a24` exposed Cargo's missing-home error.
+The attempted v1.0.6 source correction set `HOME=/tmp` and added an assertion
+for that value. It was signed and passed focused host-side checks, but was not
+installed or independently qualified at the pause. It is an unaccepted patch,
+not evidence that the platform or complete build environment is qualified.
+
+The existing enforced sandbox supplies a fresh private `/tmp` and controls
+`TMPDIR`. A one-shot verifier can create a scoped temporary directory there,
+with a dedicated Cargo state directory and, if needed, an explicit private
+home child for that subprocess. It must not inherit host HOME or use the whole
+scratch root as HOME. Persistent-session runtime views have a separate durable
+lifecycle and are unnecessary for this identity probe. Keep the identity and
+closure checks; correct their environment instead of removing the failing gate.
+
+The node's signed `external_content` policy originally contained no named
+roots. The operator added the `release-inputs` root to the live signed policy,
+using the inspected device and inode for the durable directory above, through
+the supported stop / policy-apply / start lifecycle. Do not commit those
+machine-local coordinates to the release-authority seed profile. A new node
+must create and inspect its own durable import root and apply its own signed
+policy generation before importing content.
+
+The active source declarations now name the imported `b74b15...` manifest only
+for `tool:ryeos/development/platform-production/assemble`. The old
+`98bced...` value remains valid only where it is explicitly historical test or
+qualification evidence. Cargo-vendor production and authoring-utility
+production receive the independently qualified platform product through the
+`platform_to_cargo_vendor_production` and
+`platform_to_authoring_utility_production` relationships. They must never bind
+the raw bootstrap manifest as their own ambient platform dependency.
+
+The consolidated environment review has now produced source corrections:
+platform verifier v1.0.7 owns separate temporary Cargo/home state; vendor
+verifier v1.0.2 checks the actual admitted workspace and lock instead of
+inventing an all-packages dependency graph; release GNU Python slots now match
+its embedded `python-gnu` runtime mount. Eleven prerequisite, four vendor and
+12 release closure tests pass. These are source checks, not installed proof.
+
+That same review found unresolved native/Core builder closure: host build
+scripts/proc macros need different execution linkage from shipped binaries,
+the chosen GCC lacks its C frontend, and the current static recipe lacks
+required libc/startup inputs. The implementation plan's section 0 audit records
+the exact remaining gate. Resolve and qualify that finite build recipe before
+another installation/calibration attempt. Do not guess new mounts, wrappers,
+toolchain identities or a Stage-0 rebuild from these findings.
+
+The next bounded diagnostic rejected the proposed final Cargo loader override:
+the dependency-free build-script/proc-macro/C fixture compiled in an isolated
+retained-platform namespace, but its ELF still named the platform interpreter
+despite a trailing substrate-loader argument. Running it with an explicitly
+selected loader did not prove the delivered ABI. Exact owned-bin selection is
+now corrected in both native and Core builders (12 release closure tests pass).
+Both release builders now normalize only copied unsigned final ELF products
+before capture and record the transformation hashes. Shared recipe-owned GCC
+specs supply host linkage with explicit Cargo target selection; retained Zig
+supplies C compilation. The bounded dynamic fixture passed direct execution
+without the build-platform mount, using retained DSOs at substrate ABI paths.
+Static-link input closure remains unresolved; this is not installed-substrate
+or Lillux proof. Preserve this distinction: compiler success, ABI validity,
+Lillux qualification and publication acceptance are separate evidence gates.
+
+Ownership remains explicit: `bundle-release` owns payload selection, build
+recipes, output normalization and publication. The development bundle owns
+toolchain/vendor input production. Missing static inputs must enter through a
+declared development product, never acquisition embedded in release tooling.
+Reusing a tiny development test fixture does not start the broader development
+worker qualification campaign or require reproduction of unchanged Stage-0.
+
+The supplementary static inputs are now measured against the same pinned
+publisher image in `.ai/config/development/ryeos/static-link-inputs.yaml`.
+The upstream `libm.a` is a linker script referring to `libm-2.41.a` and
+`libmvec.a` by absolute distribution paths; retain its bytes and layout, and
+prove lookup inside the supplementary sysroot rather than exposing host
+`/usr/lib`. Eleven files (9,989,612 bytes) include the measured glibc notice.
+These pins are not an imported or qualified product identity. Export,
+development-owned production, admission and static compile/run evidence
+remain outstanding; do not treat this inventory as completion.
+
+Follow-up: verified supplementary inputs were exported to
+`/tmp/ryeos-static-link-inputs`. The small dynamic/static release diagnostic
+now passes with unchanged upstream archive/script bytes: explicit linker
+`--sysroot=%R` resolves the absolute math-script members within the declared
+supplementary tree. Its static executable runs without loader/library mounts.
+Export and finite static recipe evidence are therefore complete, but retained
+development-product production, import, qualification and release consumer
+binding remain outstanding. The installed node and actual Core payloads have
+not been proved by this diagnostic.
+
+Current-node import now succeeded after disk capacity was restored. Verified
+files reside under the existing admitted `release-inputs` root at
+`static-link-inputs`; input manifest is
+`e16652fd10ff718182fe2b09fd8a4c913fc8c994baacf833e3e6a29a69750ebf`
+(`external_large_content_manifest`, 17 entries, 9,989,612 bytes).
+The subsequent signed producer ran successfully at project snapshot
+`d28b446c6c2f2c7490c41ce3edcbbbc0e1c4c56be77c4ec9046dfe812d1fa11f`.
+Graph chain and terminal thread are both
+`T-42b7ed0a-23b8-2faa-664a-f5a55c94f4a5`; product capture returned witness
+`7f5f8e375ced4160dbf907b38d88b373c99c163e4806c2c3743b417f72b50a7e`
+and coordinate
+`6125d74e07597e6646fdf5516b3b4333e83b6d1f6867673ab933d4529c44b588`.
+The product reproduces the imported manifest exactly. Bootstrap Python was
+reused through its active retained binding, without acquisition. This proves
+production and capture, not independent qualification or release admission.
+The new Standard verifier still needs installation and exact selected bindings.
+Do not rerun production merely because the verifier generation changes.
+
+Qualification revealed that this first static witness retained only the
+unqualified verifier relationship. A qualification policy must be present in
+the captured producer recipe; a later consumer declaration cannot add it to
+old testimony. Recipe v1.0.1 adds the exact policy-bearing native/core release
+relationships. The corrected product is witness
+`562606efca5076fa7ed77a03ccc20a888e156653e3ad481ad5b3aeefacfae93b`,
+coordinate `7b6eb131aae8acda868bb03adc91997ee825cb912beebd9cb80fb7d19cc718ff`,
+from graph `T-47e5fb4d-a93d-0380-c98a-e0e1a3166f99` at snapshot
+`84d3ab11026bcd931b91a7844af5b7f6b087a1cc5e909e59eda6969aa9d746d5`.
+It reproduces the same `e16652...` manifest. Use this witness for qualification;
+the earlier witness is historical evidence only. This recapture was required
+by changed recipe authority, not changed input bytes.
+
+Live platform verifier `T-157f276c-6a5c-cfe5-0e4e-c50cac8af6dc` passed the
+Cargo probe but failed because `collect2 --version` delegates to an absent
+`ld`. Source v1.0.8 selects retained LLD explicitly with `-fuse-ld=lld` and
+probe-local COMPILER_PATH, leaving PATH empty. Its isolated retained-platform
+probe and 12 focused tests pass; install and repeat live qualification before
+claiming platform acceptance. No compiler alias or Stage-0 rebuild is needed.
+
+The v1.0.8 live run `T-a66eb988-da21-aa57-a620-ad102bb29e93` passed
+collect2 but rejected GCC's invocation-dependent banner. Verifier v1.0.9
+expects `gcc (Debian 14.2.0-19) 14.2.0`, matching retained `native/bin/gcc`,
+not the publisher image's original executable basename. All seven identity
+probes and the complete isolated diagnostic passed using retained bootstrap
+Python and Stage-0 (19,551 entries, 1,026,378,565 bytes, 47 ELF closures).
+Thirteen focused tests pass. This diagnostic is not authority-issued platform
+qualification; install v1.0.9 and rerun the live verifier next.
+
+After v1.0.9 installation, live thread
+`T-5ea90cfa-19e8-f696-3d05-556bd6f58bb8` passed with both ABI and target
+claims and 47 ELF closures. Issuing qualification exposed an output contract
+error: those two claims were emitted target-first, while the authority requires
+a sorted unique set. Verifier v1.0.10 emits the policy's ABI-first order;
+the focused test checks it, all 13 tests pass, and both files are signed.
+This correction requires source installation, a refreshed bootstrap Python
+binding for the new consumer generation, and another live verifier execution
+before qualification can be issued. Retain Stage-0 and its original witness.
+
+That v1.0.10 installation and rerun are complete. Live thread
+`T-9ca081eb-f134-ea3e-45a2-7b40b4081c52` passed with sorted ABI/target
+claims and all 47 ELF closures. Authority issued qualification
+`53857da6e4663bf2417ac807ed92957bcbd61efbf8a5da96a41cb3a674c80d31`
+for the unchanged Stage-0 witness
+`1dbfc122307ad9741ae776898b376f73ae6c05e5d1b7b7118f007cc38e5042fb`
+under `platform_to_cargo_vendor_production`. This is current-node platform
+qualification, not a Cargo-vendor or release-build qualification.
+
+Static-input live verifier `T-8e99201c-2088-074e-2197-50b2a9dbbc27` completed
+with exit zero. Qualification
+`3b895459903f116ba7cf60fb20dba33ee7c7ef1ce506ded9d70df63e65e37e4e`
+was issued for corrected witness `562606...`; both native and Core seed
+relationship requests resolve idempotently to that evidence. It proves the
+17-entry, 11-file, 9,989,612-byte checksum closure, not compiler execution.
+The prior concurrent launch failed on fork-sensitive CAS guard quiescence;
+its bound thread was confirmed terminal before this sequential retry. Keep
+prerequisite admissions sequential; do not weaken descriptor safety or blindly
+retry a delivery-uncertain launch.
+
+The subsequent finite cc-rs diagnostic caught a separate release-recipe defect:
+cc-rs appends the Rust target spelling, which Zig rejects. The shared recipe
+now supplies final `CFLAGS` and `CXXFLAGS` with Zig's `x86_64-linux-gnu` spelling,
+preserving ordinary cc-rs defaults without a compiler wrapper. Exact locked
+cc/shlex/find-msvc-tools archives were checksum-verified and used as nonparallel
+scratch path dependencies. Both dynamic and static C-linkage fixtures passed,
+including retained GNU AR and host/target separation. This does not qualify
+the vendor product, C++ ABI, actual Core payloads or installed substrate.
+
+Platform production, capture and qualification are now durable. Changing the
+verifier did not invalidate unchanged subject bytes. Historical binding
+coordinates above must still be checked against the selected current identity.
+
+At the earlier checkpoint, the release-authority node had neither the historical
+`e8f5ded8d3327ed0ce91798f8f0264ac7bf4f120a85936d3a3dc675be7ad2dbe`
+registry-input manifest nor a local-capture registry product witness. The
+2026-09-07 registry qualification belongs to another node and an older source
+generation; it is evidence, not transferable current authority. Cargo-vendor
+continuation must therefore use the canonical bounded registry acquisition and
+offline registry-production path to create a fresh retained product on this
+node, then compose that exact unqualified registry product alongside the
+qualified platform product. A fresh acquisition records full upstream index
+response hashes, so unrelated registry changes may change its receipt and tree
+manifest even with the same lock and archives. Measure and bind the actual
+acquired tree, updating its signed declaration if needed; do not assume it
+reproduces the historical `e8f5...` identity. This missing prerequisite does
+not require reacquiring or rebuilding Stage 0.
+
+The current-node registry path is now complete through production/capture.
+The bounded acquisition imported manifest
+`9de036779fbc33f8e33bc5068a286ac27813e80586d1b766ee7db99a1fa7a2e8`;
+`graph:ryeos/development/registry-production` completed as thread
+`T-dc0bb4c3-7444-bfe9-8dc1-2f81cb38f354` with 414 packages and no network
+acquisition. Capture issued witness
+`932a12d3f5eb733ddb2354e333f270d81652147966dce2b2f4e1a0526c52f207`
+for output manifest
+`c73499d571ab14a599d4a9f32d0d29942c079632d6c1762fc280ec63da460227`.
+This registry witness is an exact unqualified input; it does not inherit the
+older node's qualification.
+
+Cargo-vendor composition selects qualified `platform` and exact
+`registry-inputs`. The child Cargo Tool independently declares its pinned
+platform; admission now deduplicates it only when the full retained identity
+equals the inherited Graph realization, while rejecting same-ID disagreement
+and mount overlap. Installed-node graph
+`T-364d9357-8873-099f-0c7a-ad94793d0f4e` completed, including production
+and lock retention. The retained `Cargo.lock` is 113,004 bytes with SHA-256
+`9e8e1a93918f8e229cdbb8a037aa1a4fbbccbe5efe1257519396bb8fc3103f09`;
+the producer reported `source_mutated: false`. Capture issued witness
+`a77eb108d4f1667dbbba3f5c1b995ba0a11c348288ac5cfdb6f7750402d09323`,
+manifest `eb30513b80548dbd9a28f97ec21078e87f673c642373f2678c351f9cf753843c`,
+26,265 entries and 581,661,813 bytes. These coordinates preserve diagnostic
+evidence, **not a qualified vendor product**.
+
+The independent verifier `T-339c1724-f647-ea7c-8af2-25ad6fb36d30`
+rejected that witness: `cc-1.2.60/.cargo-checksum.json` names four
+`src/target/*.rs` files absent from the captured tree. A read-only retained
+manifest scan found no other package mismatch. The release-authority policy's
+component-wide `target/` ignore also applied to workspace-output capture,
+silently stripping nested vendored source. Its signed source profile now uses
+root-anchored `/target/`, which still excludes the project build directory but
+retains nested package source; focused matcher and policy tests pass. Install
+the corrected policy generation, take a new project snapshot under it, bind
+the exact retained inputs to that generation, then reproduce/capture/verify a
+new vendor product. Do not qualify or reuse the incomplete witness. This
+policy correction does not require rebuilding Stage-0, registry inputs or the
+daemon. The finalizer has a dedicated signed Tool entrypoint; it does not own
+public-registry acquisition or Cargo vendoring.
+
+Under the installed root-only policy, snapshot
+`1633788e59e2ac266504f4fc7777c1bfc51f5984818bcfd50b0540acb0f96e43`
+rebound the unchanged platform, registry and bootstrap Python identities.
+Cargo-vendor thread `T-c7590324-c8e8-f4d7-b9e6-392a5fddd9e4` completed and
+capture issued witness
+`16967633e22f697993faf66ede6c93d2bd299497f4741cddc825861a6f09c005`,
+manifest `ede513268c395bb79d21933e02fc317ccc9b56fbf18e00ae7d14b3efd10565c7`,
+26,270 entries and 581,717,585 bytes. Its manifest includes all four
+formerly missing `cc-1.2.60/src/target/*.rs` files. Independent verifier
+`T-709a88d7-6320-08de-a4ac-631469656691` passed the lock-closure and
+offline-checksum claims with 414 registry packages, 21,623 verified files,
+579,399,937 verified bytes, no Git dependencies and no network contact.
+
+Qualification issuance first refused an object closure of 671,156,525 bytes
+against the release-authority policy's 640 MiB aggregate blob ceiling. A 768
+MiB wire-transfer trial failed init because base64 and envelope overhead would
+exceed the hard 1 GiB response maximum. The 704 MiB response-bounded policy
+was installed, but retrying qualification refused at 742,904,407 bytes. These
+failures report the first threshold crossing, not the complete closure.
+Read-only inspection of the verifier's retained Python, vendor and platform
+manifests found 40,537 distinct CAS blobs totaling 1,007,471,595 bytes.
+This is local verification of one aggregate execution realization, not a
+single remote transfer. The correction is a separately signed local
+verification aggregate of 65,536 blobs and 1 GiB, while remote admission and
+its response bound remain unchanged. Focused tests and compilation passed. An
+initial daemon-only population left `ryeos init` and core-tools on the prior
+policy schema. Policy-reader population now couples `ryeos-cli`, `ryeosd` and
+`ryeos-core-tools`, with focused regression coverage. The exact host generation
+is installed and the upgrade journal is clear. Qualification then issued
+coordinate `beed07545f5b09fa99348e8831deb6feaac1621f64c29eea1870ac2ade822bc9`
+and qualification
+`5f37c3e8f795a65d8bdc32213d498279941744c6f7a707c76d4f63f4cc10b518`
+from the retained witness and successful verifier. Do not split aggregate
+verification into per-manifest passes or reproduce this qualified product.
+Do not mistake successful verifier execution for issued product qualification,
+and do not reproduce Stage-0, registry inputs or vendor output unless an exact
+generation check requires it.
+
+Current calibration is defined by
+`crates/daemon/ryeos-app/src/bundle_publication/calibration.rs`:
+`CalibrationEnvironmentSelection` requires Python, platform and Cargo-vendor
+product selections. The portable build Graph's Python-only runtime does not
+erase those authority requirements. Do not weaken calibration to obtain a
+green portable-bundle test, or claim that source tests prove live activation.
+
+Calibration and catalog bootstrap establish the initial authority. Routine
+updates reuse its measurements while the selected identities and signed policy
+remain admissible; invalidating changes require recalibration. A data-only
+bundle uses the Python-only portable build graph. A binary-bearing bundle uses
+its selected targets and qualified platform/vendor inputs; shared dependencies
+may compile. Neither recurring path requires a new Stage-0 export, host-image
+build or daemon build just because a bundle changed.
+
+The previously installed release-authority app root is
+`/home/leo/.local/share/ryeos-release-authority`. Recheck its status, installed
+generation and selected policies before live work; its earlier successful
+startup is not a claim about its current health. Consult installed command help
+and current handlers before issuing import/binding commands. Keep checks focused;
+no full Cargo/image rebuild or broad host-service cleanup is implied by this
+checkpoint. Report the exact remaining gate instead of sending another guessed
+sudo command.
 
 - Command descriptors / local command help: routed without daemon alias
   parsing; project-aware tails auto-detect a cwd ancestor containing `.ai/`;
@@ -54,12 +553,14 @@ The ordinary content tier retains its 10,000-entry / 1 MiB manifest bounds;
 the large-content tier admits up to 65,536 tree entries while retaining its
 8 MiB serialized manifest bound. The tier-neutral realization set independently
 bounds the aggregate launch to 65,536 entries. Node policy may narrow these
-structural limits, never widen them. The verified Stage-0 platform has about
-384 MB of small-file CAS content plus five large-store files; its development
+structural limits, never widen them. A previously verified Stage-0 platform had
+about 384 MB of small-file CAS content plus five large-store files; its development
 profile therefore permits a 512 MiB aggregate CAS blob closure. Local binding,
 verification and launch proof consume the selected node's `object_closure`
 policy, not generic control-plane defaults. No policy entry selects a compiler
 version or grants an unbound project access to that content.
+Those historical measurements do not establish the corrected artifact's import
+totals; measure the actual manifest before evaluating policy admission.
 
 ## Project capture policy
 
@@ -216,6 +717,17 @@ directory prevents failed downloads from publishing a partial registry. The
 operator must exclusively own the destination during acquisition; this helper
 is not a concurrent no-replace transaction or a replacement for Lillux's
 node-owned filesystem authorities.
+
+Current release-authority acquisition used this entry and the current Cargo.lock
+(414 locked registry entries). The finished tree is retained at
+`/home/leo/.local/share/ryeos-release-authority-imports/development-registry-inputs`.
+Node import under the admitted `release-inputs` root measured 1,129 entries,
+77,004,545 bytes and manifest
+`9de036779fbc33f8e33bc5068a286ac27813e80586d1b766ee7db99a1fa7a2e8`.
+The staging request is `5e5c94d92b13cb477496ae72ed1423852ab0181c1d3f6b7623bef87f851d88d8`
+at `upload-18d78ff65d54bb95-2d30-1`. The signed registry-production Tool now
+pins this measured input; it was bound, executed and captured as recorded in
+the current-node checkpoint above. Its captured product remains unqualified.
 
 The signed `registry-production/assemble` Tool takes the same lock and public
 selection Config plus `config:development/ryeos/registry-production` for project
@@ -577,6 +1089,38 @@ the exact selected archives and publisher-image members, then atomically emits
 an acquisition directory. Bootstrap passes that directory to the canonical
 offline producer; a future admitted Stage1 run must call the same producer.
 Source ownership does not itself claim admitted execution.
+
+The Tool-owned `stage0-platform-production/lib/bootstrap.py` helper coordinates
+the external publisher export and canonical artifact verification. Run it as
+the ordinary user, elevating only the Buildx subprocess when required:
+
+```sh
+python3 .ai/tools/ryeos/development/stage0-platform-production/lib/bootstrap.py \
+  --output /tmp/ryeos-development-stage0-verified \
+  -- sudo /home/leo/.docker/cli-plugins/docker-buildx
+```
+
+The command prefix after `--` is explicit host bootstrap configuration; omit it
+when the default `docker buildx` can access the Docker socket. The output
+directory must not exist and its parent must exist. The helper saves the
+selected source files, builds and verifies against those same bytes, and
+accepts only the bounded archive/checksum pair from the Buildx tar export.
+Only Buildx is elevated: output remains user-owned without a recursive ownership
+change. Existing exports and the publisher's BuildKit cache are left intact.
+Failure removes only the newly reserved output directory; success retains the
+archive, checksum and exact `source/` inputs. This is seed-toolchain bootstrap,
+not a command to repeat for each bundle update.
+
+Verified export is not import, consumer binding, independent reproduction or
+isolation qualification. Derive and import the actual external-content manifest
+through RyeOS; never reuse a historical platform manifest after changing the
+Stage-0 closure. Consumer binding remains scoped to the intended pinned project
+snapshot. Production, capture, independent qualification and composition then
+use the existing graphs. Current release-authority calibration requires
+qualified Python, platform and Cargo-vendor evidence; the portable bundle
+graph's smaller runtime requirements do not remove those calibration gates.
+The bootstrap helper neither changes policy nor proves consumer activation.
+
 For durable input evidence, place the complete acquired directory at
 `stage0-acquisition` in the selected project generation and execute
 `graph:ryeos/development/stage0-acquisition-capture`. Its
@@ -613,15 +1157,20 @@ evidence and signed bounds before optionally publishing one sibling-staged
 directory. It does not clear the execution gate:
 
 ```bash
-bash .ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh \
-  --inputs .ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml \
-  --producer .ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh \
+bash "$stage0_source/.ai/tools/ryeos/development/stage0-platform-production/lib/verify-bootstrap-artifact.sh" \
+  --inputs "$stage0_source/.ai/config/development/ryeos/stage0-platform-x86_64-linux.yaml" \
+  --producer "$stage0_source/.ai/tools/ryeos/development/stage0-platform-production/lib/produce.sh" \
   --archive "$stage0_archive" \
   --checksum "$stage0_archive.sha256" \
   --materialize "$named_root/stage0-toolchain"
 ```
 
-Qualifying Stage 0 runs the pinned publisher twice into distinct output
+Here `stage0_source` is the verified export's retained `source/` directory,
+`stage0_archive` is its exact archive, and `named_root` is an inspected,
+operator-admitted import root. These are deliberately selected coordinates,
+not permission to choose a host path or use the current checkout implicitly.
+
+Independent Stage-0 archive-reproducibility qualification runs the pinned publisher twice into distinct output
 directories (and preferably distinct empty caches), then passes both archive /
 checksum pairs to
 `tests/e2e/development-toolchain-stage0/test-artifact.sh`. The test requires
@@ -630,6 +1179,12 @@ does not build or acquire anything itself. The tracked artifact tests consume
 already-built archives, do not compile RyeOS, and never manufacture substitute
 binaries. Artifact production and those tests remain explicit qualification
 steps rather than release-time fallback logic.
+
+This separate reproducibility campaign is outside the current bundle-update
+completion sequence. The current gate is independent live qualification of the
+already retained platform product. It neither requires repeating this Docker
+export sequence nor establishes two independent archive builds. Keep both
+claims separate in evidence and status reports.
 
 The offline producer requires an exact Bash/archive/helper process runtime.
 Current admitted authoring build support supplies Bash and most helpers but not

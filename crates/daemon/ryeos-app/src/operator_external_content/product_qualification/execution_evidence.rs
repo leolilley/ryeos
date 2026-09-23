@@ -55,6 +55,27 @@ fn projector_identity(
     }
 }
 
+/// Decide whether the currently installed projector is the same executable
+/// authority that interpreted the retained qualification.
+///
+/// `binary_manifest_digest` records the complete signed executor set of the
+/// bundle generation that supplied the projector. That set can change when an
+/// unrelated executable in the same bundle changes. It remains useful
+/// historical provenance, but it is not part of the projector's semantic
+/// identity: the signed descriptor, exact executable bytes, and their signer
+/// are. Requiring the aggregate set digest here would invalidate otherwise
+/// reusable qualification evidence after any unrelated core-binary release.
+fn compatible_projector_identity(
+    current: &ProductQualificationProjectorIdentity,
+    retained: &ProductQualificationProjectorIdentity,
+) -> bool {
+    current.canonical_ref == retained.canonical_ref
+        && current.descriptor_content_digest == retained.descriptor_content_digest
+        && current.descriptor_signer_fingerprint == retained.descriptor_signer_fingerprint
+        && current.binary_content_digest == retained.binary_content_digest
+        && current.binary_signer_fingerprint == retained.binary_signer_fingerprint
+}
+
 fn require_terminal_invocation(
     snapshot: &ThreadSnapshot,
     capsule: &AdmittedLaunchCapsule,
@@ -522,7 +543,7 @@ pub(in crate::operator_external_content) fn verify_current(
             &proof.projection_contract_digest,
         )?
         .context("current execution contract no longer supports qualification evidence")?;
-    if projector_identity(&projector.projector) != proof.projector {
+    if !compatible_projector_identity(&projector_identity(&projector.projector), &proof.projector) {
         bail!("qualification evidence projector identity changed");
     }
     let required = described(state.engine.describe_execution_evidence(

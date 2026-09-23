@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:39Z:7da6a5eda6d9e492eb090544fcc1af29dccfb46fe2fd6a7a0bbdc970d58e1a8a:+ydhvQoG8AfDKZSOMu4mUR8/tTyPXdgeMgiPeWjJCQlHDWfGkOsjcpYn/BDnoeHPS8dyU7wDazkINhczanOCAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:24:34Z:c7dab56dc77ef0d3ae3afbf91444e1fe1bac61e8fd1c8d0dd4429e06be2f73eb:+jSPOYc5Pw58iFC3qCPLdiMinB7X3uwJ+1WZUkUJQW+3uGv5dXnwpyDGqjyIpgK1AiIVsY+lcUnRmYUQFVkpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -6,7 +6,12 @@ effects: live
 requires:
   capabilities:
     declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.config.bundle-release/native-build-products
+      - ryeos.execute.config.bundle-release/portable-build-products
+      - ryeos.execute.config.bundle-release/portable-qualification
+      - ryeos.execute.config.bundle-release/portable-signed-capture-products
       - ryeos.execute.config.bundle-release/signed-capture-products
       - ryeos.execute.service.bundle-release/catalog-remote-publish
       - ryeos.execute.service.bundle-release/catalog-request-publication
@@ -20,6 +25,9 @@ requires:
       - ryeos.execute.service.bundle-release/set-compose
       - ryeos.execute.tool.ryeos/bundle-release/native-build
       - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/portable-build
+      - ryeos.execute.tool.ryeos/bundle-release/portable-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/portable-signed-capture
       - ryeos.execute.tool.ryeos/bundle-release/signed-capture
 config:
   start: inspect
@@ -121,6 +129,7 @@ config:
         ref_bindings: {}
         params:
           release_input: "${state.release_input}"
+          catalog_namespace: "${inputs.catalog_namespace}"
           captured_tree_manifest_hash: "${state.captured.content_manifest_hash}"
           manifest_item_hash: "${state.materialization.output_manifest_item_hash}"
           signed_product_witness: "${state.captured.signed_product_witness}"

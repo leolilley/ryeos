@@ -21,10 +21,13 @@ pub struct CoreSeedBuildRequest {
     pub bundle_publication_policy_section_digest: String,
     pub trust_epoch: u64,
     pub release_input: Value,
+    #[serde(default)]
+    pub child_product_selections: super::recipe::ReleaseChildProductSelections,
 }
 
 impl CoreSeedBuildRequest {
     pub fn validate(&self) -> anyhow::Result<()> {
+        super::recipe::validate_child_product_selections(&self.child_product_selections)?;
         anyhow::ensure!(
             !self.catalog_namespace.is_empty()
                 && self.catalog_namespace.len() <= 64
@@ -111,8 +114,10 @@ impl CoreSeedRecipeRequest {
     }
     pub fn parameters(&self) -> Value {
         match self {
-            Self::Build(build) => json!({"release_input":build.release_input}),
+            Self::Build(build) => json!({"release_input":build.release_input,
+                "child_product_selections":build.child_product_selections}),
             Self::Capture(capture) => json!({"release_input":capture.build.release_input,
+                "child_product_selections":capture.build.child_product_selections,
                 "materialization_result_hash":capture.materialization_result_hash,
                 "signed_tree_manifest_hash":capture.signed_tree_manifest_hash,
                 "manifest_item_hash":capture.manifest_item_hash,"signed_manifest":capture.signed_manifest}),
@@ -155,6 +160,20 @@ impl CoreSeedRecipeRequest {
             "maximum_file_bytes":ryeos_state::external_content::MAX_CAPTURE_FILE_BYTES,
             "maximum_total_bytes":ryeos_state::external_content::MAX_CAPTURE_BYTES});
         let build = self.build();
+        let mut relationships = vec![json!({
+            "name":relationship,"producer":{"canonical_ref":producer,"recipe_binding":"product_recipe","product_name":product,"parameters":self.parameters()},
+            "consumer":{"canonical_ref":consumer,"declaration_id":slot},
+            "required_product":{"shape":"tree","storage":"content","bounds":bounds},"qualification":qualification
+        })];
+        if matches!(self, Self::Build(_)) {
+            relationships.push(json!({
+                "name":"core_seed_to_signed_capture_tool",
+                "producer":{"canonical_ref":producer,"recipe_binding":"product_recipe","product_name":product,"parameters":self.parameters()},
+                "consumer":{"canonical_ref":"tool:ryeos/bundle-release/core-seed-capture","declaration_id":"unsigned_core"},
+                "required_product":{"shape":"tree","storage":"content","bounds":bounds},
+                "qualification":{"policy_ref":null,"required_claims":[]}
+            }));
+        }
         let value = json!({"category":"bundle-release","version":"1.0.0","description":"Exact substrate Core seed producer recipe.",
             "recipe_purpose":"bundle_release_v1",
             "release_recipe_authorization":{"catalog_namespace":build.catalog_namespace,
@@ -163,10 +182,7 @@ impl CoreSeedRecipeRequest {
                 "output_roots":[{"name":"core_tree","path":path,"storage":"content","bounds":bounds}],
                 "products":[{"name":product,"source":{"kind":"workspace_output","root":"core_tree"},
                     "path":format!("{path}/tree"),"shape":"tree","storage":"content","required":true,"bounds":bounds}]},
-            "product_relationships":{"schema":"ryeos.product_relationships.v1","relationships":[{
-                "name":relationship,"producer":{"canonical_ref":producer,"recipe_binding":"product_recipe","product_name":product,"parameters":self.parameters()},
-                "consumer":{"canonical_ref":consumer,"declaration_id":slot},
-                "required_product":{"shape":"tree","storage":"content","bounds":bounds},"qualification":qualification}]}});
+            "product_relationships":{"schema":"ryeos.product_relationships.v1","relationships":relationships}});
         let declarations =
             ryeos_state::external_content::products::ProductDeclarations::from_value(
                 value["build_products"].clone(),
@@ -240,6 +256,7 @@ mod tests {
                 "payloads":[{"bundle":"core","binary":"ryeos-core-tools","cargo_package":"ryeos-core-tools","build_class":"release","bundle_sets":["core"]}],
                 "cargo_packages":["ryeos-core-tools"],"build_classes":["release"],"requires_binary_build":true,
                 "clean_output_required":true,"ambient_target_reuse_allowed":false}),
+            child_product_selections: vec![],
         }
     }
 
@@ -263,7 +280,7 @@ mod tests {
         );
         assert_eq!(
             body["product_relationships"]["relationships"][0]["producer"]["parameters"],
-            json!({"release_input":request.release_input})
+            CoreSeedRecipeRequest::Build(request.clone()).parameters()
         );
         let mut cyclic = serde_json::to_value(request).unwrap();
         cyclic["substrate_image_digest"] = json!(format!("sha256:{}", "d".repeat(64)));

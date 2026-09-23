@@ -1,14 +1,18 @@
-# ryeos:signed:2026-09-20T15:22:39Z:21f53fb6cc960081ed6ce77c06bad1a905aa4ea84898d8f898a4431d28af6aba:lnZgV9tFO11oNo44dmzp+UXjRs2rXt2BjBVsppunTNFKg1kkc8gXlpZ1VHA2E8HMXSWNzMpm0QuJ3ZF68lATDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-23T04:25:12Z:9bc6e2ee3d3033d6aeffabdc8774d29c54a8828680b42fc82d2f95180218d0fa:u/hF54KimrQgMuiwrrDOU7d7S18mJeu0svnpbrE5fkttWMJEHsZ+KOp4UbgO2bELSZa1fqSR+pPIxJ170y9xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.1"
 category: ryeos/bundle-release
-description: Run the bounded pre-policy authority calibration against one clean source snapshot without contacting a catalog or publisher.
+description: Run the bounded pre-policy authority calibration against one verified RyeOS ProjectSnapshot without contacting a catalog or publisher.
 effects: live
 requires:
   capabilities:
     declared:
       - ryeos.execute.config.bundle-release/core-seed-build-products
       - ryeos.execute.config.bundle-release/core-seed-capture-products
-      - ryeos.execute.config.bundle-release/native-build-products
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
+      - ryeos.execute.config.bundle-release/portable-build-products
+      - ryeos.execute.config.bundle-release/portable-qualification
+      - ryeos.execute.config.bundle-release/portable-signed-capture-products
       - ryeos.execute.config.bundle-release/signed-capture-products
       - ryeos.execute.config.bundle-release/substrate-build-products
       - ryeos.execute.service.bundle-release/authority-calibrate
@@ -17,6 +21,9 @@ requires:
       - ryeos.execute.tool.ryeos/bundle-release/core-seed-qualify
       - ryeos.execute.tool.ryeos/bundle-release/native-build
       - ryeos.execute.tool.ryeos/bundle-release/native-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/portable-build
+      - ryeos.execute.tool.ryeos/bundle-release/portable-qualify
+      - ryeos.execute.tool.ryeos/bundle-release/portable-signed-capture
       - ryeos.execute.tool.ryeos/bundle-release/signed-capture
       - ryeos.execute.tool.ryeos/bundle-release/substrate-build
       - ryeos.execute.tool.ryeos/bundle-release/substrate-qualify
@@ -27,10 +34,27 @@ config:
   config_schema:
     type: object
     additionalProperties: false
-    required: [project_path, source_snapshot_hash]
+    required: [project_path, source_snapshot_hash, execution_environment]
     properties:
       project_path: {type: string}
       source_snapshot_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+      execution_environment:
+        type: object
+        additionalProperties: false
+        required: [python_runtime, platform, cargo_vendor, static_link_inputs]
+        properties:
+          python_runtime: {$ref: "#/$defs/product_selection"}
+          platform: {$ref: "#/$defs/product_selection"}
+          cargo_vendor: {$ref: "#/$defs/product_selection"}
+          static_link_inputs: {$ref: "#/$defs/product_selection"}
+    $defs:
+      product_selection:
+        type: object
+        additionalProperties: false
+        required: [product_witness_hash, qualification_attestation_hash]
+        properties:
+          product_witness_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
+          qualification_attestation_hash: {type: string, pattern: "^[0-9a-f]{64}$"}
   state: {}
   nodes:
     calibrate:
@@ -40,6 +64,7 @@ config:
         params:
           project_path: "${inputs.project_path}"
           source_snapshot_hash: "${inputs.source_snapshot_hash}"
+          execution_environment: "${inputs.execution_environment}"
       assign: {calibration: "${result}"}
       next: {type: unconditional, to: done}
     done:

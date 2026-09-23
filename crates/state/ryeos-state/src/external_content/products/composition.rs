@@ -185,11 +185,24 @@ impl ProductRelationship {
         &self,
         evidence: &ProductCaptureEvidence,
     ) -> anyhow::Result<()> {
-        self.validate()?;
-        evidence.validate()?;
+        self.validate_compatible_product_evidence(evidence)?;
         if evidence.relationships.select(&self.name)? != self {
             bail!("product witness retained a different signed relationship");
         }
+        Ok(())
+    }
+
+    /// Check that a separately signed consumer allowance admits the exact
+    /// product described by an authenticated capture witness. The capture
+    /// recipe and the consumer relationship intentionally have independent
+    /// identities: a retained product is reusable without republishing its
+    /// historical witness for every later consumer.
+    pub fn validate_compatible_product_evidence(
+        &self,
+        evidence: &ProductCaptureEvidence,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        evidence.validate()?;
         if self.producer.canonical_ref != evidence.root_producer.canonical_ref
             || self.producer.recipe_binding != evidence.recipe_binding
             || self.producer.product_name != evidence.declaration.name
@@ -1087,6 +1100,43 @@ mod tests {
         let mut changed = relationship;
         changed.producer.canonical_ref = "graph:test/other".to_owned();
         assert!(changed.validate_product_evidence(&evidence).is_err());
+    }
+
+    #[test]
+    fn later_consumer_relationship_reuses_exact_retained_product_without_recapture() {
+        let capture_relationship = relationship();
+        let evidence = evidence(capture_relationship.clone());
+        let mut consumer_relationship = capture_relationship;
+        consumer_relationship.name = "runtime_to_later_consumer".to_owned();
+        consumer_relationship.consumer = ProductRelationshipConsumer {
+            canonical_ref: "graph:test/later-consumer".to_owned(),
+            declaration_id: "runtime".to_owned(),
+        };
+
+        consumer_relationship
+            .validate_compatible_product_evidence(&evidence)
+            .unwrap();
+        assert!(
+            consumer_relationship
+                .validate_product_evidence(&evidence)
+                .is_err()
+        );
+
+        let mut wrong_producer = consumer_relationship.clone();
+        wrong_producer.producer.canonical_ref = "graph:test/other-producer".to_owned();
+        assert!(
+            wrong_producer
+                .validate_compatible_product_evidence(&evidence)
+                .is_err()
+        );
+
+        let mut widened = consumer_relationship;
+        widened.required_product.bounds.maximum_total_bytes = 8_192;
+        assert!(
+            widened
+                .validate_compatible_product_evidence(&evidence)
+                .is_err()
+        );
     }
 
     #[test]

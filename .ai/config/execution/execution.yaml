@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:10:34Z:501727f1a25dba43029f9a6f3a0d1b4a7d6e9e6f75e8ce37aabf9db3e2deb889:SkezhnMW7FWg4KLMmIKsJZA/2HAvMeljohFE66MWqFeK1r5QBygbNpVH7JUexJHUAPcrlcYVSjrM+Umg27QoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-22T06:28:31Z:1988e46f35e6d6426dae3be9b89262e8ff8d9cf242b6c35a18f32b19b3ed5c5e:i3BDCsqUFymoMo/Khss/lwE5noVfi9rd3lWKkI7pr4nZO5V3IG2lHCo/61nQUPJC4cKgVI0f3do+n4U7QAI2AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: execution
 version: "1.0.0"
 schema_version: "2.1.0"
@@ -25,8 +25,16 @@ items:
       timeout: 1860
     ryeos/development/authoring-built-utilities-production-recorded:
       timeout: 1920
+    ryeos/development/gnu-python-production:
+      # Production plus terminal retained-product capture.
+      timeout: 360
+    ryeos/development/gnu-python-production-recorded:
+      # The wrapper waits for the retained producer and durable publication.
+      timeout: 420
     ryeos/development/platform-production:
       timeout: 900
+    ryeos/development/cargo-vendor-production:
+      timeout: 360
   tool:
     ryeos/development/authoring-environment-production/build-utilities:
       timeout: 1800
@@ -50,8 +58,12 @@ items:
       timeout: 300
     ryeos/development/authoring-environment-production/verify:
       timeout: 300
+    ryeos/environments/qualification/gnu-python:
+      timeout: 120
     ryeos/development/cargo-vendor:
       timeout: 300
+    ryeos/development/cargo-vendor-finalize/run:
+      timeout: 60
     ryeos/development/cargo-check:
       timeout: 300
     ryeos/development/cargo-build:

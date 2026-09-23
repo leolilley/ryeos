@@ -224,6 +224,12 @@ pub enum LinuxSandboxExit {
 pub struct LinuxSandboxProcess {
     #[cfg(target_os = "linux")]
     pid: libc::pid_t,
+    /// Private launcher-owned pipe. The write end remains `CLOEXEC` in the
+    /// target: EOF proves that `execve` crossed the descriptor boundary,
+    /// while a bounded error record identifies a post-readiness setup/exec
+    /// failure. The workload can never write this channel after exec.
+    #[cfg(target_os = "linux")]
+    exec_status_fd: Option<libc::c_int>,
 }
 
 impl LinuxSandboxProcess {
@@ -241,6 +247,28 @@ impl LinuxSandboxProcess {
     pub fn wait(mut self) -> Result<LinuxSandboxExit, String> {
         #[cfg(target_os = "linux")]
         {
+            if let Some(fd) = self.exec_status_fd.take() {
+                let exec_status = imp::read_child_exec_status(fd);
+                unsafe { libc::close(fd) };
+                if let Err(error) = exec_status {
+                    unsafe { libc::kill(self.pid, libc::SIGKILL) };
+                    loop {
+                        let waited = unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) };
+                        if waited == self.pid {
+                            break;
+                        }
+                        let wait_error = std::io::Error::last_os_error();
+                        if wait_error.raw_os_error() != Some(libc::EINTR) {
+                            self.pid = 0;
+                            return Err(format!(
+                                "sandbox target failed before exec: {error}; wait for failed target: {wait_error}"
+                            ));
+                        }
+                    }
+                    self.pid = 0;
+                    return Err(format!("sandbox target failed before exec: {error}"));
+                }
+            }
             let mut status = 0;
             loop {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
@@ -271,6 +299,9 @@ impl LinuxSandboxProcess {
 #[cfg(target_os = "linux")]
 impl Drop for LinuxSandboxProcess {
     fn drop(&mut self) {
+        if let Some(fd) = self.exec_status_fd.take() {
+            unsafe { libc::close(fd) };
+        }
         if self.pid > 0 {
             unsafe {
                 libc::kill(self.pid, libc::SIGKILL);
@@ -2219,15 +2250,18 @@ mod imp {
         }
         close_fd(ready[1]);
         let result = read_child_ready(ready[0]);
-        close_fd(ready[0]);
         if let Err(error) = result {
+            close_fd(ready[0]);
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
                 libc::waitpid(pid, std::ptr::null_mut(), 0);
             }
             return Err(error);
         }
-        Ok(LinuxSandboxProcess { pid })
+        Ok(LinuxSandboxProcess {
+            pid,
+            exec_status_fd: Some(ready[0]),
+        })
     }
 
     fn child_target_main(request: &LinuxSandboxRequest, ready_fd: RawFd) -> Result<(), String> {
@@ -2300,16 +2334,25 @@ mod imp {
                 }
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::EINTR) {
-                    return Err(format!("read sandbox release boundary: {error}"));
+                    return Err(format!(
+                        "stage=release errno={} read sandbox release boundary: {error}",
+                        error.raw_os_error().unwrap_or(0)
+                    ));
                 }
             };
             if count != 1 || release[0] != 1 {
-                return Err("sandbox release boundary closed or carried invalid data".to_string());
+                return Err(
+                    "stage=release errno=0 sandbox release boundary closed or carried invalid data"
+                        .to_string(),
+                );
             }
             close_fd(raw_fd(release_fd)?);
             close_fd(raw_fd(release_keepalive_fd)?);
         }
-        close_fd(ready_fd);
+        // Keep this internal channel open until the final exec. It was
+        // created with O_CLOEXEC, so successful exec is authenticated by EOF
+        // at the launcher. A returned setup/exec error is reported by the
+        // child wrapper below before it exits with the reserved launcher code.
         exec_target(request)
     }
 
@@ -2379,10 +2422,12 @@ mod imp {
         unsafe {
             libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
         }
+        let error = std::io::Error::last_os_error();
         Err(format!(
-            "exec sandbox target {}: {}",
+            "stage=exec errno={} target={}: {}",
+            error.raw_os_error().unwrap_or(0),
             request.executable.display(),
-            std::io::Error::last_os_error()
+            error
         ))
     }
 
@@ -3374,6 +3419,35 @@ mod imp {
             }
             _ => Err("sandbox child emitted an invalid readiness record".to_string()),
         }
+    }
+
+    pub(super) fn read_child_exec_status(fd: RawFd) -> Result<(), String> {
+        let mut kind = [0_u8; 1];
+        let count = loop {
+            let count = unsafe { libc::read(fd, kind.as_mut_ptr().cast(), kind.len()) };
+            if count >= 0 {
+                break count;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("read sandbox exec status: {error}"));
+            }
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        if count != 1 || kind[0] != CHILD_ERROR {
+            return Err("sandbox child emitted an invalid exec status record".to_string());
+        }
+        let mut length = [0_u8; 4];
+        read_exact_fd(fd, &mut length)?;
+        let length = u32::from_ne_bytes(length) as usize;
+        if length > MAX_CHILD_ERROR_BYTES {
+            return Err("sandbox child exec error exceeds Lillux bound".to_string());
+        }
+        let mut bytes = vec![0_u8; length];
+        read_exact_fd(fd, &mut bytes)?;
+        Err(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn write_child_error(fd: RawFd, error: &str) -> Result<(), String> {
@@ -4971,6 +5045,116 @@ mod tests {
         });
         let error = launch_linux_sandbox(request).unwrap_err();
         assert!(error.contains("delegated cgroup-v2 authority"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_status_channel_distinguishes_launcher_failure_from_workload_125() {
+        fn spawn(status_record: Option<&str>) -> LinuxSandboxProcess {
+            let mut pipe = [0; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let record = status_record.map(|message| {
+                let bytes = message.as_bytes();
+                let mut record = Vec::with_capacity(5 + bytes.len());
+                record.push(1); // CHILD_ERROR
+                record.extend_from_slice(&(bytes.len() as u32).to_ne_bytes());
+                record.extend_from_slice(bytes);
+                record
+            });
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                unsafe { libc::close(pipe[0]) };
+                if let Some(record) = record.as_ref()
+                    && unsafe { libc::write(pipe[1], record.as_ptr().cast(), record.len()) }
+                        != record.len() as isize
+                {
+                    unsafe { libc::_exit(126) };
+                }
+                // Closing the CLOEXEC channel emulates either successful exec
+                // or the launcher wrapper completing its failure record.
+                unsafe {
+                    libc::close(pipe[1]);
+                    libc::_exit(125);
+                }
+            }
+            unsafe { libc::close(pipe[1]) };
+            LinuxSandboxProcess {
+                pid,
+                exec_status_fd: Some(pipe[0]),
+            }
+        }
+
+        assert_eq!(spawn(None).wait().unwrap(), LinuxSandboxExit::Code(125));
+
+        // Exercise the kernel's real PT_INTERP failure, rather than merely
+        // synthesizing the error text.  The executable itself exists and is
+        // valid; execve(2) returns ENOENT only because its requested loader is
+        // absent.  This is the case that otherwise looks exactly like a
+        // workload deliberately exiting with status 125.
+        let source = std::fs::read("/bin/true").unwrap();
+        let interpreter = b"/lib64/ld-linux-x86-64.so.2\0";
+        let Some(offset) = source
+            .windows(interpreter.len())
+            .position(|window| window == interpreter)
+        else {
+            eprintln!("skipping missing-loader regression: /bin/true has another PT_INTERP");
+            return;
+        };
+        let mut executable = source;
+        let missing = b"/tmp/ryeos-no-ld.so\0";
+        assert!(missing.len() <= interpreter.len());
+        executable[offset..offset + interpreter.len()].fill(0);
+        executable[offset..offset + missing.len()].copy_from_slice(missing);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing-loader");
+        std::fs::write(&path, executable).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut pipe = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::close(pipe[0]) };
+            let executable = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            let argv = [executable.as_ptr(), std::ptr::null()];
+            let envp = [std::ptr::null()];
+            unsafe { libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+            let errno = std::io::Error::last_os_error();
+            let message = format!(
+                "stage=exec errno={} target={}: {errno}",
+                errno.raw_os_error().unwrap_or_default(),
+                path.display()
+            );
+            let bytes = message.as_bytes();
+            let mut record = Vec::with_capacity(5 + bytes.len());
+            record.push(1);
+            record.extend_from_slice(&(bytes.len() as u32).to_ne_bytes());
+            record.extend_from_slice(bytes);
+            unsafe {
+                libc::write(pipe[1], record.as_ptr().cast(), record.len());
+                libc::close(pipe[1]);
+                libc::_exit(125);
+            }
+        }
+        unsafe { libc::close(pipe[1]) };
+        let error = LinuxSandboxProcess {
+            pid,
+            exec_status_fd: Some(pipe[0]),
+        }
+        .wait()
+        .unwrap_err();
+        assert!(error.contains("failed before exec"), "{error}");
+        assert!(error.contains("stage=exec errno=2"), "{error}");
+        assert!(error.contains("No such file or directory"), "{error}");
     }
 
     #[cfg(target_os = "linux")]

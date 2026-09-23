@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T12:43:58Z:7913fc4f2dff90552d152797b8fe139070ed2b814aaaf7cdc36db2e474ad6668:a0PkN9a8r7XRJ2HYOpYe1gWz0Ip76N0fPhs8VCPRtr3W4oQaVbRfi8sbFXl6i5a0HnBkmNZ9uLIwrVBvpx3QBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:851a9ba2b8bc96b141b14859e7f375b0dbd5fd30e5b9b15f8169270fd697373a:FP1DS6IfwTShnR8dtnYePaNxcVXhK7omQbgLjn2cqXgzp707tAJsYiTCa7HwvG31CJoST8rGloGQxtFnR+6WDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one canonical receipt-only captured substrate release product."""
 import json
 import os
@@ -56,9 +56,12 @@ request = json.load(sys.stdin)
 if request != {}:
     refuse("substrate qualification accepts no caller-authored parameters")
 sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
-if not isinstance(sealed, list) or len(sealed) != 1 or sealed[0].get("id") != "subject":
-    refuse("exact admitted substrate subject required")
-manifest_hash = sealed[0].get("manifest_hash")
+if (not isinstance(sealed, list) or len(sealed) != 2
+        or any(not isinstance(item, dict) for item in sealed)
+        or {item.get("id") for item in sealed} != {"python", "subject"}):
+    refuse("exact admitted Python and substrate subject required")
+subject = next(item for item in sealed if item["id"] == "subject")
+manifest_hash = subject.get("manifest_hash")
 if not isinstance(manifest_hash, str) or not HASH.fullmatch(manifest_hash):
     refuse("admitted substrate subject has no exact manifest identity")
 if not ROOT.is_dir() or ROOT.is_symlink():

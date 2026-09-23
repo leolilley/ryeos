@@ -258,6 +258,43 @@ fn projector_identity_retains_descriptor_and_binary_authority_independently() {
 }
 
 #[test]
+fn projector_compatibility_ignores_only_unrelated_executor_set_changes() {
+    let retained = ProductQualificationProjectorIdentity {
+        canonical_ref: "handler:test/projector".into(),
+        descriptor_content_digest: "1".repeat(64),
+        descriptor_signer_fingerprint: "2".repeat(64),
+        binary_content_digest: "3".repeat(64),
+        binary_manifest_digest: "4".repeat(64),
+        binary_signer_fingerprint: "5".repeat(64),
+    };
+    let mut current = retained.clone();
+    current.binary_manifest_digest = "6".repeat(64);
+    assert!(compatible_projector_identity(&current, &retained));
+
+    for change in [
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.canonical_ref = "handler:test/other".into()
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.descriptor_content_digest = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.descriptor_signer_fingerprint = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.binary_content_digest = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.binary_signer_fingerprint = "7".repeat(64)
+        },
+    ] {
+        let mut changed = current.clone();
+        change(&mut changed);
+        assert!(!compatible_projector_identity(&changed, &retained));
+    }
+}
+
+#[test]
 fn projector_refusal_is_not_an_empty_successful_description() {
     assert!(
         described(ExecutionEvidenceDescribeResponse::Refused {

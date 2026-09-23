@@ -1,0 +1,45 @@
+# ryeos:signed:2026-09-22T05:36:04Z:0b4969b7e6ac949f065193f11ce698f1f1bc810405893f15cdc0d9ef7b484677:3DKAgMX7e4yogQhtHAG9EDK4X1pnQjw71QGc06PJHJ9cFi/Nwe40GfZMSxVyTUTb03uyeJRn9/DITp132c7IDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: development/ryeos
+version: "1.0.1"
+description: Named retained supplementary static-link inputs, separate from Stage-0
+build_products:
+  schema: ryeos.build_products.v1
+  output_roots:
+    - name: static_link_inputs
+      path: products/static-link-inputs
+      storage: large_content
+      bounds:
+        maximum_entries: 64
+        maximum_depth: 8
+        maximum_file_bytes: 8388608
+        maximum_total_bytes: 16777216
+  products:
+    - name: static_link_inputs
+      source: {kind: workspace_output, root: static_link_inputs}
+      path: products/static-link-inputs
+      shape: tree
+      storage: large_content
+      required: true
+      bounds:
+        maximum_entries: 64
+        maximum_depth: 8
+        maximum_file_bytes: 8388608
+        maximum_total_bytes: 16777216
+product_relationships:
+  schema: ryeos.product_relationships.v1
+  relationships:
+    - name: static_link_inputs_to_qualification_verifier
+      producer: {canonical_ref: graph:ryeos/development/static-link-inputs-production, recipe_binding: product_recipe, product_name: static_link_inputs, parameters: {}}
+      consumer: {canonical_ref: tool:ryeos/environments/qualification/static-link-inputs, declaration_id: subject}
+      required_product: {shape: tree, storage: large_content, bounds: {maximum_entries: 64, maximum_depth: 8, maximum_file_bytes: 8388608, maximum_total_bytes: 16777216}}
+      qualification: {policy_ref: null, required_claims: []}
+    - name: static_link_inputs_to_native_build
+      producer: &static_link_producer {canonical_ref: graph:ryeos/development/static-link-inputs-production, recipe_binding: product_recipe, product_name: static_link_inputs, parameters: {}}
+      consumer: {canonical_ref: graph:ryeos/bundle-release/native-build, declaration_id: static-link-inputs}
+      required_product: &static_link_product {shape: tree, storage: large_content, bounds: {maximum_entries: 64, maximum_depth: 8, maximum_file_bytes: 8388608, maximum_total_bytes: 16777216}}
+      qualification: &static_link_qualification {policy_ref: config:ryeos/environments/qualification/static-link-inputs, required_claims: [static_link_inputs_x86_64_linux_gnu_v1]}
+    - name: static_link_inputs_to_core_seed_build
+      producer: *static_link_producer
+      consumer: {canonical_ref: graph:ryeos/bundle-release/core-seed-build, declaration_id: static-link-inputs}
+      required_product: *static_link_product
+      qualification: *static_link_qualification

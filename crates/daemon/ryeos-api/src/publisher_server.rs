@@ -1,6 +1,6 @@
 //! Narrow HTTP transport for an externally-custodied bundle publisher.
 //!
-//! This router deliberately exposes only the seven typed operations consumed
+//! This router deliberately exposes only typed operations consumed
 //! by `AuthenticatedPublisherClient`. It is not part of the ordinary daemon
 //! API and must be served on loopback or behind an HTTPS terminator.
 
@@ -85,6 +85,10 @@ pub fn router(state: PublisherServerState) -> Router {
         .route(
             "/v1/substrate-core/authorize-recipe",
             post(authorize_core_seed_recipe),
+        )
+        .route(
+            "/v1/substrate-build/authorize-recipe",
+            post(authorize_substrate_build_recipe),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
@@ -196,6 +200,22 @@ async fn authorize_core_seed_recipe(
         &headers,
         BundleReleaseOperation::AuthorizeCoreSeedRecipe(request.clone()),
         state.authority.authorize_core_seed_recipe(request),
+    )
+    .await
+}
+
+async fn authorize_substrate_build_recipe(
+    State(state): State<PublisherServerState>,
+    headers: HeaderMap,
+    Json(request): Json<
+        ryeos_app::bundle_publication::recipe::AuthorizeSubstrateBuildRecipeRequest,
+    >,
+) -> Response {
+    execute(
+        &state,
+        &headers,
+        BundleReleaseOperation::AuthorizeSubstrateBuildRecipe(request.clone()),
+        state.authority.authorize_substrate_build_recipe(request),
     )
     .await
 }

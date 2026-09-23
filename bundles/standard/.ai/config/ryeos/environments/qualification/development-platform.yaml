@@ -1,0 +1,12 @@
+# ryeos:signed:2026-09-22T00:24:35Z:bf32dc7e814b39e635af364a9285c081f698780c12c8fc7c89b43e0c79c60a1f:YJp7qRq0ocsldYSrUKPhtVrBIoZi7cJUJMRQ61QaDqPSdv1r1+67LGKo5pltyKXyUKTqku5RmvhTuK+pXZmjDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+version: "1.0.0"
+description: Independent policy for the retained RyeOS development platform
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:ryeos/environments/qualification/development-platform
+  subject_declaration_id: subject
+  allowed_claims:
+    - development_platform_abi_v1
+    - development_platform_target_x86_64_linux_gnu_v1
+  verifier_parameters: {}

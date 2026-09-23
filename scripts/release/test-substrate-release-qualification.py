@@ -29,7 +29,7 @@ def receipt():
 
 
 class SubstrateQualificationTests(unittest.TestCase):
-    def run_verifier(self, product, request=None):
+    def run_verifier(self, product, request=None, realizations=None):
         output = io.StringIO()
         real_path = Path
 
@@ -39,8 +39,9 @@ class SubstrateQualificationTests(unittest.TestCase):
             return real_path(*parts)
 
         environment = {
-            "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([
-                {"id": "subject", "manifest_hash": "c" * 64}
+            "RYEOS_EXTERNAL_REALIZATIONS": json.dumps(realizations if realizations is not None else [
+                {"id": "python", "manifest_hash": "d" * 64},
+                {"id": "subject", "manifest_hash": "c" * 64},
             ]),
             "RYE_THREAD_ID": "qualification-thread",
         }
@@ -60,18 +61,32 @@ class SubstrateQualificationTests(unittest.TestCase):
     def test_assets_close_the_fixed_coordinates(self):
         policy = yaml.safe_load((ASSET / "config/bundle-release/substrate-qualification.yaml").read_text())
         products = yaml.safe_load((ASSET / "config/bundle-release/substrate-build-products.yaml").read_text())
+        calibration_products = yaml.safe_load((ASSET / "config/bundle-release/calibration-substrate-build-products.yaml").read_text())
+        environment = yaml.safe_load((ASSET / "config/bundle-release/execution-environment-products.yaml").read_text())
         tool = yaml.safe_load((ASSET / "tools/ryeos/bundle-release/substrate-qualify.yaml").read_text())
-        graph = yaml.safe_load((ASSET / "graphs/ryeos/bundle-release/substrate-qualify.yaml").read_text())
-        self.assertEqual(policy["product_qualification_policy"]["verifier_ref"], "tool:ryeos/bundle-release/substrate-qualify")
-        relationship, = products["product_relationships"]["relationships"]
-        self.assertEqual(relationship["name"], "substrate_release_to_qualification")
-        self.assertEqual(relationship["producer"]["canonical_ref"], "graph:ryeos/bundle-release/substrate-build")
-        self.assertEqual(relationship["qualification"]["policy_ref"], "config:bundle-release/substrate-qualification")
-        for owner in (tool, graph):
-            slot, = owner["external_product_slots"]
-            self.assertEqual(slot["relationship_ref"], "config:bundle-release/substrate-build-products")
-            self.assertEqual(slot["relationship"], "substrate_release_to_qualification")
-            self.assertEqual(slot["mount"], "substrate-release")
+        verifier_ref = "tool:ryeos/bundle-release/substrate-qualify"
+        self.assertEqual(policy["product_qualification_policy"]["verifier_ref"], verifier_ref)
+        for recipe in (products, calibration_products):
+            relationship, = recipe["product_relationships"]["relationships"]
+            self.assertEqual(relationship["name"], "substrate_release_to_qualification")
+            self.assertEqual(relationship["producer"]["canonical_ref"], "graph:ryeos/bundle-release/substrate-build")
+            self.assertEqual(relationship["consumer"], {"canonical_ref": verifier_ref, "declaration_id": "subject"})
+            self.assertEqual(relationship["qualification"]["policy_ref"], "config:bundle-release/substrate-qualification")
+        slots = {slot["id"]: slot for slot in tool["external_product_slots"]}
+        self.assertEqual(set(slots), {"python", "subject"})
+        self.assertEqual(slots["subject"]["relationship_ref"], "config:bundle-release/substrate-build-products")
+        self.assertEqual(slots["subject"]["relationship"], "substrate_release_to_qualification")
+        self.assertEqual(slots["subject"]["mount"], "substrate-release")
+        self.assertEqual(slots["python"]["relationship_ref"], "config:bundle-release/execution-environment-products")
+        self.assertEqual(slots["python"]["relationship"], "python_to_substrate_qualify")
+        self.assertEqual(slots["python"]["mount"], "python-gnu")
+        python_relationship, = [relationship for relationship in environment["product_relationships"]["relationships"]
+                                if relationship["name"] == "python_to_substrate_qualify"]
+        self.assertEqual(python_relationship["consumer"], {"canonical_ref": verifier_ref, "declaration_id": "python"})
+        handler = (ROOT / "crates/daemon/ryeos-api/src/handlers/bundle_release.rs").read_text()
+        self.assertIn(f'const SUBSTRATE_QUALIFY_TOOL_REF: &str = "{verifier_ref}";', handler)
+        self.assertNotIn("SUBSTRATE_QUALIFY_GRAPH_REF", handler)
+        self.assertEqual(handler.count("SUBSTRATE_QUALIFY_TOOL_REF"), 4)
 
     def test_canonical_receipt_only_tree_is_qualified(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -79,6 +94,23 @@ class SubstrateQualificationTests(unittest.TestCase):
         self.assertEqual(result["claims"], ["substrate_release_checks_v1"])
         self.assertEqual(result["subject_manifest_hash"], "c" * 64)
         self.assertEqual(result["probe_evidence"]["receipt"], receipt())
+
+    def test_verifier_requires_exact_python_and_subject_realizations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            product = self.make_product(directory)
+            for realizations in (
+                [{"id": "subject", "manifest_hash": "c" * 64}],
+                [{"id": "python", "manifest_hash": "d" * 64}],
+                [
+                    {"id": "python", "manifest_hash": "d" * 64},
+                    {"id": "subject", "manifest_hash": "c" * 64},
+                    {"id": "extra", "manifest_hash": "e" * 64},
+                ],
+            ):
+                with self.subTest(realizations=realizations), self.assertRaisesRegex(
+                    SystemExit, "exact admitted Python and substrate subject"
+                ):
+                    self.run_verifier(product, realizations=realizations)
 
     def test_noncanonical_receipt_bytes_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:

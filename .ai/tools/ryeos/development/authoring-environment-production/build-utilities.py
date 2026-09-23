@@ -1,7 +1,7 @@
-# ryeos:signed:2026-09-17T05:41:43Z:b75493f55c40a2fe6c99120be6ed4eea7c2d0b2579bc82e24c0c0a5f69010549:+rYcu2oUbgpPUsF/XPwvG3JKBlj41OmxsrIdoYSnhLXq5q9ex1i1sCauryU1X+1cCDrGET/4ZfgzHgOfna0eDA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-22T00:24:35Z:8d260728e744b2b3fbcfd0e89e4c5b80d08b2e45cbe418038b711e45f87cd80d:5TiwYLMeqQKNddSvpGHz+KH1I0rGvyJvAOuTEE7CgSxFcQ/u5LbAuNz7bJLLGTYAJ0BuJ106+lyXtnc60anhCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/development/authoring-environment-production
-#   version: "1.0.0"
+#   version: "1.1.0"
 #   description: Build the finite authoring utilities from exact sources using admitted Stage0 and support
 #   executor_id: tool:ryeos/development/authoring-environment-production/runtime
 #   execution_protocol: protocol:ryeos/core/opaque
@@ -29,14 +29,9 @@
 #       digest: 800d4969489634cc3bbc5774bd9e99a330cdc23bbc1fd0fd231ec6a88ca9acdf
 #       mount_root: execution_runtime
 #       mount: producer-python
-#   # authoring-build-support is selected by the enclosing producer Graph and
-#   # reaches this inline Tool through the admitted normalized realization set.
-#     - id: platform
-#       kind: tree
-#       mode: pinned
-#       digest: 98bceddd5b4024d5963eeac8c579e6d4e79c24577980fa9f88bce9ae3151d316
-#       mount_root: execution_runtime
-#       mount: platform
+#   # authoring-build-support and the qualified platform product are selected
+#   # by the enclosing producer Graph and reach this inline Tool through its
+#   # admitted normalized realization set. Stage-0 is not bound here.
 #     - id: source-inputs
 #       kind: tree
 #       mode: pinned

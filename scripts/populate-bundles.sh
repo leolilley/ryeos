@@ -394,10 +394,29 @@ case "$BUNDLE_SET" in
     ;;
 esac
 
-# --crates overrides the build list (staging still copies all bundle binaries
-# from target/release, so unbuilt ones must already exist there).
+# --crates overrides the build list. Bundle payload staging retains unselected
+# artifacts from the existing exact bundle generation. The installed host is a
+# single policy-reader generation, however: `ryeos init` executes node policy
+# code linked into the CLI, the daemon consumes the resulting generation, and
+# core-tools verifies installed bundles against it. Never publish one reader
+# against stale counterparts.
 if [[ -n "$CRATES_OVERRIDE" ]]; then
   read -ra pkgs <<< "$CRATES_OVERRIDE"
+  selected_policy_reader=0
+  for p in "${pkgs[@]}"; do
+    case "$p" in
+      ryeosd|ryeos-cli|ryeos-core-tools) selected_policy_reader=1 ;;
+    esac
+  done
+  if (( selected_policy_reader == 1 )); then
+    for required in ryeosd ryeos-cli ryeos-core-tools; do
+      present=0
+      for p in "${pkgs[@]}"; do
+        [[ "$p" == "$required" ]] && present=1
+      done
+      (( present == 1 )) || pkgs+=("$required")
+    done
+  fi
 fi
 
 # Static admitted worker packages are built under an explicit target and must

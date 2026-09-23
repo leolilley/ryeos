@@ -1,20 +1,23 @@
-# ryeos:signed:2026-09-20T12:43:58Z:a619b75f2ffb752c94c41db5c81d7f26e00f297abac987b2413517ca1338f7a1:X3i6H43RgNsYJwZSuiqW51aH1x2wAL3HIcgKnGq2lAmJ1OzzHisCOuJhdiXhIU5PaOH/spG2AxsxEXjWLuJICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:15:01Z:17e3636d156ac816029940901ffcff525eb3ded9bf2ebbc4f8b03cf0dd9ac8ac:fFWYS3iz2Rt7FUJR3Al8VSGkRG/zam/VrGfYPwy6I/qUV+bfXgWEuJ5VAfIV9dTkd4EttwYJMxbU4//EGK14Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-build
-version: "1.0.0"
+version: "1.0.1"
 description: Materialize the initial Core bundle from pinned source into a fresh captured product root.
-executor_id: "@subprocess"
+executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-source_scope:
-  location: item_namespace
-  load_roots: [item_directory]
-  materialization: read_only
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-tool-products, relationship: python_to_core_seed_build_tool, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - {id: platform, relationship_ref: config:bundle-release/execution-tool-products, relationship: platform_to_core_seed_build_tool, kind: tree, mount_root: execution_runtime, mount: platform}
+  - {id: cargo-vendor, relationship_ref: config:bundle-release/execution-tool-products, relationship: cargo_vendor_to_core_seed_build_tool, kind: tree, mount_root: execution_runtime, mount: cargo-vendor}
+  - {id: static-link-inputs, relationship_ref: config:bundle-release/execution-tool-products, relationship: static_link_inputs_to_core_seed_build_tool, kind: tree, mount_root: execution_runtime, mount: static-link-inputs}
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
-  command: /usr/bin/python3
-  args: ["${tool_dir}/lib/core-seed-build.py"]
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/core-seed-build.py"]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

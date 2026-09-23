@@ -1,0 +1,11 @@
+# ryeos:signed:2026-09-22T04:12:14Z:b00ebb6d394e55e54d4c7eb050fb1985559a522c2662e69976362d2200f6446d:y8udT94E0dxP3XB3FYKQARpyl5kVTCHsgdfa/Qnlm+GIycOTkE0tZVcx6+PH4nx8OG8DrL40K0vkAAZmdNqiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/environments/qualification
+version: "1.0.0"
+description: Exact supplementary GNU static-link checksum closure; no execution claim
+product_qualification_policy:
+  schema: ryeos.product_qualification_policy.v1
+  verifier_ref: tool:ryeos/environments/qualification/static-link-inputs
+  subject_declaration_id: subject
+  allowed_claims:
+    - static_link_inputs_x86_64_linux_gnu_v1
+  verifier_parameters: {}

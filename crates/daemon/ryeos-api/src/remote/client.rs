@@ -4419,6 +4419,7 @@ mod tests {
             max_total_blob_bytes: 128 * 1024 * 1024,
             max_response_bytes: 256 * 1024 * 1024,
             max_links_per_object: 100_000,
+            local_verification: None,
         }
     }
 

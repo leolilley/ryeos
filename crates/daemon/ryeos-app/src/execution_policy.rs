@@ -271,6 +271,82 @@ pub(crate) fn synthetic_test_live_project_authority(
 mod policy_tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn enforced_runtime_fixture(
+        app_root: &std::path::Path,
+    ) -> ryeos_engine::isolation::IsolationRuntime {
+        use ryeos_isolation_protocol::{
+            InspectedArtifact, IsolationArtifactRole, IsolationBackendDeclaration,
+            IsolationBackendSelection, IsolationCapability,
+        };
+        use std::{
+            collections::{BTreeMap, BTreeSet},
+            sync::Arc,
+        };
+
+        let selection = IsolationBackendSelection {
+            bundle: "live-project-test-backend".to_owned(),
+            implementation: "fixture".to_owned(),
+        };
+        let launcher = lillux::sealed_memfd(c"live-project-test-launcher", b"").unwrap();
+        let backend = ryeos_engine::isolation::ResolvedIsolationBackend {
+            selection: selection.clone(),
+            declaration: IsolationBackendDeclaration {
+                id: "fixture".to_owned(),
+                protocol: ryeos_isolation_protocol::IsolationAdapterProtocolVersion::Current,
+                targets: vec![
+                    ryeos_isolation_protocol::IsolationTargetTriple::X86_64UnknownLinuxGnu,
+                ],
+                adapter: "adapter".to_owned(),
+                artifacts: BTreeMap::from([(
+                    IsolationArtifactRole::Launcher,
+                    "launcher".to_owned(),
+                )]),
+                capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
+            },
+            bundle_manifest_digest: "a".repeat(64),
+            signer_fingerprint: "b".repeat(64),
+            adapter_digest: "c".repeat(64),
+            adapter_handle: lillux::sealed_memfd(c"live-project-test-adapter", b"").unwrap(),
+            artifact_handles: BTreeMap::from([(IsolationArtifactRole::Launcher, launcher)]),
+            adapter_build: "test".to_owned(),
+            effective_capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
+            inspected_artifacts: BTreeMap::from([(
+                IsolationArtifactRole::Launcher,
+                InspectedArtifact {
+                    version: "fixture".to_owned(),
+                    digest: "d".repeat(64),
+                },
+            )]),
+        };
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.mode = ryeos_engine::isolation::IsolationMode::Enforce;
+        policy.backend = Some(selection);
+        ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_definition_validation(
+            app_root,
+            policy,
+            app_root.join("signed-isolation-policy.yaml"),
+            format!("sha256:{}", "e".repeat(64)),
+            Some(Arc::new(backend)),
+        )
+        .unwrap()
+    }
+
+    fn live_policy(access: LiveAccess) -> ExecutionPolicy {
+        ExecutionPolicy {
+            schema_version: EXECUTION_POLICY_SCHEMA_VERSION,
+            ownership: ExecutionOwnership::RequestScoped,
+            recovery: ExecutionRecovery::None,
+            response: ExecutionResponse::Wait,
+            target: ExecutionTarget::Here,
+            environment: ExecutionEnvironmentPolicy::None,
+            project: ProjectExecutionPolicy::LiveDirect {
+                access,
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+        }
+    }
+
     #[test]
     fn live_async_is_daemon_owned_and_restart_recoverable() {
         let policy = ExecutionPolicy::local_live(ExecutionResponse::Accepted);
@@ -379,6 +455,79 @@ mod policy_tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_project_access_is_truthful_under_disabled_and_real_enforced_profiles() {
+        let project = tempfile::tempdir().unwrap();
+        let app_root = tempfile::tempdir().unwrap();
+        let disabled = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let enforced = enforced_runtime_fixture(app_root.path());
+        assert!(enforced.is_enforced());
+
+        let disabled_read_only = live_policy(LiveAccess::ReadOnly)
+            .resolve_live_project_authority(
+                project.path(),
+                live_filesystem_confinement_for_isolation(disabled.inspection()),
+                vec![LIVE_PROJECT_READ_CAPABILITY.to_owned()],
+            )
+            .unwrap_err();
+        assert!(
+            disabled_read_only
+                .to_string()
+                .contains("cannot truthfully enforce read-only")
+        );
+
+        for (runtime, accesses, expected_confinement) in [
+            (
+                &disabled,
+                vec![(
+                    LiveAccess::ReadWrite,
+                    ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    LIVE_PROJECT_WRITE_CAPABILITY,
+                )],
+                ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
+            ),
+            (
+                &enforced,
+                vec![
+                    (
+                        LiveAccess::ReadOnly,
+                        ryeos_state::objects::LiveProjectAccess::ReadOnly,
+                        LIVE_PROJECT_READ_CAPABILITY,
+                    ),
+                    (
+                        LiveAccess::ReadWrite,
+                        ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                        LIVE_PROJECT_WRITE_CAPABILITY,
+                    ),
+                ],
+                ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
+            ),
+        ] {
+            for (access, expected_access, capability) in accesses {
+                let authority = live_policy(access)
+                    .resolve_live_project_authority(
+                        project.path(),
+                        live_filesystem_confinement_for_isolation(runtime.inspection()),
+                        vec![capability.to_owned()],
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    authority,
+                    ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                        live_access: ryeos_state::objects::LiveAccessAuthority {
+                            access,
+                            confinement,
+                            ..
+                        },
+                        environment: ryeos_state::objects::EnvironmentAuthority::None,
+                        ..
+                    } if access == expected_access && confinement == expected_confinement
+                ));
+            }
+        }
     }
 
     #[test]

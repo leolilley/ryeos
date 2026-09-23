@@ -1,12 +1,19 @@
-# ryeos:signed:2026-09-20T14:52:10Z:3b8860807e9a7b40718505cd609b57e6814443b3817f5b52da0227d0272c821f:E7Zc/kWnETBz9AGDIdM2LKII+a6SVb45/R5liEOn+k4g5oYDzMT0OQ7xSfn/UPpKFFx5Hq3uRHxqCYkR6krCCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-version: "1.0.0"
+# ryeos:signed:2026-09-23T04:20:49Z:51a1bc02976321cd622bd497c887b5c5b15a4e52ff59f5e0174f2459a2d4eedb:T3VhMiTRC6jVkAiFkPftiuUPFVFG8YpUwM3yemKzeoVFRKQCIxVkxcvO21U5L/9NCCwxSp/Wtc4Bprm2WxBCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "1.0.1"
 category: ryeos/bundle-release
 description: Build exactly one non-core bundle and all payloads selected by the ownership contract into a clean captured output.
 effects: live
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-environment-products, relationship: python_to_native_build, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+  - {id: platform, relationship_ref: config:bundle-release/execution-environment-products, relationship: platform_to_native_build, kind: tree, mount_root: execution_runtime, mount: platform}
+  - {id: cargo-vendor, relationship_ref: config:bundle-release/execution-environment-products, relationship: cargo_vendor_to_native_build, kind: tree, mount_root: execution_runtime, mount: cargo-vendor}
+  - {id: static-link-inputs, relationship_ref: config:bundle-release/execution-environment-products, relationship: static_link_inputs_to_native_build, kind: tree, mount_root: execution_runtime, mount: static-link-inputs}
 product_recipe: config:bundle-release/native-build-products
 requires:
   capabilities:
     declared:
+      - ryeos.execute.config.bundle-release/execution-environment-products
+      - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.tool.ryeos/bundle-release/native-build
 config:
   start: build
@@ -15,15 +22,17 @@ config:
   config_schema:
     type: object
     additionalProperties: false
-    required: [release_input]
+    required: [release_input, child_product_selections]
     properties:
       release_input: {type: object}
+      child_product_selections: {type: array, minItems: 1, maxItems: 8}
   state: {}
   nodes:
     build:
       action:
         item_id: tool:ryeos/bundle-release/native-build
         ref_bindings: {}
+        product_selections: "${inputs.child_product_selections}"
         params:
           release_input: "${inputs.release_input}"
       assign: {build: "${result}"}

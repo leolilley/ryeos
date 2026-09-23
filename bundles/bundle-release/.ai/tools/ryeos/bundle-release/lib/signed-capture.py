@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-20T12:43:58Z:ebee1de21aecb41a2607e84a2c26af6fe6579098587f483a9b5e09085eb6bdf0:aKvRCQFPbkgecmXRbqgkD3LYnssjAqYocoiWZiXPdtAfvi6mcxuJiNTKKvuIOa9HaWXDY8pchifu0JpVJqkXDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-09-23T08:19:54Z:64a7e14f3c353ee3458707bb34b023486edf67ed76708b394174d179a282055f:nw3uGMzLnrChV78bAKTbTxAyuky60m+ADb/sanA+jzxt67fn6n2+D5rFOKMdzIx1Mpeu1xAyCjBwKAR1XOzYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Apply the exact publisher manifest to one admitted unsigned bundle product."""
 import hashlib, json, os, pathlib, re, shutil, stat, sys
 
@@ -18,8 +18,9 @@ if not isinstance(signed, str) or len(signed.encode()) > 131072:
 if hashlib.sha256(signed.encode()).hexdigest() != request["manifest_item_hash"]:
     raise SystemExit("signed manifest bytes changed")
 sealed = json.loads(os.environ.get("RYEOS_EXTERNAL_REALIZATIONS", "null"))
-if not isinstance(sealed, list) or len(sealed) != 1 or sealed[0].get("id") != "unsigned_bundle":
-    raise SystemExit("exact admitted unsigned bundle required")
+if (not isinstance(sealed, list) or len(sealed) != 2
+        or {entry.get("id") for entry in sealed} != {"python", "unsigned_bundle"}):
+    raise SystemExit("exact admitted Python and unsigned bundle required")
 source = pathlib.Path("/ryeos/realizations/unsigned-native-bundle")
 target = pathlib.Path.cwd() / "products/signed-native-bundle/tree"
 if not source.is_dir() or source.is_symlink() or target.exists():

@@ -254,7 +254,13 @@ pub(super) fn probe() -> Result<(), String> {
         );
         // Always reap the exact creator, including malformed/failed receipt.
         // Its bounded alarm also prevents an inspection wait from hanging.
-        require_probe_exit((LinuxSandboxProcess { pid: creator }).wait()?)?;
+        require_probe_exit(
+            (LinuxSandboxProcess {
+                pid: creator,
+                exec_status_fd: None,
+            })
+            .wait()?,
+        )?;
         let (payload, mut descriptors) = received.map_err(|error| error.to_string())?.into_parts();
         if payload != b"view" || descriptors.len() != 1 {
             return Err("template probe received an unexpected capability packet".to_string());
@@ -322,7 +328,13 @@ fn bounded_probe_child(operation: impl FnOnce() -> Result<(), String>) -> Result
         arm_probe_child(parent);
         finish_probe_child(operation());
     }
-    require_probe_exit((LinuxSandboxProcess { pid }).wait()?)
+    require_probe_exit(
+        (LinuxSandboxProcess {
+            pid,
+            exec_status_fd: None,
+        })
+        .wait()?,
+    )
 }
 
 fn arm_probe_child(parent: libc::pid_t) {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T15:22:41Z:7c56385e3b5000793a69106e9c55965f460d715f00843a1e230cda345112abbc:ELZNWhb/SPKExoLqcJ7baRqoBtqrGNcC234Je1wlC5VjN/dMHk5DmhDhxBJ/6g0C9jU2SX1NyzPW26QocQj9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T04:20:49Z:f090782362252445ff341235302584e4aecb778f829204ab1bbe49f9c0ba7cba:Kf9EhkgGjIKmlJ/pzsGMZGXrUyWobymZCN5iZ337GQFXZd9e6Ye8auTURfCQUsiByyyyKzPcbq2QYOjSATD6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: substrate-build
 version: "1.0.0"
@@ -9,6 +9,8 @@ state_access: read_write
 record_thread: true
 availability: daemon_only
 required_caps:
+  - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/execution-tool-products
   - ryeos.execute.config.bundle-release/substrate-build-products
   - ryeos.execute.service.bundle-release/substrate-build
   - ryeos.execute.tool.ryeos/bundle-release/substrate-build

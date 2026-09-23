@@ -1,19 +1,19 @@
-# ryeos:signed:2026-09-20T12:43:58Z:f34a051bdf81e22b7942e4937773456951953d90b6810ce5bf14d0ab9c72fce0://U0zxKrvVXO+7+D4+lWLKNf987mTQmSDP2PAh67y/vIR1i6EGfeUmd8zIajdMLUgEiPOzBDzhi16wH+NAveBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:15:01Z:81fd1e975743d0e5eb442ef34013eb743dd0f58cd2aecc73c34c3c81c34f2c4a:Y8vZYFAnJo0/rmUN5SGrMzPRsigcBDQ3knXRwSHwddH5LfPEwcp26F+asFrVQTjmotJyMGLarpqguAMsiohVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-build
 version: "1.0.0"
 description: Materialize one canonical measured substrate receipt without rebuilding the host image.
-executor_id: "@subprocess"
+executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
 filesystem_authority: captured_execution
 network_authority: isolated
-source_scope:
-  location: item_namespace
-  load_roots: [item_directory]
-  materialization: read_only
+external_product_slots:
+  - {id: python, relationship_ref: config:bundle-release/execution-tool-products, relationship: python_to_substrate_build_tool, kind: tree, mount_root: execution_runtime, mount: python-gnu}
+env_config:
+  interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
-  command: /usr/bin/python3
-  args: ["${tool_dir}/lib/substrate-build.py"]
+  command: "${interpreter}"
+  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/substrate-build.py"]
   input_data: "${params_json}"
   timeout_secs: 60
