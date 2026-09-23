@@ -2159,39 +2159,49 @@ async fn handle_execute(
 /// record that the attempt just published would turn Executed/Inserted into
 /// EffectRecord/NotApplicable. Identity checks here bind the in-band result;
 /// they never infer execution from a thread ID or from record provenance.
+fn project_execute_callback_response(response: Value) -> Result<Value> {
+    // The execute API adds a result-generation coordinate. It is not part of
+    // the callback wire contract, but must be validated before projection.
+    // No other outer execute/debug fields are admitted at this boundary.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ExecuteResponse {
+        thread: Value,
+        result: Value,
+        #[serde(default)]
+        dispatch: Option<ryeos_runtime::callback_contract::RuntimeDispatchEvidence>,
+        #[serde(default)]
+        result_project_snapshot_hash: Option<String>,
+    }
+    // Missing evidence is permitted only for the existing Live attachment
+    // below. Explicit null is malformed evidence, not permission to mint it.
+    if response.get("dispatch").is_some_and(Value::is_null) {
+        anyhow::bail!("callback dispatch response contains null dispatch evidence");
+    }
+    let parsed: ExecuteResponse = serde_json::from_value(response)
+        .context("decode execute response for callback projection")?;
+    if let Some(hash) = parsed.result_project_snapshot_hash.as_deref()
+        && !lillux::valid_hash(hash)
+    {
+        anyhow::bail!("execute response has an invalid result snapshot hash");
+    }
+    let mut projected = serde_json::json!({"thread":parsed.thread,"result":parsed.result});
+    if let Some(dispatch) = parsed.dispatch {
+        projected["dispatch"] = serde_json::to_value(dispatch)?;
+    }
+    Ok(projected)
+}
+
 fn completed_awaited_root_response(
     response: &Value,
     action_digest: &str,
     expected_root_thread_id: &str,
 ) -> Result<Option<Value>> {
-    if response.get("dispatch").is_none() {
+    let projected = project_execute_callback_response(response.clone())?;
+    if projected.get("dispatch").is_none() {
         // A continued or incomplete managed launch has no accepted answer.
         return Ok(None);
     }
-    // Managed execution also returns its result-generation coordinate to the
-    // outer execute API. It is not a callback field: project only the typed
-    // callback response here, without discarding its dispatch evidence.
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ManagedResponse {
-        thread: Value,
-        result: Value,
-        dispatch: ryeos_runtime::callback_contract::RuntimeDispatchEvidence,
-        #[serde(default)]
-        result_project_snapshot_hash: Option<String>,
-    }
-    let managed: ManagedResponse = serde_json::from_value(response.clone())?;
-    if let Some(hash) = managed.result_project_snapshot_hash.as_deref()
-        && !lillux::valid_hash(hash)
-    {
-        anyhow::bail!("managed product response has an invalid result snapshot hash");
-    }
-    let projected =
-        serde_json::to_value(ryeos_runtime::callback_contract::CallbackDispatchResponse {
-            thread: managed.thread,
-            result: managed.result,
-            dispatch: managed.dispatch,
-        })?;
     let validated = attach_runtime_dispatch_evidence(projected, action_digest, true)?;
     let parsed: ryeos_runtime::callback_contract::CallbackDispatchResponse =
         serde_json::from_value(validated.clone())?;
@@ -2224,10 +2234,11 @@ fn completed_awaited_root_response(
 }
 
 fn attach_runtime_dispatch_evidence(
-    mut response: Value,
+    response: Value,
     action_digest: &str,
     durable_effect_requested: bool,
 ) -> Result<Value> {
+    let mut response = project_execute_callback_response(response)?;
     let object = response
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("callback dispatch response is not an object"))?;
@@ -3007,6 +3018,114 @@ mod tests {
         ] {
             enforce_inline_dispatch_class("alias:test/leaf", class, false).unwrap();
         }
+    }
+
+    #[test]
+    fn ordinary_execute_projection_preserves_in_band_dispatch_without_record_lookup() {
+        use ryeos_runtime::callback_contract::{
+            RuntimeDispatchEffectClass, RuntimeDispatchEvidence, RuntimeDispatchPublication,
+            RuntimeDispatchSource,
+        };
+        let action = "a".repeat(64);
+        for (source, publication) in [
+            (
+                RuntimeDispatchSource::Executed,
+                RuntimeDispatchPublication::Inserted,
+            ),
+            (
+                RuntimeDispatchSource::Executed,
+                RuntimeDispatchPublication::Folded,
+            ),
+            (
+                RuntimeDispatchSource::EffectRecord,
+                RuntimeDispatchPublication::NotApplicable,
+            ),
+        ] {
+            let dispatch = RuntimeDispatchEvidence {
+                source,
+                effect_class: RuntimeDispatchEffectClass::Recorded,
+                action_digest: action.clone(),
+                effect_identity: Some("b".repeat(64)),
+                publication,
+                record_hash: Some("c".repeat(64)),
+                replayed_from: (source == RuntimeDispatchSource::EffectRecord)
+                    .then(|| "c".repeat(64)),
+                result_projection:
+                    ryeos_effect_contract::DispatchResultProjection::DispatchedSubject,
+            };
+            dispatch.validate().unwrap();
+            let response = serde_json::json!({
+                "thread": if source == RuntimeDispatchSource::EffectRecord {Value::Null} else {serde_json::json!({"thread_id":"T-ordinary","status":"completed"})},
+                "result":{"outcome_code":"exit:0","result":{"answer":42},"error":null,"artifacts":[]},
+                "dispatch":dispatch,
+                "result_project_snapshot_hash":null,
+            });
+            // Missing/null/valid snapshot are all existing execute-envelope
+            // forms. Projection cannot change actual execution provenance.
+            for snapshot in [None, Some(Value::Null), Some(Value::String("d".repeat(64)))] {
+                let mut input = response.clone();
+                if let Some(snapshot) = snapshot {
+                    input["result_project_snapshot_hash"] = snapshot;
+                } else {
+                    input
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("result_project_snapshot_hash");
+                }
+                let projected = attach_runtime_dispatch_evidence(input, &action, true).unwrap();
+                assert_eq!(projected["dispatch"], response["dispatch"]);
+                assert_eq!(projected["thread"], response["thread"]);
+                assert_eq!(projected["result"], response["result"]);
+                assert_eq!(projected.as_object().unwrap().len(), 3);
+            }
+            assert!(
+                attach_runtime_dispatch_evidence(response.clone(), &"f".repeat(64), true).is_err()
+            );
+            assert!(attach_runtime_dispatch_evidence(response.clone(), &action, false).is_err());
+            for (field, value) in [
+                ("result_project_snapshot_hash", serde_json::json!("invalid")),
+                ("result_project_snapshot_hash", serde_json::json!(42)),
+                ("debug", Value::Null),
+                ("unexpected", serde_json::json!(true)),
+                ("dispatch", Value::Null),
+            ] {
+                let mut changed = response.clone();
+                changed[field] = value;
+                assert!(
+                    attach_runtime_dispatch_evidence(changed, &action, true).is_err(),
+                    "accepted invalid {field}"
+                );
+            }
+            let mut changed = response.clone();
+            changed["dispatch"]["record_hash"] = serde_json::json!("invalid");
+            assert!(attach_runtime_dispatch_evidence(changed, &action, true).is_err());
+            let mut changed = response.clone();
+            changed["dispatch"]["unexpected"] = serde_json::json!(true);
+            assert!(attach_runtime_dispatch_evidence(changed, &action, true).is_err());
+            let mut changed = response;
+            changed.as_object_mut().unwrap().remove("dispatch");
+            assert!(attach_runtime_dispatch_evidence(changed, &action, true).is_err());
+        }
+    }
+
+    #[test]
+    fn ordinary_live_projection_attaches_only_missing_live_evidence() {
+        let action = "a".repeat(64);
+        let response = serde_json::json!({"thread":null,"result":{"answer":42},"result_project_snapshot_hash":null});
+        let projected = attach_runtime_dispatch_evidence(response.clone(), &action, false).unwrap();
+        assert_eq!(projected["dispatch"]["source"], "executed");
+        assert_eq!(projected["dispatch"]["effect_class"], "live");
+        assert_eq!(projected["dispatch"]["action_digest"], action);
+        assert_eq!(projected["result"], response["result"]);
+        assert!(projected.get("result_project_snapshot_hash").is_none());
+        assert_eq!(
+            attach_runtime_dispatch_evidence(projected.clone(), &action, false).unwrap(),
+            projected
+        );
+        assert!(attach_runtime_dispatch_evidence(projected, &action, true).is_err());
+        let mut malformed = response;
+        malformed["dispatch"] = Value::Null;
+        assert!(attach_runtime_dispatch_evidence(malformed, &action, false).is_err());
     }
 
     #[test]
