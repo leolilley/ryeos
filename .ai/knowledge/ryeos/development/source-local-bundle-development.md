@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-23T08:16:34Z:40a863927bc164c3f7c2cce63b0df2cb62f01b35008b8690c716da3b12680572:qnCwmuMJuZfDcPQusTy/R0EjB3d+N4JrnEO71lDiFpWOEzuFPRCHzIb8FVwvFp7NjZOv48POJn/qog+pmKi4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-23T08:42:42Z:2af116af308ed2989838cd02af4cc7ab21a257e2d9e9041d5a65c2613e077da0:ocSYkzx44DlkODguXFQNLKYPCoKETo6DkOIfFAoD2i6kM3TD967maauuZJrBSiwoKYNXqO0j7GdrxTZmkwIIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -43,7 +43,11 @@ release Tools now point to one signed `tool:ryeos/bundle-release/runtime`
 intermediate. That intermediate owns the narrower `item_directory` scope;
 each root retains its own exact command, interpreter, product slots and
 workspace-relative script argument. The focused asset test covers all eleven.
-This corrected chain is source-signed but not yet installed or live-proven.
+This corrected chain was signed, republished and installed on 2026-09-23;
+strict bundle verification passed, and the signed release-authority policy
+generation was replaced. The release-authority node is healthy at
+`127.0.0.1:7401`; port 7400 belongs to a separate node and was left untouched.
+The chain is not yet live-calibration-proven.
 No successful calibration, catalog bootstrap or consumer bundle activation is
 established. Continue from the controlling plan below; do not reproduce
 qualified prerequisites, clear Cargo caches, or treat a host file's existence
@@ -69,10 +73,12 @@ their subject and verifier identity. Focused API, recipe, Core, calibration,
 composition and release-asset checks pass. These are source checks only. Build
 of the coupled daemon/CLI/publisher/core-tools artifacts and population of the
 signed 11-bundle release-authority set completed on 2026-09-23. The live node
-still runs the prior generation. Install the coupled generation with the
-release-authority policy reset, take its exact source snapshot and rebind the
-retained prerequisites before retrying live calibration; only the subsequent
-catalog and distinct-consumer update can close the release proof.
+now runs the corrected generation and policy. The signed project-snapshot
+configuration excludes `bundle-release` generated payload/CAS/ref trees, as
+it does for the other source bundles. Capture a fresh exact source snapshot,
+recheck the retained prerequisite bindings, then retry live calibration. Only
+the subsequent measured policy, catalog bootstrap and distinct-consumer
+updates can close the release proof.
 
 #### Retained prerequisite evidence and ownership
 

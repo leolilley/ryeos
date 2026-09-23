@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-11T11:37:14Z:c01297654227ce58ea3fb47722d8da3ee580621d247e50c7cff9aefe9f33c06e:vy0cn2SUWXqFO9Zp2TOquokj6KM4DCdrnwfzwGruZ6If16wN6aH7L1tD3yRjdHYzyZ6kEqL5Mha5FTZKKHQoAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T08:41:46Z:98da9091318c8b0657987326cae267d36a0668681d2a18884db89297ff0e9eec:6EBlaWuf5nkdLpB4aNrfkPlNyutDaAdRJ/1pVJGSEKSyB/qPJPf0ruhMUDunCZuKWqyX1o/hhvV58CP5yYnODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Repository capture intent, composed with the target's signed node patterns.
 # Git ignores are not snapshot authority. Keep source and the public developer
 # signing fixture, but never send local artifacts or nested worktrees as source.
@@ -33,6 +33,9 @@ exclusions:
   - "/bundles/browser/.ai/bin/"
   - "/bundles/browser/.ai/objects/"
   - "/bundles/browser/.ai/refs/"
+  - "/bundles/bundle-release/.ai/bin/"
+  - "/bundles/bundle-release/.ai/objects/"
+  - "/bundles/bundle-release/.ai/refs/"
   - "/bundles/central-auth/.ai/bin/"
   - "/bundles/central-auth/.ai/objects/"
   - "/bundles/central-auth/.ai/refs/"
