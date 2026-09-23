@@ -185,6 +185,12 @@ impl ExecutionResourcePool {
             return Ok(SelectedExecutionResources::empty());
         };
         target.validate_current_platform()?;
+        // A platform-only target selects no resource authority. Retaining the
+        // pool's allocation/cleanup ceilings here would falsely make its held
+        // process resource-bearing. Validate OS/architecture before returning.
+        if target.resources.is_empty() {
+            return Ok(SelectedExecutionResources::empty());
+        }
         let mut selected_ids = BTreeSet::new();
         let mut selections = Vec::new();
         let mut device_sets = Vec::new();
@@ -1007,6 +1013,79 @@ mod tests {
     }
 
     #[test]
+    fn platform_only_target_has_no_resource_authority() {
+        let pool = ExecutionResourcePool::observe(Some(&policy())).unwrap();
+        let target = ExecutionTargetRequirement {
+            os: lillux::platform::current_target().os.to_string(),
+            arch: lillux::platform::current_target().arch.to_string(),
+            resources: Vec::new(),
+        };
+        for selected in [
+            pool.select(None).unwrap(),
+            pool.select(Some(&target)).unwrap(),
+        ] {
+            assert!(selected.selections().is_empty());
+            assert!(selected.devices().is_none());
+            assert!(selected.accounting_authorities().is_empty());
+            assert_eq!(selected.max_concurrent_exclusive_allocations(), None);
+            assert_eq!(selected.cleanup_allowance_ms(), None);
+
+            // Pure shape check: these coordinates are not a live process
+            // claim. The same binding owner used after held spawn must accept
+            // the empty selection without relaxing its resource invariant.
+            let mut identity: crate::process::ExecutionProcessIdentity =
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    "boot_id": "fixture-boot", "target_pid": 40,
+                    "target_start_time_ticks": 200, "group_leader_pid": 39,
+                    "group_leader_start_time_ticks": 190, "process_scope": null,
+                    "resource_selections": [], "resource_operations": [],
+                    "resource_allocation_limit": null,
+                    "resource_occupancy_start": null, "resource_occupancy_limit": null,
+                    "resource_cleanup_allowance_ms": null,
+                }))
+                .unwrap();
+            identity
+                .bind_execution_resources(
+                    selected.selections().to_vec(),
+                    Vec::new(),
+                    selected.max_concurrent_exclusive_allocations(),
+                    None,
+                    None,
+                    selected.cleanup_allowance_ms(),
+                )
+                .unwrap();
+            identity.resource_allocation_limit = Some(1);
+            assert!(crate::process::validate_execution_process_identity_shape(&identity).is_err());
+        }
+    }
+
+    #[test]
+    fn platform_only_target_still_rejects_another_platform() {
+        let pool = ExecutionResourcePool::observe(Some(&policy())).unwrap();
+        let current = lillux::platform::current_target();
+        let mut target = ExecutionTargetRequirement {
+            os: if current.os == "linux" {
+                "macos"
+            } else {
+                "linux"
+            }
+            .to_owned(),
+            arch: current.arch.to_owned(),
+            resources: Vec::new(),
+        };
+        assert!(pool.select(Some(&target)).is_err());
+        target.os = current.os.to_owned();
+        target.arch = if current.arch == "x86_64" {
+            "aarch64"
+        } else {
+            "x86_64"
+        }
+        .to_owned();
+        assert!(pool.select(Some(&target)).is_err());
+    }
+
+    #[test]
     fn selection_retains_lillux_observed_assignment() {
         let pool = ExecutionResourcePool::observe(Some(&policy())).unwrap();
         let target = ExecutionTargetRequirement {
@@ -1022,6 +1101,8 @@ mod tests {
             }],
         };
         let selected = pool.select(Some(&target)).unwrap();
+        assert_eq!(selected.max_concurrent_exclusive_allocations(), Some(1));
+        assert_eq!(selected.cleanup_allowance_ms(), Some(1_000));
         assert_eq!(selected.selections().len(), 1);
         assert!(selected.selections()[0].matched_facts.is_empty());
         assert_eq!(selected.selections()[0].stable_id, "device-a");
