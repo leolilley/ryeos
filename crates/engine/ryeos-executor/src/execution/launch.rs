@@ -6170,6 +6170,9 @@ async fn run_claimed_thread_row_inner(
     let resolution = effective_program.resolution();
     let super::runner::PreparedProcessInputs {
         path: process_project_path,
+        // Managed runtimes already receive this exact root as their cwd via
+        // project_root below; the optional default is for direct spawn plans.
+        default_input_cwd: _,
         lifeline: admitted_input_lifeline,
         isolation_project_authority,
         isolation_immutable_project,

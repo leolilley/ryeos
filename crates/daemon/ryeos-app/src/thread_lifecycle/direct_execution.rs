@@ -778,6 +778,18 @@ impl PreparedItemPlan {
             .ok_or_else(|| anyhow!("direct execution plan has no verified runtime identity"))
     }
 
+    /// Supply the absent default cwd on an operational spawn copy only.
+    ///
+    /// The executor owns selection and the lifeline of the exact private input
+    /// root. This method validates its path shape; it neither acquires filesystem
+    /// authority nor changes logical project authority. Call after recovering or
+    /// cloning the admitted plan, never before retaining its portable identity.
+    /// An explicitly authored cwd remains untouched. Recovery starts from the
+    /// retained plan again, so it cannot reuse a predecessor's scratch path.
+    pub fn bind_default_input_cwd_for_spawn(&mut self, input_root: &Path) -> Result<()> {
+        bind_default_input_cwd_for_spawn(&mut self.plan, input_root)
+    }
+
     /// Bind admitted behavior to its daemon-owned workspace. This mutation
     /// happens before artifact identity and closure admission, so the exact
     /// working directory is part of the retained execution plan.
@@ -1949,6 +1961,33 @@ fn first_subprocess_spec_mut(plan: &mut ExecutionPlan) -> Result<&mut PlanSubpro
         }
         None => bail!("item plan is empty"),
     }
+}
+
+fn bind_default_input_cwd_for_spawn(plan: &mut ExecutionPlan, input_root: &Path) -> Result<()> {
+    use std::path::Component;
+
+    let normalized: std::path::PathBuf = input_root.components().collect();
+    if !input_root.is_absolute()
+        || input_root.components().count() < 2
+        || input_root
+            .components()
+            .enumerate()
+            .any(|(index, component)| {
+                !matches!(
+                    (index, component),
+                    (0, Component::RootDir) | (_, Component::Normal(_))
+                )
+            })
+        || normalized.as_os_str() != input_root.as_os_str()
+        || input_root.as_os_str().as_encoded_bytes().contains(&0)
+    {
+        bail!("private input root must be an absolute normalized non-root path");
+    }
+    let spec = first_subprocess_spec_mut(plan)?;
+    if spec.cwd.is_none() {
+        spec.cwd = Some(input_root.to_path_buf());
+    }
+    Ok(())
 }
 
 fn validate_direct_plan_portability(
@@ -3671,6 +3710,111 @@ mod tests {
         assert!(
             error.to_string().contains("escapes its project root"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn private_input_spawn_defaults_only_absent_cwd() {
+        let input_root = Path::new("/private/input-current");
+        let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+        first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
+        let mut expected = serde_json::to_value(&plan).unwrap();
+        expected["nodes"][0]["spec"]["cwd"] = json!(input_root);
+        let mut prepared = prepared_plan(plan);
+        prepared
+            .bind_default_input_cwd_for_spawn(input_root)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            prepared.timeout_secs, 300,
+            "default cwd cannot change timeout"
+        );
+    }
+
+    #[test]
+    fn private_input_spawn_preserves_explicit_cwd_and_all_other_plan_fields() {
+        for cwd in [
+            Path::new("/explicit/workdir"),
+            Path::new("relative-authored"),
+        ] {
+            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+            first_subprocess_spec_mut(&mut plan).unwrap().cwd = Some(cwd.to_path_buf());
+            let retained = serde_json::to_value(&plan).unwrap();
+            let mut prepared = prepared_plan(plan);
+            prepared
+                .bind_default_input_cwd_for_spawn(Path::new("/private/input-current"))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(prepared.execution_plan()).unwrap(),
+                retained
+            );
+        }
+    }
+
+    #[test]
+    fn private_input_spawn_keeps_retained_plan_portable_across_recovery_roots() {
+        let mut retained = portable_direct_plan(Path::new("/admitted/base"));
+        first_subprocess_spec_mut(&mut retained).unwrap().cwd = None;
+        let retained_value = serde_json::to_value(&retained).unwrap();
+        let mut first = prepared_plan(retained.clone());
+        first
+            .bind_default_input_cwd_for_spawn(Path::new("/private/first-generation"))
+            .unwrap();
+        let mut recovered = prepared_plan(retained.clone());
+        recovered
+            .bind_default_input_cwd_for_spawn(Path::new("/private/recovered-generation"))
+            .unwrap();
+        let first_value = serde_json::to_value(first.execution_plan()).unwrap();
+        let recovered_value = serde_json::to_value(recovered.execution_plan()).unwrap();
+        assert_eq!(
+            first_value["nodes"][0]["spec"]["cwd"],
+            "/private/first-generation"
+        );
+        assert_eq!(
+            recovered_value["nodes"][0]["spec"]["cwd"],
+            "/private/recovered-generation"
+        );
+        assert_ne!(first_value, recovered_value);
+        assert_eq!(serde_json::to_value(&retained).unwrap(), retained_value);
+        assert!(retained_value["nodes"][0]["spec"]["cwd"].is_null());
+    }
+
+    #[test]
+    fn private_input_spawn_rejects_invalid_root_without_mutation() {
+        for invalid in [
+            "",
+            ".",
+            "relative",
+            "/",
+            "/private/../input",
+            "/private//input",
+            "/private/./input",
+            "/private/input/",
+            "/private/input\0bad",
+        ] {
+            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+            first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
+            let retained = serde_json::to_value(&plan).unwrap();
+            let mut prepared = prepared_plan(plan);
+            assert!(
+                prepared
+                    .bind_default_input_cwd_for_spawn(Path::new(invalid))
+                    .is_err(),
+                "{invalid:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(prepared.execution_plan()).unwrap(),
+                retained
+            );
+        }
+        let mut no_subprocess = portable_direct_plan(Path::new("/admitted/base"));
+        no_subprocess.nodes.remove(0);
+        assert!(
+            bind_default_input_cwd_for_spawn(&mut no_subprocess, Path::new("/private/input"))
+                .is_err()
         );
     }
 

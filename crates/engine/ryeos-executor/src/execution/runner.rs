@@ -3186,6 +3186,8 @@ struct DirectExternalRealizations {
 /// identity; it exists only for the lifetime of one process launch.
 pub(crate) struct PreparedProcessInputs {
     pub(crate) path: PathBuf,
+    /// Spawn-only default for copied projectless inputs, never project authority.
+    pub(crate) default_input_cwd: Option<PathBuf>,
     pub(crate) lifeline: Option<Arc<TempDirGuard>>,
     pub(crate) isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
     pub(crate) isolation_immutable_project: Option<ryeos_state::PinnedProjectMaterialization>,
@@ -3262,6 +3264,15 @@ fn projectless_isolation_workspace(
         | ProcessProjectClass::PinnedReadOnly
         | ProcessProjectClass::PinnedCow => None,
     }
+}
+
+fn private_input_default_cwd(
+    project: ProcessProjectClass,
+    private_copy: bool,
+    process_path: &Path,
+) -> Option<PathBuf> {
+    (project == ProcessProjectClass::Projectless && private_copy)
+        .then(|| process_path.to_path_buf())
 }
 
 fn select_process_input_root(
@@ -3390,6 +3401,28 @@ mod process_input_selection_tests {
             assert!(prepare_sparse_input_mount_target(&root, "link/escape", Tree).is_err());
             assert!(!outside.path().join("escape").exists());
         }
+    }
+
+    #[test]
+    fn only_projectless_private_input_delivery_defaults_spawn_cwd() {
+        let scratch = Path::new("/owned-current-attempt/inputs");
+        for project in [
+            ProcessProjectClass::Projectless,
+            ProcessProjectClass::Live,
+            ProcessProjectClass::PinnedReadOnly,
+            ProcessProjectClass::PinnedCow,
+        ] {
+            assert_eq!(private_input_default_cwd(project, false, scratch), None);
+            assert_eq!(
+                private_input_default_cwd(project, true, scratch),
+                (project == ProcessProjectClass::Projectless).then(|| scratch.to_path_buf())
+            );
+        }
+        let recovered = Path::new("/owned-recovered-attempt/inputs");
+        assert_eq!(
+            private_input_default_cwd(ProcessProjectClass::Projectless, true, recovered),
+            Some(recovered.to_path_buf())
+        );
     }
 
     #[test]
@@ -3849,6 +3882,7 @@ pub(crate) fn prepare_process_inputs(
         None
     };
     Ok(PreparedProcessInputs {
+        default_input_cwd: private_input_default_cwd(project_class, private_copy, &path),
         path,
         lifeline,
         isolation_project_authority,
@@ -4694,6 +4728,7 @@ pub async fn run_and_wait(
     )?;
     let PreparedProcessInputs {
         path: process_path,
+        default_input_cwd,
         lifeline: process_input_lifeline,
         isolation_project_authority: wait_isolation_project_authority,
         isolation_immutable_project: wait_isolation_immutable_project,
@@ -4714,6 +4749,11 @@ pub async fn run_and_wait(
     }
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
+    if let Some(cwd) = default_input_cwd.as_deref() {
+        prepared_plan
+            .bind_default_input_cwd_for_spawn(cwd)
+            .map_err(|error| guard.fail_before_spawn(error))?;
+    }
     // The capsule retains a stable logical project root. This in-memory spawn
     // copy executes against the concrete live or pinned workspace selected for
     // this launch. Rebind only typed/validated project paths after birth has
@@ -5669,6 +5709,7 @@ pub async fn run_detached(
     )?;
     let PreparedProcessInputs {
         path: process_path,
+        default_input_cwd,
         lifeline: process_input_lifeline,
         isolation_project_authority: bg_isolation_project_authority,
         isolation_immutable_project: bg_isolation_immutable_project,
@@ -5691,6 +5732,11 @@ pub async fn run_detached(
 
     // Keep the serialized logical admission plan sealed while rebinding this
     // spawn copy to the selected live or pinned workspace; see `run_and_wait`.
+    if let Some(cwd) = default_input_cwd.as_deref() {
+        prepared_plan
+            .bind_default_input_cwd_for_spawn(cwd)
+            .map_err(|error| guard.fail_before_spawn(error))?;
+    }
     if matches!(
         &params.resolved.plan_context.project_context,
         ProjectContext::LocalPath { .. }
@@ -8144,6 +8190,7 @@ async fn run_existing_recovered_thread(
     .map_err(|error| guard.fail_before_spawn(error))?;
     let PreparedProcessInputs {
         path: process_path,
+        default_input_cwd,
         lifeline: process_input_lifeline,
         isolation_project_authority: bg_isolation_project_authority,
         isolation_immutable_project: bg_isolation_immutable_project,
@@ -8203,6 +8250,11 @@ async fn run_existing_recovered_thread(
     .map_err(|error| {
         guard.fail_before_spawn(error.context("admitted_execution_closure_invalid"))
     })?;
+    if let Some(cwd) = default_input_cwd.as_deref() {
+        prepared_plan
+            .bind_default_input_cwd_for_spawn(cwd)
+            .map_err(|error| guard.fail_before_spawn(error))?;
+    }
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         bg_external_realizations.as_ref(),
