@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-24T04:09:17Z:9c4163ec5cdd12e97e405397744dca89e7a016aba18bd9d2a43c2a6075eef686:folGsrMsujGH9b152+M++0SV3mY3qspcsEfjIi/7x/fopPIPlw87xlPCY2Px1LhfkHLMfsBH1sBImAJhxmeVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T04:14:28Z:66f96de75ff355181cb2464a1b083f38256868c805c8f42d56ab3e2e30c962fa:RkKMCv5miWa03QS7/MWroaAXC7TZk4xdby0CI6FriioQDCieTte6GjzpdhHq/4I3sScnag4l2S1iu6jW8jWNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -57,14 +57,15 @@ release-authority refuses a missing candidate while ordinary sets do not
 require it. A bounded architecture review confirms that the executable is
 excluded from `native_substrate_digest`: node substrate identity covers
 `ryeosd` and the CLI, while publication policy separately pins publisher
-bytes. The latest filesystem check confirms the installed CLI, daemon, and
-publisher paths are byte-identical to their retained release candidates, and
-the candidate daemon's read-only existing-policy preflight passes. The
-operator's preceding live-status output was captured before those installed
-hashes changed; the workspace cannot inspect the host process namespace, so a
-fresh live readiness and supervision check must still prove the running daemon
-restarted onto the new bytes. The publisher has not been measured and no
-publisher service has been started.
+bytes. Fresh operator evidence confirms the installed CLI, daemon, and
+publisher paths are byte-identical to their retained release candidates; the
+release-authority daemon is ready under PID 17600, its signed policy preflight
+passes, and host-upgrade inspection reports `supervised`. The scoped app root
+contains the exact eleven signed refs. The publisher has not been measured and
+no publisher service has been started. The same host check found two separate
+remote-development Docker containers restarting with exit 70; preserve them
+and inspect non-secret state before deciding whether they are relevant to
+bundle publication. Neither is established as the bundle-source service.
 
 The controlling execution state is section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
@@ -72,11 +73,12 @@ Current local release-authority candidates are `ryeosd` SHA-256
 `9a266b287629a5cacb9e8b5f03029ac9bb56a2d83d8b2bf41508121451b6a4d8`, CLI
 `8e59853649e2f601f6b2219df47d2503cc8eb099a9d2f3647875aa4593aa6cc8`, and
 publisher `f191ed3bb693fda203e789e577db374087b303c6129f508622fb4fcac422dcd9`.
-Do not repopulate or reset signed node policy. Confirm live release-authority
-readiness, exact installed hashes, supervised host binding, no unfinished
-upgrade journal, all eleven strict bundle refs, and operational service-catalog
-self-check; then capture a new clean exact source snapshot. The installer, its
-signing envelope, and deployment contract must precede that snapshot.
+Do not repopulate or reset signed node policy. The live release-authority,
+installed hashes, policy preflight, supervision, and eleven signed refs are now
+verified. Capture a new clean exact source snapshot only after the remaining
+source/deployment coordinates are resolved and all source-writing corrections
+are included. The installer, its signing envelope, and deployment contract
+must precede that snapshot.
 Calibration, measured policy application, authority/catalog bootstrap, data
 and native publication, cross-node activation, restart/recovery, unaffected
 consumer behavior, and exported-closure acceptance remain unproven.
