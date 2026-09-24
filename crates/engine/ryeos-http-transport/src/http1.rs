@@ -674,7 +674,7 @@ fn encode_request_head(
         })?;
     let mut buffer = Zeroizing::new([0u8; IO_BUFFER_BYTES]);
     while !request.can_proceed() {
-        let count = request.write(&mut buffer).map_err(|_| {
+        let count = request.write(&mut buffer[..]).map_err(|_| {
             HttpError::before(io::ErrorKind::InvalidData, "invalid HTTP request framing")
         })?;
         if count == 0 || encoded.len().saturating_add(count) > maximum {
