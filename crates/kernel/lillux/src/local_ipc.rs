@@ -375,6 +375,27 @@ impl LocalDuplexStream {
         }
     }
 
+    /// Connect to an endpoint minted by [`OwnerPrivateLocalDuplexListener`]
+    /// without allowing a full Unix listen queue to block past `deadline`.
+    pub fn connect_until(
+        endpoint: &Path,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<Self> {
+        validate_endpoint_path(endpoint)?;
+        #[cfg(target_os = "linux")]
+        {
+            let stream = connect_unix_until(endpoint, deadline)
+                .with_context(|| format!("connect local endpoint {}", endpoint.display()))?;
+            protect_descriptor_from_exec(&stream).map_err(anyhow::Error::msg)?;
+            Ok(Self { stream })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (endpoint, deadline);
+            bail!("deadline-bounded local duplex connect requires Linux")
+        }
+    }
+
     /// Connect to the trusted PID-1 broker in the caller's isolated runtime.
     ///
     /// A same-UID descendant can unlink and replace a pathname even below the
@@ -451,6 +472,168 @@ impl LocalDuplexStream {
                 "local duplex write shutdown is unavailable",
             ))
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn connect_unix_until(
+    endpoint: &Path,
+    deadline: crate::time::MonotonicDeadline,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if deadline.has_elapsed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "local connect deadline elapsed",
+        ));
+    }
+    let _descriptor_lease = crate::exec::retain_fork_sensitive_descriptors_until(deadline)
+        .map_err(std::io::Error::other)?;
+    let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let raw = descriptor.as_raw_fd();
+    let status = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+    if status < 0 || unsafe { libc::fcntl(raw, libc::F_SETFL, status | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let descriptor_flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+    if descriptor_flags < 0
+        || unsafe { libc::fcntl(raw, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let path = endpoint.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if path.len() >= address.sun_path.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "local endpoint path exceeds sockaddr bound",
+        ));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            path.as_ptr(),
+            address.sun_path.as_mut_ptr().cast::<u8>(),
+            path.len(),
+        );
+    }
+    address.sun_path[path.len()] = 0;
+    let address_length = std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        .saturating_add(path.len())
+        .saturating_add(1);
+    let result = unsafe {
+        libc::connect(
+            raw,
+            (&address as *const libc::sockaddr_un).cast::<libc::sockaddr>(),
+            address_length as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS)
+            && error.raw_os_error() != Some(libc::EAGAIN)
+        {
+            return Err(error);
+        }
+        wait_unix_connect(raw, deadline)?;
+    }
+    if deadline.has_elapsed() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "local connect deadline elapsed",
+        ));
+    }
+    // Nonblocking mode is required only while connect/poll owns the raw fd.
+    // LocalDuplexStream's ordinary Read/Write implementations are blocking;
+    // bounded callers use DeadlineDuplexStream, which adds MSG_DONTWAIT.
+    let connected_status = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+    if connected_status < 0
+        || unsafe { libc::fcntl(raw, libc::F_SETFL, connected_status & !libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = std::os::unix::net::UnixStream::from(descriptor);
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_unix_connect(
+    descriptor: std::os::fd::RawFd,
+    deadline: crate::time::MonotonicDeadline,
+) -> std::io::Result<()> {
+    loop {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "local connect deadline elapsed",
+            ));
+        }
+        let timeout_ms = remaining
+            .as_millis()
+            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .min(i32::MAX as u128) as i32;
+        let mut readiness = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut readiness, 1, timeout_ms) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if deadline.has_elapsed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "local connect deadline elapsed",
+            ));
+        }
+        if readiness.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local connect descriptor is not live",
+            ));
+        }
+        if readiness.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                descriptor,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if length as usize != std::mem::size_of_val(&socket_error) {
+            return Err(std::io::Error::other(
+                "local connect returned an invalid socket error length",
+            ));
+        }
+        if socket_error != 0 {
+            return Err(std::io::Error::from_raw_os_error(socket_error));
+        }
+        return Ok(());
     }
 }
 
@@ -944,6 +1127,55 @@ fn connect_local_until(
 fn os_name_cstring(name: &OsStr) -> Result<CString> {
     use std::os::unix::ffi::OsStrExt as _;
     CString::new(name.as_bytes()).context("local endpoint name contains NUL")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod local_connect_tests {
+    use super::*;
+    use crate::time::{Duration, MonotonicDeadline};
+    use std::io::{Read as _, Write as _};
+
+    #[test]
+    fn connect_until_shares_its_deadline_with_local_handshake_io() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let listener = OwnerPrivateLocalDuplexListener::bind(&directory, "connect-test").unwrap();
+        let endpoint = listener.endpoint().to_path_buf();
+        let deadline = MonotonicDeadline::after(Duration::from_secs(2));
+        let accept = std::thread::spawn(move || {
+            listener
+                .accept_before(deadline)
+                .unwrap()
+                .expect("deadline-bounded connect did not arrive")
+        });
+
+        let mut client = LocalDuplexStream::connect_until(&endpoint, deadline).unwrap();
+        let mut server = accept.join().unwrap();
+        client
+            .with_deadline(deadline)
+            .write_all(b"handshake")
+            .unwrap();
+        let mut received = [0; 9];
+        server
+            .with_deadline(deadline)
+            .read_exact(&mut received)
+            .unwrap();
+        assert_eq!(&received, b"handshake");
+    }
+
+    #[test]
+    fn connect_until_refuses_an_expired_deadline_before_contact() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let listener = OwnerPrivateLocalDuplexListener::bind(&directory, "expired-test").unwrap();
+        let error = LocalDuplexStream::connect_until(
+            listener.endpoint(),
+            MonotonicDeadline::after(Duration::ZERO),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("deadline"));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

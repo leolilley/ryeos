@@ -291,15 +291,12 @@ fn run() -> Result<()> {
     }?;
     let (input, mut output, pipe_interrupt) = pipes.split();
 
-    let mut stream = lillux::LocalDuplexStream::connect(&endpoint)
+    let local_handshake_deadline = lillux::time::MonotonicDeadline::after(LOCAL_IO_TIMEOUT);
+    let mut stream = lillux::LocalDuplexStream::connect_until(&endpoint, local_handshake_deadline)
         .context("connect protected external candidate controller")?;
-    write_external_connector_hello(
-        &mut stream.with_deadline(lillux::time::MonotonicDeadline::after(LOCAL_IO_TIMEOUT)),
-        &hello,
-    )?;
-    let first = read_external_connector_server_frame(
-        &mut stream.with_deadline(lillux::time::MonotonicDeadline::after(LOCAL_IO_TIMEOUT)),
-    )?;
+    write_external_connector_hello(&mut stream.with_deadline(local_handshake_deadline), &hello)?;
+    let first =
+        read_external_connector_server_frame(&mut stream.with_deadline(local_handshake_deadline))?;
     let ExternalConnectorServerFrame::Ready {
         placement_thread_id: ready_placement,
         execution_binding_hash: ready_binding,
@@ -330,7 +327,8 @@ fn run() -> Result<()> {
             if let Some(error) = input_status.take_failure() {
                 return Err(error);
             }
-            match read_external_connector_server_frame(&mut stream)? {
+            let frame_deadline = lillux::time::MonotonicDeadline::after(LOCAL_IO_TIMEOUT);
+            match read_external_connector_server_frame(&mut stream.with_deadline(frame_deadline))? {
                 ExternalConnectorServerFrame::Ready { .. } => {
                     bail!("external connector received duplicate readiness");
                 }

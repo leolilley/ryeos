@@ -1,6 +1,4 @@
-//! TLS policy translation over Lillux clock and cryptographic capabilities.
-//! Ring remains the audited cipher/signature implementation. Its default key
-//! exchange/random integrations are replaced so host entropy stays in Lillux.
+//! TLS policy over explicit roots and Lillux host capabilities.
 
 use lillux::crypto::agreement::{AgreementCurve, EphemeralAgreement};
 use rustls::crypto::{ActiveKeyExchange, CryptoProvider, SharedSecret, SupportedKxGroup};
@@ -52,7 +50,6 @@ impl ActiveKeyExchange for Exchange {
         self.0
     }
     fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
-        // TLS negotiates only uncompressed SEC1 points for these curves.
         let valid = match self.0 {
             NamedGroup::X25519 => peer.len() == 32,
             NamedGroup::secp256r1 => peer.len() == 65 && peer.first() == Some(&4),

@@ -7,7 +7,6 @@
 pub mod entrypoint;
 mod http_transport;
 pub mod runtime;
-mod tls;
 
 use anyhow::{Context as _, Result, ensure};
 use http_transport::{BoundedHttpClient, HttpResponse};

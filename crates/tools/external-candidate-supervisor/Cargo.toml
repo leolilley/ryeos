@@ -15,8 +15,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 lillux = { workspace = true }
 url = { workspace = true }
-ureq-proto = { version = "0.6.4", default-features = false, features = ["client"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ryeos-http-transport = { workspace = true }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 ryeos-state = { workspace = true }

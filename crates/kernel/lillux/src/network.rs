@@ -37,6 +37,11 @@ impl NetworkCancellation {
     pub fn cancel(&self) {
         self.0.send_replace(true);
     }
+
+    /// Observe whether the owner has cancelled future and in-flight I/O.
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
 }
 
 /// Explicit captured DNS inputs, with no filesystem/proxy/CA/environment
@@ -109,12 +114,19 @@ impl NetworkContext {
         port: u16,
         connection_deadline: MonotonicDeadline,
         request_deadline: MonotonicDeadline,
+        idle_timeout: crate::time::Duration,
         cancellation: NetworkCancellation,
     ) -> io::Result<NetworkStream> {
         if host.is_empty() || host.len() > 253 || port == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid network endpoint",
+            ));
+        }
+        if idle_timeout.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "network idle timeout must be nonzero",
             ));
         }
         // A synchronous host capability cannot nest a reactor. Its caller must
@@ -170,6 +182,7 @@ impl NetworkContext {
             runtime: Some(runtime),
             deadline: request_deadline,
             setup_deadline: Some(deadline),
+            idle_timeout,
             cancellation,
         })
     }
@@ -208,6 +221,7 @@ pub struct NetworkStream {
     runtime: Option<Runtime>,
     deadline: MonotonicDeadline,
     setup_deadline: Option<MonotonicDeadline>,
+    idle_timeout: crate::time::Duration,
     cancellation: NetworkCancellation,
 }
 
@@ -231,6 +245,11 @@ impl NetworkStream {
             .map_or(self.deadline, |setup| setup.min(self.deadline))
     }
 
+    fn io_deadline(&self) -> MonotonicDeadline {
+        self.effective_deadline()
+            .min(MonotonicDeadline::after(self.idle_timeout))
+    }
+
     pub fn narrow_deadline(&mut self, deadline: MonotonicDeadline) {
         self.deadline = self.deadline.min(deadline);
     }
@@ -245,7 +264,7 @@ impl Read for NetworkStream {
             ));
         }
         let result = self.runtime.as_ref().unwrap().block_on(bounded(
-            self.effective_deadline(),
+            self.io_deadline(),
             &self.cancellation,
             self.socket.as_mut().unwrap().read(bytes),
         ));
@@ -265,7 +284,7 @@ impl Write for NetworkStream {
             ));
         }
         let result = self.runtime.as_ref().unwrap().block_on(bounded(
-            self.effective_deadline(),
+            self.io_deadline(),
             &self.cancellation,
             self.socket.as_mut().unwrap().write(bytes),
         ));
@@ -283,7 +302,7 @@ impl Write for NetworkStream {
             ));
         }
         let result = self.runtime.as_ref().unwrap().block_on(bounded(
-            self.effective_deadline(),
+            self.io_deadline(),
             &self.cancellation,
             self.socket.as_mut().unwrap().flush(),
         ));
@@ -472,6 +491,7 @@ mod tests {
                 443,
                 deadline,
                 deadline,
+                Duration::from_secs(5),
                 NetworkCancellation::default(),
             )
             .err()
@@ -509,6 +529,7 @@ mod tests {
                 443,
                 deadline,
                 deadline,
+                Duration::from_secs(5),
                 cancellation.clone(),
             )
             .err()
@@ -517,7 +538,14 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
         task.join().unwrap();
         let error = context
-            .connect("127.0.0.1", 443, deadline, deadline, cancellation)
+            .connect(
+                "127.0.0.1",
+                443,
+                deadline,
+                deadline,
+                Duration::from_secs(5),
+                cancellation,
+            )
             .err()
             .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
@@ -544,6 +572,7 @@ mod tests {
                 port,
                 deadline,
                 deadline,
+                Duration::from_secs(5),
                 NetworkCancellation::default(),
             )
             .unwrap();
@@ -601,7 +630,14 @@ mod tests {
         let cancellation = NetworkCancellation::default();
         let deadline = MonotonicDeadline::after(Duration::from_secs(10));
         let mut stream = context("127.0.0.1:53".parse().unwrap())
-            .connect("127.0.0.1", port, deadline, deadline, cancellation.clone())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(5),
+                cancellation.clone(),
+            )
             .unwrap();
         stream.complete_setup().unwrap();
         let mut first = [0; 11];
@@ -625,6 +661,68 @@ mod tests {
         cancel.join().unwrap();
         server.join().unwrap();
         // Local socket settlement is deliberately not a remote non-commit proof.
+    }
+
+    #[test]
+    fn idle_timeout_closes_a_silent_stream_without_renewing_the_absolute_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (settled, observe_settlement) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            observe_settlement
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        });
+        let deadline = MonotonicDeadline::after(Duration::from_secs(2));
+        let mut stream = context("127.0.0.1:53".parse().unwrap())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_millis(50),
+                NetworkCancellation::default(),
+            )
+            .unwrap();
+        stream.complete_setup().unwrap();
+        let start = Instant::now();
+        assert_eq!(
+            stream.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(stream.socket.is_none(), "idle timeout retained its socket");
+        assert_eq!(
+            stream.write(b"must-not-resume").unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        settled.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn zero_idle_timeout_refuses_before_dns_or_socket_creation() {
+        let dns = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let context = context(dns.local_addr().unwrap());
+        let deadline = MonotonicDeadline::after(Duration::from_secs(1));
+        let error = context
+            .connect(
+                "silent.example",
+                443,
+                deadline,
+                deadline,
+                Duration::ZERO,
+                NetworkCancellation::default(),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            dns.recv_from(&mut [0; 512]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     fn exercise_stalled_write(cancel: bool) {
@@ -661,7 +759,14 @@ mod tests {
         let cancellation = NetworkCancellation::default();
         let deadline = MonotonicDeadline::after(Duration::from_secs(10));
         let mut stream = context("127.0.0.1:53".parse().unwrap())
-            .connect("127.0.0.1", port, deadline, deadline, cancellation.clone())
+            .connect(
+                "127.0.0.1",
+                port,
+                deadline,
+                deadline,
+                Duration::from_secs(5),
+                cancellation.clone(),
+            )
             .unwrap();
         stream.complete_setup().unwrap();
         let mut ready = [0; 5];
@@ -772,6 +877,7 @@ mod tests {
                     1,
                     deadline,
                     deadline,
+                    Duration::from_secs(5),
                     NetworkCancellation::default(),
                 )
                 .err()
