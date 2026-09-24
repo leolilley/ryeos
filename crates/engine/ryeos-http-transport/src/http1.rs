@@ -13,6 +13,7 @@ use ureq_proto::client::{Call, RecvResponseResult, SendRequestResult};
 use zeroize::{Zeroize, Zeroizing};
 
 const IO_BUFFER_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_TLS_ROOT_CERTIFICATES: usize = 64;
 const MAX_TLS_ROOT_BYTES: usize = 1024 * 1024;
 const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
@@ -24,7 +25,7 @@ pub struct Header {
     /// Header field name.
     pub name: String,
     /// Header value bytes, excluding line framing.
-    pub value: Vec<u8>,
+    value: Vec<u8>,
     sensitive: bool,
 }
 
@@ -49,6 +50,11 @@ impl Header {
             value: std::mem::take(&mut *value),
             sensitive: true,
         }
+    }
+
+    /// Read the header value without exposing its owned buffer for replacement.
+    pub fn value(&self) -> &[u8] {
+        &self.value
     }
 }
 
@@ -529,13 +535,14 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
         ));
     }
     if request.limits.request_header_bytes == 0
+        || request.limits.request_header_bytes > MAX_REQUEST_HEADER_BYTES
         || request.limits.response_header_bytes == 0
         || request.limits.response_body_bytes == 0
         || request.limits.response_body_wire_bytes == 0
     {
         return Err(HttpError::before(
             io::ErrorKind::InvalidInput,
-            "HTTP byte ceilings must be nonzero",
+            "HTTP byte ceilings are invalid or exceed their bound",
         ));
     }
     let mut header_input_bytes = 0usize;
@@ -657,6 +664,14 @@ fn encode_request_head(
 ) -> Result<(Zeroizing<Vec<u8>>, Call<ureq_proto::client::state::SendRequest>), HttpError> {
     let mut request = call.proceed();
     let mut encoded = Zeroizing::new(Vec::new());
+    encoded
+        .try_reserve_exact(maximum)
+        .map_err(|_| {
+            HttpError::before(
+                io::ErrorKind::OutOfMemory,
+                "HTTP request head allocation failed",
+            )
+        })?;
     let mut buffer = Zeroizing::new([0u8; IO_BUFFER_BYTES]);
     while !request.can_proceed() {
         let count = request.write(&mut buffer).map_err(|_| {

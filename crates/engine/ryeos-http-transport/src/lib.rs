@@ -100,7 +100,7 @@ impl Deadlines {
 pub struct Limits {
     /// Maximum exact-length request body bytes.
     pub request_body_bytes: u64,
-    /// Maximum serialized request line and header bytes.
+    /// Maximum serialized request line and header bytes, hard-capped at 1 MiB.
     pub request_header_bytes: usize,
     /// Maximum cumulative response status line and header bytes.
     pub response_header_bytes: usize,
