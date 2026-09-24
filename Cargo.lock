@@ -3138,6 +3138,7 @@ dependencies = [
  "rustls",
  "ureq-proto",
  "url",
+ "zeroize",
 ]
 
 [[package]]
