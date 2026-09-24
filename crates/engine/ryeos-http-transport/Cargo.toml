@@ -10,3 +10,4 @@ lillux = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ureq-proto = { version = "0.6.4", default-features = false, features = ["client"] }
 url = { workspace = true }
+zeroize = { workspace = true }

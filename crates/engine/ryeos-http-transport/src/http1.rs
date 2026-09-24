@@ -5,10 +5,12 @@ use lillux::network::{NetworkCancellation, NetworkContext, NetworkStream};
 use lillux::time::MonotonicDeadline;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
 use ureq_proto::client::{Call, RecvResponseResult, SendRequestResult};
+use zeroize::{Zeroize, Zeroizing};
 
 const IO_BUFFER_BYTES: usize = 16 * 1024;
 const MAX_TLS_ROOT_CERTIFICATES: usize = 64;
@@ -17,12 +19,13 @@ const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_HEADER_FIELDS: usize = 128;
 
 /// One HTTP header. Response values preserve their original octets.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Header {
     /// Header field name.
     pub name: String,
     /// Header value bytes, excluding line framing.
     pub value: Vec<u8>,
+    sensitive: bool,
 }
 
 impl Header {
@@ -31,6 +34,41 @@ impl Header {
         Self {
             name: name.into(),
             value: value.into().into_bytes(),
+            sensitive: false,
+        }
+    }
+
+    /// Build a sensitive header from bytes that are zeroized when dropped.
+    ///
+    /// The value remains available to the HTTP parser while the request is
+    /// prepared. This scrubs RyeOS-owned copies; internal copies made by
+    /// `ureq-proto` are outside this type's control.
+    pub fn new_sensitive(name: impl Into<String>, mut value: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            value: std::mem::take(&mut *value),
+            sensitive: true,
+        }
+    }
+}
+
+impl fmt::Debug for Header {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Header");
+        debug.field("name", &self.name);
+        if self.sensitive {
+            debug.field("value", &"[REDACTED]");
+        } else {
+            debug.field("value", &self.value);
+        }
+        debug.finish()
+    }
+}
+
+impl Drop for Header {
+    fn drop(&mut self) {
+        if self.sensitive {
+            self.value.zeroize();
         }
     }
 }
@@ -616,10 +654,10 @@ fn build_http_call(
 fn encode_request_head(
     call: Call<ureq_proto::client::state::Prepare>,
     maximum: usize,
-) -> Result<(Vec<u8>, Call<ureq_proto::client::state::SendRequest>), HttpError> {
+) -> Result<(Zeroizing<Vec<u8>>, Call<ureq_proto::client::state::SendRequest>), HttpError> {
     let mut request = call.proceed();
-    let mut encoded = Vec::new();
-    let mut buffer = [0u8; IO_BUFFER_BYTES];
+    let mut encoded = Zeroizing::new(Vec::new());
+    let mut buffer = Zeroizing::new([0u8; IO_BUFFER_BYTES]);
     while !request.can_proceed() {
         let count = request.write(&mut buffer).map_err(|_| {
             HttpError::before(io::ErrorKind::InvalidData, "invalid HTTP request framing")
@@ -701,6 +739,7 @@ fn receive_response(
         .map(|(name, value)| Header {
             name: name.as_str().to_owned(),
             value: value.as_bytes().to_vec(),
+            sensitive: false,
         })
         .collect();
     incoming.drain(..head_bytes);
