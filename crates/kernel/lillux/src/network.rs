@@ -705,6 +705,7 @@ mod tests {
     #[test]
     fn zero_idle_timeout_refuses_before_dns_or_socket_creation() {
         let dns = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns.set_nonblocking(true).unwrap();
         let context = context(dns.local_addr().unwrap());
         let deadline = MonotonicDeadline::after(Duration::from_secs(1));
         let error = context
