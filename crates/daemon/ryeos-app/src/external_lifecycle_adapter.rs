@@ -8,12 +8,15 @@ use ryeos_external_execution::lifecycle_adapter::{
 };
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV,
-    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleOperationCommon,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent,
-    TerminationIntent, from_json_slice_strict,
+    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
+    LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
+    LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV,
+    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
+    LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
+    LifecycleArtifactRole, LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
+    from_json_slice_strict,
 };
 
 use crate::external_artifacts::ResolvedExternalLifecycleArtifacts;
@@ -36,6 +39,55 @@ use crate::vault::placement::PlacementCredential;
 // ceiling for this startup-only, non-provider-contact operation.  Keep it
 // finite and aligned with the maximum admitted lifecycle contact window.
 const LIFECYCLE_ADAPTER_INSPECTION_TIMEOUT_SECONDS: f64 = 60.0;
+
+struct CapturedLifecycleNetworkInputs {
+    resolver: lillux::secure_fs::CapturedRegularFile,
+    hosts: lillux::secure_fs::CapturedRegularFile,
+    resolver_sha256: String,
+    hosts_sha256: String,
+    policy_sha256: String,
+}
+
+fn capture_lifecycle_network_inputs(
+    policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+) -> Result<CapturedLifecycleNetworkInputs> {
+    use ryeos_state::external_execution::transport::{
+        ExternalCapturedNetworkInputs, ExternalNetworkInputSelection,
+    };
+
+    policy.validate()?;
+    let capture = |selection: &ExternalNetworkInputSelection| -> Result<
+        lillux::secure_fs::CapturedRegularFile,
+    > {
+        let path = lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))
+            .with_context(|| "canonicalize signed lifecycle network input")?;
+        let file = lillux::secure_fs::open_pinned_regular_file_no_follow(&path)
+            .with_context(|| "open pinned lifecycle network input")?;
+        let observation = file.observation()?;
+        file.capture_sealed_bounded(&observation, selection.max_bytes)
+            .with_context(|| "capture bounded lifecycle network input")
+    };
+
+    let resolver = capture(&policy.resolver)?;
+    let hosts = capture(&policy.hosts)?;
+    lillux::network::NetworkContext::from_config_bytes(resolver.bytes(), hosts.bytes())
+        .context("validate captured lifecycle network inputs")?;
+    let captured = ExternalCapturedNetworkInputs::from_bytes(
+        policy,
+        resolver.bytes(),
+        hosts.bytes(),
+    )?;
+    captured.validate_for(policy)?;
+    let policy_sha256 = policy.digest()?;
+
+    Ok(CapturedLifecycleNetworkInputs {
+        resolver,
+        hosts,
+        resolver_sha256: captured.resolver_digest,
+        hosts_sha256: captured.hosts_digest,
+        policy_sha256,
+    })
+}
 
 #[derive(Debug)]
 pub(crate) struct ExecutableExternalPlacementBackend {
@@ -152,6 +204,9 @@ impl ExecutableExternalPlacementBackend {
         // cannot queue behind a new exclusive fork after budget admission.
         let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
         self.qualify_offline(contract, credential)?;
+        let network_inputs = capture_lifecycle_network_inputs(
+            &contract.controller_transport.network_inputs,
+        )?;
         let request_handle = lillux::sealed_memfd(
             c"ryeos-lifecycle-operation-request",
             &request.canonical_bytes()?,
@@ -171,6 +226,8 @@ impl ExecutableExternalPlacementBackend {
             self.launcher.clone(),
             settings_handle.clone(),
             credential_handle.clone(),
+            network_inputs.resolver.authority().clone(),
+            network_inputs.hosts.authority().clone(),
         ];
         let mut envs = vec![
             (
@@ -201,6 +258,36 @@ impl ExecutableExternalPlacementBackend {
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
             ),
+            (
+                LIFECYCLE_RESOLVER_FD_ENV.into(),
+                network_inputs
+                    .resolver
+                    .authority()
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_HOSTS_FD_ENV.into(),
+                network_inputs
+                    .hosts
+                    .authority()
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_RESOLVER_SHA256_ENV.into(),
+                network_inputs.resolver_sha256.clone(),
+            ),
+            (
+                LIFECYCLE_HOSTS_SHA256_ENV.into(),
+                network_inputs.hosts_sha256.clone(),
+            ),
+            (
+                LIFECYCLE_NETWORK_POLICY_SHA256_ENV.into(),
+                network_inputs.policy_sha256.clone(),
+            ),
         ];
         if let Some(bootstrap) = bootstrap {
             bootstrap.validate()?;
@@ -224,6 +311,17 @@ impl ExecutableExternalPlacementBackend {
             inherited.extend(guest_inputs.retained_descriptors());
         }
         drop(descriptors);
+        let remaining_timeout_ms = deadline.remaining().as_millis();
+        ensure!(
+            remaining_timeout_ms > 0,
+            "external lifecycle contact deadline expired before spawn"
+        );
+        envs.push((
+            LIFECYCLE_REMAINING_TIMEOUT_MS_ENV.into(),
+            u64::try_from(remaining_timeout_ms)
+                .context("external lifecycle remaining timeout exceeds its bound")?
+                .to_string(),
+        ));
         let response = run_lifecycle_adapter(
             &self.adapter,
             LifecycleAdapterInvocation::Operate,
