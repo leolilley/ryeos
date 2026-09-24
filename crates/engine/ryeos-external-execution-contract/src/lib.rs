@@ -1,8 +1,9 @@
 //! Strict, provider-neutral wire contract for external lifecycle adapters.
 //!
-//! The contract deliberately contains no filesystem path, command, URL,
-//! credential value, clock, database handle, or application state. Exact
-//! executable and secret descriptors are supplied out of band by the
+//! The contract deliberately contains no host filesystem path, command, URL,
+//! credential value, clock, database handle, or application state. Its one
+//! bundle-relative provider-spec path is a signed artifact identity, not an
+//! ambient path; its exact bounded contents are supplied out of band by the
 //! controller that admitted the adapter.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,10 +16,11 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
 
-pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v1";
+pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
     "ryeos.external-execution.provider-configuration.v1";
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 256 * 1024;
+pub const MAX_LIFECYCLE_PROVIDER_SPEC_BYTES: u64 = 256 * 1024;
 pub const MAX_GUEST_INPUT_PROJECTION_BYTES: usize = 192 * 1024;
 pub const EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA: u32 = 4;
 pub const MAX_GUEST_SOURCE_RECORD_BYTES: u64 = 1024 * 1024;
@@ -34,6 +36,8 @@ pub const LIFECYCLE_BOOTSTRAP_FD_ENV: &str = "RYEOS_LIFECYCLE_BOOTSTRAP_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
 pub const LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV: &str = "RYEOS_LIFECYCLE_ADAPTER_EXECUTABLE_FD";
+pub const LIFECYCLE_PROVIDER_SPEC_FD_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_FD";
+pub const LIFECYCLE_PROVIDER_SPEC_SHA256_ENV: &str = "RYEOS_LIFECYCLE_PROVIDER_SPEC_SHA256";
 pub const LIFECYCLE_RESOLVER_FD_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_FD";
 pub const LIFECYCLE_HOSTS_FD_ENV: &str = "RYEOS_LIFECYCLE_HOSTS_FD";
 pub const LIFECYCLE_RESOLVER_SHA256_ENV: &str = "RYEOS_LIFECYCLE_RESOLVER_SHA256";
@@ -754,8 +758,8 @@ pub enum ExternalProviderConnectorProcessGroup {
 }
 
 /// Signed bundle declaration for one external occurrence lifecycle adapter.
-/// The adapter and the two guest bootstrap executables are separate roles and
-/// are captured independently from the same signed bundle generation.
+/// The adapter, provider behavior specification, and two guest bootstrap
+/// executables are captured from the same signed bundle generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalLifecycleAdapterDeclaration {
@@ -765,8 +769,19 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub adapter: String,
     pub supervisor: String,
     pub launcher: String,
+    pub provider_spec: LifecycleProviderSpecIdentity,
     pub settings_schema_digest: String,
     pub capabilities: BTreeSet<LifecycleCapability>,
+}
+
+/// Bundle-relative identity of the closed provider behavior specification
+/// consumed by a lifecycle adapter. `sha256` is part of the signed bundle
+/// declaration and must match the bounded bytes captured from `path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleProviderSpecIdentity {
+    pub path: String,
+    pub sha256: String,
 }
 
 impl ExternalProviderDeclaration {
@@ -801,6 +816,8 @@ impl ExternalLifecycleAdapterDeclaration {
         validate_executable_name(&self.adapter, "external lifecycle adapter")?;
         validate_executable_name(&self.supervisor, "external candidate supervisor")?;
         validate_executable_name(&self.launcher, "external candidate launcher")?;
+        validate_bundle_relative_file_path(&self.provider_spec.path, "lifecycle provider spec")?;
+        digest(&self.provider_spec.sha256, "lifecycle provider spec")?;
         digest(
             &self.settings_schema_digest,
             "external lifecycle settings schema",
@@ -906,6 +923,7 @@ pub struct LifecycleAdapterInspectionRequest {
     pub settings_schema_digest: String,
     pub target: String,
     pub declared_capabilities: BTreeSet<LifecycleCapability>,
+    pub provider_spec: LifecycleArtifactInspection,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
@@ -920,6 +938,7 @@ pub struct LifecycleAdapterInspectionResponse {
     pub observed_settings_schema_digest: String,
     pub target: String,
     pub effective_capabilities: BTreeSet<LifecycleCapability>,
+    pub observed_provider_spec_sha256: String,
     pub artifacts: BTreeMap<LifecycleArtifactRole, LifecycleArtifactInspection>,
 }
 
@@ -1060,6 +1079,7 @@ impl LifecycleAdapterInspectionRequest {
             !self.declared_capabilities.is_empty(),
             "lifecycle adapter declares no capabilities"
         );
+        validate_provider_spec_inspection(&self.provider_spec)?;
         validate_artifact_inspections(&self.artifacts)?;
         ensure!(
             self.artifacts.len() == 2
@@ -1092,6 +1112,7 @@ impl LifecycleAdapterInspectionResponse {
                 && self.observed_adapter_artifact_hash == request.adapter_artifact_hash
                 && self.observed_settings_schema_digest == request.settings_schema_digest
                 && self.target == request.target
+                && self.observed_provider_spec_sha256 == request.provider_spec.digest
                 && self
                     .effective_capabilities
                     .is_subset(&request.declared_capabilities)
@@ -1100,6 +1121,15 @@ impl LifecycleAdapterInspectionResponse {
         );
         Ok(())
     }
+}
+
+fn validate_provider_spec_inspection(artifact: &LifecycleArtifactInspection) -> Result<()> {
+    ensure!(
+        artifact.descriptor > 2
+            && (1..=MAX_LIFECYCLE_PROVIDER_SPEC_BYTES).contains(&artifact.bytes),
+        "lifecycle provider spec descriptor or size is invalid"
+    );
+    digest(&artifact.digest, "lifecycle provider spec")
 }
 
 fn validate_artifact_inspections(
@@ -1484,6 +1514,24 @@ fn validate_single_file_name(value: &str, label: &str) -> Result<()> {
             && path.components().count() == 1
             && matches!(path.components().next(), Some(Component::Normal(_))),
         "{label} is not a canonical single file name"
+    );
+    Ok(())
+}
+
+fn validate_bundle_relative_file_path(value: &str, label: &str) -> Result<()> {
+    let path = Path::new(value);
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 512
+            && !value.as_bytes().contains(&0)
+            && !value.chars().any(char::is_control)
+            && !value.contains('\\')
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str(),
+        "{label} is not a normalized bundle-relative file path"
     );
     Ok(())
 }
@@ -1998,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_declarations_are_closed_and_pathless_except_for_fixed_destination() {
+    fn signed_declarations_bind_a_closed_bundle_relative_provider_spec() {
         let provider = ExternalProviderDeclaration {
             id: "codex-hosted".into(),
             protocol: PROVIDER_CONFIGURATION_PROTOCOL.into(),
@@ -2017,6 +2065,10 @@ mod tests {
             adapter: "ryeos-external-lifecycle-synthetic".into(),
             supervisor: "ryeos-external-candidate-supervisor".into(),
             launcher: "ryeos-external-candidate-launcher".into(),
+            provider_spec: LifecycleProviderSpecIdentity {
+                path: "lifecycle/provider.json".into(),
+                sha256: "f".repeat(64),
+            },
             settings_schema_digest: "a".repeat(64),
             capabilities: BTreeSet::from([
                 LifecycleCapability::ExactAllocationReconciliation,

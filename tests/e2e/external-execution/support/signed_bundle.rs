@@ -82,6 +82,16 @@ pub fn install_signed_test_bundle(
         .unwrap();
         item_source_hashes.insert(item_ref, serde_json::Value::String(item_source_hash));
     }
+    let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
+    let provider_spec_path = bundle.join("lifecycle/provider.json");
+    std::fs::create_dir_all(provider_spec_path.parent().unwrap()).unwrap();
+    std::fs::write(&provider_spec_path, provider_spec_bytes).unwrap();
+    std::fs::set_permissions(
+        &provider_spec_path,
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let provider_spec_sha256 = lillux::sha256_hex(provider_spec_bytes);
     let executor_manifest = serde_json::json!({
         "item_source_hashes": item_source_hashes,
         "kind": "source_manifest",
@@ -111,11 +121,14 @@ requires_kinds: []
 uses_kinds: []
 external_lifecycle_adapters:
   - id: synthetic-local
-    protocol: ryeos.external-execution.lifecycle-adapter.v1
+    protocol: ryeos.external-execution.lifecycle-adapter.v2
     targets: [{target}]
     adapter: ryeos-synthetic-external-lifecycle-adapter
     supervisor: ryeos-synthetic-external-candidate-supervisor
     launcher: ryeos-synthetic-external-candidate-launcher
+    provider_spec:
+      path: lifecycle/provider.json
+      sha256: {provider_spec_sha256}
     settings_schema_digest: '{}'
     capabilities:
       - exact_allocation_reconciliation
@@ -138,6 +151,7 @@ external_providers:
         } else {
             "inherited"
         },
+        provider_spec_sha256 = provider_spec_sha256,
     );
     std::fs::write(
         ai.join("manifest.yaml"),

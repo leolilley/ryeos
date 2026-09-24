@@ -10,6 +10,7 @@ use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
     LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
     LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
+    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV,
     LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
     LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
@@ -19,7 +20,9 @@ use ryeos_external_execution_contract::{
     from_json_slice_strict,
 };
 
-use crate::external_artifacts::ResolvedExternalLifecycleArtifacts;
+use crate::external_artifacts::{
+    CapturedLifecycleProviderSpec, ResolvedExternalLifecycleArtifacts,
+};
 use crate::external_placement::{
     ExternalAllocationResolution, ExternalLifecycleObservation, ExternalPlacementBackend,
     ExternalSupervisorActivation, ExternalSupervisorActivationResolution,
@@ -103,6 +106,7 @@ pub(crate) struct ExecutableExternalPlacementBackend {
     launcher_hash: String,
     launcher_bytes: u64,
     launcher: lillux::InheritedDescriptorAuthority,
+    provider_spec: CapturedLifecycleProviderSpec,
     inspection: LifecycleAdapterInspectionResponse,
 }
 
@@ -111,6 +115,10 @@ impl ExecutableExternalPlacementBackend {
         let adapter_bytes = artifact_bytes(&artifacts.adapter)?;
         let supervisor_bytes = artifact_bytes(&artifacts.supervisor)?;
         let launcher_bytes = artifact_bytes(&artifacts.launcher)?;
+        ensure!(
+            artifacts.provider_spec.sha256 == artifacts.declaration.provider_spec.sha256,
+            "captured lifecycle provider spec identity differs from its signed declaration"
+        );
         let request = LifecycleAdapterInspectionRequest {
             schema: 1,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
@@ -119,6 +127,15 @@ impl ExecutableExternalPlacementBackend {
             settings_schema_digest: artifacts.declaration.settings_schema_digest.clone(),
             target: lillux::platform::current_binary_target()?.into(),
             declared_capabilities: artifacts.declaration.capabilities.clone(),
+            provider_spec: LifecycleArtifactInspection {
+                descriptor: artifacts
+                    .provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+                digest: artifacts.provider_spec.sha256.clone(),
+                bytes: artifacts.provider_spec.bytes,
+            },
             artifacts: BTreeMap::from([
                 (
                     LifecycleArtifactRole::Supervisor,
@@ -158,6 +175,7 @@ impl ExecutableExternalPlacementBackend {
             vec![
                 artifacts.supervisor.handle.clone(),
                 artifacts.launcher.handle.clone(),
+                artifacts.provider_spec.authority.clone(),
             ],
             Vec::new(),
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs_f64(
@@ -179,6 +197,7 @@ impl ExecutableExternalPlacementBackend {
             launcher_hash: artifacts.launcher.identity.content_hash,
             launcher_bytes,
             launcher: artifacts.launcher.handle,
+            provider_spec: artifacts.provider_spec,
             inspection,
         })
     }
@@ -224,6 +243,7 @@ impl ExecutableExternalPlacementBackend {
         let mut inherited = vec![
             self.supervisor.clone(),
             self.launcher.clone(),
+            self.provider_spec.authority.clone(),
             settings_handle.clone(),
             credential_handle.clone(),
             network_inputs.resolver.authority().clone(),
@@ -257,6 +277,18 @@ impl ExecutableExternalPlacementBackend {
                     .inherited_descriptor()
                     .map_err(anyhow::Error::msg)?
                     .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                self.provider_spec
+                    .authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ),
+            (
+                LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                self.provider_spec.sha256.clone(),
             ),
             (
                 LIFECYCLE_RESOLVER_FD_ENV.into(),
@@ -806,6 +838,11 @@ mod tests {
             adapter_artifact_hash: "a".repeat(64), settings_schema_digest: "b".repeat(64),
             target: "x86_64-unknown-linux-gnu".into(),
             declared_capabilities: std::collections::BTreeSet::from([ryeos_external_execution_contract::LifecycleCapability::ExactAllocationReconciliation]),
+            provider_spec: LifecycleArtifactInspection {
+                descriptor: 22,
+                digest: "e".repeat(64),
+                bytes: 128,
+            },
             artifacts: BTreeMap::from([
                 (LifecycleArtifactRole::Supervisor, LifecycleArtifactInspection { descriptor: 20, digest: "c".repeat(64), bytes: 4096 }),
                 (LifecycleArtifactRole::Launcher, LifecycleArtifactInspection { descriptor: 21, digest: "d".repeat(64), bytes: 4096 }),
@@ -820,6 +857,7 @@ mod tests {
             observed_settings_schema_digest: request.settings_schema_digest.clone(),
             target: request.target.clone(),
             effective_capabilities: request.declared_capabilities.clone(),
+            observed_provider_spec_sha256: request.provider_spec.digest.clone(),
             artifacts: request.artifacts.clone(),
         };
         let valid = serde_json::to_value(response).unwrap();

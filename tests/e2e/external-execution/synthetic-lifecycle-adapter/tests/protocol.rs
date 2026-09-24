@@ -2500,6 +2500,14 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
     let (adapter_hash, _, _) = artifact(&adapter);
     let (_, _, supervisor_artifact) = artifact(&supervisor);
     let (_, _, launcher_artifact) = artifact(&launcher);
+    let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
+    let provider_spec = lillux::sealed_memfd(c"synthetic-provider-spec", provider_spec_bytes)
+        .unwrap();
+    let provider_spec_artifact = LifecycleArtifactInspection {
+        descriptor: provider_spec.inherited_descriptor().unwrap(),
+        digest: lillux::sha256_hex(provider_spec_bytes),
+        bytes: provider_spec_bytes.len() as u64,
+    };
     let settings_schema_digest = "1".repeat(64);
     let capabilities = BTreeSet::from([
         LifecycleCapability::ExactAllocationReconciliation,
@@ -2518,6 +2526,7 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
             .unwrap()
             .to_owned(),
         declared_capabilities: capabilities,
+        provider_spec: provider_spec_artifact,
         artifacts: BTreeMap::from([
             (LifecycleArtifactRole::Supervisor, supervisor_artifact),
             (LifecycleArtifactRole::Launcher, launcher_artifact),
@@ -2532,7 +2541,7 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
         &adapter,
         LifecycleAdapterInvocation::Inspect,
         &inspection_request,
-        vec![supervisor.clone(), launcher.clone()],
+        vec![supervisor.clone(), launcher.clone(), provider_spec.clone()],
         Vec::new(),
         lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
     )

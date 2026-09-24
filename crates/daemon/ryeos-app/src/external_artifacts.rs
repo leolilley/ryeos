@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_engine::binary_resolver::{CapturedExecutable, capture_bundle_binary_ref};
-use ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration;
+use ryeos_external_execution_contract::{
+    ExternalLifecycleAdapterDeclaration, LifecycleProviderSpecIdentity,
+    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+};
 
 use crate::external_placement::{
     ExternalCandidateConnectorRegistry, ExternalPlacementBackend, ExternalPlacementBackendRegistry,
@@ -26,6 +29,15 @@ pub struct ResolvedExternalLifecycleArtifacts {
     pub adapter: CapturedExecutable,
     pub supervisor: CapturedExecutable,
     pub launcher: CapturedExecutable,
+    pub provider_spec: CapturedLifecycleProviderSpec,
+}
+
+#[derive(Debug)]
+pub struct CapturedLifecycleProviderSpec {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub authority: lillux::InheritedDescriptorAuthority,
 }
 
 #[derive(Debug)]
@@ -138,6 +150,10 @@ pub fn resolve_external_execution_artifacts(
                     &declaration.launcher,
                     "external candidate launcher",
                 )?,
+                provider_spec: capture_declared_provider_spec(
+                    root,
+                    &declaration.provider_spec,
+                )?,
             });
         }
     }
@@ -158,6 +174,38 @@ pub fn resolve_external_execution_artifacts(
             configurations,
         )?,
         placement_backends: ExternalPlacementBackendRegistry::from_backends(backends)?,
+    })
+}
+
+fn capture_declared_provider_spec(
+    root: &std::path::Path,
+    identity: &LifecycleProviderSpecIdentity,
+) -> Result<CapturedLifecycleProviderSpec> {
+    // `validate` restricts this to a normalized bundle-relative path, and
+    // Lillux opens each component without following symlinks.
+    let path = root.join(&identity.path);
+    let pinned = lillux::secure_fs::open_pinned_regular_file_no_follow(&path)
+        .with_context(|| format!("open signed lifecycle provider spec `{}`", identity.path))?;
+    let observation = pinned.observation()?;
+    let bytes = observation.size();
+    ensure!(
+        (1..=MAX_LIFECYCLE_PROVIDER_SPEC_BYTES).contains(&bytes),
+        "signed lifecycle provider spec exceeds its byte bound"
+    );
+    ensure!(
+        pinned.permission_mode()? & 0o111 == 0,
+        "signed lifecycle provider spec must not be executable"
+    );
+    let captured = pinned.capture_sealed_bounded(&observation, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
+    ensure!(
+        captured.digest() == identity.sha256,
+        "signed lifecycle provider spec digest does not match its declaration"
+    );
+    Ok(CapturedLifecycleProviderSpec {
+        path: identity.path.clone(),
+        sha256: identity.sha256.clone(),
+        bytes,
+        authority: captured.authority().clone(),
     })
 }
 

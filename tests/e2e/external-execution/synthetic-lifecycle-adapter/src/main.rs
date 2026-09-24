@@ -399,6 +399,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
         observed_settings_schema_digest: request.settings_schema_digest.clone(),
         target: request.target.clone(),
         effective_capabilities: request.declared_capabilities.clone(),
+        observed_provider_spec_sha256: request.provider_spec.digest.clone(),
         artifacts: request.artifacts.clone(),
     };
     response.validate_for(&request)?;
