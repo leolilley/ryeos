@@ -3024,11 +3024,11 @@ dependencies = [
  "rustls",
  "ryeos-external-execution",
  "ryeos-external-execution-contract",
+ "ryeos-http-transport",
  "ryeos-state",
  "serde",
  "serde_json",
  "tempfile",
- "ureq-proto",
  "url",
 ]
 
@@ -3128,6 +3128,16 @@ dependencies = [
  "ryeos-effect-contract",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ryeos-http-transport"
+version = "0.1.0"
+dependencies = [
+ "lillux",
+ "rustls",
+ "ureq-proto",
+ "url",
 ]
 
 [[package]]
