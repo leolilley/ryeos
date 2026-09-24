@@ -53,7 +53,24 @@ class AuthorityCalibrationAssets(unittest.TestCase):
             self.assertNotIn("catalog_namespace", recipe)
             self.assertNotIn("publisher", recipe.lower())
 
-        self.assertIn("CalibrationCoreManifestAuthority", handler)
+        self.assertIn("CalibrationManifestAuthority", handler)
+        portable_lane = handler[
+            handler.index("let portable = calibrate_signed_bundle") : handler.index(
+                "let native = calibrate_signed_bundle"
+            )
+        ]
+        native_lane = handler[
+            handler.index("let native = calibrate_signed_bundle") : handler.index(
+                "let core = calibrate_signed_bundle"
+            )
+        ]
+        core_lane = handler[handler.index("let core = calibrate_signed_bundle") :]
+        self.assertIn('"bundle-release"', portable_lane)
+        self.assertIn("CalibrationManifestSource::DerivedCurrent", portable_lane)
+        self.assertIn('"web"', native_lane)
+        self.assertIn("CalibrationManifestSource::DerivedCurrent", native_lane)
+        self.assertIn('"core"', core_lane)
+        self.assertIn("CalibrationManifestSource::CoreSeedGenerated", core_lane)
         self.assertIn("accept_dispatch_products", handler)
         self.assertIn("publish_qualification", handler)
         self.assertIn("load_verified_substrate_identity", handler)

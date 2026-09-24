@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-24T00:28:14Z:7864b8db93425e83f79560086bc1c550bd1c5ca66d15fefce1ad8fa3f4096f2e:77gbmgN4QyEEFprM6doFiPDt2wWz8+S6AYRiBPqjndzsR0ssb8EGYbGdesp74/jCzZxtvc4aPVAHkbCHmMWdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T01:52:08Z:d0c91ecffb09e45366756c8dee20ec41e0c83e5aaf1442e7bb6136e03d857d7c:lCINVDn3mroBUU6Pn2EzJ9ti3Ja7WtUYVmXIHn35UouYv2K6IFN9W6VGuyr783IN2gVuFhKvA4QsSlPVv/RxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.30.0"
+version: "1.31.0"
 ```
 
 # Source-Local Bundle Development
@@ -22,6 +22,45 @@ For continuation of the native release proof, start with the dated checkpoint
 below and `development-operation-ownership.md`. Historical successful compiler
 or binding evidence elsewhere in this document is not evidence for a newly
 produced platform identity.
+
+### Calibration manifest authority correction — 2026-09-24
+
+The most recent calibration failure was initially attributed to Core seed, but
+the execution trace proved that it stopped in the portable `bundle-release`
+lane; no native or Core-seed Graph ran. Service root
+`svc-1790212482057-83105957` failed at portable Graph
+`T-869ff0cc-637c-adb5-1f4d-1287093873a5`, Tool child
+`T-b2ca7805-8057-a27f-389b-ce683a7d6b59`. The portable candidate manifest was
+normalized JSON (`7c696fd7…`), derived from the typed manifest admitted in
+`release_input`. The failure message named the shared helper's Core source
+snapshot comparison; it did not prove the Core producer ran.
+
+The mistake was treating the checked generated `.ai/manifest.yaml` body as
+authority for every lane. RyeOS's current source authority is the exact
+`ProjectSnapshot` plus `manifest.source.yaml` and current kind schemas. Portable
+and native candidates are valid when their parsed, closed `BundleManifest`
+equals that source-derived materialization; normalized JSON is an allowed
+serialization, and the exact validated candidate bytes are what calibration
+signs. Core seed has an additional producer contract: its candidate must also
+match the exact unsigned body of the checked generated Core manifest, while
+still equaling the current source-derived typed manifest. The Core byte rule
+must never be applied to portable/native lanes.
+
+This boundary exposed a review failure: the helper's Core-only name and
+assumption were shared by all calibration lanes, while review followed the
+Core producer output rather than tracing the actual portable service/Graph/Tool
+chain. The correction separates the lane authority in the generic manifest
+calibrator and adds focused tests for normalized derived manifests, stale
+generated non-Core manifests, semantic mismatch, and Core exact-body plus
+semantic equality. Focused Rust tests exercise both lanes end-to-end, check the
+signed manifest body and signature against the output tree/evidence hash, and
+reject mismatched lane evidence. The five focused Rust tests, five static
+calibration asset tests, API compile check, and formatting check pass after an
+independent review caught and corrected a stale static assertion. No live
+calibration evidence, authority measurement, catalog policy, publication, or
+activation resulted. The controlling execution plan records the full trace,
+superseded diagnosis, and finite next gates; do not reuse its older source
+snapshots after source changes.
 
 ### Release-authority ownership/runtime correction — 2026-09-24
 
@@ -266,17 +305,20 @@ post-execution rollback in v1. The original publication acceptance also retains
 a second consumer on the prior selection, restarts source/consumers and restores
 a clean source from exported closure; a single successful update is insufficient.
 
-Live calibration on 2026-09-24 established two distinct source/materialization
+Live calibration on 2026-09-24 established distinct source/materialization
 boundaries, not calibration success. In enforced CoW execution, RyeOS hard-links
 verified content-cache files into the admitted source view; source-file link
 count is not authored-tree evidence. The native and Core seed builders therefore
-must copy from the verified view into private output files, while the produced
-bundle and verifier continue to refuse hard links. After that correction, Core
-seed signing reached a byte-identity gate: the candidate manifest must retain
-the exact unsigned body of the signed source manifest, not a semantically
-equivalent JSON reserialization. That gate remains strict. The controlling
-`.tmp` plan records the two failed runs, corrections, and next install/snapshot
-requirements. Neither a failed run nor focused tests authorize catalog policy.
+copy from the verified view into private output files, while the produced bundle
+and verifier continue to refuse hard links. A later error was initially
+misclassified as a Core-seed byte-identity failure. Execution tracing proved
+the affected run was portable: its normalized candidate was incorrectly
+compared byte-for-byte with the checked generated manifest by a shared Core
+guard. Portable/native lanes instead require typed equality with current
+source-derived materialization; only Core additionally requires exact generated
+body equality. The controlling `.tmp` plan records the trace, superseded
+diagnosis, corrections, and next install/snapshot requirements. Neither a
+failed run nor focused tests authorize catalog policy.
 The full development-worker proof, Stage1 reproduction, self-hosted CI cutover
 and persistent build-cache work are separate campaigns. Add authoring utilities
 only when an exact remaining release operation declares that dependency.

@@ -1440,8 +1440,8 @@ async fn run_authority_calibration(
 ) -> anyhow::Result<ryeos_app::bundle_publication::calibration::AuthorityCalibrationResult> {
     use ryeos_app::bundle_publication::{
         admitted_build::{
-            CalibrationBundleInspectRequest,
-            inspect_calibration_bundle_input, inspect_calibration_core_input,
+            CalibrationBundleInspectRequest, inspect_calibration_bundle_input,
+            inspect_calibration_core_input,
         },
         calibration::{
             AUTHORITY_CALIBRATION_SCHEMA, AuthorityCalibrationEvidence, AuthorityCalibrationRecipes,
@@ -1508,6 +1508,7 @@ async fn run_authority_calibration(
 
     let portable = calibrate_signed_bundle(
         "bundle-release",
+        ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource::DerivedCurrent,
         ryeos_app::bundle_publication::recipe::PORTABLE_BUILD_GRAPH,
         ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH,
         ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER,
@@ -1531,6 +1532,7 @@ async fn run_authority_calibration(
     .await?;
     let native = calibrate_signed_bundle(
         "web",
+        ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource::DerivedCurrent,
         ryeos_app::bundle_publication::recipe::BUILD_GRAPH,
         ryeos_app::bundle_publication::recipe::CAPTURE_GRAPH,
         NATIVE_QUALIFY_TOOL_REF,
@@ -1554,6 +1556,7 @@ async fn run_authority_calibration(
     .await?;
     let core = calibrate_signed_bundle(
         "core",
+        ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource::CoreSeedGenerated,
         ryeos_app::bundle_publication::core_seed::BUILD_GRAPH,
         ryeos_app::bundle_publication::core_seed::CAPTURE_GRAPH,
         ryeos_app::bundle_publication::core_seed::QUALIFIER,
@@ -1663,6 +1666,7 @@ async fn run_authority_calibration(
 #[allow(clippy::too_many_arguments)]
 async fn calibrate_signed_bundle(
     bundle_name: &str,
+    manifest_source: ryeos_app::bundle_publication::calibration_manifest::CalibrationManifestSource,
     build_graph: &'static str,
     capture_graph: &'static str,
     qualifier: &'static str,
@@ -1686,8 +1690,8 @@ async fn calibrate_signed_bundle(
     use ryeos_app::bundle_publication::calibration::{
         AuthorityCalibrationLane, CalibrationRecipeIdentity,
     };
-    use ryeos_app::bundle_publication::calibration_core::{
-        CalibrationCoreManifestAuthority, CalibrationCoreManifestRequest,
+    use ryeos_app::bundle_publication::calibration_manifest::{
+        CalibrationManifestAuthority, CalibrationManifestRequest,
     };
     let build_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
         environment.build,
@@ -1742,16 +1746,17 @@ async fn calibrate_signed_bundle(
         &build_digest,
         &build_parameters,
     )?;
-    let signer = CalibrationCoreManifestAuthority::new(
+    let signer = CalibrationManifestAuthority::new(
         Arc::clone(&cas),
         state.identity.as_ref().clone(),
         Arc::new(source_generation.authority()),
     );
-    let signed = signer.sign_and_capture(CalibrationCoreManifestRequest {
+    let signed = signer.sign_and_capture(CalibrationManifestRequest {
         project_path: source_generation.project_identity().display().to_string(),
         source_snapshot_hash: source_snapshot_hash.to_owned(),
         bundle_name: bundle_name.to_owned(),
         input_content_manifest_hash: build_manifest,
+        manifest_source,
     })?;
     let signed_manifest = String::from_utf8(
         cas.get_blob(signed.evidence().output_manifest_item_hash())?

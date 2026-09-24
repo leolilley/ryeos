@@ -18,7 +18,7 @@ pub mod consumer;
 pub mod publisher;
 
 pub mod calibration;
-pub mod calibration_core;
+pub mod calibration_manifest;
 pub mod catalog;
 
 pub mod admitted_build;
