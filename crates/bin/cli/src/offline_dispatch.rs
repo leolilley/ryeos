@@ -644,6 +644,10 @@ fn exec_tool(
                 expand_template(&template, &params_json, project_path)
             }
             ryeos_engine::runtime::RuntimeArgument::Literal(literal) => Ok(literal.literal),
+            ryeos_engine::runtime::RuntimeArgument::SourceMember(_) => Err(CliError::Local {
+                detail: "offline execution cannot redeem admitted source member arguments"
+                    .to_owned(),
+            }),
         })
         .collect::<Result<Vec<_>, _>>()?;
 

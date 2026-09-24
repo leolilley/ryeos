@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused contract tests for purpose-owned Core seed assets."""
 import io
+import ast
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,20 @@ def signed_manifest(name="core"):
 
 
 class CoreSeedAssetTests(unittest.TestCase):
+    def test_core_seed_preserves_exact_unsigned_source_manifest_bytes(self):
+        source = ast.parse(BUILD.read_text())
+        extractor = next(node for node in source.body
+                         if isinstance(node, ast.FunctionDef)
+                         and node.name == "unsigned_source_manifest")
+        namespace = {"fail": lambda message: (_ for _ in ()).throw(SystemExit(message))}
+        exec(compile(ast.Module(body=[extractor], type_ignores=[]), str(BUILD), "exec"), namespace)
+        unsigned = namespace["unsigned_source_manifest"]
+        signed = (ROOT / "bundles/core/.ai/manifest.yaml").read_bytes()
+        self.assertEqual(unsigned(signed), signed.partition(b"\n")[2])
+        self.assertNotEqual(unsigned(signed), b'{"name":"core"}\n')
+        with self.assertRaisesRegex(SystemExit, "another signature envelope"):
+            unsigned(signed + b"# ryeos:signed:duplicate\n")
+
     def test_bootstrap_graph_closes_genesis_without_an_image_rebuild(self):
         graph = yaml.safe_load(
             (ASSET / "graphs/ryeos/bundle-release/bootstrap.yaml").read_text()
@@ -184,12 +199,17 @@ class CoreSeedAssetTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "symbolic link"):
                 self.run_qualifier(product)
         with tempfile.TemporaryDirectory() as directory:
+            product = self.make_core(directory)
+            os.link(product / ".ai/manifest.yaml", product / "alias")
+            with self.assertRaisesRegex(SystemExit, "hard link"):
+                self.run_qualifier(product)
+        with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(SystemExit, "caller-authored"):
                 self.run_qualifier(self.make_core(directory), {"extra": True})
 
     def test_build_and_capture_are_core_only_and_closed(self):
         with patch("sys.stdin", io.StringIO(json.dumps({
-                "release_input": release_input("web")}))):
+                "release_input": release_input("web"), "resolved_config": {}}))):
             with self.assertRaisesRegex(SystemExit, "initial Core"):
                 runpy.run_path(str(BUILD), run_name="__main__")
         request = {
@@ -205,6 +225,9 @@ class CoreSeedAssetTests(unittest.TestCase):
         with patch("sys.stdin", io.StringIO(json.dumps({"release_input": release_input(),
                                                           "extra": True}))):
             with self.assertRaisesRegex(SystemExit, "closed"):
+                runpy.run_path(str(BUILD), run_name="__main__")
+        with patch("sys.stdin", io.StringIO(json.dumps({"release_input": release_input()}))):
+            with self.assertRaisesRegex(SystemExit, "verified ownership resolution required"):
                 runpy.run_path(str(BUILD), run_name="__main__")
 
 

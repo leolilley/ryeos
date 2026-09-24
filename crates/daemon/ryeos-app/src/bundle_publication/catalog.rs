@@ -910,7 +910,7 @@ mod transport_binding_tests {
         );
         trust.insert(uploader.fingerprint().to_owned(), *uploader.verifying_key());
         let policy = BundlePublicationPolicy {
-            schema: 1,
+            schema: 2,
             catalogs: vec![],
         };
         let authority = CurrentCatalogPolicyAuthority {

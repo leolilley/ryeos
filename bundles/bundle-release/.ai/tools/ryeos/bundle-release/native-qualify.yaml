@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-23T08:15:01Z:e7102a450fe3389f36fb212a8cd76fa4c075ca0a9e8336e8b0da3b22f54e7317:rfcUwjtl7Lq7q8SnQFxH/HrB2w5zy5C2dzZhZ6yx14Gr6GW/v8VOAKV5NUxbtiVcshYOQhUGi93O2zu0nD2HDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:16:49Z:578ec59254b2dffee3ab5292671c99ddd216ec11a240e0d87eca0b7763012a6c:qngmOLFW6JdB5sxkUaR9eqcZ54VGLYANuQT3xfssnL7zj6z32SAQaNUjGbc+cNWUdMk7lpWps66IZUHd7McaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: native-qualify
 version: "1.0.0"
-description: Verify the exact captured web bundle tree without mutating it.
+description: Verify the exact captured native bundle tree and its executable payloads without mutating it.
 executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -20,6 +20,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/native-qualify.py"]
+  args: ["-I", "-B", {source_member: "lib/native-qualify.py"}]
   input_data: "${params_json}"
   timeout_secs: 300

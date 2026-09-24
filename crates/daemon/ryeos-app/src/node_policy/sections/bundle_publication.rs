@@ -42,10 +42,14 @@ pub struct BundleCatalogPolicy {
         crate::bundle_publication::calibration::CalibrationEnvironmentEvidence,
     pub qualification_signer_public_key: [u8; 32],
     pub qualification_signer_fingerprint: String,
-    pub qualification_policy: ProductQualificationPolicySource,
-    pub qualification_verifier_effective_definition_digest: String,
-    pub qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
-    pub required_qualification_claims: Vec<String>,
+    pub portable_qualification_policy: ProductQualificationPolicySource,
+    pub portable_qualification_verifier_effective_definition_digest: String,
+    pub portable_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_portable_qualification_claims: Vec<String>,
+    pub native_qualification_policy: ProductQualificationPolicySource,
+    pub native_qualification_verifier_effective_definition_digest: String,
+    pub native_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_native_qualification_claims: Vec<String>,
     pub substrate_qualification_policy: ProductQualificationPolicySource,
     pub substrate_qualification_verifier_effective_definition_digest: String,
     pub substrate_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -89,7 +93,7 @@ impl TypedNodePolicy for BundlePublicationPolicy {
 
 impl BundlePublicationPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 1 {
+        if self.schema != 2 {
             bail!("bundle-publication policy schema is not current");
         }
         // No catalog is authorized until an operator provisions measured release
@@ -153,7 +157,20 @@ impl BundlePublicationPolicy {
                     == catalog.substrate_build_signer_fingerprint,
                 "substrate build signer key and fingerprint disagree"
             );
-            catalog.qualification_policy.validate()?;
+            require_closed_bundle_qualification(
+                &catalog.portable_qualification_policy,
+                &catalog.required_portable_qualification_claims,
+                "config:bundle-release/portable-qualification",
+                crate::bundle_publication::recipe::PORTABLE_QUALIFIER,
+                "portable_bundle_release_checks_v1",
+            )?;
+            require_closed_bundle_qualification(
+                &catalog.native_qualification_policy,
+                &catalog.required_native_qualification_claims,
+                "config:bundle-release/native-qualification",
+                "tool:ryeos/bundle-release/native-qualify",
+                "native_bundle_release_checks_v1",
+            )?;
             catalog.core_seed_qualification_policy.validate()?;
             catalog
                 .core_seed_qualification_verifier_artifact_identity
@@ -172,6 +189,13 @@ impl BundlePublicationPolicy {
                         .policy
                         .verifier_parameters
                         == serde_json::json!({})
+                    && catalog
+                        .core_seed_qualification_policy
+                        .policy
+                        .subject_declaration_id
+                        == "subject"
+                    && catalog.core_seed_qualification_policy.policy.allowed_claims
+                        == [crate::bundle_publication::core_seed::QUALIFICATION_CLAIM.to_owned()]
                     && catalog.required_core_seed_qualification_claims
                         == vec![
                             crate::bundle_publication::core_seed::QUALIFICATION_CLAIM.to_owned()
@@ -179,11 +203,21 @@ impl BundlePublicationPolicy {
                 "Core seed qualification must use its distinct fixed policy, verifier and claim"
             );
             catalog
-                .qualification_verifier_artifact_identity
+                .portable_qualification_verifier_artifact_identity
                 .validate()?;
-            catalog.substrate_qualification_policy.validate()?;
+            catalog
+                .native_qualification_verifier_artifact_identity
+                .validate()?;
+            require_closed_bundle_qualification(
+                &catalog.substrate_qualification_policy,
+                &catalog.required_substrate_qualification_claims,
+                "config:bundle-release/substrate-qualification",
+                crate::bundle_publication::recipe::SUBSTRATE_QUALIFIER,
+                "substrate_release_checks_v1",
+            )?;
             require_distinct_qualification_verifiers(
-                &catalog.qualification_policy.policy.verifier_ref,
+                &catalog.portable_qualification_policy.policy.verifier_ref,
+                &catalog.native_qualification_policy.policy.verifier_ref,
                 &catalog.core_seed_qualification_policy.policy.verifier_ref,
                 &catalog.substrate_qualification_policy.policy.verifier_ref,
             )?;
@@ -191,8 +225,12 @@ impl BundlePublicationPolicy {
                 .substrate_qualification_verifier_artifact_identity
                 .validate()?;
             validate_hash(
-                &catalog.qualification_verifier_effective_definition_digest,
-                "qualification verifier definition",
+                &catalog.portable_qualification_verifier_effective_definition_digest,
+                "portable qualification verifier definition",
+            )?;
+            validate_hash(
+                &catalog.native_qualification_verifier_effective_definition_digest,
+                "native qualification verifier definition",
             )?;
             validate_hash(
                 &catalog.substrate_qualification_verifier_effective_definition_digest,
@@ -206,15 +244,6 @@ impl BundlePublicationPolicy {
                 &catalog.publisher_tool_artifact_identity_hash,
                 "publisher tool artifact",
             )?;
-            if catalog.required_qualification_claims.is_empty()
-                || catalog.required_qualification_claims.len() > 64
-                || catalog
-                    .required_qualification_claims
-                    .windows(2)
-                    .any(|pair| pair[0] >= pair[1])
-            {
-                bail!("qualification claims must be bounded, sorted, and unique");
-            }
             if catalog.required_substrate_qualification_claims.is_empty()
                 || catalog.required_substrate_qualification_claims.len() > 64
                 || catalog
@@ -302,13 +331,39 @@ fn validate_name(value: &str, label: &str) -> anyhow::Result<()> {
 }
 
 fn require_distinct_qualification_verifiers(
+    portable: &str,
     native: &str,
     core_seed: &str,
     substrate: &str,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        native != core_seed && native != substrate && core_seed != substrate,
-        "native, Core seed, and substrate qualification policies must use pairwise-distinct verifiers"
+        portable != native
+            && portable != core_seed
+            && portable != substrate
+            && native != core_seed
+            && native != substrate
+            && core_seed != substrate,
+        "portable, native, Core seed, and substrate qualification policies must use pairwise-distinct verifiers"
+    );
+    Ok(())
+}
+
+fn require_closed_bundle_qualification(
+    policy: &ProductQualificationPolicySource,
+    required_claims: &[String],
+    policy_ref: &str,
+    verifier_ref: &str,
+    claim: &str,
+) -> anyhow::Result<()> {
+    policy.validate()?;
+    anyhow::ensure!(
+        policy.canonical_ref == policy_ref
+            && policy.policy.verifier_ref == verifier_ref
+            && policy.policy.subject_declaration_id == "subject"
+            && policy.policy.verifier_parameters == serde_json::json!({})
+            && policy.policy.allowed_claims == [claim.to_owned()]
+            && required_claims == [claim.to_owned()],
+        "bundle qualification must use its exact lane policy, verifier, and claim"
     );
     Ok(())
 }
@@ -316,10 +371,33 @@ fn require_distinct_qualification_verifiers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_state::external_content::products::qualification::{
+        PRODUCT_QUALIFICATION_POLICY_SCHEMA, ProductQualificationPolicy,
+    };
+
+    fn qualification_source(
+        policy_ref: &str,
+        verifier_ref: &str,
+        claim: &str,
+    ) -> ProductQualificationPolicySource {
+        ProductQualificationPolicySource {
+            canonical_ref: policy_ref.to_owned(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            policy: ProductQualificationPolicy {
+                schema: PRODUCT_QUALIFICATION_POLICY_SCHEMA.to_owned(),
+                verifier_ref: verifier_ref.to_owned(),
+                subject_declaration_id: "subject".to_owned(),
+                allowed_claims: vec![claim.to_owned()],
+                verifier_parameters: serde_json::json!({}),
+            },
+        }
+    }
 
     fn value() -> Value {
         serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "catalogs": [{
                 "namespace": "official",
                 "publisher_fingerprint": "a".repeat(64),
@@ -341,11 +419,19 @@ mod tests {
     #[test]
     fn empty_bootstrap_policy_authorizes_no_catalog() {
         let policy = BundlePublicationPolicy {
-            schema: 1,
+            schema: 2,
             catalogs: vec![],
         };
         policy.validate().unwrap();
         assert!(policy.require_catalog("official").is_err());
+        assert!(
+            BundlePublicationPolicy {
+                schema: 1,
+                catalogs: vec![],
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -361,9 +447,90 @@ mod tests {
 
     #[test]
     fn qualification_verifiers_are_pairwise_distinct() {
-        assert!(require_distinct_qualification_verifiers("native", "core", "substrate").is_ok());
-        assert!(require_distinct_qualification_verifiers("same", "same", "substrate").is_err());
-        assert!(require_distinct_qualification_verifiers("same", "core", "same").is_err());
-        assert!(require_distinct_qualification_verifiers("native", "same", "same").is_err());
+        assert!(
+            require_distinct_qualification_verifiers("portable", "native", "core", "substrate")
+                .is_ok()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("same", "same", "core", "substrate").is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("portable", "same", "same", "substrate")
+                .is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("portable", "native", "same", "same").is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("same", "native", "core", "same").is_err()
+        );
+    }
+
+    #[test]
+    fn portable_and_native_qualification_require_exact_distinct_lanes() {
+        let portable = qualification_source(
+            "config:bundle-release/portable-qualification",
+            "tool:ryeos/bundle-release/portable-qualify",
+            "portable_bundle_release_checks_v1",
+        );
+        let native = qualification_source(
+            "config:bundle-release/native-qualification",
+            "tool:ryeos/bundle-release/native-qualify",
+            "native_bundle_release_checks_v1",
+        );
+        let portable_claim = vec!["portable_bundle_release_checks_v1".to_owned()];
+        let native_claim = vec!["native_bundle_release_checks_v1".to_owned()];
+        assert!(
+            require_closed_bundle_qualification(
+                &portable,
+                &portable_claim,
+                "config:bundle-release/portable-qualification",
+                "tool:ryeos/bundle-release/portable-qualify",
+                "portable_bundle_release_checks_v1",
+            )
+            .is_ok()
+        );
+        assert!(
+            require_closed_bundle_qualification(
+                &native,
+                &native_claim,
+                "config:bundle-release/native-qualification",
+                "tool:ryeos/bundle-release/native-qualify",
+                "native_bundle_release_checks_v1",
+            )
+            .is_ok()
+        );
+        assert!(
+            require_closed_bundle_qualification(
+                &native,
+                &portable_claim,
+                "config:bundle-release/portable-qualification",
+                "tool:ryeos/bundle-release/portable-qualify",
+                "portable_bundle_release_checks_v1",
+            )
+            .is_err()
+        );
+        assert!(
+            require_closed_bundle_qualification(
+                &portable,
+                &native_claim,
+                "config:bundle-release/native-qualification",
+                "tool:ryeos/bundle-release/native-qualify",
+                "native_bundle_release_checks_v1",
+            )
+            .is_err()
+        );
+        let mut widened = portable.clone();
+        widened.policy.allowed_claims.push("extra_claim".to_owned());
+        assert!(
+            require_closed_bundle_qualification(
+                &widened,
+                &portable_claim,
+                "config:bundle-release/portable-qualification",
+                "tool:ryeos/bundle-release/portable-qualify",
+                "portable_bundle_release_checks_v1",
+            )
+            .is_err()
+        );
     }
 }

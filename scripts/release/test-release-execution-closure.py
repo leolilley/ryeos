@@ -178,12 +178,25 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                     self.assertIn('pathlib.Path(__file__).with_name("' + helper + '")', body)
                 self.assertIn("release_cargo.validate_source_configuration(root)", body)
 
+    def test_build_tools_require_the_same_strict_signed_ownership_resolution(self):
+        expected = {
+            "type": "strict_signed_project_bundle",
+            "bundle_name": "bundle-release",
+            "config_path": "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml",
+        }
+        for name in ("native-build", "portable-build", "core-seed-build"):
+            with self.subTest(tool=name):
+                tool = load_yaml(TOOLS / f"{name}.yaml")
+                self.assertEqual(tool["config_resolve"], expected)
+                source = TOOLS / "lib" / ("core-seed-build.py" if name == "core-seed-build" else "native-build.py")
+                body = source.read_text()
+                self.assertIn('verified_ownership_projection(request["resolved_config"])', body)
+                self.assertNotIn("scripts/release/bundle-payload-ownership.py", body)
+
     def test_release_tool_entrypoints_resolve_only_through_admitted_source_mount(self):
-        # A direct Tool's source is mounted under its execution workspace.
-        # ${tool_dir} names the installed host bundle, which is not visible to
-        # its isolated child. Check every release Tool, not just the first
-        # portable builder reached by calibration.
-        expected_root = Path(".ai/tools/ryeos/bundle-release")
+        # Source members remain typed until launch redeems the retained closure
+        # in its private runtime namespace. Neither installed host paths nor
+        # assumed project directories grant executable source authority.
         self.assertEqual({path.stem for path in TOOLS.glob("*.yaml")}, set(PYTHON_TOOLS) | {"runtime"})
         runtime = load_yaml(TOOLS / "runtime.yaml")
         self.assertEqual(runtime["executor_id"], "@subprocess")
@@ -200,11 +213,12 @@ class BundleReleaseExecutionClosureTests(unittest.TestCase):
                 args = tool["config"]["args"]
                 self.assertEqual(args[:2], ["-I", "-B"])
                 self.assertEqual(len(args), 3)
-                entry = Path(args[2])
+                self.assertEqual(set(args[2]), {"source_member"})
+                entry = Path(args[2]["source_member"])
                 self.assertFalse(entry.is_absolute())
-                self.assertEqual(entry.parts[:len(expected_root.parts)], expected_root.parts)
-                self.assertEqual(entry.parent, expected_root / "lib")
-                self.assertTrue((TOOLS / entry.relative_to(expected_root)).is_file())
+                self.assertNotIn("..", entry.parts)
+                self.assertEqual(entry.parent, Path("lib"))
+                self.assertTrue((TOOLS / entry).is_file())
 
     def test_build_commands_select_exact_owned_bins_per_package(self):
         # Execute the real command-building loops without building or touching

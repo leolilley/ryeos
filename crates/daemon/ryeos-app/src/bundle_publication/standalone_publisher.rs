@@ -109,12 +109,17 @@ pub struct StandalonePublisherPolicy {
     pub catalog_publisher_fingerprint: String,
     pub bundle_publication_policy_section_digest: String,
     pub trust_epoch: u64,
+    pub calibration_execution_environment: super::calibration::CalibrationEnvironmentEvidence,
     pub qualification_signer_public_key: [u8; 32],
     pub qualification_signer_fingerprint: String,
-    pub qualification_policy: ProductQualificationPolicySource,
-    pub qualification_verifier_effective_definition_digest: String,
-    pub qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
-    pub required_qualification_claims: Vec<String>,
+    pub portable_qualification_policy: ProductQualificationPolicySource,
+    pub portable_qualification_verifier_effective_definition_digest: String,
+    pub portable_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_portable_qualification_claims: Vec<String>,
+    pub native_qualification_policy: ProductQualificationPolicySource,
+    pub native_qualification_verifier_effective_definition_digest: String,
+    pub native_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
+    pub required_native_qualification_claims: Vec<String>,
     pub substrate_qualification_policy: ProductQualificationPolicySource,
     pub substrate_qualification_verifier_effective_definition_digest: String,
     pub substrate_qualification_verifier_artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -141,7 +146,7 @@ impl StandalonePublisherPolicy {
         let catalog = section.require_catalog(namespace)?;
         anyhow::ensure!(!catalog.frozen, "catalog is frozen");
         let policy = Self {
-            schema: "ryeos.standalone_bundle_publisher_policy.v1".into(),
+            schema: "ryeos.standalone_bundle_publisher_policy.v2".into(),
             core_seed_qualification_policy: catalog.core_seed_qualification_policy.clone(),
             core_seed_qualification_verifier_effective_definition_digest: catalog
                 .core_seed_qualification_verifier_effective_definition_digest
@@ -156,16 +161,29 @@ impl StandalonePublisherPolicy {
             catalog_publisher_fingerprint: catalog.publisher_fingerprint.clone(),
             bundle_publication_policy_section_digest: section.section_digest()?,
             trust_epoch: catalog.trust_epoch,
+            calibration_execution_environment: catalog.calibration_execution_environment.clone(),
             qualification_signer_public_key: catalog.qualification_signer_public_key,
             qualification_signer_fingerprint: catalog.qualification_signer_fingerprint.clone(),
-            qualification_policy: catalog.qualification_policy.clone(),
-            qualification_verifier_effective_definition_digest: catalog
-                .qualification_verifier_effective_definition_digest
+            portable_qualification_policy: catalog.portable_qualification_policy.clone(),
+            portable_qualification_verifier_effective_definition_digest: catalog
+                .portable_qualification_verifier_effective_definition_digest
                 .clone(),
-            qualification_verifier_artifact_identity: catalog
-                .qualification_verifier_artifact_identity
+            portable_qualification_verifier_artifact_identity: catalog
+                .portable_qualification_verifier_artifact_identity
                 .clone(),
-            required_qualification_claims: catalog.required_qualification_claims.clone(),
+            required_portable_qualification_claims: catalog
+                .required_portable_qualification_claims
+                .clone(),
+            native_qualification_policy: catalog.native_qualification_policy.clone(),
+            native_qualification_verifier_effective_definition_digest: catalog
+                .native_qualification_verifier_effective_definition_digest
+                .clone(),
+            native_qualification_verifier_artifact_identity: catalog
+                .native_qualification_verifier_artifact_identity
+                .clone(),
+            required_native_qualification_claims: catalog
+                .required_native_qualification_claims
+                .clone(),
             substrate_qualification_policy: catalog.substrate_qualification_policy.clone(),
             substrate_qualification_verifier_effective_definition_digest: catalog
                 .substrate_qualification_verifier_effective_definition_digest
@@ -191,7 +209,7 @@ impl StandalonePublisherPolicy {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.schema == "ryeos.standalone_bundle_publisher_policy.v1",
+            self.schema == "ryeos.standalone_bundle_publisher_policy.v2",
             "unsupported standalone publisher policy schema"
         );
         require_hash(
@@ -203,8 +221,12 @@ impl StandalonePublisherPolicy {
             "catalog publisher fingerprint",
         )?;
         require_hash(
-            &self.qualification_verifier_effective_definition_digest,
-            "qualification verifier definition",
+            &self.portable_qualification_verifier_effective_definition_digest,
+            "portable qualification verifier definition",
+        )?;
+        require_hash(
+            &self.native_qualification_verifier_effective_definition_digest,
+            "native qualification verifier definition",
         )?;
         require_hash(
             &self.substrate_qualification_verifier_effective_definition_digest,
@@ -223,7 +245,21 @@ impl StandalonePublisherPolicy {
             "invalid catalog namespace"
         );
         anyhow::ensure!(self.trust_epoch > 0, "trust epoch must be nonzero");
-        self.qualification_policy.validate()?;
+        self.calibration_execution_environment.validate()?;
+        require_closed_bundle_qualification(
+            &self.portable_qualification_policy,
+            &self.required_portable_qualification_claims,
+            "config:bundle-release/portable-qualification",
+            super::recipe::PORTABLE_QUALIFIER,
+            "portable_bundle_release_checks_v1",
+        )?;
+        require_closed_bundle_qualification(
+            &self.native_qualification_policy,
+            &self.required_native_qualification_claims,
+            "config:bundle-release/native-qualification",
+            "tool:ryeos/bundle-release/native-qualify",
+            "native_bundle_release_checks_v1",
+        )?;
         self.core_seed_qualification_policy.validate()?;
         self.core_seed_qualification_verifier_artifact_identity
             .validate()?;
@@ -241,13 +277,27 @@ impl StandalonePublisherPolicy {
                     .policy
                     .verifier_parameters
                     == serde_json::json!({})
+                && self
+                    .core_seed_qualification_policy
+                    .policy
+                    .subject_declaration_id
+                    == "subject"
+                && self.core_seed_qualification_policy.policy.allowed_claims
+                    == [super::core_seed::QUALIFICATION_CLAIM.to_owned()]
                 && self.required_core_seed_qualification_claims
                     == vec![super::core_seed::QUALIFICATION_CLAIM.to_owned()],
             "invalid Core seed qualification policy pins"
         );
-        self.substrate_qualification_policy.validate()?;
+        require_closed_bundle_qualification(
+            &self.substrate_qualification_policy,
+            &self.required_substrate_qualification_claims,
+            "config:bundle-release/substrate-qualification",
+            super::recipe::SUBSTRATE_QUALIFIER,
+            "substrate_release_checks_v1",
+        )?;
         require_distinct_qualification_verifiers(
-            &self.qualification_policy.policy.verifier_ref,
+            &self.portable_qualification_policy.policy.verifier_ref,
+            &self.native_qualification_policy.policy.verifier_ref,
             &self.core_seed_qualification_policy.policy.verifier_ref,
             &self.substrate_qualification_policy.policy.verifier_ref,
         )?;
@@ -265,13 +315,12 @@ impl StandalonePublisherPolicy {
                 == self.substrate_build_signer_fingerprint,
             "substrate build signer key and fingerprint disagree"
         );
-        self.qualification_verifier_artifact_identity.validate()?;
+        self.portable_qualification_verifier_artifact_identity
+            .validate()?;
+        self.native_qualification_verifier_artifact_identity
+            .validate()?;
         self.substrate_qualification_verifier_artifact_identity
             .validate()?;
-        anyhow::ensure!(
-            !self.required_qualification_claims.is_empty(),
-            "qualification claims must not be empty"
-        );
         anyhow::ensure!(
             !self.required_substrate_qualification_claims.is_empty()
                 && self
@@ -302,27 +351,268 @@ impl StandalonePublisherPolicy {
 }
 
 fn require_distinct_qualification_verifiers(
+    portable: &str,
     native: &str,
     core_seed: &str,
     substrate: &str,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
-        native != core_seed && native != substrate && core_seed != substrate,
-        "native, Core seed, and substrate qualification policies must use pairwise-distinct verifiers"
+        portable != native
+            && portable != core_seed
+            && portable != substrate
+            && native != core_seed
+            && native != substrate
+            && core_seed != substrate,
+        "portable, native, Core seed, and substrate qualification policies must use pairwise-distinct verifiers"
+    );
+    Ok(())
+}
+
+fn require_closed_bundle_qualification(
+    policy: &ProductQualificationPolicySource,
+    required_claims: &[String],
+    policy_ref: &str,
+    verifier_ref: &str,
+    claim: &str,
+) -> anyhow::Result<()> {
+    policy.validate()?;
+    anyhow::ensure!(
+        policy.canonical_ref == policy_ref
+            && policy.policy.verifier_ref == verifier_ref
+            && policy.policy.subject_declaration_id == "subject"
+            && policy.policy.verifier_parameters == serde_json::json!({})
+            && policy.policy.allowed_claims == [claim.to_owned()]
+            && required_claims == [claim.to_owned()],
+        "bundle qualification must use its exact lane policy, verifier, and claim"
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod policy_invariant_tests {
-    use super::require_distinct_qualification_verifiers;
+    use super::{
+        expected_non_core_selections, require_distinct_qualification_verifiers,
+        require_non_core_release_input, require_non_core_selections,
+    };
+    use crate::bundle_publication::calibration::{
+        CalibrationEnvironmentSelection, CalibrationProductSelection,
+    };
+    use ryeos_bundle_publication_contract::{
+        BUNDLE_GENERATION_KIND, BUNDLE_GENERATION_SCHEMA, BundleGeneration, BundleTarget,
+    };
+    use serde_json::{Value, json};
+
+    fn release_input(native: bool) -> Value {
+        let target = if native {
+            json!({"kind":"triple","triple":"x86_64-unknown-linux-gnu"})
+        } else {
+            json!({"kind":"portable"})
+        };
+        json!({
+            "schema": "ryeos.bundle_release_input_plan.v1",
+            "project_path": "/source",
+            "bundle_name": "example",
+            "authored_manifest": {
+                "name": "example", "version": "1.0.0",
+                "provides_kinds": [], "requires_kinds": []
+            },
+            "source_snapshot_hash": "a".repeat(64),
+            "predecessor_generation_hash": null,
+            "target": target,
+            "build_profile": "release",
+            "payload_ownership_item_ref": "config:bundle-release/payload-ownership",
+            "payload_ownership_content_hash": "b".repeat(64),
+            "payloads": if native { json!([{
+                "bundle":"example", "binary":"example-bin", "cargo_package":"example-bin",
+                "build_class":"release", "bundle_sets":["example"]
+            }]) } else { json!([]) },
+            "cargo_packages": if native { json!(["example-bin"]) } else { json!([]) },
+            "build_classes": if native { json!(["release"]) } else { json!([]) },
+            "requires_binary_build": native,
+            "clean_output_required": true,
+            "ambient_target_reuse_allowed": false
+        })
+    }
+
+    fn generation(target: Value) -> BundleGeneration {
+        serde_json::from_value(json!({
+            "schema": BUNDLE_GENERATION_SCHEMA,
+            "kind": BUNDLE_GENERATION_KIND,
+            "bundle_name": "example",
+            "authored_version": "1.0.0",
+            "content_manifest_hash": "c".repeat(64),
+            "manifest_item_hash": "d".repeat(64),
+            "target": target,
+            "build_profile": "release",
+            "substrate_protocol": 1,
+            "bundle_manifest_format": "ryeos.bundle-manifest/v1",
+            "accepted_product_result_hash": "e".repeat(64),
+            "selected_product_identity": "example",
+            "selected_product_witness": "f".repeat(64),
+            "publisher_materialization_result_hash": "1".repeat(64),
+            "accepted_capture_result_hash": "2".repeat(64),
+            "selected_signed_product_identity": "signed_example",
+            "selected_signed_product_witness": "3".repeat(64),
+            "source_snapshot_hash": "a".repeat(64),
+            "qualification_evidence_hashes": ["4".repeat(64)],
+            "provenance_hash": null,
+            "sbom_hash": null
+        }))
+        .unwrap()
+    }
+
+    fn environment() -> CalibrationEnvironmentSelection {
+        let selection = |product: char, qualification: char| CalibrationProductSelection {
+            product_witness_hash: product.to_string().repeat(64),
+            qualification_attestation_hash: qualification.to_string().repeat(64),
+        };
+        CalibrationEnvironmentSelection {
+            python_runtime: selection('a', 'b'),
+            platform: selection('c', 'd'),
+            cargo_vendor: selection('e', 'f'),
+            static_link_inputs: selection('1', '2'),
+        }
+    }
 
     #[test]
     fn qualification_verifiers_are_pairwise_distinct() {
-        assert!(require_distinct_qualification_verifiers("native", "core", "substrate").is_ok());
-        assert!(require_distinct_qualification_verifiers("same", "same", "substrate").is_err());
-        assert!(require_distinct_qualification_verifiers("same", "core", "same").is_err());
-        assert!(require_distinct_qualification_verifiers("native", "same", "same").is_err());
+        assert!(
+            require_distinct_qualification_verifiers("portable", "native", "core", "substrate")
+                .is_ok()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("same", "same", "core", "substrate").is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("portable", "same", "same", "substrate")
+                .is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("portable", "native", "same", "same").is_err()
+        );
+        assert!(
+            require_distinct_qualification_verifiers("same", "native", "core", "same").is_err()
+        );
+    }
+
+    #[test]
+    fn non_core_release_metadata_must_match_authenticated_input_in_both_lanes() {
+        let portable_input = release_input(false);
+        let native_input = release_input(true);
+        let portable_generation = generation(portable_input["target"].clone());
+        let native_generation = generation(native_input["target"].clone());
+        assert!(require_non_core_release_input(&portable_generation, &portable_input).is_ok());
+        assert!(require_non_core_release_input(&native_generation, &native_input).is_ok());
+        assert!(require_non_core_release_input(&portable_generation, &native_input).is_err());
+        assert!(require_non_core_release_input(&native_generation, &portable_input).is_err());
+        for field in ["bundle_name", "source_snapshot_hash"] {
+            let mut altered = portable_input.clone();
+            altered[field] = json!("different");
+            assert!(require_non_core_release_input(&portable_generation, &altered).is_err());
+        }
+        let mut altered = portable_input.clone();
+        altered["authored_manifest"]["version"] = json!("2.0.0");
+        assert!(require_non_core_release_input(&portable_generation, &altered).is_err());
+    }
+
+    #[test]
+    fn build_and_capture_select_exact_phase_products_and_signed_build_witness() {
+        let environment = environment();
+        let portable = BundleTarget::Portable;
+        let native = BundleTarget::Triple {
+            triple: "x86_64-unknown-linux-gnu".to_owned(),
+        };
+        let build_witness = "3".repeat(64);
+        for (target, build_count) in [(&portable, 1), (&native, 4)] {
+            let build =
+                expected_non_core_selections(&environment, target, false, &build_witness).unwrap();
+            let capture =
+                expected_non_core_selections(&environment, target, true, &build_witness).unwrap();
+            assert_eq!(build.len(), build_count);
+            assert_eq!(capture.len(), 2);
+            assert!(
+                require_non_core_selections(
+                    &json!(build),
+                    &environment,
+                    target,
+                    false,
+                    &build_witness
+                )
+                .is_ok()
+            );
+            assert!(
+                require_non_core_selections(
+                    &json!(capture),
+                    &environment,
+                    target,
+                    true,
+                    &build_witness
+                )
+                .is_ok()
+            );
+            assert!(
+                require_non_core_selections(
+                    &json!(build),
+                    &environment,
+                    target,
+                    true,
+                    &build_witness
+                )
+                .is_err()
+            );
+            assert!(
+                require_non_core_selections(
+                    &json!(capture),
+                    &environment,
+                    target,
+                    false,
+                    &build_witness
+                )
+                .is_err()
+            );
+        }
+        let capture =
+            expected_non_core_selections(&environment, &native, true, &build_witness).unwrap();
+        let mut wrong_witness = json!(capture);
+        wrong_witness[1]["selection"]["witness_hash"] = json!("4".repeat(64));
+        assert!(
+            require_non_core_selections(
+                &wrong_witness,
+                &environment,
+                &native,
+                true,
+                &build_witness,
+            )
+            .is_err()
+        );
+        let mut wrong_qualification = json!(capture);
+        wrong_qualification[0]["selection"]["qualification_hash"] = json!("5".repeat(64));
+        assert!(
+            require_non_core_selections(
+                &wrong_qualification,
+                &environment,
+                &native,
+                true,
+                &build_witness,
+            )
+            .is_err()
+        );
+        let mut wrong_root = json!(capture);
+        wrong_root[1]["target"] = json!({"kind":"content_dependency","binding":"other"});
+        assert!(
+            require_non_core_selections(&wrong_root, &environment, &native, true, &build_witness,)
+                .is_err()
+        );
+        let mut extra = json!(capture);
+        extra.as_array_mut().unwrap().push(json!({
+            "target":{"kind":"root"},
+            "selection":{"declaration_id":"unexpected", "witness_hash":"6".repeat(64),
+                "witness_source":{"kind":"local_capture"}, "qualification_hash":null}
+        }));
+        assert!(
+            require_non_core_selections(&extra, &environment, &native, true, &build_witness,)
+                .is_err()
+        );
     }
 }
 
@@ -717,17 +1007,291 @@ impl BundleReleaseEvidenceProof for StandalonePublisherProof {
                     .core_seed_qualification_verifier_artifact_identity,
             )
         } else {
+            let (
+                build_graph,
+                build_recipe,
+                build_product,
+                build_relationship,
+                capture_graph,
+                capture_recipe,
+                signed_product,
+                capture_relationship,
+                qualifier,
+                qualification_policy,
+                verifier_digest,
+                verifier_artifact,
+                required_claims,
+            ) = match &generation.target {
+                ryeos_bundle_publication_contract::BundleTarget::Portable => (
+                    super::recipe::PORTABLE_BUILD_GRAPH,
+                    super::recipe::PORTABLE_BUILD_RECIPE_REF,
+                    "portable_bundle",
+                    "portable_bundle_to_signed_capture",
+                    super::recipe::PORTABLE_CAPTURE_GRAPH,
+                    super::recipe::PORTABLE_CAPTURE_RECIPE_REF,
+                    "signed_portable_bundle",
+                    "signed_portable_bundle_to_release_qualification",
+                    super::recipe::PORTABLE_QUALIFIER,
+                    &self.policy.portable_qualification_policy,
+                    &self
+                        .policy
+                        .portable_qualification_verifier_effective_definition_digest,
+                    &self
+                        .policy
+                        .portable_qualification_verifier_artifact_identity,
+                    &self.policy.required_portable_qualification_claims,
+                ),
+                ryeos_bundle_publication_contract::BundleTarget::Triple { .. } => (
+                    super::recipe::BUILD_GRAPH,
+                    super::recipe::BUILD_RECIPE_REF,
+                    "native_bundle",
+                    "native_bundle_to_signed_capture",
+                    super::recipe::CAPTURE_GRAPH,
+                    super::recipe::CAPTURE_RECIPE_REF,
+                    "signed_native_bundle",
+                    "signed_native_bundle_to_release_qualification",
+                    "tool:ryeos/bundle-release/native-qualify",
+                    &self.policy.native_qualification_policy,
+                    &self
+                        .policy
+                        .native_qualification_verifier_effective_definition_digest,
+                    &self.policy.native_qualification_verifier_artifact_identity,
+                    &self.policy.required_native_qualification_claims,
+                ),
+            };
+            anyhow::ensure!(
+                accepted.producer_ref == build_graph
+                    && accepted_capture.producer_ref == capture_graph
+                    && accepted.owner_principal == accepted_capture.owner_principal
+                    && generation.selected_product_identity == build_product
+                    && generation.selected_signed_product_identity == signed_product,
+                "bundle generation selected a product outside its authenticated target lane"
+            );
+            let mut release_input_value = None;
+            for (
+                result,
+                witness_hash,
+                recipe_ref,
+                manifest_hash,
+                product_name,
+                relationship_name,
+                consumer_ref,
+                consumer_declaration,
+            ) in [
+                (
+                    accepted,
+                    &generation.selected_product_witness,
+                    build_recipe,
+                    &materialization.input_content_manifest_hash,
+                    build_product,
+                    build_relationship,
+                    capture_graph,
+                    "unsigned_bundle",
+                ),
+                (
+                    accepted_capture,
+                    &generation.selected_signed_product_witness,
+                    capture_recipe,
+                    &materialization.output_content_manifest_hash,
+                    signed_product,
+                    capture_relationship,
+                    qualifier,
+                    "subject",
+                ),
+            ] {
+                let witness =
+                    Attestation::from_value(&super::read_exact(self.cas.as_ref(), witness_hash)?)?;
+                anyhow::ensure!(
+                    !witness.is_expired_at(&lillux::time::iso8601_now())?,
+                    "bundle product witness expired"
+                );
+                let product = ryeos_state::external_content::products::ProductCaptureEvidence::verify_attestation_for_owner(
+                    &witness, &build_key, &result.owner_principal,
+                )?;
+                product.recipe_purpose.require_bundle_release()?;
+                anyhow::ensure!(
+                    product.recipe_ref == recipe_ref
+                        && product.manifest_hash == *manifest_hash
+                        && product.declaration.name == product_name
+                        && product.root_producer.canonical_ref == result.producer_ref
+                        && product.root_producer.producer_project_snapshot_hash
+                            == result.producer_project_snapshot_hash
+                        && product.root_producer.effective_definition_digest
+                            == result.producer_effective_definition_digest
+                        && product.root_producer.admitted_parameters_digest
+                            == result.producer_parameters_digest
+                        && product.producer_partition_identity.as_deref()
+                            == Some(result.producer_partition_identity.as_str()),
+                    "accepted bundle product contradicts authenticated capture evidence"
+                );
+                let relationship = product.relationships.select(relationship_name)?;
+                relationship.validate_product_evidence(&product)?;
+                anyhow::ensure!(
+                    relationship.producer.canonical_ref == result.producer_ref
+                        && relationship.producer.product_name == product_name
+                        && relationship.consumer.canonical_ref == consumer_ref
+                        && relationship.consumer.declaration_id == consumer_declaration,
+                    "bundle product relationship differs from its target lane"
+                );
+                let parameters = relationship
+                    .producer
+                    .parameters
+                    .as_object()
+                    .context("bundle producer parameters are not an object")?;
+                let release_value = parameters
+                    .get("release_input")
+                    .context("bundle producer omitted release input")?;
+                require_non_core_release_input(generation, release_value)?;
+                if let Some(previous) = &release_input_value {
+                    anyhow::ensure!(
+                        previous == release_value,
+                        "build and capture witnesses name different release inputs"
+                    );
+                } else {
+                    release_input_value = Some(release_value.clone());
+                }
+                require_non_core_selections(
+                    parameters
+                        .get("child_product_selections")
+                        .context("bundle producer omitted child product selections")?,
+                    &calibration_environment_selection(
+                        &self.policy.calibration_execution_environment,
+                    ),
+                    &generation.target,
+                    recipe_ref == capture_recipe,
+                    &generation.selected_product_witness,
+                )?;
+                if recipe_ref == capture_recipe {
+                    anyhow::ensure!(
+                        parameters.len() == 6
+                            && parameters["materialization_result_hash"]
+                                == generation.publisher_materialization_result_hash
+                            && parameters["signed_tree_manifest_hash"]
+                                == generation.content_manifest_hash
+                            && parameters["manifest_item_hash"] == generation.manifest_item_hash
+                            && parameters["signed_manifest"]
+                                .as_str()
+                                .is_some_and(|manifest| lillux::sha256_hex(manifest.as_bytes())
+                                    == generation.manifest_item_hash),
+                        "bundle capture is not bound to the released publisher transformation"
+                    );
+                    anyhow::ensure!(
+                        relationship.qualification.policy_ref.as_deref()
+                            == Some(qualification_policy.canonical_ref.as_str())
+                            && relationship.qualification.required_claims == *required_claims,
+                        "bundle capture qualification relationship differs from its target lane"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        parameters.len() == 2
+                            && relationship.qualification.policy_ref.is_none()
+                            && relationship.qualification.required_claims.is_empty(),
+                        "bundle build relationship differs from its target lane"
+                    );
+                }
+            }
             evidence.validate_current_policy(
-                &self.policy.qualification_policy,
-                &self
-                    .policy
-                    .qualification_verifier_effective_definition_digest,
-                &self.policy.required_qualification_claims,
+                qualification_policy,
+                verifier_digest,
+                required_claims,
             )?;
-            evidence
-                .validate_current_artifact(&self.policy.qualification_verifier_artifact_identity)
+            evidence.validate_current_artifact(verifier_artifact)
         }
     }
+}
+
+fn calibration_environment_selection(
+    environment: &super::calibration::CalibrationEnvironmentEvidence,
+) -> super::calibration::CalibrationEnvironmentSelection {
+    super::calibration::CalibrationEnvironmentSelection {
+        python_runtime: environment.python_runtime.selection.clone(),
+        platform: environment.platform.selection.clone(),
+        cargo_vendor: environment.cargo_vendor.selection.clone(),
+        static_link_inputs: environment.static_link_inputs.selection.clone(),
+    }
+}
+
+fn expected_non_core_selections(
+    environment: &super::calibration::CalibrationEnvironmentSelection,
+    target: &ryeos_bundle_publication_contract::BundleTarget,
+    capture: bool,
+    build_witness: &str,
+) -> anyhow::Result<super::recipe::ReleaseChildProductSelections> {
+    use ryeos_state::external_content::products::{
+        composition::{
+            ProductSelection, ProductSelectionInput, ProductSelectionTarget,
+            canonicalize_product_selection_inputs,
+        },
+        transfer::ProductWitnessSource,
+    };
+    environment.validate()?;
+    let environment_selection =
+        |declaration_id: &str, selected: &super::calibration::CalibrationProductSelection| {
+            ProductSelectionInput {
+                target: ProductSelectionTarget::Root {},
+                selection: ProductSelection {
+                    declaration_id: declaration_id.to_owned(),
+                    witness_hash: selected.product_witness_hash.clone(),
+                    witness_source: ProductWitnessSource::LocalCapture {},
+                    qualification_hash: Some(selected.qualification_attestation_hash.clone()),
+                },
+            }
+        };
+    let mut selections = vec![environment_selection("python", &environment.python_runtime)];
+    if capture {
+        selections.push(ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: "unsigned_bundle".to_owned(),
+                witness_hash: build_witness.to_owned(),
+                witness_source: ProductWitnessSource::LocalCapture {},
+                qualification_hash: None,
+            },
+        });
+    } else if matches!(
+        target,
+        ryeos_bundle_publication_contract::BundleTarget::Triple { .. }
+    ) {
+        selections.extend([
+            environment_selection("cargo-vendor", &environment.cargo_vendor),
+            environment_selection("platform", &environment.platform),
+            environment_selection("static-link-inputs", &environment.static_link_inputs),
+        ]);
+    }
+    canonicalize_product_selection_inputs(selections)
+}
+
+fn require_non_core_selections(
+    observed: &serde_json::Value,
+    environment: &super::calibration::CalibrationEnvironmentSelection,
+    target: &ryeos_bundle_publication_contract::BundleTarget,
+    capture: bool,
+    build_witness: &str,
+) -> anyhow::Result<()> {
+    let selected: super::recipe::ReleaseChildProductSelections =
+        serde_json::from_value(observed.clone())?;
+    super::recipe::validate_child_product_selections(&selected)?;
+    anyhow::ensure!(
+        selected == expected_non_core_selections(environment, target, capture, build_witness)?,
+        "bundle phase selects products outside its pinned calibration and signed build witness"
+    );
+    Ok(())
+}
+
+fn require_non_core_release_input(
+    generation: &ryeos_bundle_publication_contract::BundleGeneration,
+    release_value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let input = super::admitted_build::AdmittedReleaseInput::from_value(release_value)?;
+    anyhow::ensure!(
+        generation.bundle_name == input.bundle_name
+            && generation.authored_version == input.authored_manifest.version
+            && generation.source_snapshot_hash.as_deref()
+                == Some(input.source_snapshot_hash.as_str())
+            && generation.target == input.target,
+        "bundle generation metadata differs from authenticated release input"
+    );
+    Ok(())
 }
 
 fn validate_substrate_receipt_tree(manifest: &ExternalContentManifestObject) -> anyhow::Result<()> {

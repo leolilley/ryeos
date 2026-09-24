@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-23T08:15:01Z:33b92f4fc12074fd948922986f5827a097cc22f9af123d63112513aaac5c302f:a4gUy0Z/WKDmnLzgfEhYxaKY3o6F/f2ciDlR8EYr/dSe0Lz2ijEs9Ybd2r7ae0iXCbj8KEwLYB2S3/Efd8biAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T23:00:26Z:a6be42d22143877a73c2e8739dab649ca4bb1660d019775633b2c7c585a5c8fa:ReaMyRdX+vgC8IKJ9G4XsH2SKdjIWuPdLQiw3hEmHATAHkYM5R6RPEGXdfHsPM2EPojqPTvLvjKZ6kc7P9YwDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: native-build
-version: "1.0.1"
-description: Materialize one exact non-core bundle and all of its owned native payloads into a fresh captured product root.
+version: "1.0.2"
+description: Materialize one exact non-core bundle and all of its owned native payloads into a fresh captured product root, using RyeOS-verified payload ownership.
 executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -15,9 +15,13 @@ external_product_slots:
   - {id: static-link-inputs, relationship_ref: config:bundle-release/execution-tool-products, relationship: static_link_inputs_to_native_build_tool, kind: tree, mount_root: execution_runtime, mount: static-link-inputs}
 env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config_resolve:
+  type: strict_signed_project_bundle
+  bundle_name: bundle-release
+  config_path: bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/native-build.py"]
+  args: ["-I", "-B", {source_member: "lib/native-build.py"}]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

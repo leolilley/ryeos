@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:15:01Z:7e3a0506633f464c1c1d632bff1a37e77b77cf84123b79997a5e05f61d4cd56e:K/jmlDg5GQ1EqLm+pybjbnNdTehg9Pr/JCPCWSnW9kFxCmwNVRcOPU3Xc6AEu0xYU0M/hHqoTb5JtnMwZPcuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T10:50:14Z:771d4ea0bae63cf579bbeef3c0ffa87027dc01a4bd3dc41eb07f54b7e8d3d090:rrak28QQ4pTu3YTuS0XVPghS2FCTj1fUI46vCl1xr5JnIAq9NiK3chz/TKb8hrFSfRFxRJVdshJ2m/wbc8hYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: portable-signed-capture
 version: "1.0.0"
@@ -15,6 +15,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/signed-capture.py"]
+  args: ["-I", "-B", {source_member: "lib/signed-capture.py"}]
   input_data: "${params_json}"
   timeout_secs: 300

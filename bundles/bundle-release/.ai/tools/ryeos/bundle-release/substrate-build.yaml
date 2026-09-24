@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:15:01Z:81fd1e975743d0e5eb442ef34013eb743dd0f58cd2aecc73c34c3c81c34f2c4a:Y8vZYFAnJo0/rmUN5SGrMzPRsigcBDQ3knXRwSHwddH5LfPEwcp26F+asFrVQTjmotJyMGLarpqguAMsiohVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T10:50:14Z:1f51c086ec625e7970333653955837c086ae966e7f5377362cd19e46f1e49542:7YPu9n3zzwdGWZnEyRuFcZSEMumtb8DINaefoOkA5KHo6yGVMcpkzqFbwsarTY+6EmZdqFBcKASf3im79HLVCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-build
 version: "1.0.0"
@@ -14,6 +14,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/substrate-build.py"]
+  args: ["-I", "-B", {source_member: "lib/substrate-build.py"}]
   input_data: "${params_json}"
   timeout_secs: 60

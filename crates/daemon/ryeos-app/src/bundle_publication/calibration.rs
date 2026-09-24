@@ -8,9 +8,9 @@ use anyhow::{Context as _, bail};
 use ryeos_state::{objects::Attestation, signer::Signer};
 use serde::{Deserialize, Serialize};
 
-pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v1";
-pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v1";
-pub const AUTHORITY_CALIBRATION_POLICY: &str = "ryeos.bundle_publication_authority_calibration.v1";
+pub const AUTHORITY_CALIBRATION_SCHEMA: &str = "ryeos.bundle_publication_authority_calibration.v2";
+pub const AUTHORITY_CALIBRATION_CLAIM: &str = "bundle_publication_authority_calibration_v2";
+pub const AUTHORITY_CALIBRATION_POLICY: &str = "ryeos.bundle_publication_authority_calibration.v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +288,9 @@ impl CalibrationRecipeIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityCalibrationRecipes {
+    pub portable_build: CalibrationRecipeIdentity,
+    pub portable_capture: CalibrationRecipeIdentity,
+    pub portable_qualification: CalibrationRecipeIdentity,
     pub native_build: CalibrationRecipeIdentity,
     pub native_capture: CalibrationRecipeIdentity,
     pub native_qualification: CalibrationRecipeIdentity,
@@ -328,6 +331,7 @@ pub struct AuthorityCalibrationEvidence {
     pub node_signer_fingerprint: String,
     pub substrate_image_digest: String,
     pub substrate_protocol: u32,
+    pub portable: AuthorityCalibrationLane,
     pub native: AuthorityCalibrationLane,
     pub core_seed: AuthorityCalibrationLane,
     pub substrate: AuthorityCalibrationLane,
@@ -356,7 +360,13 @@ impl AuthorityCalibrationEvidence {
         if self.substrate_protocol == 0 {
             bail!("calibration substrate protocol must be nonzero");
         }
+        self.portable.validate("portable")?;
         self.native.validate("native")?;
+        if self.portable.qualification_attestation_hash
+            == self.native.qualification_attestation_hash
+        {
+            bail!("portable and native calibration must retain distinct qualifications");
+        }
         self.core_seed.validate("Core seed")?;
         self.substrate.validate("substrate")?;
         canonical_hash(
@@ -368,6 +378,18 @@ impl AuthorityCalibrationEvidence {
             &self.substrate_product_witness_signer_fingerprint,
         )?;
         for (label, identity) in [
+            (
+                "portable source build recipe",
+                &self.source_recipes.portable_build,
+            ),
+            (
+                "portable source capture recipe",
+                &self.source_recipes.portable_capture,
+            ),
+            (
+                "portable source qualification policy",
+                &self.source_recipes.portable_qualification,
+            ),
             (
                 "native source build recipe",
                 &self.source_recipes.native_build,
@@ -399,6 +421,12 @@ impl AuthorityCalibrationEvidence {
             (
                 "substrate source qualification policy",
                 &self.source_recipes.substrate_qualification,
+            ),
+            ("portable build recipe", &self.recipes.portable_build),
+            ("portable capture recipe", &self.recipes.portable_capture),
+            (
+                "portable qualification policy",
+                &self.recipes.portable_qualification,
             ),
             ("native build recipe", &self.recipes.native_build),
             ("native capture recipe", &self.recipes.native_capture),
@@ -670,12 +698,19 @@ mod tests {
             node_signer_fingerprint: fingerprint.clone(),
             substrate_image_digest: format!("sha256:{}", hash('e')),
             substrate_protocol: 1,
-            native: lane.clone(),
+            portable: lane.clone(),
+            native: AuthorityCalibrationLane {
+                qualification_attestation_hash: hash('8'),
+                ..lane.clone()
+            },
             core_seed: lane.clone(),
             substrate: lane,
             substrate_product_witness_hash: hash('f'),
             substrate_product_witness_signer_fingerprint: fingerprint.clone(),
             source_recipes: AuthorityCalibrationRecipes {
+                portable_build: source_recipe.clone(),
+                portable_capture: source_recipe.clone(),
+                portable_qualification: source_recipe.clone(),
                 native_build: source_recipe.clone(),
                 native_capture: source_recipe.clone(),
                 native_qualification: source_recipe.clone(),
@@ -686,6 +721,9 @@ mod tests {
                 substrate_qualification: source_recipe,
             },
             recipes: AuthorityCalibrationRecipes {
+                portable_build: recipe.clone(),
+                portable_capture: recipe.clone(),
+                portable_qualification: recipe.clone(),
                 native_build: recipe.clone(),
                 native_capture: recipe.clone(),
                 native_qualification: recipe.clone(),
@@ -708,6 +746,28 @@ mod tests {
         assert_eq!(
             AuthorityCalibrationEvidence::from_attestation(&attestation).unwrap(),
             evidence
+        );
+        let mut collapsed = evidence.clone();
+        collapsed.native = collapsed.portable.clone();
+        assert!(collapsed.validate().is_err());
+        let mut legacy = serde_json::to_value(&evidence).unwrap();
+        legacy["schema"] = serde_json::json!("ryeos.bundle_publication_authority_calibration.v1");
+        assert!(
+            serde_json::from_value::<AuthorityCalibrationEvidence>(legacy)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut incomplete = serde_json::to_value(&evidence).unwrap();
+        incomplete.as_object_mut().unwrap().remove("portable");
+        assert!(serde_json::from_value::<AuthorityCalibrationEvidence>(incomplete).is_err());
+        let mut incomplete_recipes = serde_json::to_value(&evidence).unwrap();
+        incomplete_recipes["source_recipes"]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_build");
+        assert!(
+            serde_json::from_value::<AuthorityCalibrationEvidence>(incomplete_recipes).is_err()
         );
         let mut changed = attestation.clone();
         changed.evidence["execution_environment"]["node_policy_generation_hash"] =

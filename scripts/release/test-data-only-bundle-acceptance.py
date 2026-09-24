@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Non-Cargo acceptance proof for a real data-only bundle release."""
+"""Focused data-only build/qualifier regressions, not live publication proof."""
 
 import json
 import io
+import copy
 import os
 from pathlib import Path
 import stat
@@ -19,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/fixtures/native-bundle-publication/central-auth-data-only-release.json"
 INSPECTOR = ROOT / "scripts/release/inspect-native-bundle-input.py"
 BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-build.py"
-QUALIFY = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-qualify.py"
+OWNERSHIP_CONFIG = ROOT / "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+QUALIFY = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/portable-qualify.py"
 GRAPH = ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/publish.yaml"
 
 
@@ -30,11 +32,11 @@ def materialize_execution_source(work: Path) -> None:
     shutil.copy2(ROOT / "scripts/release/bundle-payload-ownership.py", parser)
 
 
-def inspect_central_auth(bundle="central-auth"):
+def inspect_central_auth(bundle="central-auth", repository_root=ROOT):
     result = subprocess.run(
         [
             "/usr/bin/python3", str(INSPECTOR),
-            "--repository-root", str(ROOT),
+            "--repository-root", str(repository_root),
             "--bundle", bundle,
             "--source-snapshot-hash", "c" * 64,
             "--target", "portable",
@@ -45,6 +47,20 @@ def inspect_central_auth(bundle="central-auth"):
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def verified_ownership_fixture():
+    # Simulate the parsed, engine-verified Tool input. This does not test the
+    # engine's signature/trust resolution, which has its own focused checks.
+    signed = OWNERSHIP_CONFIG.read_text(encoding="utf-8")
+    return {
+        "value": yaml.safe_load(signed),
+        "source": {
+            "bundle_name": "bundle-release",
+            "config_path": "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml",
+            "signer_fingerprint": signed.splitlines()[0].rsplit(":", 1)[1],
+        },
+    }
 
 
 class DataOnlyBundleAcceptance(unittest.TestCase):
@@ -80,6 +96,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             materialize_execution_source(work)
+            (work / "scripts/release/bundle-payload-ownership.py").unlink()
             fake_bin = work / "bin"
             fake_bin.mkdir()
             cargo_marker = work / "cargo-was-invoked"
@@ -94,7 +111,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
             environment["RYEOS_CARGO_MARKER"] = str(cargo_marker)
             result = subprocess.run(
                 ["/usr/bin/python3", str(BUILD)],
-                input=json.dumps({"release_input": plan}),
+                input=json.dumps({"release_input": plan, "resolved_config": verified_ownership_fixture()}),
                 cwd=work,
                 env=environment,
                 capture_output=True,
@@ -137,12 +154,21 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
             evidence = io.StringIO()
             def realized_path(*parts):
                 return product if parts == ("/ryeos/realizations/native-bundle",) else Path(*parts)
+            # Explicit simulated admission for this verifier-unit regression.
+            # This host invocation does not prove node admission or isolation.
             with patch("pathlib.Path", side_effect=realized_path), patch("sys.stdin", io.StringIO("{}")), patch("sys.stdout", evidence), patch.dict(os.environ, {
-                "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([{"id": "subject", "manifest_hash": "c" * 64}]),
+                "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([
+                    {"id": "python", "manifest_hash": "d" * 64},
+                    {"id": "subject", "manifest_hash": "c" * 64},
+                ]),
                 "RYE_THREAD_ID": "test-qualification",
             }):
                 runpy.run_path(str(QUALIFY), run_name="__main__")
-            self.assertEqual(json.loads(evidence.getvalue())["claims"], ["native_bundle_release_checks_v1"])
+            qualification = json.loads(evidence.getvalue())
+            self.assertEqual(qualification["claims"], ["portable_bundle_release_checks_v1"])
+            self.assertEqual(qualification["subject_manifest_hash"], "c" * 64)
+            self.assertEqual(qualification["probe_evidence"]["binary_count"], 0)
+            self.assertIn("no-native-payloads", qualification["probe_evidence"]["checks"])
 
     def test_finalize_metadata_expressions_resolve_from_inspection_envelope(self):
         plan = inspect_central_auth()
@@ -173,13 +199,18 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
             self.assertEqual(value, expected[field])
 
     def test_source_only_manifest_is_materialized_without_prebuilt_manifest(self):
-        plan = inspect_central_auth("bundle-release")
-        self.assertFalse((ROOT / "bundles/bundle-release/.ai/manifest.yaml").exists())
         with tempfile.TemporaryDirectory() as directory:
-            materialize_execution_source(Path(directory))
+            work = Path(directory)
+            materialize_execution_source(work)
+            # Local population may legitimately create the repository manifest.
+            # Establish source-only state solely in our disposable fixture.
+            manifest = work / "bundles/bundle-release/.ai/manifest.yaml"
+            manifest.unlink(missing_ok=True)
+            self.assertFalse(manifest.exists())
+            plan = inspect_central_auth("bundle-release", repository_root=work)
             result = subprocess.run(
                 ["/usr/bin/python3", str(BUILD)],
-                input=json.dumps({"release_input": plan}), cwd=directory,
+                input=json.dumps({"release_input": plan, "resolved_config": verified_ownership_fixture()}), cwd=directory,
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -193,17 +224,51 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
                 ["/usr/bin/python3", str(BUILD)],
-                input=json.dumps({"release_input": plan}), cwd=directory,
+                input=json.dumps({"release_input": plan, "resolved_config": verified_ownership_fixture()}), cwd=directory,
                 capture_output=True, text=True,
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("release input shape changed", result.stderr)
 
+    def test_build_requires_engine_resolved_ownership_and_exact_projection(self):
+        plan = inspect_central_auth()
+        verified = verified_ownership_fixture()
+        forged = copy.deepcopy(plan)
+        forged["payloads"] = [{
+            "bundle": "central-auth", "binary": "forged", "cargo_package": "forged",
+            "build_class": "release", "bundle_sets": ["release-authority"],
+        }]
+        cases = [
+            ({"release_input": plan}, "verified ownership resolution required"),
+            ({"release_input": forged, "resolved_config": verified}, "exact ownership selection"),
+            ({"release_input": plan, "resolved_config": {**verified, "source": {
+                **verified["source"], "bundle_name": "another-bundle",
+            }}}, "another source"),
+            ({"release_input": plan, "resolved_config": {**verified, "value": {
+                **verified["value"], "payload_ownership": {
+                    **verified["value"]["payload_ownership"],
+                    "bundles": verified["value"]["payload_ownership"]["bundles"] + [{
+                        "bundle_name": "zz-data-only", "bundle_sets": ["release-authority"],
+                        "payloads": [],
+                    }],
+                },
+            }}}, "data-only bundles must be absent"),
+        ]
+        for request, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(
+                    ["/usr/bin/python3", "-I", "-B", str(BUILD)],
+                    input=json.dumps(request), cwd=directory,
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_qualification_has_distinct_truthful_captured_tree_checks(self):
         source = QUALIFY.read_text(encoding="utf-8")
         for check in self.case["qualification_checks"]:
             self.assertIn(check, source)
-        self.assertIn("native_bundle_release_checks_v1", source)
+        self.assertIn("portable_bundle_release_checks_v1", source)
         self.assertNotIn("portable-data-only-plan", source)
 
     def test_data_only_uses_the_same_signing_and_remote_catalog_flow(self):

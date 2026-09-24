@@ -479,4 +479,16 @@ mod tests {
         };
         assert!(request.validate().is_err());
     }
+
+    #[test]
+    fn core_manifest_requires_exact_unsigned_source_bytes() {
+        let signed = include_str!("../../../../../bundles/core/.ai/manifest.yaml");
+        let body = signed.split_once('\n').unwrap().1;
+        require_source_core_manifest(signed.as_bytes(), body).unwrap();
+        let equivalent = serde_json::to_string(
+            &serde_yaml::from_str::<serde_json::Value>(body).unwrap(),
+        )
+        .unwrap();
+        assert!(require_source_core_manifest(signed.as_bytes(), &equivalent).is_err());
+    }
 }

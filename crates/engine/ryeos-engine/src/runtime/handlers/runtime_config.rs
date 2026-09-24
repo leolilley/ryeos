@@ -28,6 +28,14 @@ pub const KEY: &str = "config";
 pub enum RuntimeArgument {
     Template(String),
     Literal(LiteralRuntimeArgument),
+    SourceMember(SourceMemberRuntimeArgument),
+}
+
+/// A member of this execution's admitted source closure, never a host path.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMemberRuntimeArgument {
+    pub source_member: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

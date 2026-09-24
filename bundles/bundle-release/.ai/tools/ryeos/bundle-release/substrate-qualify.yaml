@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:15:01Z:722be898391f3e0806aa4b036df1151c77146c4ba51a15830887880d250472db:Ayn1UMuXesoMpxHNcNFaV0ddjsY+qpS0sAiiLNamFXUtvlX8psEW1CP8+Vf976+Aqi5XCGAoXHGf5s7yVLp6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T10:50:14Z:23d34ee71c52728851c9d4d6d43433ed34010f3e5b1a744162e347a30c20c95d:g45rpJ7NPPkrfDQRBGeHahnAiiNgB5WoN7MPNUONa24ZormqVnNQpFzizSo1mZ3+BQl/EopVrwNKZEEbMIIDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: substrate-qualify
 version: "1.0.0"
@@ -20,6 +20,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/substrate-qualify.py"]
+  args: ["-I", "-B", {source_member: "lib/substrate-qualify.py"}]
   input_data: "${params_json}"
   timeout_secs: 60

@@ -1154,6 +1154,33 @@ impl Engine {
             .map(|bundle| bundle.canonical_root.as_path())
     }
 
+    /// Resolve one exact publisher-owned Config from a retained project
+    /// snapshot. This is deliberately separate from merged config resolution:
+    /// release input ownership must not be changed by an overlay or a live
+    /// checkout read. The registered source bundle anchors the signer.
+    pub fn load_strict_signed_project_bundle_config(
+        &self,
+        project_root: &Path,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        bundle_name: &str,
+        config_path: &str,
+    ) -> Result<crate::config_loading::StrictSignedProjectBundleConfig, EngineError> {
+        let registered_root = self.registered_bundle_root(bundle_name).ok_or_else(|| {
+            EngineError::InvalidRuntimeConfig {
+                path: config_path.to_owned(),
+                reason: format!("source bundle `{bundle_name}` is not registered"),
+            }
+        })?;
+        crate::config_loading::load_strict_signed_project_bundle_config(
+            project_root,
+            project_content,
+            &self.node_trust_store,
+            registered_root,
+            bundle_name,
+            config_path,
+        )
+    }
+
     /// Stable identity for this engine's complete admitted installed-bundle
     /// generation. Executor verification caches bind to the whole generation,
     /// rather than only the root that happened to publish a matching binary,

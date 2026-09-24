@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-23T08:15:01Z:17e3636d156ac816029940901ffcff525eb3ded9bf2ebbc4f8b03cf0dd9ac8ac:fFWYS3iz2Rt7FUJR3Al8VSGkRG/zam/VrGfYPwy6I/qUV+bfXgWEuJ5VAfIV9dTkd4EttwYJMxbU4//EGK14Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T23:00:26Z:b28c577edd72dd653537e5ba41549e1042482e217667f29f197014e411f4575e:gBsSgMese3GilDDQf7LZ6eDN1kvTgxdklmQGK5yjgWGw0jkiFnMjizzoaPqNUiUC3OzOteYAquRJbGDh3BnoBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-build
-version: "1.0.1"
-description: Materialize the initial Core bundle from pinned source into a fresh captured product root.
+version: "1.0.2"
+description: Materialize the initial Core bundle from pinned source into a fresh captured product root, using RyeOS-verified payload ownership.
 executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -15,9 +15,13 @@ external_product_slots:
   - {id: static-link-inputs, relationship_ref: config:bundle-release/execution-tool-products, relationship: static_link_inputs_to_core_seed_build_tool, kind: tree, mount_root: execution_runtime, mount: static-link-inputs}
 env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config_resolve:
+  type: strict_signed_project_bundle
+  bundle_name: bundle-release
+  config_path: bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/core-seed-build.py"]
+  args: ["-I", "-B", {source_member: "lib/core-seed-build.py"}]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

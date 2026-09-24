@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T04:18:07Z:fd8dfbb30c6bc411b0a9317434a05caf563fbb1260edde433ae549b4b22999ed:JB4rX3sPmcRKI/vv+ttE6kgLJipOQ0A4x48a+9vzd4u/nBKXHRPQngI57TbnHxEX7O9upNk50j0OFZEhV+rgDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:24:35Z:df730c762c2aa6cb104cb2397b5f809366c2e1026867d3f37332ebaee687ed97:Bw2CYn2WusBG++F+MBA4SXrJJa31jpYej53LEf2fWHsBJ73wj0lL4Jujt9JDxR3sJg6Tz1WgP40etEBQrHkRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: bundle-release
 version: "1.0.0"
 description: Purpose-separated portable authority-calibration producer.
@@ -32,6 +32,6 @@ product_relationships:
       qualification: {policy_ref: null, required_claims: []}
     - name: portable_bundle_to_signed_capture_tool
       producer: {canonical_ref: graph:ryeos/bundle-release/portable-build, recipe_binding: product_recipe, product_name: portable_bundle, parameters: {}}
-      consumer: {canonical_ref: tool:ryeos/bundle-release/signed-capture, declaration_id: unsigned_bundle}
+      consumer: {canonical_ref: tool:ryeos/bundle-release/portable-signed-capture, declaration_id: unsigned_bundle}
       required_product: {shape: tree, storage: content, bounds: *bounds}
       qualification: {policy_ref: null, required_claims: []}

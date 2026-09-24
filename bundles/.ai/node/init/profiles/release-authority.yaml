@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T04:20:49Z:807c65b367420158195a11cf3a93cfa3b7427ae84eed8faae5785f4ed0aba79b:A/+COEDZcM5/aDv91wo5yIv0Y3OGFUWkooEC7RmgzmHTuDK5yhmkOmKZC1G0QrK/4Rvvh+kOofNXsscuuxjjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:33cc53d76a072ed8dfe4ef6704a11bee86b45de45e8521dbfb9876eabe47b181:6rFr9aACGzbfj30tpPvkFfQT3C36n6SMj6y/fwirGRyZAmlAWfSH+PdyRXGdmjhnd7E60S5jSZ8I/o5o7VLCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -14,7 +14,7 @@ exact_bundles:
   - web
 policies:
   bundle_publication:
-    schema: 1
+    schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
 
@@ -98,6 +98,7 @@ policies:
         - ryeos.execute.config.bundle-release/execution-environment-products
         - ryeos.execute.config.bundle-release/execution-tool-products
         - ryeos.execute.config.bundle-release/native-build-products
+        - ryeos.execute.config.bundle-release/native-qualification
         - ryeos.execute.config.bundle-release/portable-build-products
         - ryeos.execute.config.bundle-release/portable-qualification
         - ryeos.execute.config.bundle-release/portable-signed-capture-products

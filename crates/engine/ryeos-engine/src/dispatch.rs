@@ -189,6 +189,9 @@ impl DebugCapture {
                     PlanArgument::AdmittedSourceEntry => {
                         "<unbound-admitted-source-entry>".to_owned()
                     }
+                    PlanArgument::AdmittedSourceMember { .. } => {
+                        "<unbound-admitted-source-member>".to_owned()
+                    }
                 })
                 .collect(),
             cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
@@ -251,10 +254,13 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         .iter()
         .map(|argument| match argument {
             PlanArgument::Literal { value } => Ok(value.clone()),
-            PlanArgument::AdmittedSourceEntry => Err(EngineError::InvalidRuntimeConfig {
-                path: "config.args".to_owned(),
-                reason: "admitted source entry was not bound before subprocess dispatch".to_owned(),
-            }),
+            PlanArgument::AdmittedSourceEntry | PlanArgument::AdmittedSourceMember { .. } => {
+                Err(EngineError::InvalidRuntimeConfig {
+                    path: "config.args".to_owned(),
+                    reason: "admitted source entry was not bound before subprocess dispatch"
+                        .to_owned(),
+                })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1578,6 +1584,24 @@ mod tests {
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Completed);
         assert!(completion.result.is_none());
+    }
+
+    #[test]
+    fn source_member_must_be_bound_before_dispatch() {
+        let spec = PlanSubprocessSpec {
+            cmd: "/bin/echo".into(),
+            verified_command: None,
+            args: vec![PlanArgument::AdmittedSourceMember {
+                relative_path: "lib/run.py".into(),
+            }],
+            cwd: None,
+            env: HashMap::new(),
+            env_sources: HashMap::new(),
+            stdin: None,
+            timeout_secs: 60,
+            execution: Default::default(),
+        };
+        assert!(spec_to_request(&spec).is_err());
     }
 
     #[test]

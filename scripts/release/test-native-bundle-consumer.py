@@ -57,7 +57,7 @@ class ConsumerUpdateContract(unittest.TestCase):
             if section is None:
                 continue
             checked += 1
-            self.assertEqual(section, {"schema": 1, "catalogs": []}, str(path))
+            self.assertEqual(section, {"schema": 2, "catalogs": []}, str(path))
             envelope, body = path.read_bytes().split(b"\n", 1)
             self.assertTrue(envelope.startswith(b"# ryeos:signed:"), str(path))
             self.assertEqual(envelope.split(b":")[-3].decode(), hashlib.sha256(body).hexdigest(), str(path))

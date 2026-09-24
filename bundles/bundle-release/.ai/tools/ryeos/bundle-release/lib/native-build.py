@@ -1,10 +1,80 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T08:19:54Z:6c08992e405e76e7027327494e6ef3d2df7a63fccb1056d3aadc9caab7eaaeae:WMATbv4SyB6RuZ97EJ8Wq44e8WMmxQJxrVYIQ1p5+Ve7YaCCrQhj5mhprtY3SRp4aKLAuO943VJBlXtZEcoeBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T00:12:06Z:6eff4dac4e0f6f3e4150a83070460d670a4eddabbaf6b77ca39508de94cb2242:vFj4FAU0Dgjf61a16eK9Lw+X1Mbgezrs2t9z4An3k4ZuSPesCiyNFfARWk70CjF4JTKE8fgWMoXgQfaakaPZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Build one exact non-core bundle selected by the ownership contract."""
 import hashlib, importlib.util, json, os, pathlib, re, resource, shutil, stat, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 
 def fail(message): raise ValueError(message)
+
+def verified_ownership_projection(resolved):
+    # The signed Tool declaration makes RyeOS resolve this Config under its
+    # pinned source and publisher authority. This value is injected at launch,
+    # replacing any caller-supplied resolved_config, even for a direct Tool call.
+    if not isinstance(resolved, dict) or set(resolved) != {"value", "source"}:
+        fail("verified ownership resolution is required")
+    source = resolved["source"]
+    if (not isinstance(source, dict)
+            or set(source) != {"bundle_name", "config_path", "signer_fingerprint"}
+            or source["bundle_name"] != "bundle-release"
+            or source["config_path"] != "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml"
+            or not isinstance(source["signer_fingerprint"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source["signer_fingerprint"])):
+        fail("ownership resolution came from another source")
+    document = resolved["value"]
+    if (not isinstance(document, dict)
+            or set(document) != {"category", "version", "description", "payload_ownership"}
+            or document["category"] != "bundle-release"
+            or document["version"] != "1.0.0"
+            or not isinstance(document["description"], str)
+            or not document["description"]):
+        fail("verified ownership Config has an invalid shape")
+    ownership = document["payload_ownership"]
+    if (not isinstance(ownership, dict)
+            or set(ownership) != {"schema", "kind", "bundles"}
+            or ownership["schema"] != "ryeos.bundle_payload_ownership.v1"
+            or ownership["kind"] != "bundle_payload_ownership"):
+        fail("verified ownership contract has an invalid shape")
+    bundles = ownership["bundles"]
+    if not isinstance(bundles, list) or len(bundles) > 1024:
+        fail("verified ownership bundles exceed their bound")
+    canonical = json.dumps(ownership, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if len(canonical.encode("utf-8")) > 64 * 1024:
+        fail("verified ownership contract exceeds its wire bound")
+    name = re.compile(r"[a-z0-9_-]{1,64}\Z")
+    records, seen_binaries, previous_bundle = [], set(), None
+    for bundle in bundles:
+        if not isinstance(bundle, dict) or set(bundle) != {"bundle_name", "bundle_sets", "payloads"}:
+            fail("verified ownership bundle has an invalid shape")
+        bundle_name, sets, payloads = bundle["bundle_name"], bundle["bundle_sets"], bundle["payloads"]
+        if (not isinstance(bundle_name, str) or not name.fullmatch(bundle_name)
+                or previous_bundle is not None and bundle_name <= previous_bundle):
+            fail("verified ownership bundle names are not unique and sorted")
+        previous_bundle = bundle_name
+        if (not isinstance(sets, list) or not sets
+                or any(not isinstance(item, str) or not name.fullmatch(item) for item in sets)
+                or sets != sorted(set(sets))):
+            fail("verified ownership bundle sets are not unique and sorted")
+        if not isinstance(payloads, list) or not payloads:
+            fail("data-only bundles must be absent from ownership")
+        previous_binary = None
+        for payload in payloads:
+            if not isinstance(payload, dict) or set(payload) != {"binary", "cargo_package", "build_class"}:
+                fail("verified owned payload has an invalid shape")
+            binary, package, build_class = payload["binary"], payload["cargo_package"], payload["build_class"]
+            if (not isinstance(binary, str) or not name.fullmatch(binary)
+                    or previous_binary is not None and binary <= previous_binary
+                    or binary in seen_binaries):
+                fail("verified owned binaries are not globally unique and sorted")
+            if (not isinstance(package, str) or not name.fullmatch(package)
+                    or build_class not in {"release", "static"}):
+                fail("verified owned payload has invalid package or class")
+            previous_binary = binary
+            seen_binaries.add(binary)
+            records.append({"bundle":bundle_name,"binary":binary,"cargo_package":package,
+                            "build_class":build_class,"bundle_sets":sets})
+            if len(records) > 256:
+                fail("verified owned payloads exceed their bound")
+    return records, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 # This helper is part of the authenticated Tool source closure, not project code.
 elf_spec = importlib.util.spec_from_file_location(
@@ -12,7 +82,8 @@ elf_spec = importlib.util.spec_from_file_location(
 release_elf = importlib.util.module_from_spec(elf_spec)
 elf_spec.loader.exec_module(release_elf)
 request = json.load(sys.stdin)
-if set(request) != {"release_input"}: fail("closed build request required")
+if not isinstance(request, dict) or set(request) != {"release_input", "resolved_config"}:
+    fail("closed build request and verified ownership resolution required")
 value = request["release_input"]
 required = {"schema","project_path","bundle_name","authored_manifest","source_snapshot_hash","predecessor_generation_hash",
             "target","build_profile","payload_ownership_item_ref","payload_ownership_content_hash",
@@ -24,11 +95,7 @@ if value["build_profile"] != "release" or not value["clean_output_required"] or 
 # Source reads are rooted in the admitted pinned execution generation. The
 # original path remains provenance only and is never ambient build authority.
 root = pathlib.Path.cwd().resolve(strict=True)
-parser_path = root / "scripts/release/bundle-payload-ownership.py"
-spec = importlib.util.spec_from_file_location("bundle_payload_ownership", parser_path)
-ownership_parser = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ownership_parser)
-ownership_records, ownership_identity = ownership_parser.load(root)
+ownership_records, ownership_identity = verified_ownership_projection(request["resolved_config"])
 if value["payload_ownership_item_ref"] != "config:bundle-release/payload-ownership":
     fail("ownership config item reference changed")
 if ownership_identity != value["payload_ownership_content_hash"]:
@@ -69,8 +136,9 @@ for directory, directories, files in os.walk(bundle_root, followlinks=False):
         if stat.S_ISLNK(metadata.st_mode): fail(f"bundle source contains a symbolic link: {source_entry.relative_to(bundle_root)}")
         if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
             fail(f"bundle source contains a special file: {source_entry.relative_to(bundle_root)}")
-        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
-            fail(f"bundle source contains a hard-linked file: {source_entry.relative_to(bundle_root)}")
+# The admitted CoW project hard-links verified content-cache inodes into its
+# lower tree. A source file's link count therefore does not describe authored
+# links; shutil.copytree creates a private output inode below.
 shutil.copytree(bundle_root, product, symlinks=False, ignore=exclude_generated)
 manifest = product / ".ai/manifest.yaml"
 authored_manifest = value["authored_manifest"]

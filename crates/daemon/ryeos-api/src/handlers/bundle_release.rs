@@ -41,6 +41,25 @@ const CATALOG_UPLOAD_SERVICE: &str = "service:bundle-catalog/upload";
 const CATALOG_PUBLISH_SERVICE: &str = "service:bundle-catalog/publish";
 const CATALOG_BLOB_CHUNK_BYTES: usize = 512 * 1024;
 const CATALOG_INLINE_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const PAYLOAD_OWNERSHIP_SOURCE_PATH: &str =
+    "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml";
+
+/// One exact signed source item, not a merged project/node Config overlay.
+/// The execution owner uses this same item for direct Tool admission.
+fn exact_release_payload_ownership(
+    source: &ReleaseSourceGeneration,
+    state: &AppState,
+) -> anyhow::Result<ryeos_bundle_publication_contract::BundlePayloadOwnership> {
+    let verified = state.engine.load_strict_signed_project_bundle_config(
+        source.root(),
+        source.project_content(),
+        "bundle-release",
+        PAYLOAD_OWNERSHIP_SOURCE_PATH,
+    )?;
+    let item: ryeos_app::bundle_publication::admitted_build::PayloadOwnershipConfigItem =
+        serde_json::from_value(verified.value)?;
+    item.into_current()
+}
 
 async fn resolve_release_source_generation(
     project_identity: &Path,
@@ -150,8 +169,10 @@ struct AuthorityMeasureRequest {
     publisher_fingerprint: String,
     authorized_uploaders: Vec<String>,
     trust_epoch: u64,
-    qualification_owner_principal: String,
-    qualification_attestation_hash: String,
+    portable_qualification_owner_principal: String,
+    portable_qualification_attestation_hash: String,
+    native_qualification_owner_principal: String,
+    native_qualification_attestation_hash: String,
     substrate_qualification_owner_principal: String,
     substrate_qualification_attestation_hash: String,
     core_seed_qualification_owner_principal: String,
@@ -271,9 +292,13 @@ fn authority_measure_handler(
             "authority calibration measured another installed substrate"
         );
         anyhow::ensure!(
-            calibration.native.owner_principal == request.qualification_owner_principal
+            calibration.portable.owner_principal == request.portable_qualification_owner_principal
+                && calibration.portable.qualification_attestation_hash
+                    == request.portable_qualification_attestation_hash
+                && calibration.native.owner_principal
+                    == request.native_qualification_owner_principal
                 && calibration.native.qualification_attestation_hash
-                    == request.qualification_attestation_hash
+                    == request.native_qualification_attestation_hash
                 && calibration.core_seed.owner_principal
                     == request.core_seed_qualification_owner_principal
                 && calibration.core_seed.qualification_attestation_hash
@@ -293,14 +318,23 @@ fn authority_measure_handler(
             .node_policy
             .require::<ryeos_app::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
             .closure_limits()?;
-        let measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+        let portable_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
             &state,
             &context,
             &authority,
             &guard,
             limits,
-            &request.qualification_owner_principal,
-            &request.qualification_attestation_hash,
+            &request.portable_qualification_owner_principal,
+            &request.portable_qualification_attestation_hash,
+        )?;
+        let native_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
+            &state,
+            &context,
+            &authority,
+            &guard,
+            limits,
+            &request.native_qualification_owner_principal,
+            &request.native_qualification_attestation_hash,
         )?;
         let substrate_measured = ryeos_app::operator_external_content::product_qualification::measure_current_qualification_authority(
             &state,
@@ -321,34 +355,162 @@ fn authority_measure_handler(
             &request.core_seed_qualification_attestation_hash,
         )?;
         anyhow::ensure!(
-            measured.qualification_policy.policy.verifier_ref
-                != substrate_measured.qualification_policy.policy.verifier_ref
-                && measured.qualification_policy.policy.verifier_ref
-                    != core_seed_measured.qualification_policy.policy.verifier_ref
-                && substrate_measured.qualification_policy.policy.verifier_ref
-                    != core_seed_measured.qualification_policy.policy.verifier_ref,
-            "bundle, Core seed, and substrate qualification must use distinct verifiers"
+            [
+                &portable_measured.qualification_policy.policy.verifier_ref,
+                &native_measured.qualification_policy.policy.verifier_ref,
+                &core_seed_measured.qualification_policy.policy.verifier_ref,
+                &substrate_measured.qualification_policy.policy.verifier_ref,
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+                == 4,
+            "portable, native, Core seed, and substrate qualification must use distinct verifiers"
         );
         anyhow::ensure!(
-            substrate_measured.required_qualification_claims == ["substrate_release_checks_v1"],
+            portable_measured.qualification_policy.policy.verifier_ref
+                == ryeos_app::bundle_publication::recipe::PORTABLE_QUALIFIER
+                && portable_measured.qualification_policy.canonical_ref
+                    == "config:bundle-release/portable-qualification"
+                && portable_measured.qualification_policy.raw_content_digest
+                    == calibration
+                        .recipes
+                        .portable_qualification
+                        .raw_content_digest
+                && portable_measured.required_qualification_claims
+                    == ["portable_bundle_release_checks_v1"],
+            "portable qualification must prove the closed portable release claim with its exact verifier"
+        );
+        anyhow::ensure!(
+            native_measured.qualification_policy.policy.verifier_ref == NATIVE_QUALIFY_TOOL_REF
+                && native_measured.qualification_policy.canonical_ref
+                    == "config:bundle-release/native-qualification"
+                && native_measured.qualification_policy.raw_content_digest
+                    == calibration.recipes.native_qualification.raw_content_digest
+                && native_measured.required_qualification_claims
+                    == ["native_bundle_release_checks_v1"],
+            "native qualification must prove the closed native release claim with its exact verifier"
+        );
+        anyhow::ensure!(
+            substrate_measured.qualification_policy.policy.verifier_ref
+                == SUBSTRATE_QUALIFY_TOOL_REF
+                && substrate_measured.qualification_policy.canonical_ref
+                    == "config:bundle-release/substrate-qualification"
+                && substrate_measured.qualification_policy.raw_content_digest
+                    == calibration
+                        .recipes
+                        .substrate_qualification
+                        .raw_content_digest
+                && substrate_measured.required_qualification_claims
+                    == ["substrate_release_checks_v1"],
             "substrate qualification must prove the closed substrate release claim"
         );
         anyhow::ensure!(
-            core_seed_measured.required_qualification_claims
-                == [ryeos_app::bundle_publication::core_seed::QUALIFICATION_CLAIM],
+            core_seed_measured.qualification_policy.policy.verifier_ref
+                == ryeos_app::bundle_publication::core_seed::QUALIFIER
+                && core_seed_measured.qualification_policy.canonical_ref
+                    == "config:bundle-release/core-seed-qualification"
+                && core_seed_measured.qualification_policy.raw_content_digest
+                    == calibration
+                        .recipes
+                        .core_seed_qualification
+                        .raw_content_digest
+                && core_seed_measured.required_qualification_claims
+                    == [ryeos_app::bundle_publication::core_seed::QUALIFICATION_CLAIM],
             "Core seed qualification must prove the closed Core seed claim"
         );
         anyhow::ensure!(
-            measured.qualification_signer_public_key
-                == core_seed_measured.qualification_signer_public_key
-                && measured.qualification_signer_public_key
+            portable_measured.qualification_signer_public_key
+                == native_measured.qualification_signer_public_key
+                && portable_measured.qualification_signer_fingerprint
+                    == native_measured.qualification_signer_fingerprint
+                && portable_measured.qualification_signer_public_key
+                    == core_seed_measured.qualification_signer_public_key
+                && portable_measured.qualification_signer_public_key
                     == substrate_measured.qualification_signer_public_key
-                && measured.qualification_signer_fingerprint
+                && portable_measured.qualification_signer_fingerprint
                     == core_seed_measured.qualification_signer_fingerprint
-                && measured.qualification_signer_fingerprint
+                && portable_measured.qualification_signer_fingerprint
                     == substrate_measured.qualification_signer_fingerprint,
-            "bundle, Core seed, and substrate qualification must use one measured signer"
+            "portable, native, Core seed, and substrate qualification must use one measured signer"
         );
+        let cas = authority.cas_store()?;
+        for (
+            measured,
+            qualification_hash,
+            recipe,
+            recipe_ref,
+            product_name,
+            producer_ref,
+            expected_bundle,
+            expected_probe_schema,
+            requires_binary,
+        ) in [
+            (
+                &portable_measured,
+                &request.portable_qualification_attestation_hash,
+                &calibration.recipes.portable_capture,
+                ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_RECIPE_REF,
+                "signed_portable_bundle",
+                ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH,
+                "bundle-release",
+                "ryeos.portable_bundle_qualification.v1",
+                false,
+            ),
+            (
+                &native_measured,
+                &request.native_qualification_attestation_hash,
+                &calibration.recipes.native_capture,
+                ryeos_app::bundle_publication::recipe::CAPTURE_RECIPE_REF,
+                "signed_native_bundle",
+                ryeos_app::bundle_publication::recipe::CAPTURE_GRAPH,
+                "web",
+                "ryeos.native_bundle_qualification.v1",
+                true,
+            ),
+        ] {
+            let qualification = ryeos_state::objects::Attestation::from_value(
+                &cas.get_object(qualification_hash)?
+                    .context("calibrated bundle qualification is absent")?,
+            )?;
+            let qualification_evidence = ryeos_state::external_content::products::qualification::ProductQualificationEvidence::verify_attestation_for_owner(
+                &qualification,
+                state.identity.verifying_key(),
+                &measured.qualified_product_owner_principal,
+            )?;
+            let probe = &qualification_evidence.result.probe_evidence;
+            anyhow::ensure!(
+                qualification_evidence.product_witness_hash
+                    == measured.qualified_product_witness_hash
+                    && probe["schema"] == expected_probe_schema
+                    && probe["bundle_name"] == expected_bundle
+                    && probe["binary_count"]
+                        .as_u64()
+                        .is_some_and(|count| if requires_binary {
+                            count > 0
+                        } else {
+                            count == 0
+                        }),
+                "calibration qualification does not prove the exact portable or native binary-owning bundle"
+            );
+            let witness = ryeos_state::objects::Attestation::from_value(
+                &cas.get_object(&measured.qualified_product_witness_hash)?
+                    .context("calibrated signed bundle witness is absent")?,
+            )?;
+            let captured = ryeos_state::external_content::products::ProductCaptureEvidence::verify_attestation_for_owner(
+                &witness,
+                state.identity.verifying_key(),
+                &measured.qualified_product_owner_principal,
+            )?;
+            captured.recipe_purpose.require_authority_calibration()?;
+            anyhow::ensure!(
+                captured.recipe_ref == recipe_ref
+                    && captured.recipe_raw_content_digest == recipe.raw_content_digest
+                    && captured.declaration.name == product_name
+                    && captured.root_producer.canonical_ref == producer_ref,
+                "calibration qualification does not bind the exact signed bundle capture lane"
+            );
+        }
         anyhow::ensure!(
             request.substrate_build_witness_hash
                 == substrate_measured.qualified_product_witness_hash,
@@ -384,7 +546,7 @@ fn authority_measure_handler(
             "substrate build witness owner differs from qualification testimony"
         );
         let candidate = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "catalogs": [{
                 "namespace": request.catalog_namespace,
                 "publisher_fingerprint": request.publisher_fingerprint,
@@ -397,12 +559,16 @@ fn authority_measure_handler(
                 "frozen": false,
                 "calibration_run_attestation_hash": request.calibration_run_attestation_hash,
                 "calibration_execution_environment": calibration.execution_environment,
-                "qualification_signer_public_key": measured.qualification_signer_public_key,
-                "qualification_signer_fingerprint": measured.qualification_signer_fingerprint,
-                "qualification_policy": measured.qualification_policy,
-                "qualification_verifier_effective_definition_digest": measured.qualification_verifier_effective_definition_digest,
-                "qualification_verifier_artifact_identity": measured.qualification_verifier_artifact_identity,
-                "required_qualification_claims": measured.required_qualification_claims,
+                "qualification_signer_public_key": portable_measured.qualification_signer_public_key,
+                "qualification_signer_fingerprint": portable_measured.qualification_signer_fingerprint,
+                "portable_qualification_policy": portable_measured.qualification_policy,
+                "portable_qualification_verifier_effective_definition_digest": portable_measured.qualification_verifier_effective_definition_digest,
+                "portable_qualification_verifier_artifact_identity": portable_measured.qualification_verifier_artifact_identity,
+                "required_portable_qualification_claims": portable_measured.required_qualification_claims,
+                "native_qualification_policy": native_measured.qualification_policy,
+                "native_qualification_verifier_effective_definition_digest": native_measured.qualification_verifier_effective_definition_digest,
+                "native_qualification_verifier_artifact_identity": native_measured.qualification_verifier_artifact_identity,
+                "required_native_qualification_claims": native_measured.required_qualification_claims,
                 "core_seed_qualification_policy": core_seed_measured.qualification_policy,
                 "core_seed_qualification_verifier_effective_definition_digest": core_seed_measured.qualification_verifier_effective_definition_digest,
                 "core_seed_qualification_verifier_artifact_identity": core_seed_measured.qualification_verifier_artifact_identity,
@@ -421,11 +587,12 @@ fn authority_measure_handler(
             serde_json::from_value(candidate.clone())?;
         policy.validate()?;
         Ok(json!({
-            "schema": "ryeos.bundle_publication_authority_measurement.v1",
+            "schema": "ryeos.bundle_publication_authority_measurement.v2",
             "calibration_run_attestation_hash": request.calibration_run_attestation_hash,
             "bundle_publication_policy": candidate,
             "bundle_publication_policy_section_digest": policy.section_digest()?,
-            "qualification_attestation_hash": request.qualification_attestation_hash,
+            "portable_qualification_attestation_hash": request.portable_qualification_attestation_hash,
+            "native_qualification_attestation_hash": request.native_qualification_attestation_hash,
             "substrate_qualification_attestation_hash": request.substrate_qualification_attestation_hash,
             "core_seed_qualification_attestation_hash": request.core_seed_qualification_attestation_hash,
             "substrate_build_witness_hash": request.substrate_build_witness_hash,
@@ -450,11 +617,17 @@ fn expected_calibration_recipes(
         })
     };
     Ok(AuthorityCalibrationRecipes {
-        native_build: identity("calibration-portable-build-products.yaml")?,
-        native_capture: identity("calibration-portable-capture-products.yaml")?,
-        native_qualification: qualification_recipe_identity(
+        portable_build: identity("calibration-portable-build-products.yaml")?,
+        portable_capture: identity("calibration-portable-capture-products.yaml")?,
+        portable_qualification: qualification_recipe_identity(
             source_generation,
             "portable-qualification.yaml",
+        )?,
+        native_build: identity("calibration-native-build-products.yaml")?,
+        native_capture: identity("calibration-native-capture-products.yaml")?,
+        native_qualification: qualification_recipe_identity(
+            source_generation,
+            "native-qualification.yaml",
         )?,
         core_seed_build: identity("calibration-core-build-products.yaml")?,
         core_seed_capture: identity("calibration-core-capture-products.yaml")?,
@@ -1267,7 +1440,7 @@ async fn run_authority_calibration(
 ) -> anyhow::Result<ryeos_app::bundle_publication::calibration::AuthorityCalibrationResult> {
     use ryeos_app::bundle_publication::{
         admitted_build::{
-            CalibrationBundleInspectRequest, PayloadOwnershipConfigItem,
+            CalibrationBundleInspectRequest,
             inspect_calibration_bundle_input, inspect_calibration_core_input,
         },
         calibration::{
@@ -1284,19 +1457,7 @@ async fn run_authority_calibration(
     )
     .await?;
     let source_authority = source_generation.authority();
-    let loader = ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
-        source_generation.root().to_path_buf(),
-        state.engine.node_config_root(),
-        vec![source_generation.root().join("bundles/bundle-release")],
-        &state.config.runtime_root().trusted_keys_dir(),
-    )?;
-    let ownership = loader
-        .load_config_strict_signed_with_proof::<PayloadOwnershipConfigItem>(
-            "bundle-release/payload-ownership",
-        )?
-        .context("required signed payload ownership config is absent")?
-        .value
-        .into_current()?;
+    let ownership = exact_release_payload_ownership(&source_generation, &state)?;
     let execution_environment = verified_calibration_environment(
         &request.execution_environment,
         &source_generation,
@@ -1304,7 +1465,7 @@ async fn run_authority_calibration(
         &state,
     )?;
     let target = serde_json::to_value(qualified_platform_target(&execution_environment.platform)?)?;
-    let native_input = inspect_calibration_bundle_input(
+    let portable_input = inspect_calibration_bundle_input(
         &ownership,
         &source_authority,
         CalibrationBundleInspectRequest {
@@ -1315,6 +1476,24 @@ async fn run_authority_calibration(
             build_profile: "release".to_owned(),
         },
     )?;
+    let native_input = inspect_calibration_bundle_input(
+        &ownership,
+        &source_authority,
+        CalibrationBundleInspectRequest {
+            project_path: source_generation.project_identity().display().to_string(),
+            bundle_name: "web".to_owned(),
+            source_snapshot_hash: request.source_snapshot_hash.clone(),
+            target: target.clone(),
+            build_profile: "release".to_owned(),
+        },
+    )?;
+    anyhow::ensure!(
+        ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput::from_value(
+            &native_input,
+        )?
+        .requires_binary_build,
+        "native calibration web fixture must own an admitted binary payload"
+    );
     let core_input = inspect_calibration_core_input(
         &ownership,
         &source_authority,
@@ -1327,7 +1506,7 @@ async fn run_authority_calibration(
         },
     )?;
 
-    let native = calibrate_signed_bundle(
+    let portable = calibrate_signed_bundle(
         "bundle-release",
         ryeos_app::bundle_publication::recipe::PORTABLE_BUILD_GRAPH,
         ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH,
@@ -1343,6 +1522,29 @@ async fn run_authority_calibration(
         "portable-signed-capture-products.yaml",
         ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_RECIPE_REF,
         CalibrationLaneEnvironment::portable(&request.execution_environment),
+        portable_input,
+        &source_generation,
+        &request.source_snapshot_hash,
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await?;
+    let native = calibrate_signed_bundle(
+        "web",
+        ryeos_app::bundle_publication::recipe::BUILD_GRAPH,
+        ryeos_app::bundle_publication::recipe::CAPTURE_GRAPH,
+        NATIVE_QUALIFY_TOOL_REF,
+        "native_bundle",
+        "unsigned_bundle",
+        "signed_native_bundle",
+        "signed_native_bundle_to_release_qualification",
+        "calibration-native-build-products.yaml",
+        "native-build-products.yaml",
+        ryeos_app::bundle_publication::recipe::BUILD_RECIPE_REF,
+        "calibration-native-capture-products.yaml",
+        "signed-capture-products.yaml",
+        ryeos_app::bundle_publication::recipe::CAPTURE_RECIPE_REF,
+        CalibrationLaneEnvironment::native(&request.execution_environment),
         native_input,
         &source_generation,
         &request.source_snapshot_hash,
@@ -1390,6 +1592,7 @@ async fn run_authority_calibration(
         node_signer_fingerprint: state.identity.fingerprint().to_owned(),
         substrate_image_digest: installed.image_digest,
         substrate_protocol: installed.protocol,
+        portable: portable.lane,
         native: native.lane,
         core_seed: core.lane,
         substrate: substrate.lane,
@@ -1397,13 +1600,21 @@ async fn run_authority_calibration(
         substrate_product_witness_signer_fingerprint: state.identity.fingerprint().to_owned(),
         source_recipes: expected_calibration_recipes(&source_generation)?,
         recipes: AuthorityCalibrationRecipes {
+            portable_build: portable.build,
+            portable_capture: portable
+                .capture
+                .context("portable calibration omitted capture recipe")?,
+            portable_qualification: qualification_recipe_identity(
+                &source_generation,
+                "portable-qualification.yaml",
+            )?,
             native_build: native.build,
             native_capture: native
                 .capture
                 .context("native calibration omitted capture recipe")?,
             native_qualification: qualification_recipe_identity(
                 &source_generation,
-                "portable-qualification.yaml",
+                "native-qualification.yaml",
             )?,
             core_seed_build: core.build,
             core_seed_capture: core
@@ -2697,6 +2908,15 @@ fn core_seed_build_handler(
                 && policy.section_digest()? == request.bundle_publication_policy_section_digest,
             "Core seed build does not match current publication policy"
         );
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        let admitted_input =
+            ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput::from_core_seed_value(
+                &request.release_input,
+            )?;
+        ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
+            &ownership,
+            &admitted_input,
+        )?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
         let measured_target = serde_json::to_value(qualified_platform_target(
@@ -3003,19 +3223,7 @@ fn input_inspect_handler(
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
         anyhow::ensure!(!catalog.frozen, "bundle publication catalog is frozen");
-        let ownership_loader =
-            ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
-                source_generation.root().to_path_buf(),
-                state.engine.node_config_root(),
-                vec![source_generation.root().join("bundles/bundle-release")],
-                &state.config.runtime_root().trusted_keys_dir(),
-            )?;
-        let ownership_snapshot = ownership_loader
-            .load_config_strict_signed_with_proof::<
-                ryeos_app::bundle_publication::admitted_build::PayloadOwnershipConfigItem,
-            >("bundle-release/payload-ownership")?
-            .context("required signed payload ownership config is absent")?;
-        let ownership = ownership_snapshot.value.into_current()?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
         let inspected = ryeos_app::bundle_publication::admitted_build::inspect_release_input(
             &ownership,
             &source_generation.authority(),
@@ -3061,19 +3269,7 @@ fn core_seed_inspect_handler(
             ryeos_app::node_policy::sections::bundle_publication::BundlePublicationPolicy,
         >()?;
         let catalog = policy.require_catalog(&request.catalog_namespace)?;
-        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
-            source_generation.root().to_path_buf(),
-            state.engine.node_config_root(),
-            vec![source_generation.root().join("bundles/bundle-release")],
-            &state.config.runtime_root().trusted_keys_dir(),
-        )?;
-        let ownership = loader
-            .load_config_strict_signed_with_proof::<
-                ryeos_app::bundle_publication::admitted_build::PayloadOwnershipConfigItem,
-            >("bundle-release/payload-ownership")?
-            .context("required signed payload ownership config is absent")?
-            .value
-            .into_current()?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
         let inspected = ryeos_app::bundle_publication::admitted_build::inspect_core_seed_input(
             &ownership,
             &source_generation.authority(),
@@ -3147,6 +3343,11 @@ fn generation_build_handler(
             ryeos_app::bundle_publication::admitted_build::AdmittedReleaseInput::from_value(
                 &request.release_input,
             )?;
+        let ownership = exact_release_payload_ownership(&source_generation, &state)?;
+        ryeos_app::bundle_publication::admitted_build::require_exact_ownership_selection(
+            &ownership,
+            &admitted_input,
+        )?;
         let environment =
             calibrated_catalog_environment(catalog, &source_generation, &context, &state)?;
         let (build_recipe_filename, capture_recipe_filename, expected_product, selections) =
@@ -3853,6 +4054,8 @@ pub const AUTHORITY_CALIBRATE: ServiceDescriptor = ServiceDescriptor {
         "ryeos.execute.config.bundle-release/core-seed-capture-products",
         "ryeos.execute.config.bundle-release/execution-environment-products",
         "ryeos.execute.config.bundle-release/execution-tool-products",
+        "ryeos.execute.config.bundle-release/native-build-products",
+        "ryeos.execute.config.bundle-release/native-qualification",
         "ryeos.execute.config.bundle-release/portable-build-products",
         "ryeos.execute.config.bundle-release/portable-qualification",
         "ryeos.execute.config.bundle-release/portable-signed-capture-products",
@@ -3961,6 +4164,7 @@ pub const GENERATION_QUALIFY: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[
         "ryeos.execute.config.bundle-release/execution-environment-products",
+        "ryeos.execute.config.bundle-release/native-qualification",
         "ryeos.execute.config.bundle-release/portable-qualification",
         "ryeos.execute.service.bundle-release/generation-qualify",
         "ryeos.execute.tool.ryeos/bundle-release/native-qualify",
@@ -4101,6 +4305,43 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn authority_measure_request_requires_both_qualification_lanes() {
+        let request = json!({
+            "calibration_run_attestation_hash": "a",
+            "project_path": "/source",
+            "catalog_namespace": "release",
+            "publisher_fingerprint": "b",
+            "authorized_uploaders": [],
+            "trust_epoch": 1,
+            "portable_qualification_owner_principal": "fp:c",
+            "portable_qualification_attestation_hash": "d",
+            "native_qualification_owner_principal": "fp:e",
+            "native_qualification_attestation_hash": "f",
+            "substrate_qualification_owner_principal": "fp:g",
+            "substrate_qualification_attestation_hash": "h",
+            "core_seed_qualification_owner_principal": "fp:i",
+            "core_seed_qualification_attestation_hash": "j",
+            "substrate_build_witness_hash": "k",
+            "substrate_build_signer_fingerprint": "l",
+            "publisher_executable_path": "/usr/bin/ryeos-bundle-publisher"
+        });
+        assert!(serde_json::from_value::<AuthorityMeasureRequest>(request.clone()).is_ok());
+        let mut missing_native = request.clone();
+        missing_native
+            .as_object_mut()
+            .unwrap()
+            .remove("native_qualification_attestation_hash");
+        assert!(serde_json::from_value::<AuthorityMeasureRequest>(missing_native).is_err());
+        let mut legacy = request;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("portable_qualification_owner_principal");
+        legacy["qualification_owner_principal"] = json!("fp:c");
+        assert!(serde_json::from_value::<AuthorityMeasureRequest>(legacy).is_err());
+    }
+
+    #[test]
     fn calibration_invocation_recipes_bind_exact_parameters_and_keep_template_shape() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../bundles/bundle-release/.ai/config/bundle-release");
@@ -4114,6 +4355,16 @@ mod tests {
                 "calibration-portable-capture-products.yaml",
                 "portable-signed-capture-products.yaml",
                 ryeos_app::bundle_publication::recipe::PORTABLE_CAPTURE_GRAPH,
+            ),
+            (
+                "calibration-native-build-products.yaml",
+                "native-build-products.yaml",
+                ryeos_app::bundle_publication::recipe::BUILD_GRAPH,
+            ),
+            (
+                "calibration-native-capture-products.yaml",
+                "signed-capture-products.yaml",
+                ryeos_app::bundle_publication::recipe::CAPTURE_GRAPH,
             ),
             (
                 "calibration-core-build-products.yaml",
@@ -4214,6 +4465,21 @@ mod tests {
                 "graphs/ryeos/bundle-release/portable-build.yaml",
                 &portable_lane.build,
                 None,
+            ),
+            (
+                "graphs/ryeos/bundle-release/native-build.yaml",
+                &native_lane.build,
+                None,
+            ),
+            (
+                "graphs/ryeos/bundle-release/signed-capture.yaml",
+                &native_lane.runtime,
+                Some("unsigned_bundle"),
+            ),
+            (
+                "tools/ryeos/bundle-release/native-qualify.yaml",
+                &native_lane.runtime,
+                Some("subject"),
             ),
             (
                 "graphs/ryeos/bundle-release/portable-signed-capture.yaml",

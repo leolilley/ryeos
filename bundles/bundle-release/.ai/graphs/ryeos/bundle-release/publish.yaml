@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T04:24:34Z:c7dab56dc77ef0d3ae3afbf91444e1fe1bac61e8fd1c8d0dd4429e06be2f73eb:+jSPOYc5Pw58iFC3qCPLdiMinB7X3uwJ+1WZUkUJQW+3uGv5dXnwpyDGqjyIpgK1AiIVsY+lcUnRmYUQFVkpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:c95fa46177f89b29bc1bdd1ecbee49be87ce0b3720ee1a8302103aaa9946f61e:VKjEkMtJ8tmktsJp9p253RUTxmX9/ZX6Gx4oTCDoueRATkvPPepgtYXNfHnoWSZJDy0QxmOEwWaEgNtCfi3YBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: ryeos/bundle-release
 description: Build, qualify, authorize, compose, and publish one exact native bundle generation.
@@ -9,6 +9,7 @@ requires:
       - ryeos.execute.config.bundle-release/execution-environment-products
       - ryeos.execute.config.bundle-release/execution-tool-products
       - ryeos.execute.config.bundle-release/native-build-products
+      - ryeos.execute.config.bundle-release/native-qualification
       - ryeos.execute.config.bundle-release/portable-build-products
       - ryeos.execute.config.bundle-release/portable-qualification
       - ryeos.execute.config.bundle-release/portable-signed-capture-products

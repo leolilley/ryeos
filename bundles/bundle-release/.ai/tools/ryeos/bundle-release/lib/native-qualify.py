@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T08:19:54Z:ceaf5ccccc006fdbe54da36b8db62f28cec8321c95f08b1842e651980a7d9c29:s4YvqkVrzTVd6twu/J2Zx/c2dpeepNyijFEEHheBRJjU392qq9CMI5q+UNWIPYANNGCf6Pf6TCYVh7iH0A7RCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T13:41:33Z:6626e26b7e01ea37604b140cc4f1f63815c2de5823ddb0fec37092a5c9ded42b:W1MhkAf6sDyiTHfyYaKJ6lBsiGqebpt7TjCfPF+oZHOJK7e5WsaJZRxcKxj0eoM/mxddZ8zawyBxnXDOU/jwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one exact admitted signed bundle-tree realization."""
 import json, os, pathlib, stat, sys
 p=json.load(sys.stdin)
@@ -35,8 +35,9 @@ if binary_root.exists():
         if binary.is_file():
             binary_count+=1
             if binary.lstat().st_mode & 0o111==0: raise SystemExit("native payload is non-executable")
+if binary_count==0: raise SystemExit("native bundle has no executable .ai/bin payload")
 checks=["captured-product-binding","bundle-manifest-present","non-core-bundle","no-symbolic-links","no-hard-links"]
-if binary_count: checks.append("native-payloads-executable")
+checks.append("native-payloads-executable")
 thread_id=os.environ.get("RYE_THREAD_ID")
 if not thread_id: raise SystemExit("qualification has no admitted thread identity")
 json.dump({"schema":"ryeos.product_qualification_result.v1","subject_manifest_hash":subject["manifest_hash"],

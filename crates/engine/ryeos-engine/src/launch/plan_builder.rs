@@ -1750,6 +1750,140 @@ config:
         file_path
     }
 
+    #[test]
+    fn signed_tool_plan_replaces_spoofed_strict_project_config_and_requires_authority() {
+        let project = tempfile::tempdir().unwrap();
+        let schemas = tempfile::tempdir().unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let trust = test_ts();
+        let tool_schema = TOOL_SCHEMA_YAML.replace(
+            "    - type: env_config",
+            "    - type: env_config\n    - type: config_resolve",
+        );
+        let schema_dir = schemas.path().join("tool");
+        fs::create_dir_all(&schema_dir).unwrap();
+        fs::write(
+            schema_dir.join("tool.kind-schema.yaml"),
+            sign_yaml(&tool_schema),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[schemas.path().to_path_buf()], &trust).unwrap();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        let manifest =
+            "name: bundle-release\nversion: 0.1.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let sign =
+            |body: &str| lillux::signature::sign_content(body, &test_signing_key(), "#", None);
+        let installed_manifest = installed.path().join(".ai/manifest.yaml");
+        fs::create_dir_all(installed_manifest.parent().unwrap()).unwrap();
+        fs::write(&installed_manifest, sign(manifest)).unwrap();
+        let source_manifest = project
+            .path()
+            .join("bundles/bundle-release/.ai/manifest.yaml");
+        fs::create_dir_all(source_manifest.parent().unwrap()).unwrap();
+        fs::write(&source_manifest, sign(manifest)).unwrap();
+        let config_path = "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml";
+        let config = project.path().join(config_path);
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(config, sign("purpose: authentic\n")).unwrap();
+
+        let terminal = write_terminal(project.path(), "ryeos/core/subprocess/execute");
+        fs::write(
+            terminal,
+            "executor_id: null\nconfig:\n  command: /bin/sh\n  input_data: \"${params_json}\"\n",
+        )
+        .unwrap();
+        let tool = project.path().join(".ai/tools/release.yaml");
+        fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        let body = format!(
+            "executor_id: \"@subprocess\"\nconfig_resolve:\n  type: strict_signed_project_bundle\n  bundle_name: bundle-release\n  config_path: {config_path}\n"
+        );
+        let signed_tool = sign(&body);
+        fs::write(&tool, &signed_tool).unwrap();
+        let mut resolved = make_verified_item(
+            "tool:release",
+            "tool",
+            tool,
+            Some("@subprocess"),
+            Some(project.path().to_path_buf()),
+        )
+        .resolved;
+        resolved.raw_content_digest = crate::item_resolution::content_hash(&body);
+        resolved.signature_header = crate::item_resolution::parse_signature_header(
+            &signed_tool,
+            &SignatureEnvelope {
+                prefix: "#".into(),
+                suffix: None,
+                after_shebang: false,
+            },
+        );
+        resolved.source_format = ResolvedSourceFormat {
+            extension: ".yaml".into(),
+            parser: "parser:ryeos/core/yaml/yaml".into(),
+            signature: SignatureEnvelope {
+                prefix: "#".into(),
+                suffix: None,
+                after_shebang: false,
+            },
+        };
+        let item = crate::trust::verify_resolved_item(resolved, &trust).unwrap();
+        assert_eq!(item.trust_class, ContractTrustClass::Trusted);
+        let roots = ResolutionRoots::from_registered(
+            Some(project.path().to_path_buf()),
+            &[crate::item_resolution::RegisteredBundleRoot {
+                name: "bundle-release".into(),
+                canonical_root: installed.path().to_path_buf(),
+            }],
+        );
+        let context = test_plan_context(Some(project.path().to_path_buf()));
+        let caller = json!({"resolved_config":{"forged":true},"release_input":{}});
+        let pinned = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let build = |authority| {
+            build_plan(BuildPlanInput {
+                item: &item,
+                root_source: None,
+                parameters: &caller,
+                hints: &ExecutionHints::default(),
+                ctx: &context,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &trust,
+                node_trust_store: &trust,
+                host_env: &HostEnvBindings::default(),
+                filesystem_authority_ceiling:
+                    crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                project_authority: authority,
+                sealed_content: None,
+            })
+        };
+        let denied = build(None).unwrap_err().to_string();
+        assert!(
+            denied.contains("admitted project-content authority"),
+            "{denied}"
+        );
+        let plan = build(Some((project.path(), &pinned))).unwrap();
+        let PlanNode::DispatchSubprocess { spec, .. } = &plan.nodes[0] else {
+            panic!("signed Tool did not build a subprocess plan");
+        };
+        let Some(crate::contracts::PlanStdin::RuntimeParameters { parameters, .. }) = &spec.stdin
+        else {
+            panic!("signed Tool did not receive typed runtime parameters");
+        };
+        assert_eq!(
+            parameters["resolved_config"]["value"]["purpose"],
+            "authentic"
+        );
+        assert_eq!(
+            parameters["resolved_config"]["source"]["bundle_name"],
+            "bundle-release"
+        );
+        assert!(parameters["resolved_config"].get("forged").is_none());
+        assert_eq!(parameters["release_input"], json!({}));
+    }
+
     // ── Test: chain walks to terminal with executor_id null ─────────────
 
     #[test]

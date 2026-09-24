@@ -3,16 +3,172 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::contracts::ItemSpace;
+use crate::contracts::{ItemSpace, SignatureEnvelope, TrustClass};
 use crate::error::EngineError;
 use crate::item_resolution::{ResolutionRoots, parse_signature_header};
 use crate::kind_registry::KindRegistry;
 use crate::parsers::dispatcher::ParserDispatcher;
-use crate::trust::{TrustStore, content_hash_after_signature, verify_item_signature_with_hash};
+use crate::project_content::AuthoritativeProjectContent;
+use crate::trust::{
+    TrustStore, content_hash_after_signature, verify_item_signature,
+    verify_item_signature_with_hash,
+};
 
 /// Maximum bytes accepted for one config source, independent of whether it is
 /// observed live or read from an admitted content authority.
 const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
+const MAX_BUNDLE_MANIFEST_BYTES: u64 = 256 * 1024;
+
+/// One exact, node-trusted Config from an admitted project generation. It is
+/// deliberately not a merged Config: source-bundle, node, and project overlay
+/// precedence must not change the ownership authority used by a build Tool.
+#[derive(Debug, Clone)]
+pub struct StrictSignedProjectBundleConfig {
+    pub value: Value,
+    pub signer_fingerprint: String,
+    pub manifest_body_digest: String,
+}
+
+/// Resolve one source-bundle Config through the retained project-content
+/// authority, anchored to the installed bundle publisher. Both the source
+/// manifest and Config must be signed by that same node-trusted publisher.
+/// No path-backed read or trust-store overlay is permitted here.
+pub(crate) fn load_strict_signed_project_bundle_config(
+    project_root: &Path,
+    project_content: &dyn AuthoritativeProjectContent,
+    node_trust_store: &TrustStore,
+    registered_bundle_root: &Path,
+    bundle_name: &str,
+    config_path: &str,
+) -> Result<StrictSignedProjectBundleConfig, EngineError> {
+    let invalid = |reason: String| EngineError::InvalidRuntimeConfig {
+        path: config_path.to_owned(),
+        reason,
+    };
+    if !project_root.is_absolute() {
+        return Err(invalid(
+            "strict project Config requires an absolute admitted project root".into(),
+        ));
+    }
+    if bundle_name.is_empty()
+        || bundle_name.len() > 128
+        || !bundle_name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || bundle_name.starts_with('-')
+        || bundle_name.ends_with('-')
+    {
+        return Err(invalid(
+            "strict project Config names an invalid source bundle".into(),
+        ));
+    }
+    let prefix = format!("bundles/{bundle_name}/.ai/config/");
+    let Some(config_suffix) = config_path.strip_prefix(&prefix) else {
+        return Err(invalid(
+            "strict project Config must belong to its exact source bundle".into(),
+        ));
+    };
+    if config_suffix.is_empty()
+        || !config_suffix.ends_with(".yaml")
+        || config_path.contains('\\')
+        || config_path
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+        || config_path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(invalid(
+            "strict project Config path is not canonical".into(),
+        ));
+    }
+
+    let installed = crate::plan_builder::verify_bundle_source_manifest_identity(
+        registered_bundle_root,
+        bundle_name,
+        node_trust_store,
+    )?;
+    let manifest_path = format!("bundles/{bundle_name}/.ai/manifest.yaml");
+    let (manifest, manifest_signer, manifest_body_digest) = read_signed_project_yaml(
+        project_content,
+        Path::new(&manifest_path),
+        MAX_BUNDLE_MANIFEST_BYTES,
+        node_trust_store,
+    )?;
+    if manifest.get("name").and_then(Value::as_str) != Some(bundle_name) {
+        return Err(invalid(
+            "signed source-bundle manifest names another bundle".into(),
+        ));
+    }
+    if manifest_signer != installed.signer_fingerprint {
+        return Err(invalid(
+            "source-bundle manifest signer differs from installed publisher".into(),
+        ));
+    }
+    let (value, config_signer, _) = read_signed_project_yaml(
+        project_content,
+        Path::new(config_path),
+        MAX_CONFIG_SOURCE_BYTES,
+        node_trust_store,
+    )?;
+    if config_signer != manifest_signer {
+        return Err(invalid(
+            "project Config signer differs from source-bundle publisher".into(),
+        ));
+    }
+    Ok(StrictSignedProjectBundleConfig {
+        value,
+        signer_fingerprint: config_signer,
+        manifest_body_digest,
+    })
+}
+
+fn read_signed_project_yaml(
+    content: &dyn AuthoritativeProjectContent,
+    relative_path: &Path,
+    max_bytes: u64,
+    trust: &TrustStore,
+) -> Result<(Value, String, String), EngineError> {
+    let label = relative_path.display().to_string();
+    let invalid = |reason: String| EngineError::InvalidRuntimeConfig {
+        path: label.clone(),
+        reason,
+    };
+    let bytes = content
+        .read_file(relative_path, max_bytes)?
+        .ok_or_else(|| invalid("required signed project source is absent".into()))?;
+    let raw = String::from_utf8(bytes)
+        .map_err(|error| invalid(format!("signed project source is not UTF-8: {error}")))?;
+    let (body, canonical_header) =
+        lillux::signature::strip_canonical_signature_with_envelope(&raw, "#", None, false)
+            .map_err(|error| invalid(format!("noncanonical signature envelope: {error}")))?;
+    if canonical_header.is_none() {
+        return Err(invalid(
+            "project source requires a trusted signature".into(),
+        ));
+    }
+    let envelope = SignatureEnvelope {
+        prefix: "#".to_owned(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let header = parse_signature_header(&raw, &envelope)
+        .ok_or_else(|| invalid("project source has no valid signature envelope".into()))?;
+    let (trust_class, _) = verify_item_signature(&raw, &header, &envelope, trust)?;
+    if trust_class != TrustClass::Trusted {
+        return Err(invalid("project source signer is not node-trusted".into()));
+    }
+    let value: Value = serde_yaml::from_str(&body)
+        .map_err(|error| invalid(format!("decode signed project YAML: {error}")))?;
+    if !value.is_object() {
+        return Err(invalid("signed project YAML must be an object".into()));
+    }
+    Ok((
+        value,
+        header.signer_fingerprint,
+        lillux::sha256_hex(body.as_bytes()),
+    ))
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -307,5 +463,180 @@ pub fn deep_merge(base: Value, override_: Value) -> Value {
             Value::Object(b)
         }
         (_, o) => o,
+    }
+}
+
+#[cfg(test)]
+mod strict_project_bundle_tests {
+    use super::load_strict_signed_project_bundle_config;
+    use crate::trust::{TrustStore, TrustedSigner, compute_fingerprint};
+    use lillux::crypto::SigningKey;
+    use std::{fs, path::Path};
+
+    const CONFIG_PATH: &str =
+        "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml";
+    const MANIFEST_PATH: &str = "bundles/bundle-release/.ai/manifest.yaml";
+    const MANIFEST: &str =
+        "name: bundle-release\nversion: 0.1.0\nprovides_kinds: []\nrequires_kinds: []\n";
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn trust(keys: &[SigningKey]) -> TrustStore {
+        TrustStore::from_signers(
+            keys.iter()
+                .map(|key| TrustedSigner {
+                    fingerprint: compute_fingerprint(&key.verifying_key()),
+                    verifying_key: key.verifying_key(),
+                    label: None,
+                })
+                .collect(),
+        )
+    }
+
+    fn write(root: &Path, relative: &str, bytes: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn signed(body: &str, key: &SigningKey) -> String {
+        lillux::signature::sign_content(body, key, "#", None)
+    }
+
+    #[test]
+    fn exact_project_config_requires_registered_publisher_signer() {
+        let fixture = tempfile::tempdir().unwrap();
+        let installed = fixture.path().join("installed-bundle");
+        let project = fixture.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let publisher = key(42);
+        let other_trusted = key(43);
+        let node_trust = trust(&[publisher.clone(), other_trusted.clone()]);
+        write(
+            &installed,
+            ".ai/manifest.yaml",
+            &signed(MANIFEST, &publisher),
+        );
+        write(&project, MANIFEST_PATH, &signed(MANIFEST, &publisher));
+        write(
+            &project,
+            CONFIG_PATH,
+            &signed("purpose: exact\n", &publisher),
+        );
+        let pinned = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
+        let loaded = load_strict_signed_project_bundle_config(
+            &project,
+            &pinned,
+            &node_trust,
+            &installed,
+            "bundle-release",
+            CONFIG_PATH,
+        )
+        .unwrap();
+        assert_eq!(loaded.value["purpose"], "exact");
+        assert_eq!(
+            loaded.signer_fingerprint,
+            compute_fingerprint(&publisher.verifying_key())
+        );
+
+        // A second node-trusted key may not take over either source item.
+        write(
+            &project,
+            CONFIG_PATH,
+            &signed("purpose: changed\n", &other_trusted),
+        );
+        assert!(
+            load_strict_signed_project_bundle_config(
+                &project,
+                &pinned,
+                &node_trust,
+                &installed,
+                "bundle-release",
+                CONFIG_PATH,
+            )
+            .is_err()
+        );
+        write(
+            &project,
+            CONFIG_PATH,
+            &signed("purpose: exact\n", &publisher),
+        );
+        write(&project, MANIFEST_PATH, &signed(MANIFEST, &other_trusted));
+        assert!(
+            load_strict_signed_project_bundle_config(
+                &project,
+                &pinned,
+                &node_trust,
+                &installed,
+                "bundle-release",
+                CONFIG_PATH,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_project_config_rejects_unsigned_missing_and_shadow_paths() {
+        let fixture = tempfile::tempdir().unwrap();
+        let installed = fixture.path().join("installed-bundle");
+        let project = fixture.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let publisher = key(44);
+        let node_trust = trust(&[publisher.clone()]);
+        write(
+            &installed,
+            ".ai/manifest.yaml",
+            &signed(MANIFEST, &publisher),
+        );
+        write(&project, MANIFEST_PATH, &signed(MANIFEST, &publisher));
+        let pinned = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
+        assert!(
+            load_strict_signed_project_bundle_config(
+                &project,
+                &pinned,
+                &node_trust,
+                &installed,
+                "bundle-release",
+                CONFIG_PATH,
+            )
+            .is_err()
+        );
+        write(&project, CONFIG_PATH, "purpose: unsigned\n");
+        assert!(
+            load_strict_signed_project_bundle_config(
+                &project,
+                &pinned,
+                &node_trust,
+                &installed,
+                "bundle-release",
+                CONFIG_PATH,
+            )
+            .is_err()
+        );
+        write(
+            &project,
+            CONFIG_PATH,
+            &signed("purpose: signed\n", &publisher),
+        );
+        for path in [
+            "bundles/other/.ai/config/bundle-release/payload-ownership.yaml",
+            "bundles/bundle-release/.ai/config/../payload-ownership.yaml",
+            "bundles/bundle-release/.ai/config//payload-ownership.yaml",
+        ] {
+            assert!(
+                load_strict_signed_project_bundle_config(
+                    &project,
+                    &pinned,
+                    &node_trust,
+                    &installed,
+                    "bundle-release",
+                    path,
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
     }
 }

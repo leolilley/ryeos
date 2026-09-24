@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-23T08:42:42Z:2af116af308ed2989838cd02af4cc7ab21a257e2d9e9041d5a65c2613e077da0:ocSYkzx44DlkODguXFQNLKYPCoKETo6DkOIfFAoD2i6kM3TD967maauuZJrBSiwoKYNXqO0j7GdrxTZmkwIIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T00:28:14Z:7864b8db93425e83f79560086bc1c550bd1c5ca66d15fefce1ad8fa3f4096f2e:77gbmgN4QyEEFprM6doFiPDt2wWz8+S6AYRiBPqjndzsR0ssb8EGYbGdesp74/jCzZxtvc4aPVAHkbCHmMWdBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
 title: Source-Local Bundle Development
 description: Source-local workflow, project-bundle, realization, and confinement contracts
 entry_type: reference
-version: "1.24.0"
+version: "1.30.0"
 ```
 
 # Source-Local Bundle Development
@@ -22,6 +22,116 @@ For continuation of the native release proof, start with the dated checkpoint
 below and `development-operation-ownership.md`. Historical successful compiler
 or binding evidence elsewhere in this document is not evidence for a newly
 produced platform identity.
+
+### Release-authority ownership/runtime correction — 2026-09-24
+
+The scoped release-authority installation completed; installed daemon SHA-256
+is `35bad6870296a592ea18f1fc8488de60e6838b3afead625d0a06fd6e8ccb47f8`
+and the node was healthy at `127.0.0.1:7401`. A new calibration on snapshot
+`939f71b3a305828b14621ad94c7ad1a136f92127cd091b75e326c35ea7175cf5`
+reached native build Tool `T-f595b5e2-bb6d-041e-5756-386903bd326c` and
+failed because the qualified isolated Python cannot import `yaml` from the
+project-root `scripts/release/bundle-payload-ownership.py`. That parser also
+imports `cryptography`; the Core-seed Tool uses it too. The four previously
+qualified build-input products remain retained, but their qualification did
+not exercise this Tool import graph. No successful calibration, catalog
+bootstrap, or cross-node bundle activation is established.
+
+The failure triggered a whole-boundary review, not host PyYAML or weaker
+isolation. The old parser checked a project-local publisher trust file; that
+file was not an independent node-trust anchor. The live generation-build
+handler also did not use the separate Rust admitted-build helper. The reviewed
+correction now resolves the one exact payload-ownership Config from admitted
+RyeOS project content, verifies its signature and source manifest under node
+trust, and pins their signer to the installed `bundle-release` source
+publisher. This source publisher is a distinct role from the catalog
+publisher that signs release recipes. The engine injects the verified Config
+at root Tool resolution, replacing caller-supplied `resolved_config`; missing
+project authority fails closed. Native, portable, and Core-seed Tools compare
+the exact normalized payload projection using only qualified Python standard
+library modules. API inspection and build handlers recheck the same signed
+selection before recipe authorization. The offline parser is no longer a
+build-Tool runtime dependency. Ordinary permissive Config resolution is not
+used for this authority.
+
+This is implemented source, not yet installed or live-proven. A coupled
+engine/app/API compile, four focused engine trust/plan tests, the app
+forged-selection regression, 42 release-asset tests, and retained-Python
+loader/import smokes passed. The Python
+executable's absolute `/ryeos/realizations/python-gnu` ELF interpreter means a
+host-path invocation cannot emulate the RyeOS mount; explicitly invoking its
+retained loader reached the Tool guards but is not an isolated launch. The
+targeted one-job release-authority population completed, retaining unselected
+payloads and static workers; candidate `ryeosd` SHA-256 is
+`b254a9917046378a536e5565da011971cc1084178356672dd41c84d65491700a`.
+Its read-only policy schema-cut preflight passed. The installed daemon remains
+`35bad687...`; the exact isolated child launch and live calibration remain
+gates. Preserve the four qualified inputs; do not rebuild unchanged Stage-0,
+use host `site-packages`, or promote a source/host smoke to publication
+acceptance.
+
+For **every** unforeseen failure, stop at the first failed boundary. Retain
+the exact terminal/snapshot/install/product identities, state the assumption
+that failed and why the earlier check missed it, audit sibling/direct/recovery
+paths, evaluate correction options against RyeOS ownership, and update the
+single controlling next action before editing or repeating a launch. The full
+failure analysis and finite resume gates are
+`.tmp/bundle-release-unexpected-boundary-review-20260924.md` and section 0
+of `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+The next action is a scoped install of the already-populated release-authority
+generation, without repopulation. It requires operator sudo authentication;
+the API sandbox cannot elevate. The install/calibration instructions in
+historical checkpoints below remain superseded. After installation and node
+health/strict-bundle verification, capture a
+new clean exact source snapshot after the last source-writing
+population/signing step and immediately before a future calibration attempt;
+the prior snapshot cannot be reused after these document changes.
+
+### Historical release-authority continuation — 2026-09-24 (superseded)
+
+The release-authority node is healthy at `127.0.0.1:7401`; its installed
+daemon is still `b73544655f1003c8542f385671675e7727fb0185c804c8ccdf02d972bb029c12`.
+An intermediate scoped population finished and signed all 11 bundles, with
+retained daemon hash
+`ff749daf12766bda919785eae45639ccd8f57c65cffe7dda7a07dbee3727e780`,
+but was intentionally not installed because review found the missing native
+qualification lane. The four prerequisite products and their qualifications
+remain retained. Do not rebuild Stage-0 or repeat prerequisite qualification.
+
+The current source adds separate portable and actual binary-owning native
+calibration lanes against the same pinned RyeOS snapshot/environment. The
+measured catalog policy is strict schema 2, with distinct exact verifier,
+artifact and claim pins for each lane; publisher and consumer selection follows
+the authenticated generation target. The native qualifier rejects zero
+executable payloads. Review additionally caught and corrected phase-specific
+build/capture selection verification, a portable calibration capture-tool ref,
+and a missing native production capture-Graph relationship. Both changed
+signed recipe templates were re-signed, with regression coverage against the
+actual Graph and Tool declarations. Combined release-profile `cargo check`,
+21 focused asset checks, 24 release-execution/data-only checks, a 53-test app
+bundle-publication run and the corrected three-test publisher-policy rerun
+passed. The focused API run caught a compiled `generation-qualify` capability
+omission (6/7 passed); the exact native-qualification Config cap was added and
+its one-case release-profile rerun passed. Both completed test executables
+(about 166 MB combined) were removed after the sessions ended; Cargo can
+regenerate them. One final scoped population completed on 2026-09-24 in
+30m41s, signing the 11-bundle release-authority set while retaining existing
+static workers. Its candidate daemon SHA-256 is
+`35bad6870296a592ea18f1fc8488de60e6838b3afead625d0a06fd6e8ccb47f8`;
+the installed daemon remains `b73544655f1003c8542f385671675e7727fb0185c804c8ccdf02d972bb029c12`.
+The candidate's read-only `init-policy-preflight --schema-cut` passed on the
+existing app root; the old installed node is HTTP 200 healthy at port 7401.
+The next gate is a scoped install with explicit policy-generation reset, then
+a fresh exact snapshot and live calibration. Source checks and population do
+not prove calibration or publication.
+
+The controlling next sequence is section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`:
+install only the release-authority node, capture a clean exact source snapshot, then
+calibrate and measure both lanes before catalog bootstrap and real data-only
+then binary-bearing consumer updates. Clear only demonstrably obsolete
+task-owned build outputs as necessary; never touch
+`.worktrees/external-candidate-execution/` or other threads' active data.
 
 ### Native release proof checkpoint — 2026-09-23
 
@@ -50,8 +160,65 @@ generation was replaced. The release-authority node is healthy at
 The chain is not yet live-calibration-proven.
 No successful calibration, catalog bootstrap or consumer bundle activation is
 established. Continue from the controlling plan below; do not reproduce
-qualified prerequisites, clear Cargo caches, or treat a host file's existence
-as sandbox visibility.
+qualified prerequisites or treat a host file's existence as sandbox visibility.
+Preserve retained products, qualification evidence and outputs required for
+installation. With operator authorization, reclaim this task's obsolete build
+outputs after checking for active users; preserving useful build data does not
+require keeping every debug or incremental cache. Never clear another thread's
+worktree, build outputs or active execution data.
+
+Revalidation on 2026-09-23 confirmed the installed and retained daemon at
+`b73544655f1003c8542f385671675e7727fb0185c804c8ccdf02d972bb029c12`,
+and a clean 3,294-entry source snapshot
+`171916b788b46bb9bd49dce38f25596439faaf3ba3d33d794e1de9d109988471`.
+The operator authorized removal of the main checkout's obsolete debug outputs;
+release/static outputs and the active `external-candidate-execution` worktree
+were preserved. A fresh calibration attempt uses that pinned snapshot and the
+four retained qualified inputs. That attempt is now terminal, not acceptance:
+root `T-cdb10c5e-5cc9-6646-6cfc-8181b6730c31` reached portable-build Tool
+`T-64b7879a-77eb-6d80-4375-8b0584cd4a9e`. Its producer Graph
+`T-6c221f48-9e59-724a-4ce9-6f1db05d479c` retains the exact isolation refusal:
+the source-backed mount destination `.ai/tools/ryeos/bundle-release` was absent
+from the captured project. Installed bundle source is not necessarily present
+at its logical item coordinate in a project. Lillux correctly refuses creating
+placeholder directories in the captured CoW workspace.
+
+The source correction now uses typed retained-source-member arguments, redeemed
+at launch into the existing private execution-runtime source namespace. All
+eleven release Tools declare their exact script member. Retained plans keep
+symbolic members; wait, background and recovery validate the exact admitted
+manifest regular file before lowering only the spawn copy. Enforced isolation
+does not create project placeholders or expose the installed host bundle;
+disabled isolation retains its explicit private-project-copy behavior.
+The Graph/direct dispatch response also now reads the exact thread's retained
+terminal rather than treating the managed Graph's live wrapper as a direct Tool
+terminal. It rejects absent, non-final and contradictory success evidence while
+preserving bounded child failure diagnostics.
+
+Focused source validation passed: 16 release-asset checks, 8 portable
+data-only checks, 5 Cargo-recipe checks, 3 engine source-member tests, 1
+application spawn-copy test, 7 executor source-closure tests and 9 API release
+execution tests. A coupled release-profile check of the CLI and daemon also
+passed. These are source checks, not live calibration. A focused population of
+the coupled daemon/CLI/core-tools generation is verifying this correction.
+Because the two-lane catalog gap below is now known, do not install this
+intermediate generation as final release authority. Complete the two-lane
+correction and its focused verification, repopulate the coupled generation,
+then perform one scoped release-authority installation. Capture a fresh clean
+source snapshot and calibrate with the four retained qualified products.
+
+A separate source audit found a later acceptance blocker: calibration currently
+records portable `bundle-release` qualification in its field named `native`,
+and authority measurement pins that single portable non-Core policy. An actual
+native-binary successor uses a distinct native verifier and claim; exact
+publisher/consumer qualification checks cannot accept it under the portable
+pin. Before applying catalog policy for native release, retain the portable
+lane, add a real native-binary calibration lane against the same snapshot and
+environment, measure both exact policies, and select the corresponding pin from
+the authenticated generation target. Existing signed native recipes are source
+inputs, not evidence that this lane has run. Do not relax exact checks or treat
+portable qualification as native qualification. This finding is code-review
+evidence; live calibration and both-lane acceptance remain unproven.
 
 Audit the whole lane before retrying a live build: each child Tool needs its own
 signed execution declarations, explicit product selections and exact-consumer
@@ -91,13 +258,25 @@ proof and must not become work repeated for every bundle update.
 The controlling implementation continuation is section 0 of
 `.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
 This knowledge checkpoint owns durable evidence and operating boundaries.
-The current stage is release-authority prerequisite qualification. The finish
+The current stage is release-authority calibration after prerequisite qualification. The finish
 line requires both a data-only and a binary-bearing non-Core bundle successor
 published and activated on another node with unchanged substrate identity,
 including failure/retry, pre-commit recovery and explicit refusal of
 post-execution rollback in v1. The original publication acceptance also retains
 a second consumer on the prior selection, restarts source/consumers and restores
 a clean source from exported closure; a single successful update is insufficient.
+
+Live calibration on 2026-09-24 established two distinct source/materialization
+boundaries, not calibration success. In enforced CoW execution, RyeOS hard-links
+verified content-cache files into the admitted source view; source-file link
+count is not authored-tree evidence. The native and Core seed builders therefore
+must copy from the verified view into private output files, while the produced
+bundle and verifier continue to refuse hard links. After that correction, Core
+seed signing reached a byte-identity gate: the candidate manifest must retain
+the exact unsigned body of the signed source manifest, not a semantically
+equivalent JSON reserialization. That gate remains strict. The controlling
+`.tmp` plan records the two failed runs, corrections, and next install/snapshot
+requirements. Neither a failed run nor focused tests authorize catalog policy.
 The full development-worker proof, Stage1 reproduction, self-hosted CI cutover
 and persistent build-cache work are separate campaigns. Add authoring utilities
 only when an exact remaining release operation declares that dependency.

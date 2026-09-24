@@ -162,21 +162,34 @@ impl CurrentConsumerPublicationPolicy {
             required_core_seed_qualification_claims: catalog
                 .required_core_seed_qualification_claims
                 .clone(),
-            schema: "ryeos.standalone_bundle_publisher_policy.v1".to_owned(),
+            schema: "ryeos.standalone_bundle_publisher_policy.v2".to_owned(),
             catalog_namespace: namespace.to_owned(),
             catalog_publisher_fingerprint: catalog.publisher_fingerprint.clone(),
             bundle_publication_policy_section_digest: policy.section_digest()?,
             trust_epoch: catalog.trust_epoch,
+            calibration_execution_environment: catalog.calibration_execution_environment.clone(),
             qualification_signer_public_key: catalog.qualification_signer_public_key,
             qualification_signer_fingerprint: catalog.qualification_signer_fingerprint.clone(),
-            qualification_policy: catalog.qualification_policy.clone(),
-            qualification_verifier_effective_definition_digest: catalog
-                .qualification_verifier_effective_definition_digest
+            portable_qualification_policy: catalog.portable_qualification_policy.clone(),
+            portable_qualification_verifier_effective_definition_digest: catalog
+                .portable_qualification_verifier_effective_definition_digest
                 .clone(),
-            qualification_verifier_artifact_identity: catalog
-                .qualification_verifier_artifact_identity
+            portable_qualification_verifier_artifact_identity: catalog
+                .portable_qualification_verifier_artifact_identity
                 .clone(),
-            required_qualification_claims: catalog.required_qualification_claims.clone(),
+            required_portable_qualification_claims: catalog
+                .required_portable_qualification_claims
+                .clone(),
+            native_qualification_policy: catalog.native_qualification_policy.clone(),
+            native_qualification_verifier_effective_definition_digest: catalog
+                .native_qualification_verifier_effective_definition_digest
+                .clone(),
+            native_qualification_verifier_artifact_identity: catalog
+                .native_qualification_verifier_artifact_identity
+                .clone(),
+            required_native_qualification_claims: catalog
+                .required_native_qualification_claims
+                .clone(),
             substrate_qualification_policy: catalog.substrate_qualification_policy.clone(),
             substrate_qualification_verifier_effective_definition_digest: catalog
                 .substrate_qualification_verifier_effective_definition_digest

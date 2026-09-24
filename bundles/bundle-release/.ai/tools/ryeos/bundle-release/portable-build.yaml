@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-23T08:15:01Z:856ee29cdfed46b3cf056729bdaeaa72e316993392040df9095220db1a8900e8:HzQEyQ3dnwkpiIJMoX3rC97wU6CzzgSmE//MRuj7M0Dt/ZsVfVBYy+plOv3DwgLtS8ktVShMzYiKzwdmZa2wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T23:00:26Z:b72db06bbde03916613efa4496f0b97bcd6669536525071788f14ec60dfdcc4d:HEOelDu1OL8NopF1+Ulx5RNXxyfmHbqZPdzcciLopezu1fBWQQw3h0Z4VxhyZ+Y6SpdSiUcbNo8jI/09Zo+/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: portable-build
-version: "1.0.0"
-description: Materialize one exact portable bundle using only the admitted Python runtime.
+version: "1.0.1"
+description: Materialize one exact portable bundle using only the admitted Python runtime and RyeOS-verified payload ownership.
 executor_id: tool:ryeos/bundle-release/runtime
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
@@ -12,9 +12,13 @@ external_product_slots:
   - {id: python, relationship_ref: config:bundle-release/execution-tool-products, relationship: python_to_portable_build_tool, kind: tree, mount_root: execution_runtime, mount: python-gnu}
 env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
+config_resolve:
+  type: strict_signed_project_bundle
+  bundle_name: bundle-release
+  config_path: bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/native-build.py"]
+  args: ["-I", "-B", {source_member: "lib/native-build.py"}]
   input_data: "${params_json}"
   timeout_secs: 7200
 input_schema:

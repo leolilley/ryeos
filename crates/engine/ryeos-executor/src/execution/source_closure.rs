@@ -15,11 +15,31 @@ pub(crate) struct BoundSourceClosure {
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     sealed_identity_env: String,
     execution_entry_path: PathBuf,
+    execution_root: PathBuf,
+    members: std::collections::BTreeSet<String>,
     source_directory: lillux::PinnedDirectory,
     _leases: Vec<std::fs::File>,
 }
 
 impl BoundSourceClosure {
+    fn member_path(&self, relative: &str) -> anyhow::Result<String> {
+        ryeos_engine::runtime::validate_source_member_path(relative)?;
+        anyhow::ensure!(
+            self.members.contains(relative),
+            "source member is absent from the admitted file manifest: {relative}"
+        );
+        anyhow::ensure!(
+            self.source_directory
+                .open_pinned_regular_descendant(Path::new(relative), false)?
+                .is_some(),
+            "admitted source member is not a retained regular file: {relative}"
+        );
+        self.execution_root
+            .join(relative)
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("source member execution coordinate is not UTF-8"))
+    }
     pub(crate) fn mounts(&self) -> &[ryeos_engine::isolation::IsolationReadOnlyMountAuthority] {
         &self.mounts
     }
@@ -40,6 +60,62 @@ impl BoundSourceClosure {
     pub(crate) fn source_directory(&self) -> &lillux::PinnedDirectory {
         &self.source_directory
     }
+}
+
+pub(crate) fn bind_prepared_source_members(
+    plan: &mut ryeos_app::thread_lifecycle::PreparedItemPlan,
+    source: Option<&BoundSourceClosure>,
+) -> anyhow::Result<()> {
+    plan.bind_source_members(|relative| {
+        source
+            .ok_or_else(|| {
+                anyhow::anyhow!("source member argument has no admitted source closure")
+            })?
+            .member_path(relative)
+    })
+}
+
+pub(crate) fn direct_source_placement(
+    plan: &ryeos_app::thread_lifecycle::PreparedItemPlan,
+    enforced: bool,
+) -> SourceMountPlacement {
+    source_member_placement(plan.consumes_source_members(), enforced)
+}
+
+fn source_member_placement(consumes_members: bool, enforced: bool) -> SourceMountPlacement {
+    if enforced && consumes_members {
+        SourceMountPlacement::ExecutionRuntime
+    } else {
+        SourceMountPlacement::Project
+    }
+}
+
+/// Fold-back must exclude only content actually shadowing the project. Replay
+/// uses the symbolic admitted plan, never the already-lowered spawn arguments.
+pub(crate) fn capsule_source_placement(
+    closure: &ryeos_state::objects::AdmittedExecutionClosure,
+    enforced: bool,
+) -> anyhow::Result<SourceMountPlacement> {
+    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+        execution_plan, ..
+    } = closure
+    else {
+        return Ok(SourceMountPlacement::Project);
+    };
+    let plan: ryeos_engine::contracts::ExecutionPlan =
+        serde_json::from_value(execution_plan.clone())?;
+    let consumes_members = plan.nodes.iter().any(|node| match node {
+        ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => {
+            spec.args.iter().any(|arg| {
+                matches!(
+                    arg,
+                    ryeos_engine::contracts::PlanArgument::AdmittedSourceMember { .. }
+                )
+            })
+        }
+        _ => false,
+    });
+    Ok(source_member_placement(consumes_members, enforced))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +368,12 @@ fn bind_source_with(
         mounts,
         sealed_identity_env,
         execution_entry_path: destination.join(entry),
+        execution_root: destination,
+        members: manifest
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect(),
         source_directory: source,
         _leases: vec![lease],
     }))
@@ -657,20 +739,99 @@ mod tests {
     }
 
     #[test]
+    fn source_member_retained_closure_has_no_project_shadow() {
+        use ryeos_state::objects::{AdmittedDirectCommandClosure, AdmittedExecutionClosure};
+        let mut closure = AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan: serde_json::json!({
+                "plan_id":"test", "root_executor_id":"@subprocess", "root_ref":"tool:test/run", "item_kind":"tool",
+                "nodes":[{"node_type":"dispatch_subprocess", "id":"spawn", "spec":{
+                    "cmd":"/python", "args":[{"kind":"admitted_source_member", "relative_path":"lib/run.py"}]
+                }, "executor_chain":[]}],
+                "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
+                "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy",
+                "target_requirement":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
+            }),
+            protocol_descriptor_document: String::new(),
+            command: AdmittedDirectCommandClosure::NodePolicy,
+            admitted_project_root: Some("/project".into()),
+        };
+        let retained: AdmittedExecutionClosure =
+            serde_json::from_value(serde_json::to_value(&closure).unwrap()).unwrap();
+        assert_eq!(
+            capsule_source_placement(&retained, true).unwrap(),
+            SourceMountPlacement::ExecutionRuntime
+        );
+        assert_eq!(
+            capsule_source_placement(&retained, false).unwrap(),
+            SourceMountPlacement::Project
+        );
+        if let AdmittedExecutionClosure::DirectItemExecutor { execution_plan, .. } = &mut closure {
+            execution_plan["nodes"][0]["spec"]["args"] =
+                serde_json::json!([{"kind":"literal","value":".ai/tools/test/run.py"}]);
+        }
+        assert_eq!(
+            capsule_source_placement(&closure, true).unwrap(),
+            SourceMountPlacement::Project
+        );
+    }
+
+    #[test]
+    fn source_member_placement_matches_actual_delivery() {
+        assert_eq!(
+            source_member_placement(true, true),
+            SourceMountPlacement::ExecutionRuntime
+        );
+        assert_eq!(
+            source_member_placement(true, false),
+            SourceMountPlacement::Project
+        );
+        assert_eq!(
+            source_member_placement(false, true),
+            SourceMountPlacement::Project
+        );
+        assert_eq!(
+            source_member_placement(false, false),
+            SourceMountPlacement::Project
+        );
+    }
+
+    #[test]
     fn bound_source_keeps_daemon_authority_separate_from_execution_coordinate() {
         let cache = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(cache.path().join("baseline.toml"), b"captured = true\n").unwrap();
+        std::fs::write(cache.path().join("unlisted.py"), b"not admitted").unwrap();
+        std::fs::create_dir(cache.path().join("directory")).unwrap();
+        std::os::unix::fs::symlink("baseline.toml", cache.path().join("alias")).unwrap();
         let bound = BoundSourceClosure {
             mounts: Vec::new(),
             sealed_identity_env: "{}".to_owned(),
             execution_entry_path: workspace.path().join("not-mounted/profile.json"),
+            execution_root: workspace.path().join("not-mounted"),
+            members: ["baseline.toml", "directory", "alias"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             source_directory: lillux::PinnedDirectory::open(cache.path())
                 .unwrap()
                 .unwrap(),
             _leases: Vec::new(),
         };
         assert!(!bound.execution_entry_path().parent().unwrap().exists());
+        assert_eq!(
+            bound.member_path("baseline.toml").unwrap(),
+            workspace
+                .path()
+                .join("not-mounted/baseline.toml")
+                .to_str()
+                .unwrap()
+        );
+        assert!(bound.member_path("missing.py").is_err());
+        assert!(bound.member_path("unlisted.py").is_err());
+        assert!(bound.member_path("directory").is_err());
+        assert!(bound.member_path("alias").is_err());
+        assert!(bound.member_path("../baseline.toml").is_err());
+        assert!(!workspace.path().join("not-mounted").exists());
         let file = bound
             .source_directory()
             .open_pinned_regular_descendant(Path::new("baseline.toml"), false)

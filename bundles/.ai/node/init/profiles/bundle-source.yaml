@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T11:26:17Z:281a7ee60fb79def72f92bf882b955457ed1f9917e7f074cba2d77ca1e53f382:V+PClrTj+ff2fmS/5BBBLSzO1RRWIJ+NfKooaP1qbM6t+FQ+/AlgpDhKLbhjWwC//km/uF/6iFViOFrk3cXQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:d9e0e38a24240d60dfffe975a38aee97a3329d7adcede03b33f7c35bf6be64c6:H2curdAKJBFZcRUYP7tL/oysM3W03aStYhsm5mXOm2WIXfvlG1OOyYrSdvBApCrs/47mfdrlm3+Kb2Vf8MiRDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -6,7 +6,7 @@ exact_bundles:
   - core
 policies:
   bundle_publication:
-    schema: 1
+    schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
 

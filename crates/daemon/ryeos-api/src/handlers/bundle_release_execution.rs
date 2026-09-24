@@ -62,6 +62,12 @@ impl ReleaseSourceGeneration {
         &self.project_identity
     }
 
+    pub(crate) fn project_content(
+        &self,
+    ) -> &dyn ryeos_engine::project_content::AuthoritativeProjectContent {
+        self.materialization.as_ref()
+    }
+
     pub(crate) fn authority(&self) -> RetainedReleaseSourceAuthority {
         RetainedReleaseSourceAuthority::new(
             Arc::clone(&self.materialization),
@@ -589,11 +595,68 @@ pub(crate) async fn execute_pinned_graph(
         &state,
     )
     .await
-    .map_err(|error| anyhow::anyhow!("{graph_ref} dispatch failed: {error}"));
+    .map_err(|error| anyhow::anyhow!("{graph_ref} dispatch failed: {error}"))
+    .and_then(|envelope| {
+        normalize_retained_dispatch_terminal(
+            envelope,
+            dispatch_request.pre_minted_thread_id.as_deref(),
+            |thread_id| {
+                let thread = state
+                    .threads
+                    .get_thread(thread_id)?
+                    .context("release dispatch thread is absent from retained state")?;
+                Ok(state
+                    .threads
+                    .build_execute_result(thread_id)?
+                    .map(|terminal| (thread.status, terminal)))
+            },
+        )
+    });
     // Captured roots outlive dispatch publication and no longer.
     drop(project_ctx.take_captured_generation());
     drop(workspace);
     result
+}
+
+/// Managed runtimes and direct Tools expose different live response payloads.
+/// Only the exact dispatched thread's retained terminal is release authority;
+/// never infer success from a runtime payload or recursively search its JSON.
+fn normalize_retained_dispatch_terminal(
+    mut envelope: Value,
+    expected_thread_id: Option<&str>,
+    load: impl FnOnce(
+        &str,
+    ) -> anyhow::Result<
+        Option<(String, ryeos_app::thread_lifecycle::ExecuteResponseResult)>,
+    >,
+) -> anyhow::Result<Value> {
+    let thread_id = envelope
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .context("release dispatch omitted its exact thread identity")?;
+    if let Some(expected) = expected_thread_id {
+        anyhow::ensure!(
+            thread_id == expected,
+            "release dispatch returned another thread identity"
+        );
+    }
+    let (status, terminal) = load(thread_id)?.with_context(|| {
+        format!("release execution {thread_id} has no retained terminal result")
+    })?;
+    let status = ryeos_state::objects::ThreadStatus::from_str_lossy(&status)
+        .filter(|status| {
+            status.is_terminal() && *status != ryeos_state::objects::ThreadStatus::Continued
+        })
+        .with_context(|| format!("release execution {thread_id} has no final terminal status"))?;
+    anyhow::ensure!(
+        terminal.outcome_code.as_deref() != Some("success")
+            || (status == ryeos_state::objects::ThreadStatus::Completed
+                && terminal.error.as_ref().is_none_or(Value::is_null)),
+        "release execution {thread_id} has contradictory retained success authority"
+    );
+    envelope["result"] = serde_json::to_value(terminal)?;
+    Ok(envelope)
 }
 
 pub(crate) fn successful_dispatch_result(envelope: &Value) -> anyhow::Result<&Value> {
@@ -609,6 +672,7 @@ pub(crate) fn successful_dispatch_result(envelope: &Value) -> anyhow::Result<&Va
         let diagnostic = terminal
             .get("error")
             .and_then(|error| error.as_str().or_else(|| error.get("message")?.as_str()))
+            .or_else(|| terminal.pointer("/result/error").and_then(Value::as_str))
             .unwrap_or("no terminal diagnostic supplied");
         // Preserve the failing producer's explanation without serializing an
         // unbounded result, arbitrary artifacts, or the whole launch envelope.
@@ -685,9 +749,116 @@ pub(crate) async fn publish_qualification(
 #[cfg(test)]
 mod tests {
     use super::{
-        selected_release_graph_child, successful_dispatch_result, verify_recipe_producer_parameters,
+        normalize_retained_dispatch_terminal, selected_release_graph_child,
+        successful_dispatch_result, verify_recipe_producer_parameters,
     };
     use serde_json::json;
+
+    fn retained_terminal(
+        outcome: &str,
+        result: serde_json::Value,
+        error: serde_json::Value,
+    ) -> (String, ryeos_app::thread_lifecycle::ExecuteResponseResult) {
+        (
+            if outcome == "success" {
+                "completed"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+            ryeos_app::thread_lifecycle::ExecuteResponseResult {
+                outcome_code: Some(outcome.to_owned()),
+                result: Some(result),
+                error: Some(error),
+                artifacts: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn managed_release_dispatch_uses_exact_retained_terminal_not_live_payload() {
+        let live = json!({
+            "thread":{"thread_id":"T-producer"},
+            "result":{"success":true,"status":"completed","result":{"schema":"spoof"}}
+        });
+        let normalized =
+            normalize_retained_dispatch_terminal(live.clone(), Some("T-producer"), |id| {
+                assert_eq!(id, "T-producer");
+                Ok(Some(retained_terminal(
+                    "success",
+                    json!({"schema":"retained"}),
+                    json!(null),
+                )))
+            })
+            .unwrap();
+        assert_eq!(
+            successful_dispatch_result(&normalized).unwrap()["schema"],
+            "retained"
+        );
+
+        let failed = normalize_retained_dispatch_terminal(live, None, |_| {
+            Ok(Some(retained_terminal(
+                "failed",
+                json!({"outcome_code":"success","result":{"schema":"spoof"}}),
+                json!("spawn item: inspect source-backed sandbox mount target ENOENT"),
+            )))
+        })
+        .unwrap();
+        let diagnostic = successful_dispatch_result(&failed).unwrap_err().to_string();
+        assert!(diagnostic.contains("T-producer"));
+        assert!(diagnostic.contains("failed"));
+        assert!(diagnostic.contains("inspect source-backed sandbox mount target ENOENT"));
+        assert!(!diagnostic.contains("spoof"));
+    }
+
+    #[test]
+    fn release_dispatch_requires_present_exact_retained_terminal() {
+        let live = json!({"thread":{"thread_id":"T-producer"},"result":{"outcome_code":"success","result":{}}});
+        assert!(normalize_retained_dispatch_terminal(live.clone(), None, |_| Ok(None)).is_err());
+        assert!(
+            normalize_retained_dispatch_terminal(live, Some("T-other"), |_| {
+                panic!("mismatched dispatch must not read another terminal")
+            })
+            .is_err()
+        );
+        assert!(
+            normalize_retained_dispatch_terminal(json!({"result":{}}), None, |_| {
+                panic!("missing identity must not read terminal")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_nested_failure_diagnostic_is_bounded_not_success_authority() {
+        let normalized = normalize_retained_dispatch_terminal(
+            json!({"thread":{"thread_id":"T-producer"},"result":{"success":true}}),
+            None,
+            |_| Ok(Some(retained_terminal("failed", json!({
+                "error":"é".repeat(8192), "outcome_code":"success", "artifacts":["do-not-dump"]
+            }), json!(null)))),
+        ).unwrap();
+        let diagnostic = successful_dispatch_result(&normalized)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(diagnostic.matches('é').count(), 4096);
+        assert!(!diagnostic.contains("do-not-dump"));
+    }
+
+    #[test]
+    fn release_dispatch_rejects_nonterminal_or_contradictory_retained_success() {
+        for status in ["running", "continued", "failed", "unknown"] {
+            let live = json!({"thread":{"thread_id":"T-producer"},"result":{"success":true}});
+            assert!(
+                normalize_retained_dispatch_terminal(live, None, |_| {
+                    let (_, terminal) = retained_terminal("success", json!({}), json!(null));
+                    Ok(Some((status.to_owned(), terminal)))
+                })
+                .is_err(),
+                "{status}"
+            );
+        }
+    }
 
     #[test]
     fn release_graphs_bind_one_exact_child_tool_selection() {

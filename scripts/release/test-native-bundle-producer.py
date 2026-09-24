@@ -1,14 +1,67 @@
 #!/usr/bin/env python3
 
+import io
+import json
+import os
 from pathlib import Path
+import runpy
+import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 GRAPH = ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/publish.yaml"
 SERVICES = ROOT / "bundles/bundle-release/.ai/services/bundle-release"
+NATIVE_QUALIFIER = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-qualify.py"
 
 
 class NativeBundleProducerSurfaceTests(unittest.TestCase):
+    def test_admitted_cow_source_link_count_is_not_product_link_policy(self):
+        tool_dir = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib"
+        for name in ("native-build.py", "core-seed-build.py"):
+            body = (tool_dir / name).read_text()
+            self.assertNotIn("st_nlink", body, name)
+            self.assertIn("stat.S_ISLNK", body, name)
+            self.assertIn("shutil.copytree(bundle_root, product", body, name)
+        for name in ("native-qualify.py", "core-seed-qualify.py"):
+            self.assertIn("st_nlink", (tool_dir / name).read_text(), name)
+
+    def test_native_qualifier_requires_an_executable_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tree = Path(directory)
+            (tree / ".ai/bin").mkdir(parents=True)
+            (tree / ".ai/manifest.yaml").write_text(
+                '# ryeos:signed:unit-test\n{"name":"native-fixture"}\n',
+                encoding="utf-8",
+            )
+            evidence = io.StringIO()
+            source_path = Path
+
+            def realized_path(*parts):
+                return tree if parts == ("/ryeos/realizations/native-bundle",) else source_path(*parts)
+
+            environment = {
+                "RYEOS_EXTERNAL_REALIZATIONS": json.dumps([
+                    {"id": "python", "manifest_hash": "d" * 64},
+                    {"id": "subject", "manifest_hash": "c" * 64},
+                ]),
+                "RYE_THREAD_ID": "native-qualifier-test",
+            }
+            # Simulated admission only; live node acceptance is separate.
+            with patch("pathlib.Path", side_effect=realized_path), patch("sys.stdin", io.StringIO("{}")), patch("sys.stdout", evidence), patch.dict(os.environ, environment):
+                with self.assertRaisesRegex(SystemExit, "no executable .ai/bin payload"):
+                    runpy.run_path(str(NATIVE_QUALIFIER), run_name="__main__")
+
+            binary = tree / ".ai/bin/native-fixture"
+            binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            evidence = io.StringIO()
+            with patch("pathlib.Path", side_effect=realized_path), patch("sys.stdin", io.StringIO("{}")), patch("sys.stdout", evidence), patch.dict(os.environ, environment):
+                runpy.run_path(str(NATIVE_QUALIFIER), run_name="__main__")
+            result = json.loads(evidence.getvalue())
+            self.assertEqual(result["probe_evidence"]["binary_count"], 1)
+            self.assertIn("native-payloads-executable", result["probe_evidence"]["checks"])
+
     def test_tool_invocation_schemas_are_inventory_not_runtime_blocks(self):
         tool_kind = (
             ROOT / "bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"

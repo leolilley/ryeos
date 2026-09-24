@@ -307,7 +307,29 @@ fn render_runtime_argument(
             expand_template(&template, ctx).map(PlanArgument::literal)
         }
         RuntimeArgument::Literal(literal) => Ok(PlanArgument::literal(literal.literal)),
+        RuntimeArgument::SourceMember(member) => {
+            validate_source_member_path(&member.source_member)?;
+            Ok(PlanArgument::AdmittedSourceMember {
+                relative_path: member.source_member,
+            })
+        }
     }
+}
+
+pub fn validate_source_member_path(path: &str) -> Result<(), EngineError> {
+    if path.is_empty()
+        || path.contains('\\')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(EngineError::InvalidRuntimeConfig {
+            path: "config.args.source_member".to_owned(),
+            reason: "source member must be a canonical nonempty relative path".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn is_host_env_root(root: &str) -> bool {
@@ -1179,6 +1201,47 @@ mod tests {
                 .literal_value(),
             Some(source)
         );
+    }
+
+    #[test]
+    fn source_member_argument_is_symbolic_and_round_trips() {
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let argument: RuntimeArgument =
+            serde_json::from_value(serde_json::json!({"source_member":"lib/run.py"})).unwrap();
+        let plan = render_runtime_argument(argument, &ctx).unwrap();
+        assert_eq!(
+            plan,
+            PlanArgument::AdmittedSourceMember {
+                relative_path: "lib/run.py".into()
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<PlanArgument>(serde_json::to_value(&plan).unwrap()).unwrap(),
+            plan
+        );
+        assert!(
+            serde_json::from_value::<RuntimeArgument>(
+                serde_json::json!({"source_member":"lib/run.py", "literal":"ignored"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_member_rejects_noncanonical_paths() {
+        for path in [
+            "",
+            "/run.py",
+            "../run.py",
+            "lib/../run.py",
+            "lib/./run.py",
+            "lib//run.py",
+            "lib/",
+            "lib\\run.py",
+            "lib\0run.py",
+        ] {
+            assert!(validate_source_member_path(path).is_err(), "{path:?}");
+        }
     }
 
     #[test]

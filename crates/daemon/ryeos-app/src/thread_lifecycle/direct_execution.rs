@@ -459,6 +459,35 @@ impl PreparedItemPlan {
         &self.plan
     }
 
+    pub fn consumes_source_members(&self) -> bool {
+        self.plan.nodes.iter().any(|node| match node {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => spec
+                .args
+                .iter()
+                .any(|arg| matches!(arg, PlanArgument::AdmittedSourceMember { .. })),
+            _ => false,
+        })
+    }
+
+    /// Redeem symbolic members only in the concrete spawn copy, after source
+    /// admission and materialization. Retained capsules keep the symbolic plan.
+    pub fn bind_source_members(
+        &mut self,
+        mut resolve: impl FnMut(&str) -> Result<String>,
+    ) -> Result<()> {
+        for node in &mut self.plan.nodes {
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
+                for arg in &mut spec.args {
+                    if let PlanArgument::AdmittedSourceMember { relative_path } = arg {
+                        ryeos_engine::runtime::validate_source_member_path(relative_path)?;
+                        *arg = PlanArgument::literal(resolve(relative_path)?);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Freeze independently admitted parent restrictions into the child's
     /// existing serialized plan before capsule admission. Recovery then reads
     /// this plan; it must not infer a new ceiling from a mutable parent row.
@@ -885,6 +914,11 @@ impl PreparedItemPlan {
             .transpose()?;
         let mut bound_entries = 0usize;
         for argument in &mut spec.args {
+            if matches!(argument, PlanArgument::AdmittedSourceMember { .. }) {
+                bail!(
+                    "persistent-session source member arguments are not supported by its source-entry contract"
+                );
+            }
             if matches!(argument, PlanArgument::AdmittedSourceEntry) {
                 let entry = source_entry.ok_or_else(|| {
                     anyhow!("persistent-session plan requires an admitted source entry")
@@ -3255,6 +3289,30 @@ mod tests {
         };
         *tool_path = Some(project_root.join(".ai/tools/test/run.yaml"));
         plan
+    }
+
+    #[test]
+    fn source_member_binding_changes_only_spawn_copy() {
+        let mut plan = portable_direct_plan(Path::new("/project"));
+        first_subprocess_spec_mut(&mut plan).unwrap().args =
+            vec![PlanArgument::AdmittedSourceMember {
+                relative_path: "lib/run.py".into(),
+            }];
+        let symbolic = serde_json::to_value(&plan).unwrap();
+        let mut prepared = prepared_plan(plan);
+        assert!(prepared.consumes_source_members());
+        let mut calls = 0;
+        prepared
+            .bind_source_members(|relative| {
+                assert_eq!(relative, "lib/run.py");
+                calls += 1;
+                Ok(format!("/runtime/source-closures/exact/{relative}"))
+            })
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert!(!prepared.consumes_source_members());
+        let retained: ExecutionPlan = serde_json::from_value(symbolic).unwrap();
+        assert!(prepared_plan(retained).consumes_source_members());
     }
 
     fn prepared_plan(plan: ExecutionPlan) -> PreparedItemPlan {

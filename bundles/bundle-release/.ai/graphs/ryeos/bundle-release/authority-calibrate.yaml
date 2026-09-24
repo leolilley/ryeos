@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T04:25:12Z:9bc6e2ee3d3033d6aeffabdc8774d29c54a8828680b42fc82d2f95180218d0fa:u/hF54KimrQgMuiwrrDOU7d7S18mJeu0svnpbrE5fkttWMJEHsZ+KOp4UbgO2bELSZa1fqSR+pPIxJ170y9xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:aac492a038a6cd83272e437025c22b3ff885f66ffb0806e03ef5c2c29f502465:cnvO3sNvFw1IejcCHfuvL/ZhGnEHVP7KuGbgHTF32+mq4HMG4oRwomNj+ttPh41gV0yDRr9Qo0QfhIoJul84CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.1"
 category: ryeos/bundle-release
 description: Run the bounded pre-policy authority calibration against one verified RyeOS ProjectSnapshot without contacting a catalog or publisher.
@@ -10,6 +10,8 @@ requires:
       - ryeos.execute.config.bundle-release/core-seed-capture-products
       - ryeos.execute.config.bundle-release/execution-environment-products
       - ryeos.execute.config.bundle-release/execution-tool-products
+      - ryeos.execute.config.bundle-release/native-build-products
+      - ryeos.execute.config.bundle-release/native-qualification
       - ryeos.execute.config.bundle-release/portable-build-products
       - ryeos.execute.config.bundle-release/portable-qualification
       - ryeos.execute.config.bundle-release/portable-signed-capture-products

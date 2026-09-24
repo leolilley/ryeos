@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:15:01Z:9ea497b08334d1a612f1e2433c0121df68e6c530cd1d5bc8577b37e6cc40c244:wF2+CA0e8W0gOG4bURI5vlSeqY3OVvmqL/3auG8Bmk6gtU+O/DpRR15ZX3YE7HwY9EStuwXP3CJ1c2MYalaKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T10:50:14Z:b45f08bd50b47374c3f04f5ad6e0d6df85b4627dc5bcc301da0746ec45041d4f:MKUHnK+MBD8/TGhGSGavffMQhNRb0KsWUglsY++BGWKDNahZrAcJtbk2fopWW8I52/biTpqAjZs6ajPzVORuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-capture
 version: "1.0.0"
@@ -15,6 +15,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/core-seed-capture.py"]
+  args: ["-I", "-B", {source_member: "lib/core-seed-capture.py"}]
   input_data: "${params_json}"
   timeout_secs: 300

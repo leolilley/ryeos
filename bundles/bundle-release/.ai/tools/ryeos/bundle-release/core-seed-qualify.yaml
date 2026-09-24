@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-23T08:15:01Z:820322dd909e7faec916ce765142f72006c66a8a8f7643b5be4df118db4feeac:Zo7tnszGCVEZlKVC3KMKfMOJ6SBDNAyFRp3YeXhdjAKg+PVKXyWhaRA5rBpNJshmg+RHmobPRQLz5NSOmcjfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T10:50:14Z:8010e37d4891cd572f7dbc586004e1140ef38e67a6b6500cd279a8e8ac2a0df7:2rS2qF5PhHgE1JHOR2+oI7vXhuvnC/GYNB7/h645uvBb1y9U/E3J7AomTOJOsI+CVt9RQSfuYhJd0y/aYP1wCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/bundle-release
 name: core-seed-qualify
 version: "1.0.0"
@@ -20,6 +20,6 @@ env_config:
   interpreter: {type: realization_member, realization_id: python, relative_path: python/bin/python3.14}
 config:
   command: "${interpreter}"
-  args: ["-I", "-B", ".ai/tools/ryeos/bundle-release/lib/core-seed-qualify.py"]
+  args: ["-I", "-B", {source_member: "lib/core-seed-qualify.py"}]
   input_data: "${params_json}"
   timeout_secs: 300

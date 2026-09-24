@@ -59,7 +59,7 @@ impl PayloadOwnershipConfigItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedPayload {
     pub bundle: String,
@@ -95,7 +95,7 @@ impl AdmittedReleaseInput {
         Self::from_value_for_purpose(value, false)
     }
 
-    pub(crate) fn from_core_seed_value(value: &Value) -> anyhow::Result<Self> {
+    pub fn from_core_seed_value(value: &Value) -> anyhow::Result<Self> {
         Self::from_value_for_purpose(value, true)
     }
 
@@ -337,10 +337,7 @@ impl AdmittedNativeBundleAuthorities {
             input.payload_ownership_item_ref == PAYLOAD_OWNERSHIP_ITEM_REF,
             "release input names an unsupported payload ownership item"
         );
-        anyhow::ensure!(
-            self.ownership.content_hash()? == input.payload_ownership_content_hash,
-            "payload ownership config changed after inspection"
-        );
+        require_exact_ownership_selection(&self.ownership, &input)?;
         let digest = input.digest()?;
         let receipt = self.build.build(&AdmittedBuildCoordinate {
             release_input: input,
@@ -361,6 +358,51 @@ impl AdmittedNativeBundleAuthorities {
         let receipt = self.qualification.qualify(&coordinate)?;
         validate_qualification_receipt(&self.objects, &coordinate, receipt)
     }
+}
+
+/// Recheck the exact signed ownership projection at the build boundary. A
+/// caller-provided release input is not authority to select its own payloads,
+/// even when its claimed ownership hash matches the current Config.
+pub fn require_exact_ownership_selection(
+    ownership: &BundlePayloadOwnership,
+    input: &AdmittedReleaseInput,
+) -> anyhow::Result<()> {
+    ownership.validate()?;
+    anyhow::ensure!(
+        ownership.content_hash()? == input.payload_ownership_content_hash,
+        "payload ownership config changed after inspection"
+    );
+    anyhow::ensure!(
+        owned_payloads_for_bundle(ownership, &input.bundle_name) == input.payloads,
+        "release input is not the exact signed payload ownership selection"
+    );
+    Ok(())
+}
+
+fn owned_payloads_for_bundle(
+    ownership: &BundlePayloadOwnership,
+    bundle_name: &str,
+) -> Vec<OwnedPayload> {
+    ownership
+        .owner(bundle_name)
+        .map(|owner| {
+            owner
+                .payloads
+                .iter()
+                .map(|payload| OwnedPayload {
+                    bundle: owner.bundle_name.clone(),
+                    binary: payload.binary.clone(),
+                    cargo_package: payload.cargo_package.clone(),
+                    build_class: serde_json::to_value(payload.build_class)
+                        .expect("payload build class serializes")
+                        .as_str()
+                        .expect("payload build class is a string")
+                        .to_owned(),
+                    bundle_sets: owner.bundle_sets.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve the only admitted build inputs after proving the requested source
@@ -474,26 +516,7 @@ fn inspect_release_input_for_purpose(
     source.verify_project_snapshot(&project_identity, &source_snapshot_hash)?;
     let project = source.authoritative_project_root();
     ownership.validate()?;
-    let payloads = ownership
-        .owner(&bundle_name)
-        .map(|owner| {
-            owner
-                .payloads
-                .iter()
-                .map(|payload| OwnedPayload {
-                    bundle: owner.bundle_name.clone(),
-                    binary: payload.binary.clone(),
-                    cargo_package: payload.cargo_package.clone(),
-                    build_class: serde_json::to_value(payload.build_class)
-                        .expect("payload build class serializes")
-                        .as_str()
-                        .expect("payload build class is a string")
-                        .to_owned(),
-                    bundle_sets: owner.bundle_sets.clone(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let payloads = owned_payloads_for_bundle(ownership, &bundle_name);
     let mut packages: Vec<_> = payloads.iter().map(|p| p.cargo_package.clone()).collect();
     packages.sort();
     packages.dedup();
@@ -766,5 +789,56 @@ mod input_contract_tests {
             polluted[field] = serde_json::json!(1);
             assert!(AdmittedReleaseInput::from_value(&polluted).is_err());
         }
+    }
+
+    #[test]
+    fn build_boundary_rejects_self_asserted_payloads_with_current_ownership_hash() {
+        let ownership = BundlePayloadOwnership::from_current_value(&serde_json::json!({
+            "schema": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_SCHEMA,
+            "kind": ryeos_bundle_publication_contract::BUNDLE_PAYLOAD_OWNERSHIP_KIND,
+            "bundles": [{
+                "bundle_name": "web",
+                "bundle_sets": ["release-authority"],
+                "payloads": [{
+                    "binary": "ryeos-web-tools",
+                    "cargo_package": "ryeos-web-tools",
+                    "build_class": "release"
+                }]
+            }]
+        }))
+        .unwrap();
+        let input = serde_json::json!({
+            "schema": RELEASE_INPUT_SCHEMA,
+            "project_path": "/source",
+            "bundle_name": "web",
+            "authored_manifest": {"name": "web", "version": "0.1.0", "provides_kinds": [], "requires_kinds": []},
+            "source_snapshot_hash": "a".repeat(64),
+            "predecessor_generation_hash": null,
+            "target": {"kind": "triple", "triple": "x86_64-unknown-linux-gnu"},
+            "build_profile": "release",
+            "payload_ownership_item_ref": PAYLOAD_OWNERSHIP_ITEM_REF,
+            "payload_ownership_content_hash": ownership.content_hash().unwrap(),
+            "payloads": [{
+                "bundle": "web",
+                "binary": "ryeos-unowned",
+                "cargo_package": "ryeos-unowned",
+                "build_class": "release",
+                "bundle_sets": ["release-authority"]
+            }],
+            "cargo_packages": ["ryeos-unowned"],
+            "build_classes": ["release"],
+            "requires_binary_build": true,
+            "clean_output_required": true,
+            "ambient_target_reuse_allowed": false,
+        });
+        let forged = AdmittedReleaseInput::from_value(&input).unwrap();
+        assert!(require_exact_ownership_selection(&ownership, &forged).is_err());
+
+        let mut exact = input;
+        exact["payloads"][0]["binary"] = serde_json::json!("ryeos-web-tools");
+        exact["payloads"][0]["cargo_package"] = serde_json::json!("ryeos-web-tools");
+        exact["cargo_packages"] = serde_json::json!(["ryeos-web-tools"]);
+        let exact = AdmittedReleaseInput::from_value(&exact).unwrap();
+        require_exact_ownership_selection(&ownership, &exact).unwrap();
     }
 }

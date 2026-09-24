@@ -16,9 +16,10 @@
 //!     and set in `ctx.params` only if not already present (caller
 //!     wins).
 //!
-//! Each loaded YAML is verified with "warn-if-unsigned, fail-loud
-//! on tampered" semantics (`allow_unsigned=True` in Python). The
-//! YAML is parsed via the `config` kind's parser dispatch entry.
+//! Ordinary single/multi Config loading retains its configured unsigned
+//! behavior and parser dispatch. `strict_signed_project_bundle` is a separate
+//! fail-closed authority path: it reads one exact signed source-bundle Config
+//! from the admitted project generation and never merges overlays.
 
 use std::collections::BTreeSet;
 
@@ -44,8 +45,19 @@ const UNIVERSAL_EXEC_KEYS: &[&str] = &["timeout", "cancellation_mode", "cancella
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigResolveSpec {
-    Single { spec: ConfigSpec },
-    Multi { specs: Vec<ConfigSpec> },
+    Single {
+        spec: ConfigSpec,
+    },
+    Multi {
+        specs: Vec<ConfigSpec>,
+    },
+    /// One exact source-bundle Config from the admitted project generation.
+    /// Unlike ordinary config resolution, absence, unsigned content, a signer
+    /// mismatch, or missing project-content authority is fatal.
+    StrictSignedProjectBundle {
+        bundle_name: String,
+        config_path: String,
+    },
 }
 
 pub struct ConfigResolveHandler;
@@ -86,6 +98,63 @@ impl RuntimeHandler for ConfigResolveHandler {
         // returns `{path: resolved}`; a single-form returns the
         // resolved config directly. Matches Python lines 1138-1146.
         let resolved: Value = match &spec {
+            ConfigResolveSpec::StrictSignedProjectBundle {
+                bundle_name,
+                config_path,
+            } => {
+                if ctx.current_index != 0 {
+                    return Err(EngineError::InvalidRuntimeConfig {
+                        path: intermediate.source_path.display().to_string(),
+                        reason: "strict signed project-bundle Config must belong to the root Tool"
+                            .into(),
+                    });
+                }
+                let (project_root, project_content) = ctx.project_authority.ok_or_else(|| {
+                    EngineError::InvalidRuntimeConfig {
+                        path: config_path.clone(),
+                        reason: "strict signed project-bundle Config requires admitted project-content authority".into(),
+                    }
+                })?;
+                let mut registered_roots = ctx.roots.ordered.iter().filter(|root| {
+                    matches!(
+                        &root.identity,
+                        crate::contracts::ItemSourceRoot::Bundle { name } if name == bundle_name
+                    )
+                });
+                let registered_root = registered_roots
+                    .next()
+                    .and_then(|root| root.content_root.as_deref())
+                    .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                        path: config_path.clone(),
+                        reason: format!(
+                            "source bundle `{bundle_name}` has no registered content root"
+                        ),
+                    })?;
+                if registered_roots.next().is_some() {
+                    return Err(EngineError::InvalidRuntimeConfig {
+                        path: config_path.clone(),
+                        reason: format!(
+                            "source bundle `{bundle_name}` has ambiguous registered roots"
+                        ),
+                    });
+                }
+                let verified = crate::config_loading::load_strict_signed_project_bundle_config(
+                    project_root,
+                    project_content,
+                    ctx.node_trust_store,
+                    registered_root,
+                    bundle_name,
+                    config_path,
+                )?;
+                serde_json::json!({
+                    "value": verified.value,
+                    "source": {
+                        "bundle_name": bundle_name,
+                        "config_path": config_path,
+                        "signer_fingerprint": verified.signer_fingerprint,
+                    }
+                })
+            }
             ConfigResolveSpec::Multi { specs } => {
                 let mut map = Map::new();
                 for s in specs {
@@ -254,6 +323,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    const STRICT_PATH: &str =
+        "bundles/bundle-release/.ai/config/bundle-release/payload-ownership.yaml";
+
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])
     }
@@ -419,6 +491,90 @@ metadata:
         };
         ConfigResolveHandler.apply(&block, &mut ctx)?;
         Ok(ctx.params)
+    }
+
+    #[test]
+    fn strict_project_bundle_requires_admitted_content_and_overwrites_caller_projection() {
+        let rig = build_rig();
+        let declaration = json!({
+            "type": "strict_signed_project_bundle",
+            "bundle_name": "bundle-release",
+            "config_path": STRICT_PATH,
+        });
+        let chain = vec![fake_intermediate("@subprocess", json!({}))];
+        let denied = run_handler(
+            &rig,
+            chain.clone(),
+            0,
+            declaration.clone(),
+            json!({"resolved_config":{"forged":true}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(denied.contains("admitted project-content authority"));
+
+        let project_root = rig.project_ai.parent().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        let manifest =
+            "name: bundle-release\nversion: 0.1.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let registered_manifest = registered.path().join(".ai/manifest.yaml");
+        fs::create_dir_all(registered_manifest.parent().unwrap()).unwrap();
+        fs::write(&registered_manifest, sign_yaml(manifest)).unwrap();
+        let source_manifest = project_root.join("bundles/bundle-release/.ai/manifest.yaml");
+        fs::create_dir_all(source_manifest.parent().unwrap()).unwrap();
+        fs::write(&source_manifest, sign_yaml(manifest)).unwrap();
+        let config = project_root.join(STRICT_PATH);
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, sign_yaml("purpose: authentic\n")).unwrap();
+        let pinned = lillux::PinnedDirectory::open(project_root)
+            .unwrap()
+            .unwrap();
+        let mut roots = rig.roots.clone();
+        roots.ordered.push(ResolutionRoot {
+            space: crate::contracts::ItemSpace::Bundle,
+            identity: crate::contracts::ItemSourceRoot::Bundle {
+                name: "bundle-release".to_owned(),
+            },
+            label: "bundle:bundle-release".to_owned(),
+            ai_root: registered.path().join(".ai"),
+            content_root: Some(registered.path().to_path_buf()),
+        });
+        let original = json!({"resolved_config":{"forged":true}, "release_input":{}});
+        let mut ctx = CompileContext {
+            template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
+            env: HashMap::new(),
+            env_sources: HashMap::new(),
+            spec_overrides: SpecOverrides::default(),
+            params: original.clone(),
+            original_params: &original,
+            chain: &chain,
+            current_index: 0,
+            roots: &roots,
+            parsers: &rig.parsers,
+            kinds: &rig.kinds,
+            trust_store: &rig.trust,
+            node_trust_store: &rig.trust,
+            project_root: Some(project_root),
+            project_authority: Some((project_root, &pinned)),
+            sealed_content: None,
+            root_trust_class: crate::resolution::TrustClass::TrustedBundle,
+            host_env: &EMPTY_HOST_ENV,
+        };
+        ConfigResolveHandler.apply(&declaration, &mut ctx).unwrap();
+        let projected = crate::runtime::subprocess_invocation_params(&original, &ctx.params);
+        assert_eq!(
+            projected["resolved_config"]["value"]["purpose"],
+            "authentic"
+        );
+        assert_eq!(
+            projected["resolved_config"]["source"]["bundle_name"],
+            "bundle-release"
+        );
+        assert_eq!(
+            projected["resolved_config"]["source"]["config_path"],
+            STRICT_PATH
+        );
+        assert!(projected["resolved_config"].get("forged").is_none());
     }
 
     fn fake_intermediate(executor_id: &str, parsed: Value) -> ChainIntermediate {

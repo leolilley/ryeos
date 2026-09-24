@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-21T01:02:21Z:151ede42874b02118fbc25faedff034a28c7b1fb656e6639f40b83d3d7fae201:HDsOo1xYDGkqfGJnSqzV/hASezWdxLvDIGpFoZFnPUQpZLzYySaUterNlnMSA7bTg+OE5d38i2Tawtxm46LTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:1a9194e27e9af70bf3d076aabf286c6066d4e8feecacb5fa4f829d2222a705a4:MrXbuy++kw4Zh/ljx0BXCmGCoB/K4Drq5aFqmbTNsMq1TifExHe0yXdL4+KCN+7DdczS8TiOKqwaV8fWMdkcCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: generation-qualify
 version: "1.0.0"
@@ -7,6 +7,7 @@ endpoint: bundle_release.generation_qualify
 availability: daemon_only
 required_caps:
   - ryeos.execute.config.bundle-release/execution-environment-products
+  - ryeos.execute.config.bundle-release/native-qualification
   - ryeos.execute.config.bundle-release/portable-qualification
   - ryeos.execute.service.bundle-release/generation-qualify
   - ryeos.execute.tool.ryeos/bundle-release/native-qualify

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-20T02:47:07Z:76bac11bc5af5d84da9871ba1ca509dd989bfa2f3ef71f5f63878ed2c418d374:gHMlA5+rQwbhKuWr9/VqbUxbpzQukDyNBbiVKrFtwRg7FxhXq6qKQkuZg5XtL5fCp95Q8ZTGP6MCBy15DXLRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-23T12:15:50Z:85494174bd389e843cf5e8d33cfac8d39a42a17081c4ef75fe178c601c74b509:zvxLY+PW7QN4BSVya1KfvLRM7MAkv82k/wbFQcyt7uXUG9jQYwUOu2ZLajaEuItv65cXvqZhcw/N1c8exDasBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -13,7 +13,7 @@ exact_bundles:
   - web
 policies:
   bundle_publication:
-    schema: 1
+    schema: 2
     # Publication is disabled until the operator installs measured release authority.
     catalogs: []
 

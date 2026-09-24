@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn deny_all_bootstrap_cannot_produce_publisher_authority() {
-        let section = serde_yaml::from_str("schema: 1\ncatalogs: []\n").unwrap();
+        let section = serde_yaml::from_str("schema: 2\ncatalogs: []\n").unwrap();
         assert!(StandalonePublisherPolicy::from_node_policy(&section, "official").is_err());
     }
 
