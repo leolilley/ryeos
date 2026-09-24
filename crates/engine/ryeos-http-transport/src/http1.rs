@@ -912,19 +912,19 @@ mod tests {
 
     #[test]
     fn request_limits_and_transport_headers_refuse_before_contact() {
-        let mut request = request(vec![b'x'; 8]);
-        request.limits.request_body_bytes = 7;
+        let mut oversized_request = request(vec![b'x'; 8]);
+        oversized_request.limits.request_body_bytes = 7;
         assert_eq!(
-            validate(&request).unwrap_err().contact_state(),
+            validate(&oversized_request).unwrap_err().contact_state(),
             crate::ContactState::NoRequestSent
         );
 
-        let mut request = request(vec![]);
-        request
+        let mut restricted_request = request(vec![]);
+        restricted_request
             .headers
             .push(Header::new("connection", "keep-alive"));
         assert_eq!(
-            validate(&request).unwrap_err().contact_state(),
+            validate(&restricted_request).unwrap_err().contact_state(),
             crate::ContactState::NoRequestSent
         );
     }
