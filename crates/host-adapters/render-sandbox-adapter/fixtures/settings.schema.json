@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RyeOS Render Sandbox early-access settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "owner_id",
+    "plan",
+    "region",
+    "snapshot_id",
+    "base_snapshot_hash",
+    "tls_roots_der_base64"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "owner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "plan": { "enum": ["starter", "standard", "pro"] },
+    "region": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 256,
+      "pattern": "^snp-[A-Za-z0-9-]+$"
+    },
+    "base_snapshot_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "tls_roots_der_base64": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "maxLength": 87384,
+        "contentEncoding": "base64"
+      }
+    }
+  }
+}

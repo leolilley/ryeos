@@ -3260,6 +3260,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-render-sandbox-lifecycle-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "lillux",
+ "ryeos-external-execution-contract",
+ "ryeos-http-transport",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ryeos-runtime"
 version = "0.5.99"
 dependencies = [

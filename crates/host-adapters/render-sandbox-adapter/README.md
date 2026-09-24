@@ -1,0 +1,172 @@
+# Render Sandbox early-access lifecycle adapter
+
+This crate is an authored, unqualified adapter for the early-access Sandbox
+surface described by the pinned Render CLI source at
+`/tmp/render-oss-cli` (`de62fd1e2762ac25ad4ae11d086377c49fd4b299`). Render's
+published [API reference](https://api-docs.render.com/reference/introduction)
+and its [OpenAPI specification](https://api-docs.render.com/openapi/render-public-api-1.json)
+currently do not list Sandbox lifecycle paths. The public OpenAPI error-code
+enum does include `snapshot_not_found`, `snapshot_not_available`, and
+`snapshot_plan_mismatch`; that corroborates these names, but does not publish
+the Sandbox create schema, response codes, or the authority of those errors as
+proof that a create had no effect. The lifecycle route and response shapes
+below therefore remain grounded in the pinned CLI source and are unqualified.
+This source and its fixture responses are not a claim of public/stable API
+support, signing, installation, or provider qualification.
+
+## Implemented control-plane behavior
+
+- Creates a Sandbox through `POST /v1/sandboxes`, placing `ownerId` in the JSON
+  body as required by the pinned generated client. It also takes plan,
+  region, immutable `snapshotId`, the reserved maximum lifetime, and `deny-all`
+  network policy from the admitted settings/request inputs. The reservation's
+  base snapshot digest must match the digest paired with `snapshotId` in those
+  settings, and both values are included in the allocation observation digest.
+  Render's create response does not echo a snapshot ID or content digest, so
+  this records the configured mapping that was sent; it is not an independent
+  provider attestation that the snapshot contents match the RyeOS digest.
+- A valid `201 application/json` response must match the pinned Sandbox shape,
+  including the requested plan, region, lifetime and network policy, before
+  its provider ID is returned as an occurrence.
+- `allocation_no_occurrence` is returned only when W1 classifies the create as
+  `NoRequestSent`, or when a complete JSON response matches one of the pinned
+  CLI source's immutable-snapshot rejection shapes: 404 `snapshot_not_found`,
+  or 409 `snapshot_not_available` / `snapshot_plan_mismatch`. These shapes
+  still need provider-authoritative protocol evidence before qualification.
+  Other transport failures, invalid responses, unexpected statuses and lost
+  create responses remain `allocation_pending`. The adapter never retries
+  create or scans the broad paginated Sandbox list to guess an occurrence. A
+  request that may have reached Render can leave a Sandbox and billable spend
+  with no safely bound occurrence; that state remains unknown and requires
+  operator quarantine or review.
+- Termination uses `POST /v1/sandboxes/{id}/terminate?ownerId=...` once, then
+  requires an exact `GET /v1/sandboxes/{id}?ownerId=...` response with matching
+  ID, `status: terminated`,
+  and a valid `terminatedAt` before returning terminal evidence. The evidence
+  digest binds the operation, binding, allocation request, occurrence,
+  termination request, terminal state, timestamp, and provider response hash.
+  Terminate acknowledgement, 404, timeout, or malformed response alone is
+  pending.
+- Allocation reconciliation without a retained provider ID is always pending.
+  The adapter does not treat list absence or a GET 404 as proof of no
+  occurrence.
+- Activation and activation reconciliation always return `supervisor_pending`.
+  The pinned CLI source exposes a connect-token POST for a run, returning an
+  execution ID, expiry, method, proxy URI, and short-lived bearer token. The CLI
+  then sends a command to that URI using the returned method and parses
+  `output`, `exit`, and `error` SSE events. It also exposes exact execution GET
+  and list operations; execution records contain command metadata,
+  operation/type, token-mint `startedAt`, optional `stoppedAt`, and optional
+  client-reported `exitCode`, but no supervisor readiness proof. The CLI's SSE
+  reader has no event-size ceiling; a RyeOS implementation would need bounded
+  per-operation SSE limits. If token minting's response is lost, the adapter
+  also lacks the returned execution ID needed for exact GET. A list result
+  cannot safely bind that uncertain activation to this RyeOS operation. The
+  dynamic proxy URI additionally needs a reviewed origin/path policy and
+  transport policy. W3 therefore does not mint a token, invoke a proxy URI, or
+  infer activation from an exit status.
+  These behaviors are visible in the pinned CLI's `pkg/sandbox/repo.go`,
+  `pkg/sandbox/sse.go`, `pkg/client/client_gen.go`, and
+  `pkg/client/sandboxes/sandboxes_gen.go`.
+
+## Provider operation and uncertainty matrix
+
+| Operation | Stable identity and pre-contact record | Positive evidence and reconciliation | Lost response, negative evidence, and spend |
+| --- | --- | --- | --- |
+| Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative; the three typed snapshot rejection shapes are adapter evidence but still need provider-authoritative qualification. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
+| Allocation observation | The original allocation identity remains the coordinate; no Sandbox ID is invented. | Allocation reconciliation is unsupported without a retained provider ID. This adapter does not list or guess. | A list miss or `404` is not a negative proof. Unresolved occurrence and spend remain unknown under the original reservation. |
+| Bootstrap and readiness | W2's activation request identity remains authoritative; this adapter does not create a Render execution token. | No bootstrap/readiness proof is emitted. Activation and its reconciliation remain pending. | The pinned CLI's token-mint response would carry the execution ID and operation-scoped proxy URI; a lost response leaves no exact ID to query. This adapter does not mint, retry, invoke, or guess from a list. |
+| Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID with `status: terminated` and a valid `terminatedAt` is terminal observation. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
+| Provider Sandbox death and writer exclusion | Bound to the exact Sandbox occurrence, but distinct from the termination request coordinate. | The current adapter does not establish guest descendant settlement, writer exclusion, or a frozen export. | Provider `terminated` status is not installed qualification or proof of RyeOS guest-writer death. No candidate execution or export is enabled by this adapter. |
+
+The exact proxy URL origin/path policy and the mapping from RyeOS captured
+snapshot/input hashes to Render Sandbox bootstrap content remain unresolved.
+The adapter therefore cannot start RyeOS's supervisor in a Sandbox and is not
+a usable external execution backend yet.
+
+The declared capabilities are exactly `authoritative_no_occurrence` and
+`exact_terminal_observation`. The first capability is limited to W1's
+`NoRequestSent` result and the three typed snapshot rejection responses above.
+The adapter does not declare `idempotent_termination` because it follows the
+one-Terminate policy.
+
+## Explicit settings
+
+`fixtures/settings.schema.json` defines the sealed settings payload. It carries
+an owner ID, plan, region, immutable snapshot ID and its admitted base digest,
+plus explicit DER roots used only for `api.render.com`. W2's lifecycle runner
+supplies resolver and hosts as sealed descriptors and supplies SHA-256 values
+for both byte strings plus the signed network-policy digest. W2 validates the
+captures against that signed policy; W3 verifies both byte digests, checks the
+policy digest encoding, and parses captured bytes through Lillux. It never
+reads DNS or hosts from ambient files. The Render API key arrives through the
+runner's sealed credential descriptor and is attached only to the fixed API
+origin. The remaining-time environment value starts one monotonic deadline
+for the whole operation; allocation also clamps it to its request contact
+deadline. SIGINT and SIGTERM cancel the operation's shared W1 network
+cancellation token.
+
+The provider specification is a separate signed bundle artifact, not a
+settings field. The settings schema digest inside `fixtures/provider-spec.json`
+binds the supported provider profile to this exact settings schema. The
+proposed closed data shape is documented in
+`fixtures/provider-spec.schema.json`; the Rust parser remains the runtime
+authority and additionally enforces the reviewed operation/profile pairings.
+
+## Signed provider specification
+
+The bundle fragment uses lifecycle protocol v2 and binds the non-executable
+`fixtures/provider-spec.json` file by path and SHA-256. W2 captures it from the
+same admitted bundle generation as the adapter, enforces the 256 KiB limit,
+checks its signed digest, and passes a sealed descriptor and digest to both
+inspection and each operation. Inspection reports the digest it actually
+observed.
+
+W3 adopts and reads the inspection descriptor through Lillux, checks its
+declared byte count and digest, parses the closed schema, and reports
+`observed_provider_spec_sha256`. At operation startup it reads the W2-supplied
+sealed FD and digest environment variables, then performs the same checks
+before settings or network work. The settings-schema digest in the spec must
+match the exact settings schema carried by this adapter.
+
+`src/provider_spec.rs` is the first narrow interpreter profile. It accepts
+fixed operation kinds, route segments, typed field sources, one reviewed
+snapshot precondition, and code-defined proof-profile identifiers. It rejects
+unknown fields, methods, origins, arbitrary expressions, capability claims,
+and proof values. The interpreter builds the create body and exact route from
+the signed data; Rust validates create binding, typed snapshot rejection, and
+terminal observations before deriving effective capabilities. Create remains
+one POST with no retry or listing-based reconciliation. Termination remains
+one POST followed by exact-ID GET. Activation and its reconciliation remain
+pending.
+
+This is the Render reference profile for the data-driven lifecycle direction,
+not evidence that a multi-provider shared runtime is complete. The interpreter
+is still crate-local and Render-specific; extracting common parsing and
+execution logic into the shared host runtime requires a reviewed schema/runtime
+boundary before another provider is added. W2's current v2 seam carries opaque,
+digest-checked spec bytes; its owner still needs to accept or revise this
+proposed JSON shape before W2 integration. The Render profile cannot introduce
+an origin, credential placement, HTTP method, retry rule, or proof behavior.
+The Sandbox proxy stays disabled until its URL policy and RyeOS bootstrap
+mapping are established.
+
+## Build and qualification gates
+
+The adapter is a separate host-adapter package. W2 owns root workspace and
+lockfile changes. The source build command, pending explicit heavy-command
+approval, is:
+
+```sh
+cargo build --release --manifest-path crates/host-adapters/render-sandbox-adapter/Cargo.toml
+```
+
+The approved offline fixture/unit command
+`cargo test --locked --offline --manifest-path crates/host-adapters/render-sandbox-adapter/Cargo.toml`
+passed on 2026-09-24 (7 tests). No release build, signing, Render API call,
+provisioning, or installed qualification has been performed for this draft.
+Before use, W2 must accept the provider-spec data shape and coordinate its
+shared lockfile change; W1 must integrate the transport seam; and the
+integration thread must establish provider-authoritative lifecycle evidence,
+proxy validation, and RyeOS bootstrap semantics. Any authenticated Render call
+requires separate approval.

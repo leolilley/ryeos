@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "provider_profile": "render_sandbox_v1",
+  "settings_schema_digest": "12659bfc0c054e6192b3b42948f3e1c14d96dc9fe2bbc58856a42859eee97658",
+  "origin_profile": "render_api_v1",
+  "routes": {
+    "sandbox_collection": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" }
+      ]
+    },
+    "sandbox_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    },
+    "sandbox_terminate_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "terminate" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    }
+  },
+  "operations": {
+    "allocate": {
+      "kind": "create_once",
+      "route": "sandbox_collection",
+      "precondition_profile": "render_base_snapshot_match_v1",
+      "body": {
+        "ownerId": { "source": "settings.owner_id" },
+        "plan": { "source": "settings.plan" },
+        "region": { "source": "settings.region" },
+        "timeoutSeconds": {
+          "source": "reservation.maximum_lifetime_seconds"
+        },
+        "networkPolicy": { "literal": { "default": "deny-all" } },
+        "snapshotId": { "source": "settings.snapshot_id" }
+      },
+      "bind_proof_profile": "render_sandbox_create_201_v1",
+      "no_occurrence_proof_profile": "render_snapshot_rejections_v1"
+    },
+    "reconcile_allocation": { "kind": "unsupported_pending" },
+    "activate_supervisor": { "kind": "unsupported_pending" },
+    "reconcile_supervisor_activation": { "kind": "unsupported_pending" },
+    "terminate": {
+      "kind": "terminate_once_then_observe_exact",
+      "mutation_route": "sandbox_terminate_by_id",
+      "observation_route": "sandbox_by_id",
+      "terminal_proof_profile": "render_sandbox_terminal_v1"
+    },
+    "reconcile_termination": {
+      "kind": "observe_exact_occurrence",
+      "route": "sandbox_by_id",
+      "terminal_proof_profile": "render_sandbox_terminal_v1"
+    }
+  }
+}

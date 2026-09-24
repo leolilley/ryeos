@@ -1,0 +1,9 @@
+{
+  "createdAt": "2026-09-24T00:00:00Z",
+  "id": "sbx-fixture-001",
+  "networkPolicy": { "default": "deny-all" },
+  "plan": "standard",
+  "region": "oregon",
+  "status": "creating",
+  "timeoutSeconds": 600
+}

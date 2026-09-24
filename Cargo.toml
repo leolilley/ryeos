@@ -45,6 +45,7 @@ members = [
     "crates/tools/independent-runtime-verifier",
     "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
+    "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
     "crates/tools/ui-contract-exporter",

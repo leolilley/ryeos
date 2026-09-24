@@ -1018,6 +1018,147 @@ mod tests {
         assert!(!debug.contains("secret-token"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn silent_tls_peer_times_out_before_http_request_transmission() {
+        use std::net::TcpListener;
+        use std::time::{Duration as StdDuration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(2)))
+                .unwrap();
+            let mut client_hello = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while client_hello.len() < 5 {
+                let count = socket.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "client closed before sending its TLS hello");
+                client_hello.extend_from_slice(&buffer[..count]);
+            }
+            assert_eq!(client_hello[0], 22, "first TLS record is not a handshake");
+            loop {
+                match socket.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => client_hello.extend_from_slice(&buffer[..count]),
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => break,
+                    Err(error) => panic!("TLS client did not settle its socket: {error}"),
+                }
+            }
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(vec![]);
+        http_request.url =
+            url::Url::parse(&format!("https://localhost:{port}/silent-tls")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.deadlines = Deadlines::new(
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+            MonotonicDeadline::after(Duration::from_secs(2)),
+        );
+
+        let started = Instant::now();
+        let error = match execute(&network, http_request) {
+            Err(error) => error,
+            Ok(_) => panic!("silent TLS peer unexpectedly completed an HTTP request"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.contact_state(), crate::ContactState::NoRequestSent);
+        assert!(started.elapsed() < StdDuration::from_secs(1));
+        peer.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_http_peer_times_out_with_ambiguous_contact() {
+        use std::net::TcpListener;
+        use std::time::{Duration as StdDuration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(4)))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    include_bytes!("../tests/fixtures/test-server.der").to_vec(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        include_bytes!("../tests/fixtures/test-server-key.der").to_vec(),
+                    ),
+                ),
+            )
+            .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut request_head = Vec::new();
+            loop {
+                assert!(request_head.len() < 64 * 1024);
+                let mut buffer = [0u8; 1024];
+                let count = tls.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "client closed before its HTTP request");
+                request_head.extend_from_slice(&buffer[..count]);
+                if request_head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(request_head.starts_with(b"POST /silent-http HTTP/1.1\r\n"));
+            let mut response_wait = [0u8; 1];
+            match tls.read(&mut response_wait) {
+                Ok(0) => {}
+                Ok(_) => panic!("silent HTTP peer received unexpected extra request data"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => panic!("unexpected TLS peer error: {error}"),
+            }
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(vec![]);
+        http_request.url =
+            url::Url::parse(&format!("https://localhost:{port}/silent-http")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.deadlines = Deadlines::new(
+            Duration::from_secs(2),
+            Duration::from_millis(250),
+            MonotonicDeadline::after(Duration::from_secs(5)),
+        );
+
+        let started = Instant::now();
+        let error = match execute(&network, http_request) {
+            Err(error) => error,
+            Ok(_) => panic!("silent HTTP peer unexpectedly returned a response"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            error.contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+        assert!(started.elapsed() < StdDuration::from_secs(3));
+        peer.join().unwrap();
+    }
+
     /// Exercise the streaming body with a local TLS peer and captured localhost resolution.
     #[cfg(unix)]
     fn streamed_response_read_error(

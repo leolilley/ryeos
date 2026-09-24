@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RyeOS Render Sandbox lifecycle provider specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "provider_profile",
+    "settings_schema_digest",
+    "origin_profile",
+    "routes",
+    "operations"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "provider_profile": { "const": "render_sandbox_v1" },
+    "settings_schema_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "origin_profile": { "const": "render_api_v1" },
+    "routes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sandbox_collection",
+        "sandbox_by_id",
+        "sandbox_terminate_by_id"
+      ],
+      "properties": {
+        "sandbox_collection": { "$ref": "#/$defs/collection_route" },
+        "sandbox_by_id": { "$ref": "#/$defs/by_id_route" },
+        "sandbox_terminate_by_id": { "$ref": "#/$defs/terminate_route" }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocate",
+        "reconcile_allocation",
+        "activate_supervisor",
+        "reconcile_supervisor_activation",
+        "terminate",
+        "reconcile_termination"
+      ],
+      "properties": {
+        "allocate": { "$ref": "#/$defs/allocate_operation" },
+        "reconcile_allocation": { "$ref": "#/$defs/pending_operation" },
+        "activate_supervisor": { "$ref": "#/$defs/pending_operation" },
+        "reconcile_supervisor_activation": {
+          "$ref": "#/$defs/pending_operation"
+        },
+        "terminate": { "$ref": "#/$defs/terminate_operation" },
+        "reconcile_termination": { "$ref": "#/$defs/reconcile_termination_operation" }
+      }
+    }
+  },
+  "$defs": {
+    "literal_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "v1" } }
+    },
+    "literal_sandboxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "sandboxes" } }
+    },
+    "literal_terminate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["literal"],
+      "properties": { "literal": { "const": "terminate" } }
+    },
+    "occurrence_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bound"],
+      "properties": { "bound": { "const": "occurrence_id" } }
+    },
+    "owner_id_query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownerId"],
+      "properties": {
+        "ownerId": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": { "source": { "const": "settings.owner_id" } }
+        }
+      }
+    },
+    "collection_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" }
+          ],
+          "minItems": 2,
+          "maxItems": 2,
+          "items": false
+        }
+      }
+    },
+    "by_id_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" }
+          ],
+          "minItems": 3,
+          "maxItems": 3,
+          "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_id_query" }
+      }
+    },
+    "terminate_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segments", "query"],
+      "properties": {
+        "segments": {
+          "type": "array",
+          "prefixItems": [
+            { "$ref": "#/$defs/literal_v1" },
+            { "$ref": "#/$defs/literal_sandboxes" },
+            { "$ref": "#/$defs/occurrence_binding" },
+            { "$ref": "#/$defs/literal_terminate" }
+          ],
+          "minItems": 4,
+          "maxItems": 4,
+          "items": false
+        },
+        "query": { "$ref": "#/$defs/owner_id_query" }
+      }
+    },
+    "settings_owner_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.owner_id" } }
+    },
+    "settings_plan_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.plan" } }
+    },
+    "settings_region_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.region" } }
+    },
+    "settings_snapshot_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": { "source": { "const": "settings.snapshot_id" } }
+    },
+    "reservation_lifetime_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "const": "reservation.maximum_lifetime_seconds" }
+      }
+    },
+    "create_body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "plan",
+        "region",
+        "timeoutSeconds",
+        "networkPolicy",
+        "snapshotId"
+      ],
+      "properties": {
+        "ownerId": { "$ref": "#/$defs/settings_owner_source" },
+        "plan": { "$ref": "#/$defs/settings_plan_source" },
+        "region": { "$ref": "#/$defs/settings_region_source" },
+        "timeoutSeconds": { "$ref": "#/$defs/reservation_lifetime_source" },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["literal"],
+          "properties": {
+            "literal": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["default"],
+              "properties": { "default": { "const": "deny-all" } }
+            }
+          }
+        },
+        "snapshotId": { "$ref": "#/$defs/settings_snapshot_source" }
+      }
+    },
+    "pending_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "const": "unsupported_pending" } }
+    },
+    "allocate_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "route",
+        "precondition_profile",
+        "body",
+        "bind_proof_profile",
+        "no_occurrence_proof_profile"
+      ],
+      "properties": {
+        "kind": { "const": "create_once" },
+        "route": { "const": "sandbox_collection" },
+        "precondition_profile": { "const": "render_base_snapshot_match_v1" },
+        "body": { "$ref": "#/$defs/create_body" },
+        "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },
+        "no_occurrence_proof_profile": { "const": "render_snapshot_rejections_v1" }
+      }
+    },
+    "terminate_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "mutation_route",
+        "observation_route",
+        "terminal_proof_profile"
+      ],
+      "properties": {
+        "kind": { "const": "terminate_once_then_observe_exact" },
+        "mutation_route": { "const": "sandbox_terminate_by_id" },
+        "observation_route": { "const": "sandbox_by_id" },
+        "terminal_proof_profile": { "const": "render_sandbox_terminal_v1" }
+      }
+    },
+    "reconcile_termination_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "route", "terminal_proof_profile"],
+      "properties": {
+        "kind": { "const": "observe_exact_occurrence" },
+        "route": { "const": "sandbox_by_id" },
+        "terminal_proof_profile": { "const": "render_sandbox_terminal_v1" }
+      }
+    }
+  }
+}

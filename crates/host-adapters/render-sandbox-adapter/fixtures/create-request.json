@@ -1,0 +1,8 @@
+{
+  "networkPolicy": { "default": "deny-all" },
+  "ownerId": "owner-fixture",
+  "plan": "standard",
+  "region": "oregon",
+  "snapshotId": "snp-fixture-001",
+  "timeoutSeconds": 600
+}
