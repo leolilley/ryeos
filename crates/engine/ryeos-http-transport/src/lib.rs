@@ -98,15 +98,15 @@ impl Deadlines {
 /// Independent byte ceilings for one exchange.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Maximum exact-length request body bytes.
+    /// Maximum exact-length request body bytes, hard-capped at 64 MiB.
     pub request_body_bytes: u64,
     /// Maximum serialized request line and header bytes, hard-capped at 1 MiB.
     pub request_header_bytes: usize,
-    /// Maximum cumulative response status line and header bytes.
+    /// Maximum cumulative response status line and header bytes, hard-capped at 1 MiB.
     pub response_header_bytes: usize,
-    /// Maximum cumulative decoded response body bytes.
+    /// Maximum cumulative decoded response body bytes, hard-capped at 64 MiB.
     pub response_body_bytes: u64,
-    /// Maximum transferred response-body bytes, including HTTP chunk framing.
+    /// Maximum transferred response-body bytes, including HTTP chunk framing, hard-capped at 128 MiB.
     pub response_body_wire_bytes: u64,
 }
 

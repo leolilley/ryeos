@@ -13,7 +13,11 @@ use ureq_proto::client::{Call, RecvResponseResult, SendRequestResult};
 use zeroize::{Zeroize, Zeroizing};
 
 const IO_BUFFER_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_RESPONSE_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RESPONSE_BODY_WIRE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_TLS_ROOT_CERTIFICATES: usize = 64;
 const MAX_TLS_ROOT_BYTES: usize = 1024 * 1024;
 const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
@@ -515,6 +519,21 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
             "HTTP method is empty, oversized, or attempts a tunnel",
         ));
     }
+    if request.limits.request_body_bytes > MAX_REQUEST_BODY_BYTES
+        || request.limits.request_header_bytes == 0
+        || request.limits.request_header_bytes > MAX_REQUEST_HEADER_BYTES
+        || request.limits.response_header_bytes == 0
+        || request.limits.response_header_bytes > MAX_RESPONSE_HEADER_BYTES
+        || request.limits.response_body_bytes == 0
+        || request.limits.response_body_bytes > MAX_RESPONSE_BODY_BYTES
+        || request.limits.response_body_wire_bytes == 0
+        || request.limits.response_body_wire_bytes > MAX_RESPONSE_BODY_WIRE_BYTES
+    {
+        return Err(HttpError::before(
+            io::ErrorKind::InvalidInput,
+            "HTTP byte ceilings are invalid or exceed their bound",
+        ));
+    }
     let body_len = request.body.exact_len();
     if body_len > request.limits.request_body_bytes {
         return Err(HttpError::before(
@@ -532,17 +551,6 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
         return Err(HttpError::before(
             io::ErrorKind::InvalidInput,
             "HTTP request has too many header fields",
-        ));
-    }
-    if request.limits.request_header_bytes == 0
-        || request.limits.request_header_bytes > MAX_REQUEST_HEADER_BYTES
-        || request.limits.response_header_bytes == 0
-        || request.limits.response_body_bytes == 0
-        || request.limits.response_body_wire_bytes == 0
-    {
-        return Err(HttpError::before(
-            io::ErrorKind::InvalidInput,
-            "HTTP byte ceilings are invalid or exceed their bound",
         ));
     }
     let mut header_input_bytes = 0usize;
@@ -927,6 +935,87 @@ mod tests {
             validate(&restricted_request).unwrap_err().contact_state(),
             crate::ContactState::NoRequestSent
         );
+    }
+
+    #[test]
+    fn configured_byte_ceilings_cannot_exceed_transport_maxima() {
+        let mut oversized_request_body = request(vec![]);
+        oversized_request_body.limits.request_body_bytes = MAX_REQUEST_BODY_BYTES + 1;
+        assert_eq!(
+            validate(&oversized_request_body)
+                .unwrap_err()
+                .contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+
+        let mut oversized_request_headers = request(vec![]);
+        oversized_request_headers.limits.request_header_bytes = MAX_REQUEST_HEADER_BYTES + 1;
+        assert_eq!(
+            validate(&oversized_request_headers)
+                .unwrap_err()
+                .contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+
+        let mut oversized_response_headers = request(vec![]);
+        oversized_response_headers.limits.response_header_bytes = MAX_RESPONSE_HEADER_BYTES + 1;
+        assert_eq!(
+            validate(&oversized_response_headers)
+                .unwrap_err()
+                .contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+
+        let mut oversized_response_body = request(vec![]);
+        oversized_response_body.limits.response_body_bytes = MAX_RESPONSE_BODY_BYTES + 1;
+        assert_eq!(
+            validate(&oversized_response_body)
+                .unwrap_err()
+                .contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+
+        let mut oversized_response_wire_body = request(vec![]);
+        oversized_response_wire_body.limits.response_body_wire_bytes =
+            MAX_RESPONSE_BODY_WIRE_BYTES + 1;
+        assert_eq!(
+            validate(&oversized_response_wire_body)
+                .unwrap_err()
+                .contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+    }
+
+    #[test]
+    fn declared_response_body_over_bound_is_ambiguous_after_request() {
+        let mut headers = ureq_proto::http::HeaderMap::new();
+        headers.insert(
+            "content-length",
+            (MAX_RESPONSE_BODY_BYTES + 1).to_string().parse().unwrap(),
+        );
+        let error = validate_response_framing(
+            &headers,
+            200,
+            20,
+            MAX_RESPONSE_BODY_BYTES,
+            MAX_RESPONSE_BODY_WIRE_BYTES,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+    }
+
+    #[test]
+    fn sensitive_header_debug_redacts_value() {
+        let header = Header::new_sensitive(
+            "authorization",
+            zeroize::Zeroizing::new(b"secret-token".to_vec()),
+        );
+        let debug = format!("{header:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-token"));
     }
 
     #[test]
