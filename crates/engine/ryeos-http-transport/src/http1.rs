@@ -1,6 +1,6 @@
 //! Single-connection HTTP/1.1 client with explicit framing and byte bounds.
 
-use crate::{HttpError, Limits};
+use crate::{Deadlines, HttpError, Limits};
 use lillux::network::{NetworkCancellation, NetworkContext, NetworkStream};
 use lillux::time::MonotonicDeadline;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -779,7 +779,7 @@ fn validate_response_framing(
     }
     let content_lengths = headers.get_all("content-length");
     let transfer_encodings = headers.get_all("transfer-encoding");
-    if !content_lengths.is_empty() && !transfer_encodings.is_empty() {
+    if content_lengths.iter().next().is_some() && transfer_encodings.iter().next().is_some() {
         return Err(HttpError::ambiguous(
             io::ErrorKind::InvalidData,
             "HTTP response has conflicting body framing",
