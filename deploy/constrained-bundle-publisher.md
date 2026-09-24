@@ -1,6 +1,6 @@
 # Constrained bundle publisher
 
-The release-authority node calls a separately composed publisher over seven
+The release-authority node calls a separately composed publisher over eight
 purpose-owned HTTP operations. The publisher owns the private publisher key;
 the release-authority daemon never does.
 
@@ -36,6 +36,7 @@ The only accepted paths are:
 - `POST /v1/bundle-generation/authorize`
 - `POST /v1/substrate-release/authorize`
 - `POST /v1/substrate-core/authorize-recipe`
+- `POST /v1/substrate-build/authorize-recipe`
 - `POST /v1/bundle-catalog/authorize-successor`
 
 Every request must use `Authorization: Bearer …`, is limited to 256 KiB, is
@@ -54,15 +55,45 @@ signed Config and its exact blob/body hashes are not execution admission or proo
 that a source snapshot exists. Normal signature/trust, retained-source, payload
 ownership and product admission checks remain mandatory.
 
-This endpoint is implemented independently of release-graph wiring. The recipe
-must be installed at its fixed identity in a retained per-release execution
-workspace, not written into the clean source checkout or substituted through an
-unchecked ref override. That workspace/source admission and post-sign capture
-integration are still pending; this endpoint alone does not make releases runnable.
+The publisher HTTP API is a closed authorization/signing boundary; it does not
+execute release work. The authenticated
+`service:bundle-release/submit` call asynchronously starts the outer canonical
+publish Graph under normal RyeOS project admission and returns an operation
+coordinate. Downstream build and capture stages resolve the caller's exact
+pushed source snapshot, materialize that immutable generation into a private
+temporary workspace, and overlay only the publisher-authorized signed recipe
+for the pinned Graph being dispatched through normal project-context
+admission. These are stage-level source and recipe checks, not a property of
+the initial submit call; the workspace lives for dispatch and is not a durable
+workspace or mutable checkout.
 
-The `ryeos-bundle-publisher` binary is the explicit deployment entrypoint. It
-accepts `--publisher-key`, `--bearer-file`, `--cas-root`, and `--policy`, and
-defaults to `127.0.0.1:7411`. The strict JSON policy pins the catalog namespace,
+Capture is a second, separately authorized execution. The daemon re-resolves
+the same pushed snapshot, validates the publisher materialization result and
+signed manifest, requests a capture recipe for those exact coordinates, runs
+the pinned capture Graph against a private recipe-overlaid materialization,
+and checks that the captured witness names the publisher-authorized tree.
+Neither the authorization endpoint nor this wiring proves that deployment
+configuration is present or that a release has passed acceptance. Calibration,
+measured policy, publisher process/key custody, complete catalog bootstrap,
+and end-to-end publication and consumer activation remain separate gates.
+
+The `ryeos-bundle-publisher` binary is a standalone deployment artifact, not a
+signed bundle payload and not part of the general node or substrate image. A
+`release-authority` local package install places an identity-equivalent copy at
+`/usr/bin/ryeos-bundle-publisher` for `authority-measure`; it does not start the
+key-bearing service. The separately operated service must run the exact bytes
+measured into policy. Its startup measures `/proc/self/exe` and refuses to
+serve unless both the closed-operation definition and executable digest match
+that policy. It may be a sidecar on the release-authority host or a separately
+deployed service; consumers and the bundle-source node do not receive its
+executable or key merely because they install publication policy. The
+publisher copy is a host-scoped deployment artifact: installing a different
+node bundle set on the same host neither installs nor removes it. Removing or
+upgrading the standalone service requires its own process/service-manager
+lifecycle and must not be inferred from one app root's selected bundle set.
+
+The binary accepts `--publisher-key`, `--bearer-file`, `--cas-root`, and
+`--policy`, and defaults to `127.0.0.1:7411`. The strict JSON policy pins the catalog namespace,
 catalog publisher fingerprint, bundle-publication policy digest and trust epoch; qualification signer public
 key, policy, verifier definition and artifact identities, and required claims;
 and publisher-tool definition and artifact identities. Unknown fields are
@@ -83,8 +114,11 @@ ryeos-bundle-publisher \
 The authority-measure service performs the policy-authoring measurement itself
 from the final installed path; it does not accept these hashes from its caller.
 At normal startup the publisher measures its own resolved executable and refuses
-to bind unless both identities match the resulting policy. A development target
-binary and an installed release binary are different artifacts.
+to bind unless both identities match the resulting policy. The measured identity
+is over exact executable bytes, not its pathname: copies on the authority and
+publisher hosts must therefore be byte-identical. Measuring a workspace candidate
+and later installing a different build is invalid; install the selected candidate
+first and measure the resulting durable path.
 
 The policy schema is `ryeos.standalone_bundle_publisher_policy.v2`. Its portable,
 native, Core-seed, and substrate qualification verifier refs must be pairwise

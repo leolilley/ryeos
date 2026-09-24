@@ -11,6 +11,7 @@ mapfile -t local_inference < <(ryeos_bundle_set_names local-inference)
 mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
 mapfile -t release_authority < <(ryeos_bundle_set_names release-authority)
 mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
+mapfile -t release_authority_host_support < <(ryeos_bundle_set_host_support_bins release-authority)
 
 contains() {
   local needle="$1"
@@ -72,12 +73,15 @@ for forbidden in hosted-node codex opencode web browser ryeos-ui; do
 done
 [[ "${release_artifacts[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference tv-tracker-authoring bundle-source bundle-release" ]]
 [[ "${release_authority[*]}" == "core central-auth standard web browser ryeos-ui hosted-node codex opencode local-inference bundle-release" ]]
+[[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
 ! contains bundle-source "${release_authority[@]}"
 for ordinary_set in full central-host standard local-inference hosted-node hosted-workflow bundle-source; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   ! contains bundle-release "${ordinary_members[@]}"
+  [[ -z "$(ryeos_bundle_set_host_support_bins "$ordinary_set")" ]]
 done
+[[ -z "$(ryeos_bundle_set_host_support_bins release-artifacts)" ]]
 for set_name in "${bundle_set_ids[@]}"; do
   [[ "$(ryeos_bundle_set_node_init_profile "$set_name")" == "$set_name" ]]
 done

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-09-19T02:07:39Z:8a757739b570684e93aaf1edc7982d177515a8be957c584423a69ffb33172c2d:tsuSgeZ08lUXDJdRC/Bftl1fhqi0co/CzeiQgc+/6CRhswM5e6H4vwjDW73KTudlFpSUqhU5C4Kb55ulcQDCCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T03:37:52Z:f4086ab24717a7913715c10a176bfaeb8b7367202978391459526182de766c8b:qTKyWPKM2h+4ixeQNKwOIm6QRlixJGeDKheuwHbyhlMhSs+ifdtQ0p/L7mbgqAZm4K5Gm3qnksX0+ISJxWOYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -31,7 +31,9 @@ Fast-install the current checkout using the packaged RyeOS layout:
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
 central-auth, standard, web, browser, ryeos-ui, hosted-node, codex,
-local-inference).
+local-inference). The release-authority set additionally installs the
+standalone publisher measurement executable; it does not start the separately
+operated key-bearing publisher service.
 
 Options:
   --populate            Run scripts/populate-bundles.sh first. Requires either a
@@ -395,6 +397,17 @@ preflight_host_install() {
     fi
 }
 
+# Bind set selection to the exact standalone host artifacts required before
+# requesting administrator authority or stopping the node. Keep this
+# sourceable for a no-sudo regression test of the role-to-package mapping.
+preflight_bundle_set_host_install() {
+    local release_dir="$1" selected_bundle_set="$2"
+    shift 2
+    local -a support_bins=()
+    mapfile -t support_bins < <(ryeos_bundle_set_host_support_bins "$selected_bundle_set")
+    preflight_host_install "$release_dir" "$@" "${support_bins[@]}"
+}
+
 # Build init trust arguments from the exact source boundary the installer
 # selected and validated. The result intentionally excludes every other
 # document that might already exist below the packaged share directory.
@@ -699,8 +712,8 @@ if [[ "${RYEOS_INSTALL_PREPARED:-}" == 1 ]]; then
     install_transaction_active=1
 fi
 
-# Only user-facing binaries go in /usr/bin/.
-# All handler/runtime/tool binaries live inside bundles under
+# Host entrypoints and selected standalone service-support binaries go in
+# /usr/bin/. Handler/runtime/tool binaries live inside bundles under
 # /usr/share/ryeos/<name>/.ai/bin/<triple>/ and are resolved
 # via bin: references at dispatch time.
 required_bins=(
@@ -708,12 +721,22 @@ required_bins=(
     ryeos
 )
 
+# The constrained publisher is independently operated from the node. A
+# release-authority install carries only an identity-equivalent local copy so
+# authority-measure can observe the final executable path; the standalone
+# service owns its own key, endpoint, and process lifecycle. Do not include it
+# in native_substrate_digest or ship it in general node images/bundle payloads.
+# It is host-scoped and deliberately not removed when this shared host later
+# installs another bundle set; process/key lifecycle needs separate authority.
+mapfile -t host_support_bins < <(ryeos_bundle_set_host_support_bins "$bundle_set")
+
 # A complete `--populate --all` now builds lillux with the other user-facing
 # binaries. Focused population may legitimately retain no prior lillux build,
 # so this direct-copy development helper still treats it as optional rather
 # than broadening a targeted repair into another package build.
 optional_bins=(lillux)
 installed_user_bins=("${required_bins[@]}")
+installed_user_bins+=("${host_support_bins[@]}")
 
 native_substrate_digest() {
     local binary digest
@@ -859,7 +882,7 @@ if [[ $run_init -eq 1 ]]; then
     fi
 fi
 
-preflight_host_install "$target_dir" "${required_bins[@]}" || \
+preflight_bundle_set_host_install "$target_dir" "$bundle_set" "${required_bins[@]}" || \
     die "host install preflight failed; node lifecycle was not changed"
 
 # Serialise the entire shared `/usr/share/ryeos` replacement, rather than only
@@ -931,6 +954,9 @@ done
 
 ryeos_term_begin INSTALL "installing binaries"
 for b in "${required_bins[@]}"; do
+    sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
+done
+for b in "${host_support_bins[@]}"; do
     sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
 done
 for b in "${optional_bins[@]}"; do

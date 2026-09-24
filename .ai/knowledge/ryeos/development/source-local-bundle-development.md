@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-24T01:52:08Z:d0c91ecffb09e45366756c8dee20ec41e0c83e5aaf1442e7bb6136e03d857d7c:lCINVDn3mroBUU6Pn2EzJ9ti3Ja7WtUYVmXIHn35UouYv2K6IFN9W6VGuyr783IN2gVuFhKvA4QsSlPVv/RxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T04:09:17Z:9c4163ec5cdd12e97e405397744dca89e7a016aba18bd9d2a43c2a6075eef686:folGsrMsujGH9b152+M++0SV3mY3qspcsEfjIi/7x/fopPIPlw87xlPCY2Px1LhfkHLMfsBH1sBImAJhxmeVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -22,6 +22,64 @@ For continuation of the native release proof, start with the dated checkpoint
 below and `development-operation-ownership.md`. Historical successful compiler
 or binding evidence elsewhere in this document is not evidence for a newly
 produced platform identity.
+
+### Constrained publisher deployment boundary — 2026-09-24
+
+The current release-authority source population builds
+`ryeos-bundle-publisher`, but a successful Cargo build alone does not provide
+the durable executable that `authority-measure` must observe. The
+release-authority local install now owns a local measurement copy at
+`/usr/bin/ryeos-bundle-publisher`. This is a host support artifact, not a
+signed bundle payload or a general node/substrate image member. The constrained
+publisher remains a separately operated key-bearing process; its service
+deployment supplies the publisher key, bearer, policy, and publication CAS.
+Its startup hashes `/proc/self/exe` and must match both the measured artifact
+digest and the fixed operation-definition digest. A separate service host is
+valid only when it runs byte-identical executable content. The measured
+pathname does not claim the same host, inode, or running process.
+
+The publisher executable is host-scoped: installing another app-root bundle
+set neither installs nor removes it. This avoids coupling publisher process
+lifecycle to one node's bundle selection. No publisher key is placed in the
+release-authority, bundle-source, or consumer app root. Ordinary bundle
+publication and consumer activation must not rebuild or replace the substrate
+image; publisher-code deployment is a separately managed artifact, not a
+bundle-payload update.
+
+This deployment gap was missed because earlier acceptance checks covered
+publication code, signed bundle sources, and release-authority node health but
+did not trace `authority-measure.publisher_executable_path` through the host
+installer and publisher-service deployment. Installing without that trace
+would have produced a running but unusable measurement candidate. The
+corrected bundle-set mapping and installer preflight the publisher executable
+before administrator authorization or node shutdown. Focused tests check that
+release-authority refuses a missing candidate while ordinary sets do not
+require it. A bounded architecture review confirms that the executable is
+excluded from `native_substrate_digest`: node substrate identity covers
+`ryeosd` and the CLI, while publication policy separately pins publisher
+bytes. The latest filesystem check confirms the installed CLI, daemon, and
+publisher paths are byte-identical to their retained release candidates, and
+the candidate daemon's read-only existing-policy preflight passes. The
+operator's preceding live-status output was captured before those installed
+hashes changed; the workspace cannot inspect the host process namespace, so a
+fresh live readiness and supervision check must still prove the running daemon
+restarted onto the new bytes. The publisher has not been measured and no
+publisher service has been started.
+
+The controlling execution state is section 0 of
+`.tmp/bundle-release-execution-closure-implementation-plan-20260921.md`.
+Current local release-authority candidates are `ryeosd` SHA-256
+`9a266b287629a5cacb9e8b5f03029ac9bb56a2d83d8b2bf41508121451b6a4d8`, CLI
+`8e59853649e2f601f6b2219df47d2503cc8eb099a9d2f3647875aa4593aa6cc8`, and
+publisher `f191ed3bb693fda203e789e577db374087b303c6129f508622fb4fcac422dcd9`.
+Do not repopulate or reset signed node policy. Confirm live release-authority
+readiness, exact installed hashes, supervised host binding, no unfinished
+upgrade journal, all eleven strict bundle refs, and operational service-catalog
+self-check; then capture a new clean exact source snapshot. The installer, its
+signing envelope, and deployment contract must precede that snapshot.
+Calibration, measured policy application, authority/catalog bootstrap, data
+and native publication, cross-node activation, restart/recovery, unaffected
+consumer behavior, and exported-closure acceptance remain unproven.
 
 ### Calibration manifest authority correction — 2026-09-24
 

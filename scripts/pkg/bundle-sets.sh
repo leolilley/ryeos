@@ -182,3 +182,19 @@ ryeos_bundle_set_bin_managed_names() {
     printf '%s\n' "$name"
   done
 }
+
+# Standalone service-support executables are host deployment artifacts, not
+# signed bundle payloads and not part of the generic node image. The
+# release-authority distribution carries the publisher executable solely as
+# the exact local measurement copy used by authority measurement; the
+# independently operated publisher process receives the same measured bytes
+# through its own deployment lifecycle.
+ryeos_bundle_set_host_support_bins() {
+  case "$1" in
+    release-authority) printf '%s\n' ryeos-bundle-publisher ;;
+    full|central-host|standard|local-inference|hosted-node|hosted-workflow|bundle-source|release-artifacts)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}

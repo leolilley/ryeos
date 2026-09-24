@@ -47,14 +47,16 @@ authenticated service configured at process startup with
 `RYEOS_BUNDLE_PUBLISHER_URL` and `RYEOS_BUNDLE_PUBLISHER_BEARER` (both or
 neither). The endpoint must use HTTPS, except for a loopback development
 sidecar, and must expose only the closed operations for exact build/capture
-recipe authoring, Core-seed authorization, tree signing, bundle/substrate
-generation authorization, and catalog-successor authorization. See
+recipe authoring, Core-seed and substrate-build recipe authorization, tree
+signing, bundle/substrate generation authorization, and catalog-successor
+authorization. See
 `deploy/release-authority.env.example`; inject the bearer from the deployment
 secret store.
 
 The authenticated JSON endpoints are `POST /v1/bundle-recipe/authorize-build`,
 `POST /v1/bundle-recipe/authorize-capture`,
 `POST /v1/substrate-core/authorize-recipe`,
+`POST /v1/substrate-build/authorize-recipe`,
 `POST /v1/bundle-tree/sign`,
 `POST /v1/bundle-generation/authorize`,
 `POST /v1/substrate-release/authorize`, and
