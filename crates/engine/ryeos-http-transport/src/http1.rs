@@ -310,7 +310,7 @@ pub(crate) fn execute(
     let tls_config = build_tls_config(&request.tls_roots_der)?;
     let tls_session = ClientConnection::new(tls_config, server_name)
         .map_err(|_| HttpError::before(io::ErrorKind::InvalidData, "TLS session setup failed"))?;
-    let (request_head, mut send_request) = encode_request_head(
+    let (request_head, send_request) = encode_request_head(
         build_http_call(&request)?,
         request.limits.request_header_bytes,
     )?;
