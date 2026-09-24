@@ -1018,6 +1018,124 @@ mod tests {
         assert!(!debug.contains("secret-token"));
     }
 
+    /// Exercise the streaming body with a local TLS peer and captured localhost resolution.
+    #[cfg(unix)]
+    fn streamed_response_read_error(
+        response_headers: &'static [u8],
+        response_body: &'static [u8],
+        decoded_limit: u64,
+        wire_limit: u64,
+    ) -> io::ErrorKind {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration as StdDuration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release_body, wait_for_release) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(5)))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    include_bytes!("../tests/fixtures/test-server.der").to_vec(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        include_bytes!("../tests/fixtures/test-server-key.der").to_vec(),
+                    ),
+                ),
+            )
+            .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut request_head = Vec::new();
+            loop {
+                assert!(
+                    request_head.len() < 64 * 1024,
+                    "test request headers exceeded bound"
+                );
+                let mut buffer = [0u8; 1024];
+                let received = tls.read(&mut buffer).unwrap();
+                assert_ne!(received, 0, "test request ended before its headers");
+                request_head.extend_from_slice(&buffer[..received]);
+                if request_head.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            tls.write_all(response_headers).unwrap();
+            tls.flush().unwrap();
+            wait_for_release
+                .recv_timeout(StdDuration::from_secs(10))
+                .unwrap();
+            tls.write_all(response_body).unwrap();
+            tls.flush().unwrap();
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(vec![]);
+        http_request.url =
+            url::Url::parse(&format!("https://localhost:{port}/bounded-response")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.limits.response_body_bytes = decoded_limit;
+        http_request.limits.response_body_wire_bytes = wire_limit;
+
+        let mut response = execute(&network, http_request).unwrap();
+        assert_eq!(response.status, 200);
+        release_body.send(()).unwrap();
+        let mut delivered = 0u64;
+        let mut output = [0u8; 32];
+        let error = loop {
+            match response.body.read(&mut output) {
+                Ok(0) => panic!("stream ended before exceeding its configured body limit"),
+                Ok(count) => {
+                    delivered = delivered.saturating_add(count as u64);
+                    assert!(
+                        delivered <= decoded_limit,
+                        "transport exposed bytes past the decoded-body limit"
+                    );
+                }
+                Err(error) => break error,
+            }
+        };
+        server.join().unwrap();
+        error.kind()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_chunked_response_wire_overflow_is_reported_as_read_error() {
+        let error = streamed_response_read_error(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            b"5\r\nhello\r\n0\r\n\r\n",
+            64,
+            8,
+        );
+        assert_eq!(error, io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_close_delimited_response_decoded_overflow_is_reported_as_read_error() {
+        let error = streamed_response_read_error(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+            b"hello",
+            4,
+            64,
+        );
+        assert_eq!(error, io::ErrorKind::InvalidData);
+    }
+
     #[test]
     fn response_conflicting_framing_is_ambiguous_after_request() {
         let mut headers = ureq_proto::http::HeaderMap::new();
