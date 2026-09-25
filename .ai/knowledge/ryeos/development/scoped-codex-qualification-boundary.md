@@ -66,3 +66,11 @@ a joined test proves exact pre-release ACK, app-server conversation, provider
 contact accounting, whole-scope/writer settlement, frozen candidate, and the
 negative cuts for wrong/lost ACK, verifier death, cancellation, restart, and
 replay.
+
+The conditional START receiver also needs a complete failure owner. A failed
+conversation currently exits before explicit scoped observation; a failed
+receiver may leave START waiting for its deadline; and relay settlement timeout
+must not discard its still-live owner through an error conversion. The required
+generic correction is an exact scoped-abort/settlement path tied to the durable
+attempt and root stop fence, plus bounded relay/task termination. Merely
+dropping a local handle or repeating START is not recovery evidence.
