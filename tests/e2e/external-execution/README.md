@@ -80,18 +80,25 @@ successful shell or stream exit cannot stand in for authenticated readiness.
 The first installed Render fixture must establish the following order, with
 exact IDs and contact counts retained at each cut:
 
-1. Produce and pin an available runtime snapshot with the expected source
-   plan, image/content identity and an inert waiter. No controller signer,
+1. Produce and pin an available, unexpired runtime snapshot in the intended
+   sandbox group and source plan with an inert waiter. Establish image/content
+   lineage through RyeOS's own exact source-Sandbox capture and pin chain:
+   Render's snapshot response identifies kind, plan, group, source Sandbox and
+   status, but does not attest a content digest. No controller signer,
    bootstrap capability, credential, project, or candidate may be in that
    reusable snapshot.
-2. Create one Sandbox from its exact snapshot ID. Verify the returned
-   occurrence, plan and region; separately prove that the waiter actually
-   resumed inside this new occurrence. A configured snapshot digest sent in
-   the create request is not provider testimony about restored bytes.
-3. After RyeOS commits the activation intent, deliver its sealed per-occurrence
-   bootstrap and exact guest-input projection. Verify destination, byte digest,
-   length and occurrence binding inside the guest. A lost upload/token/stream
-   response is Pending, not permission to replay bytes or infer success.
+2. Create one Sandbox from its exact snapshot ID, requiring the same sandbox
+   group and matching runtime plan. Verify the returned occurrence and region;
+   separately prove that the waiter actually resumed inside this new
+   occurrence. A configured snapshot digest sent in the create request is not
+   provider testimony about restored bytes.
+3. After RyeOS commits the activation intent, prove a fresh authenticated,
+   restart-safe transfer path for its sealed per-occurrence bootstrap and exact
+   guest-input projection. Verify destination, byte digest, length and
+   occurrence binding inside the guest, including restored network/socket
+   behavior. Neither Render's streamed run nor its connect-token response
+   supplies that transfer proof by itself. A lost upload/token/stream response
+   is Pending, not permission to resend uncertain bytes or infer success.
 4. Require the guest's authenticated channel attachment and signed `Ready`
    before Release. A provider-Pending activation may resolve through that
    exact Ready; a provider `not_started`, wrong occurrence, stale capability,
