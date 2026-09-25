@@ -630,7 +630,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         .get_object(object)?
         .context("retained scoped observation absent")?;
     ensure!(
-        observation["schema"] == "ryeos.scoped_producer_observation.v3"
+        observation["schema"] == "ryeos.scoped_producer_observation.v4"
             && observation["attempt_id"] == *attempt
             && observation["recipe_digest"] == *recipe
             && observation["recipe_generation"] == *generation
@@ -658,6 +658,7 @@ fn install_signed_independent_verifier_fixture(
     keys: &common::fast_fixture::FastFixture,
     scenario: &independent_verifier_scenario::IndependentVerifierScenario,
     verifier_bytes: &[u8],
+    reserved_resume_race: bool,
 ) -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
@@ -678,10 +679,15 @@ fn install_signed_independent_verifier_fixture(
         binary.ends_with("/independent-runtime-verifier"),
         "installed verifier binary changed coordinate"
     );
-    for (relative, signed) in scenario.signed_sources_for_reserved_resume_race(
-        &keys.publisher,
-        common::fast_fixture::FAST_FIXTURE_TIME,
-    )? {
+    let signed_sources = if reserved_resume_race {
+        scenario.signed_sources_for_reserved_resume_race(
+            &keys.publisher,
+            common::fast_fixture::FAST_FIXTURE_TIME,
+        )?
+    } else {
+        scenario.signed_sources(&keys.publisher, common::fast_fixture::FAST_FIXTURE_TIME)?
+    };
+    for (relative, signed) in signed_sources {
         let target = bundle.join(relative);
         std::fs::create_dir_all(target.parent().context("signed source has no parent")?)?;
         std::fs::write(target, signed)?;
@@ -951,6 +957,136 @@ fn stage_independent_verifier_inputs(
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exact Codex and verifier binaries, four input trees, and authored admitted evidence; uses only a local scripted provider"]
+async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
+-> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let scenario_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON")
+            .context("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON is required")?,
+    );
+    let verifier_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
+            .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
+    );
+    let scenario: independent_verifier_scenario::IndependentVerifierScenario =
+        serde_json::from_slice(&lillux::secure_fs::read_regular_file_bounded_no_follow(
+            &scenario_path,
+            16 * 1024,
+        )?)?;
+    let parameters = scenario.parameters()?;
+    let input_root = stage_independent_verifier_inputs(&scenario)?;
+    let verifier_bytes =
+        lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
+    let (mut harness, keys) = DaemonHarness::start_fast_with(
+        |state, _, fixture| {
+            common::fast_fixture::register_standard_bundle(state, fixture)?;
+            admit_independent_verifier_input_root(state, fixture, input_root.path())
+        },
+        |_| {},
+    )
+    .await?;
+    harness.retain_evidence_on_drop(true);
+    let imports = [
+        (
+            "subject",
+            "large_content",
+            268_435_456,
+            &scenario.subject_manifest_hash,
+        ),
+        (
+            "controller",
+            "content",
+            64 * 1024 * 1024,
+            &scenario.controller_manifest_hash,
+        ),
+        (
+            "tools",
+            "content",
+            64 * 1024 * 1024,
+            &scenario.tools_manifest_hash,
+        ),
+        (
+            "configurations",
+            "content",
+            1024 * 1024,
+            &scenario.configurations_manifest_hash,
+        ),
+    ];
+    let mut staged = Vec::new();
+    for (member, storage, limit, expected) in imports {
+        let imported = import_independent_verifier_tree(&harness, member, storage, limit).await?;
+        ensure!(
+            imported["manifest_hash"] == expected.as_str(),
+            "public {member} import differs from the authored direct scenario"
+        );
+        staged.push(imported);
+    }
+    harness.kill_daemon().await?;
+    install_signed_independent_verifier_fixture(
+        &harness.state_path,
+        &keys,
+        &scenario,
+        &verifier_bytes,
+        false,
+    )?;
+    harness.respawn_with(|_| {}).await?;
+    for imported in &staged {
+        bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
+    }
+    let launch_id = "L-f321054b98a409f7da7cd63e7bdacc09";
+    let (accepted, terminal) = public_launch::terminal_launch(
+        &harness,
+        json!({
+            "item_ref":independent_verifier_scenario::TOOL_REF,
+            "launch_id":launch_id,"ref_bindings":{},"parameters":parameters,
+            "execution_policy":ExecutionPolicy::projectless(ExecutionResponse::Accepted)
+                .exclude_operator_vault(),
+        }),
+        launch_id,
+        std::time::Duration::from_secs(330),
+    )
+    .await?;
+    let root = accepted["thread_id"]
+        .as_str()
+        .context("accepted direct verifier root absent")?;
+    ensure!(
+        terminal.pointer("/thread/status") == Some(&json!("failed")),
+        "incomplete direct qualification incorrectly succeeded"
+    );
+    let error = terminal
+        .pointer("/thread/error")
+        .context("failed direct verifier has no authoritative error")?;
+    ensure!(
+        serde_json::to_string(error)?.contains(
+            "effective namespace environment and complete qualification evidence remain unproven"
+        ),
+        "direct run failed before its explicit no-claims boundary: {error}"
+    );
+    let scoped = exact_scoped_producer_observation(&harness.state_path, root)?;
+    ensure!(
+        scoped["launch_owner"]["thread_id"] == root
+            && scoped["relay_handoff"].is_object()
+            && scoped["applied_launch"].is_object()
+            && scoped["process_identity"].is_object(),
+        "direct scoped attempt lacks joined daemon execution evidence"
+    );
+    eprintln!(
+        "signed direct verifier fail-closed evidence: {}",
+        json!({
+            "launch_id":launch_id,"root":root,"terminal":terminal,
+            "scoped_attempt":scoped["attempt_id"],
+            "scoped_receipt":scoped["natural_empty_receipt_digest"],
+            "provider_contact_kind":"credential-free scripted local peer",
+            "qualification_claims_issued":false,
+        })
+    );
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires exact verifier executable, four input trees and authored scenario; no provider credentials"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
@@ -1022,6 +1158,7 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
         &keys,
         &scenario,
         &verifier_bytes,
+        true,
     )?;
     let (mut gate, child) = common::ScopedReservedAttemptGate::pair()?;
     harness
