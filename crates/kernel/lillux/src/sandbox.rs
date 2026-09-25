@@ -250,6 +250,10 @@ pub struct LinuxSandboxProcess {
     applied_launch: Option<std::fs::File>,
     #[cfg(target_os = "linux")]
     observed_applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    /// Child-origin observation of declared mount destinations after pivot,
+    /// before readiness. The parent binds it to its exact host child PID.
+    #[cfg(target_os = "linux")]
+    mount_preparation: Option<LinuxSandboxMountPreparationReceipt>,
     /// Once cleanup has been requested, its observed status can never be
     /// presented as an independently observed target completion.
     #[cfg(target_os = "linux")]
@@ -277,6 +281,38 @@ pub struct LinuxSandboxAppliedLaunchReceipt {
     pub argv_sha256: [u8; 32],
     pub environment_sha256: [u8; 32],
     pub cwd_sha256: [u8; 32],
+}
+
+/// Bounded final-root mount observation from the held namespace-init before
+/// target release. It proves readiness checks, not subsequent exec or source
+/// content. Only the exact owning parent supplies the host PID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxSandboxMountPreparationReceipt {
+    pub schema: u32,
+    pub owned_child_pid: u32,
+    pub mount_count: u32,
+    pub destination_access_sha256: [u8; 32],
+}
+
+impl LinuxSandboxMountPreparationReceipt {
+    /// Compare the observed final-root tuple set with the complete admitted
+    /// native request. This does not independently attest the source content.
+    pub fn matches_request(&self, request: &LinuxSandboxRequest) -> Result<bool, String> {
+        #[cfg(target_os = "linux")]
+        {
+            let expected = imp::expected_mount_preparation(request)?;
+            Ok(self.schema == expected.schema
+                && self.owned_child_pid > 0
+                && self.mount_count == expected.mount_count
+                && self.destination_access_sha256 == expected.destination_access_sha256)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = request;
+            Err("native mount preparation comparison is unavailable on this platform".into())
+        }
+    }
 }
 
 /// Borrowed expected target fields for an independent receipt comparison.
@@ -697,6 +733,19 @@ fn prepare_linux_sandbox_inner(
 }
 
 impl LinuxSandboxProcess {
+    /// Return the exact child-origin final-root preparation observation. This
+    /// precedes release; it must not be presented as applied-exec evidence.
+    pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.mount_preparation
+                .clone()
+                .ok_or("sandbox target has no final-root mount preparation receipt".into())
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native mount preparation is unavailable on this platform".into())
+    }
+
     /// Poll a bounded post-chdir, pre-exec observation from this exact owned
     /// native target. Ordinary launch needs no separate release; held launch
     /// must be polled through the held wrapper after release.
@@ -1191,6 +1240,9 @@ mod imp {
     const OLD_ROOT: &str = "/tmp/.lillux-old-root";
     const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
     const CHILD_READY: u8 = 0;
+    const CHILD_TARGET_READY: u8 = 2;
+    const MOUNT_PREPARATION_SCHEMA: u8 = 1;
+    const MOUNT_PREPARATION_RECORD_BYTES: usize = 1 + 1 + 4 + 32;
     const APPLIED_LAUNCH_RECORD: u8 = 0xA7;
     const APPLIED_LAUNCH_RECORD_BYTES: usize = 1 + 4 * 5 + 32 * 4;
     pub(super) const CHILD_ERROR: u8 = 1;
@@ -2601,27 +2653,93 @@ mod imp {
         Ok(())
     }
 
-    fn verify_final_descriptor_mounts(request: &LinuxSandboxRequest) -> Result<(), String> {
+    fn verify_final_descriptor_mounts(
+        request: &LinuxSandboxRequest,
+    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        let mut observed = Vec::with_capacity(
+            request.mounts.len()
+                + request
+                    .overlay
+                    .as_ref()
+                    .map_or(0, |overlay| overlay.writable_descendant_mounts.len()),
+        );
         for mount in &request.mounts {
-            verify_final_descriptor_mount(mount)?;
+            let (kind, read_only) = verify_final_descriptor_mount(mount)?;
+            observed.push((&mount.destination, kind, read_only));
         }
         if let Some(overlay) = &request.overlay {
             for descendant in &overlay.writable_descendant_mounts {
                 // Reanchoring selected the exact mounted source before pivot.
                 // The original descriptor may name the enclosing template,
                 // so this final-view check covers kind and access only.
-                verify_final_mount_view(
+                let (kind, read_only) = verify_final_mount_view(
                     &descendant.destination,
                     libc::S_IFDIR,
                     LinuxSandboxMountAccess::Writable,
                     None,
                 )?;
+                observed.push((&descendant.destination, kind, read_only));
             }
         }
-        Ok(())
+        digest_mount_tuples(observed)
     }
 
-    fn verify_final_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(), String> {
+    pub(super) fn expected_mount_preparation(
+        request: &LinuxSandboxRequest,
+    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        let mut expected = Vec::with_capacity(
+            request.mounts.len()
+                + request
+                    .overlay
+                    .as_ref()
+                    .map_or(0, |overlay| overlay.writable_descendant_mounts.len()),
+        );
+        for mount in &request.mounts {
+            let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
+            let kind = mount_kind_code(source.st_mode & libc::S_IFMT)?;
+            expected.push((
+                &mount.destination,
+                kind,
+                mount.access == LinuxSandboxMountAccess::ReadOnly,
+            ));
+        }
+        if let Some(overlay) = &request.overlay {
+            for descendant in &overlay.writable_descendant_mounts {
+                expected.push((&descendant.destination, 1, false));
+            }
+        }
+        digest_mount_tuples(expected)
+    }
+
+    fn digest_mount_tuples(
+        mut observed: Vec<(&PathBuf, u8, bool)>,
+    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        observed.sort_by(|left, right| left.0.cmp(right.0));
+        if observed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err("final target mount destinations are duplicated".into());
+        }
+        let count = u32::try_from(observed.len())
+            .map_err(|_| "final target mount count exceeds native receipt bound")?;
+        let mut digest = Sha256::new();
+        digest.update(b"lillux.final-target-mounts/v1\0");
+        digest.update(count.to_le_bytes());
+        for (destination, kind, read_only) in observed {
+            let path = destination.as_os_str().as_bytes();
+            let length = u32::try_from(path.len())
+                .map_err(|_| "final target mount path exceeds native receipt bound")?;
+            digest.update(length.to_le_bytes());
+            digest.update(path);
+            digest.update([kind, u8::from(read_only)]);
+        }
+        Ok(LinuxSandboxMountPreparationReceipt {
+            schema: u32::from(MOUNT_PREPARATION_SCHEMA),
+            owned_child_pid: 0,
+            mount_count: count,
+            destination_access_sha256: digest.finalize().into(),
+        })
+    }
+
+    fn verify_final_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(u8, bool), String> {
         let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
         let kind = source.st_mode & libc::S_IFMT;
         let inode = (kind != libc::S_IFDIR).then_some((source.st_dev, source.st_ino));
@@ -2633,7 +2751,7 @@ mod imp {
         expected_kind: libc::mode_t,
         access: LinuxSandboxMountAccess,
         expected_inode: Option<(libc::dev_t, libc::ino_t)>,
-    ) -> Result<(), String> {
+    ) -> Result<(u8, bool), String> {
         let mounted = open_mount_destination_beneath(Path::new("/"), destination)?;
         let observed = mount_source_stat(mounted.as_raw_fd())?;
         if observed.st_mode & libc::S_IFMT != expected_kind
@@ -2657,7 +2775,17 @@ mod imp {
                 destination.display()
             ));
         }
-        Ok(())
+        let kind = mount_kind_code(observed.st_mode & libc::S_IFMT)?;
+        Ok((kind, read_only))
+    }
+
+    fn mount_kind_code(kind: libc::mode_t) -> Result<u8, String> {
+        Ok(match kind {
+            libc::S_IFDIR => 1,
+            libc::S_IFREG => 2,
+            libc::S_IFSOCK => 3,
+            _ => return Err("final target mount has unsupported kind".into()),
+        })
     }
 
     fn bind_fd_to_mount_target(
@@ -3153,17 +3281,21 @@ mod imp {
         close_fd(ready[1]);
         close_fd(launch_failure[1]);
         close_fd(applied_launch[1]);
-        let result = read_child_ready(ready[0]);
+        let result = read_child_target_ready(ready[0]);
         close_fd(ready[0]);
-        if let Err(error) = result {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-                libc::waitpid(pid, std::ptr::null_mut(), 0);
+        let mut mount_preparation = match result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, std::ptr::null_mut(), 0);
+                }
+                close_fd(launch_failure[0]);
+                close_fd(applied_launch[0]);
+                return Err(error);
             }
-            close_fd(launch_failure[0]);
-            close_fd(applied_launch[0]);
-            return Err(error);
-        }
+        };
+        mount_preparation.owned_child_pid = pid as u32;
         Ok(LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
@@ -3172,6 +3304,7 @@ mod imp {
             // SAFETY: the parent exclusively owns this surviving pipe end.
             applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
             observed_applied_launch: None,
+            mount_preparation: Some(mount_preparation),
             termination_requested: false,
         })
     }
@@ -3203,7 +3336,7 @@ mod imp {
         // Earlier attachment checks ran against the private root before pivot.
         // Recheck the target view after layering, fixed-parent changes and pivot,
         // while admitted descriptors are live and before readiness or exec.
-        verify_final_descriptor_mounts(request)?;
+        let mount_preparation = verify_final_descriptor_mounts(request)?;
         let mut mapped_channels = Vec::with_capacity(request.target_channels.len());
         if let Some(stdio) = stdio {
             use std::os::fd::AsRawFd as _;
@@ -3242,7 +3375,12 @@ mod imp {
             verify_nested_host_controls_unavailable()?;
         }
         install_confinement_filter(request.contain_process_group, request.nested_sandbox)?;
-        write_all_fd(ready_fd, &[CHILD_READY])?;
+        let mut ready = [0_u8; MOUNT_PREPARATION_RECORD_BYTES];
+        ready[0] = CHILD_TARGET_READY;
+        ready[1] = MOUNT_PREPARATION_SCHEMA;
+        ready[2..6].copy_from_slice(&mount_preparation.mount_count.to_le_bytes());
+        ready[6..].copy_from_slice(&mount_preparation.destination_access_sha256);
+        write_all_fd(ready_fd, &ready)?;
         if let LinuxSandboxLifecycle::AwaitRelease {
             release_fd,
             release_keepalive_fd,
@@ -4534,19 +4672,72 @@ mod imp {
         read_exact_fd(fd, &mut kind)?;
         match kind[0] {
             CHILD_READY => Ok(()),
-            CHILD_ERROR => {
-                let mut length = [0_u8; 4];
-                read_exact_fd(fd, &mut length)?;
-                let length = u32::from_ne_bytes(length) as usize;
-                if length > MAX_CHILD_ERROR_BYTES {
-                    return Err("sandbox child error exceeds Lillux bound".to_string());
-                }
-                let mut bytes = vec![0_u8; length];
-                read_exact_fd(fd, &mut bytes)?;
-                Err(String::from_utf8_lossy(&bytes).into_owned())
-            }
+            CHILD_ERROR => Err(read_child_error(fd)?),
             _ => Err("sandbox child emitted an invalid readiness record".to_string()),
         }
+    }
+
+    fn read_child_target_ready(fd: RawFd) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        read_child_target_ready_until(
+            fd,
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(30)),
+        )
+    }
+
+    fn read_child_target_ready_until(
+        fd: RawFd,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        let mut kind = [0_u8; 1];
+        read_exact_fd_until(fd, &mut kind, deadline)?;
+        match kind[0] {
+            CHILD_TARGET_READY => {
+                let mut record = [0_u8; MOUNT_PREPARATION_RECORD_BYTES - 1];
+                read_exact_fd_until(fd, &mut record, deadline)?;
+                if record[0] != MOUNT_PREPARATION_SCHEMA {
+                    return Err("sandbox target mount preparation has invalid schema".into());
+                }
+                let mount_count = u32::from_le_bytes(record[1..5].try_into().unwrap());
+                if mount_count > 4096 {
+                    return Err("sandbox target mount preparation exceeds native bound".into());
+                }
+                Ok(LinuxSandboxMountPreparationReceipt {
+                    schema: u32::from(MOUNT_PREPARATION_SCHEMA),
+                    owned_child_pid: 0,
+                    mount_count,
+                    destination_access_sha256: record[5..].try_into().unwrap(),
+                })
+            }
+            CHILD_ERROR => Err(read_child_error_until(fd, deadline)?),
+            _ => Err("sandbox child emitted an invalid target readiness record".into()),
+        }
+    }
+
+    fn read_child_error(fd: RawFd) -> Result<String, String> {
+        let mut length = [0_u8; 4];
+        read_exact_fd(fd, &mut length)?;
+        let length = u32::from_ne_bytes(length) as usize;
+        if length > MAX_CHILD_ERROR_BYTES {
+            return Err("sandbox child error exceeds Lillux bound".to_string());
+        }
+        let mut bytes = vec![0_u8; length];
+        read_exact_fd(fd, &mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn read_child_error_until(
+        fd: RawFd,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<String, String> {
+        let mut length = [0_u8; 4];
+        read_exact_fd_until(fd, &mut length, deadline)?;
+        let length = u32::from_ne_bytes(length) as usize;
+        if length > MAX_CHILD_ERROR_BYTES {
+            return Err("sandbox child error exceeds Lillux bound".to_string());
+        }
+        let mut bytes = vec![0_u8; length];
+        read_exact_fd_until(fd, &mut bytes, deadline)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub(super) fn write_child_error(fd: RawFd, error: &str) -> Result<(), String> {
@@ -4629,6 +4820,52 @@ mod imp {
         Ok(())
     }
 
+    fn read_exact_fd_until(
+        fd: RawFd,
+        bytes: &mut [u8],
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<(), String> {
+        let mut read = 0;
+        while read < bytes.len() {
+            let remaining = deadline.remaining();
+            if remaining.is_zero() {
+                return Err("sandbox target readiness deadline elapsed".into());
+            }
+            let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(format!(
+                    "poll sandbox target readiness: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let count =
+                unsafe { libc::read(fd, bytes[read..].as_mut_ptr().cast(), bytes.len() - read) };
+            if count > 0 {
+                read += count as usize;
+            } else if count == 0 {
+                return Err("sandbox child closed target readiness boundary".into());
+            } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return Err(format!(
+                    "read sandbox target readiness: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn write_all_fd(fd: RawFd, bytes: &[u8]) -> Result<(), String> {
         let mut written = 0;
         while written < bytes.len() {
@@ -4681,16 +4918,20 @@ mod imp {
     }
 
     fn validate_absolute_path(path: &PathBuf, label: &str) -> Result<(), String> {
-        if !path.is_absolute() || path.as_os_str().as_bytes().contains(&0) {
-            return Err(format!("{label} must be an absolute NUL-free path"));
+        let bytes = path.as_os_str().as_bytes();
+        if !path.is_absolute() || bytes.contains(&0) || bytes.len() >= libc::PATH_MAX as usize {
+            return Err(format!("{label} must be a bounded absolute NUL-free path"));
         }
-        if path.components().any(|component| {
-            !matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        }) {
-            return Err(format!("{label} must be lexically normalized"));
+        let normalized = path.components().collect::<PathBuf>();
+        if normalized.as_os_str().as_bytes() != bytes
+            || path.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            })
+        {
+            return Err(format!("{label} must have one canonical lexical spelling"));
         }
         Ok(())
     }
@@ -4972,6 +5213,61 @@ mod imp {
         use super::*;
 
         #[test]
+        fn target_ready_receipt_is_fixed_size_and_versioned() {
+            fn parse(bytes: &[u8]) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+                let mut pipe = [-1; 2];
+                assert_eq!(
+                    unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+                    0
+                );
+                write_all_fd(pipe[1], bytes).unwrap();
+                close_fd(pipe[1]);
+                let result = read_child_target_ready(pipe[0]);
+                close_fd(pipe[0]);
+                result
+            }
+
+            let mut record = [0_u8; MOUNT_PREPARATION_RECORD_BYTES];
+            record[0] = CHILD_TARGET_READY;
+            record[1] = MOUNT_PREPARATION_SCHEMA;
+            record[2..6].copy_from_slice(&3_u32.to_le_bytes());
+            record[6..].copy_from_slice(&[0xA5; 32]);
+            let receipt = parse(&record).unwrap();
+            assert_eq!(receipt.schema, 1);
+            assert_eq!(receipt.owned_child_pid, 0);
+            assert_eq!(receipt.mount_count, 3);
+            assert_eq!(receipt.destination_access_sha256, [0xA5; 32]);
+            assert!(parse(&record[..record.len() - 1]).is_err());
+            record[1] = 2;
+            assert!(parse(&record).unwrap_err().contains("invalid schema"));
+            record[1] = MOUNT_PREPARATION_SCHEMA;
+            record[2..6].copy_from_slice(&4097_u32.to_le_bytes());
+            assert!(parse(&record).unwrap_err().contains("exceeds native bound"));
+            record[0] = CHILD_READY;
+            assert!(
+                parse(&record)
+                    .unwrap_err()
+                    .contains("invalid target readiness")
+            );
+
+            let mut pipe = [-1; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            record[0] = CHILD_TARGET_READY;
+            write_all_fd(pipe[1], &record[..1]).unwrap();
+            let error = read_child_target_ready_until(
+                pipe[0],
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_millis(5)),
+            )
+            .unwrap_err();
+            assert!(error.contains("deadline elapsed"));
+            close_fd(pipe[0]);
+            close_fd(pipe[1]);
+        }
+
+        #[test]
         #[cfg(target_arch = "x86_64")]
         fn launch_failure_distinguishes_missing_elf_loader_from_workload_exit_125() {
             use std::os::fd::FromRawFd as _;
@@ -5004,6 +5300,7 @@ mod imp {
                     launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
                     applied_launch: None,
                     observed_applied_launch: None,
+                    mount_preparation: None,
                     termination_requested: false,
                 }
             }
@@ -6365,6 +6662,18 @@ mod imp {
                         if !terminal_export {
                             let expected_launch = request.clone();
                             let mut process = launch(request)?;
+                            let preparation = process.mount_preparation_receipt()?;
+                            if preparation.schema != 1
+                                || preparation.owned_child_pid != process.child_pid()
+                                || !preparation.matches_request(&expected_launch)?
+                            {
+                                return Err("native mount preparation differs from target".into());
+                            }
+                            let mut tampered = preparation.clone();
+                            tampered.destination_access_sha256[0] ^= 1;
+                            if tampered.matches_request(&expected_launch)? {
+                                return Err("changed mount preparation was accepted".into());
+                            }
                             let deadline =
                                 std::time::Instant::now() + std::time::Duration::from_secs(5);
                             loop {
@@ -6401,6 +6710,13 @@ mod imp {
                         request.target_channels.clear();
                         let expected_launch = request.clone();
                         let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
+                        let preparation = process.process.mount_preparation_receipt()?;
+                        if preparation.schema != 1
+                            || preparation.owned_child_pid != process.process.child_pid()
+                            || !preparation.matches_request(&expected_launch)?
+                        {
+                            return Err("held mount preparation differs from target".into());
+                        }
                         if process.try_observe_target_exit().is_ok() {
                             return Err("unreleased target yielded an execution observation".into());
                         }
@@ -6867,6 +7183,7 @@ mod tests {
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
+                mount_preparation: None,
                 termination_requested: false,
             },
             release: None,
@@ -6937,6 +7254,7 @@ mod tests {
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
+                mount_preparation: None,
                 termination_requested: false,
             },
             // Deliberately wrong access mode: a failed private release write.
@@ -6969,6 +7287,7 @@ mod tests {
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
+            mount_preparation: None,
             termination_requested: false,
         };
         for timeout in [
@@ -7195,7 +7514,29 @@ mod tests {
         let mut request = minimal_request();
         request.executable = PathBuf::from("/bin/../secret");
         let error = launch_linux_sandbox(request).unwrap_err();
-        assert!(error.contains("lexically normalized"));
+        assert!(error.contains("canonical lexical spelling"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_mount_aliases_refuse_before_namespace_entry() {
+        use std::os::fd::AsRawFd as _;
+
+        let source = tempfile::tempfile().unwrap();
+        for alias in ["/tool//member", "/tool/./member", "/tool/member/"] {
+            let mut request = minimal_request();
+            request.mounts = vec![LinuxSandboxMount {
+                source_fd: source.as_raw_fd() as u32,
+                destination: PathBuf::from(alias),
+                access: LinuxSandboxMountAccess::ReadOnly,
+                layer: 1,
+            }];
+            let error = launch_linux_sandbox(request).unwrap_err();
+            assert!(
+                error.contains("canonical lexical spelling"),
+                "{alias}: {error}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

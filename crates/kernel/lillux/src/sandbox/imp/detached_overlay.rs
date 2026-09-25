@@ -261,6 +261,7 @@ pub(super) fn probe() -> Result<(), String> {
                 launch_failure: None,
                 applied_launch: None,
                 observed_applied_launch: None,
+                mount_preparation: None,
                 termination_requested: false,
             })
             .wait()?,
@@ -339,6 +340,7 @@ fn bounded_probe_child(operation: impl FnOnce() -> Result<(), String>) -> Result
             launch_failure: None,
             applied_launch: None,
             observed_applied_launch: None,
+            mount_preparation: None,
             termination_requested: false,
         })
         .wait()?,
