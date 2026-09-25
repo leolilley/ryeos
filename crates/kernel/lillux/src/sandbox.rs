@@ -281,6 +281,9 @@ pub struct LinuxSandboxAppliedLaunchReceipt {
     pub argv_sha256: [u8; 32],
     pub environment_sha256: [u8; 32],
     pub cwd_sha256: [u8; 32],
+    /// Fresh target-view observation after release, before exec. Source
+    /// identity remains the separate descriptor-backed pre-release proof.
+    pub post_release_mount_view: LinuxSandboxMountPreparationCommitments,
 }
 
 /// Bounded final-root mount observation from the held namespace-init before
@@ -429,6 +432,13 @@ impl LinuxSandboxAppliedLaunchReceipt {
             && self.argv_sha256 == expected.argv_sha256
             && self.environment_sha256 == expected.environment_sha256
             && self.cwd_sha256 == expected.cwd_sha256
+    }
+
+    pub fn matches_post_release_mounts(
+        &self,
+        expected: &LinuxSandboxMountPreparationCommitments,
+    ) -> bool {
+        self.post_release_mount_view == *expected
     }
 }
 
@@ -1277,8 +1287,9 @@ mod imp {
     const CHILD_TARGET_READY: u8 = 2;
     const MOUNT_PREPARATION_SCHEMA: u8 = 1;
     const MOUNT_PREPARATION_RECORD_BYTES: usize = 1 + 1 + 4 + 32;
-    const APPLIED_LAUNCH_RECORD: u8 = 0xA7;
-    const APPLIED_LAUNCH_RECORD_BYTES: usize = 1 + 4 * 5 + 32 * 4;
+    // Wire cut: the applied record now includes a post-release mount view.
+    const APPLIED_LAUNCH_RECORD: u8 = 0xA8;
+    const APPLIED_LAUNCH_RECORD_BYTES: usize = 1 + 4 * 7 + 32 * 5;
     pub(super) const CHILD_ERROR: u8 = 1;
     pub(super) const MAX_CHILD_ERROR_BYTES: usize = 64 * 1024;
     // The private failure channel is drained only after the exact child exits.
@@ -2724,6 +2735,46 @@ mod imp {
         })
     }
 
+    /// Reobserve only destination kind and effective access after release.
+    /// The admitted source descriptors are intentionally already closed; this
+    /// cannot replace the descriptor-backed pre-release identity check.
+    fn observe_post_release_mounts(
+        request: &LinuxSandboxRequest,
+    ) -> Result<LinuxSandboxMountPreparationCommitments, String> {
+        let mut observed = Vec::with_capacity(
+            request.mounts.len()
+                + request
+                    .overlay
+                    .as_ref()
+                    .map_or(0, |overlay| overlay.writable_descendant_mounts.len()),
+        );
+        for mount in &request.mounts {
+            let (kind, read_only) = observe_final_mount_view(&mount.destination)?;
+            observed.push((&mount.destination, kind, read_only));
+        }
+        if let Some(overlay) = &request.overlay {
+            for descendant in &overlay.writable_descendant_mounts {
+                let (kind, read_only) = observe_final_mount_view(&descendant.destination)?;
+                observed.push((&descendant.destination, kind, read_only));
+            }
+        }
+        digest_mount_tuples(observed)
+    }
+
+    fn observe_final_mount_view(destination: &PathBuf) -> Result<(u8, bool), String> {
+        let mounted = open_mount_destination_beneath(Path::new("/"), destination)?;
+        let observed = mount_source_stat(mounted.as_raw_fd())?;
+        let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        syscall_zero(
+            unsafe { libc::fstatvfs(mounted.as_raw_fd(), filesystem.as_mut_ptr()) },
+            "observe post-release target mount access",
+        )?;
+        Ok((
+            mount_kind_code(observed.st_mode & libc::S_IFMT)?,
+            unsafe { filesystem.assume_init() }.f_flag & libc::ST_RDONLY != 0,
+        ))
+    }
+
     pub(super) fn expected_mount_preparation(
         request: &LinuxSandboxRequest,
     ) -> Result<LinuxSandboxMountPreparationCommitments, String> {
@@ -3467,7 +3518,14 @@ mod imp {
             close_fd(raw_fd(release_keepalive_fd)?);
         }
         close_fd(ready_fd);
-        exec_target_with_receipt(request, Some(applied_launch_fd))
+        let post_release_mount_view = observe_post_release_mounts(request)?;
+        if post_release_mount_view.mount_count != mount_preparation.mount_count
+            || post_release_mount_view.destination_access_sha256
+                != mount_preparation.destination_access_sha256
+        {
+            return Err("post-release target mounts differ from held final-root preparation".into());
+        }
+        exec_target_with_receipt(request, Some((applied_launch_fd, post_release_mount_view)))
     }
 
     /// Called only in the actual PID-namespace child before pivot_root. A
@@ -3510,7 +3568,7 @@ mod imp {
 
     fn exec_target_with_receipt(
         request: &LinuxSandboxRequest,
-        applied_launch_fd: Option<RawFd>,
+        applied_launch: Option<(RawFd, LinuxSandboxMountPreparationCommitments)>,
     ) -> Result<(), String> {
         let executable = c_string(request.executable.as_os_str(), "sandbox executable")?;
         let argv0 = c_string(&request.argv0, "sandbox argv0")?;
@@ -3541,8 +3599,8 @@ mod imp {
             unsafe { libc::chdir(cwd.as_ptr()) },
             "enter sandbox target cwd",
         )?;
-        if let Some(fd) = applied_launch_fd {
-            write_applied_launch(fd, &executable, &arguments, &environment)?;
+        if let Some((fd, mounts)) = applied_launch {
+            write_applied_launch(fd, &executable, &arguments, &environment, &mounts)?;
         }
         unsafe {
             libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
@@ -3625,8 +3683,17 @@ mod imp {
                 argv_sha256: hash_c_strings(&argv),
                 environment_sha256: hash_c_strings(&env),
                 cwd_sha256: hash_c_string(c"/workspace"),
+                post_release_mount_view: LinuxSandboxMountPreparationCommitments {
+                    schema: 1,
+                    mount_count: 0,
+                    destination_access_sha256: [0; 32],
+                },
             };
             assert!(receipt.matches_request(&request).unwrap());
+            assert!(receipt.matches_post_release_mounts(&receipt.post_release_mount_view));
+            let mut wrong_mounts = receipt.post_release_mount_view.clone();
+            wrong_mounts.destination_access_sha256[0] ^= 1;
+            assert!(!receipt.matches_post_release_mounts(&wrong_mounts));
             request
                 .environment
                 .insert("TOKEN".into(), "other-secret".into());
@@ -3644,6 +3711,7 @@ mod imp {
         executable: &CStr,
         arguments: &[CString],
         environment: &[CString],
+        post_release_mount_view: &LinuxSandboxMountPreparationCommitments,
     ) -> Result<(), String> {
         // Bounded native observation of the final cwd, not the caller's
         // requested spelling. Refuse a cwd that cannot be represented here.
@@ -3673,6 +3741,8 @@ mod imp {
             unsafe { libc::getegid() },
             no_new_privs as u32,
             seccomp_mode as u32,
+            post_release_mount_view.schema,
+            post_release_mount_view.mount_count,
         ] {
             record[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             offset += 4;
@@ -3682,6 +3752,7 @@ mod imp {
             hash_c_strings(arguments),
             hash_c_strings(environment),
             hash_c_string(cwd),
+            post_release_mount_view.destination_access_sha256,
         ] {
             record[offset..offset + 32].copy_from_slice(&digest);
             offset += 32;
@@ -3721,9 +3792,13 @@ mod imp {
         let effective_gid = read_u32();
         let no_new_privs = read_u32();
         let seccomp_mode = read_u32();
+        let mount_schema = read_u32();
+        let mount_count = read_u32();
         if namespace_pid != 1
             || no_new_privs != 1
             || seccomp_mode != libc::SECCOMP_MODE_FILTER as u32
+            || mount_schema != u32::from(MOUNT_PREPARATION_SCHEMA)
+            || mount_count > 4096
         {
             return Err("sandbox applied-launch record has invalid native controls".into());
         }
@@ -3743,6 +3818,11 @@ mod imp {
             argv_sha256: digest(),
             environment_sha256: digest(),
             cwd_sha256: digest(),
+            post_release_mount_view: LinuxSandboxMountPreparationCommitments {
+                schema: mount_schema,
+                mount_count,
+                destination_access_sha256: digest(),
+            },
         })
     }
 
@@ -6715,6 +6795,7 @@ mod imp {
                             let mut process = launch(request)?;
                             let preparation = process.mount_preparation_receipt()?;
                             if preparation.schema != 1
+                                || preparation.mount_count == 0
                                 || preparation.owned_child_pid != process.child_pid()
                                 || !preparation.matches_request(&expected_launch)?
                             {
@@ -6731,6 +6812,9 @@ mod imp {
                                 if let Some(applied) = process.try_observe_applied_launch()? {
                                     if applied.owned_child_pid != process.child_pid()
                                         || !applied.matches_request(&expected_launch)?
+                                        || !applied.matches_post_release_mounts(
+                                            &imp::expected_mount_preparation(&expected_launch)?,
+                                        )
                                     {
                                         return Err(
                                             "native applied launch differs from exact request"
@@ -6763,6 +6847,7 @@ mod imp {
                         let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
                         let preparation = process.process.mount_preparation_receipt()?;
                         if preparation.schema != 1
+                            || preparation.mount_count == 0
                             || preparation.owned_child_pid != process.process.child_pid()
                             || !preparation.matches_request(&expected_launch)?
                         {
@@ -6852,6 +6937,9 @@ mod imp {
                         };
                         if applied.owned_child_pid != process.process.child_pid()
                             || !applied.matches_request(&expected_launch)?
+                            || !applied.matches_post_release_mounts(
+                                &imp::expected_mount_preparation(&expected_launch)?,
+                            )
                         {
                             return Err("native applied launch differs from exact request".into());
                         }
@@ -7274,7 +7362,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn applied_launch_channel_rejects_missing_partial_and_invalid_records() {
         use std::os::fd::FromRawFd as _;
-        for record in [Vec::new(), vec![0xA7], vec![0xFF; 149]] {
+        for record in [Vec::new(), vec![0xA8], vec![0xA7; 189], vec![0xFF; 188]] {
             let mut descriptors = [0; 2];
             assert_eq!(
                 unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },

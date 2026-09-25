@@ -664,6 +664,11 @@ mod tests {
             argv_sha256: list(&argv),
             environment_sha256: list(&["TZ=UTC".to_owned()]),
             cwd_sha256: digest(&c_string(&recipe.cwd)),
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
         };
         let observation = serde_json::json!({"applied_receipt":receipt});
         assert!(check_applied_receipt_against_signed_request(&observation, &expected).is_ok());

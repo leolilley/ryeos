@@ -20,7 +20,7 @@ use crate::state::AppState;
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 
-const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v4";
+const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v5";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
@@ -140,6 +140,10 @@ impl ScopedProducerObservation {
             self.isolation_provenance.plan_digest.as_deref().unwrap(),
             &self.process_identity,
         )?;
+        ensure!(
+            self.applied_launch.matches_post_release_mounts(&mount_evidence.expected),
+            "observation post-release target mounts differ from retained held preparation"
+        );
         ensure!(
             i64::from(self.applied_launch.owned_child_pid) == self.process_identity.target_pid
                 && self.applied_launch.namespace_pid == 1
@@ -290,11 +294,15 @@ fn observe_owned_scoped_producer(
             );
         }
     };
-    if !applied_launch.matches_commitments(&expected_applied_launch) {
+    let retained_mounts = record.mount_preparation_evidence.as_ref()
+        .context("released scoped child has no retained mount preparation")?;
+    if !applied_launch.matches_commitments(&expected_applied_launch)
+        || !applied_launch.matches_post_release_mounts(&retained_mounts.expected)
+    {
         let abort = child.process.abort_and_reap_checked();
         let settlement = settle_cleanup_only(state, record);
         bail!(
-            "scoped producer applied target differs from independently compiled plan; abort={abort:?}; cleanup={settlement:?}"
+            "scoped producer applied target or post-release mounts differ from independently compiled plan; abort={abort:?}; cleanup={settlement:?}"
         );
     }
     let wait = child

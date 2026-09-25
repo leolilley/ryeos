@@ -522,14 +522,23 @@ fn scoped_attempt_locator(
         .scoped_producer_processes
         .prelaunch_evidence_exact(record)?
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no exact live prelaunch target"))?;
+    let held_mounts = record.mount_preparation_evidence.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("scoped locator has no retained held mount preparation"))?;
+    anyhow::ensure!(
+        held_mounts.plan_digest == isolation_plan_digest
+            && held_mounts.observed.matches_commitments(&held_mounts.expected),
+        "scoped locator held mount preparation differs from compiled plan"
+    );
     Ok(serde_json::json!({
-        "schema": "ryeos.scoped_producer_locator.v3",
+        "schema": "ryeos.scoped_producer_locator.v4",
         "attempt_id": record.initial.attempt_id,
         "recipe_digest": record.initial.recipe_digest,
         "recipe_generation": record.initial.recipe_generation,
         "scenario_digest": record.initial.scenario_digest,
         "isolation_plan_digest": isolation_plan_digest,
         "expected_applied_launch": expected,
+        "expected_mount_preparation": held_mounts.expected,
+        "held_mount_preparation": held_mounts.observed,
     }))
 }
 

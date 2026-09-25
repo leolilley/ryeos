@@ -13,7 +13,7 @@ pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v12";
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
 pub const ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA: &str =
-    "ryeos.isolation-adapter.applied-launch/v1";
+    "ryeos.isolation-adapter.applied-launch/v2";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;

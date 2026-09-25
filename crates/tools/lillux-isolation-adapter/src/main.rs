@@ -197,10 +197,19 @@ fn launch(request_fd: u32) -> ! {
             format!("compare applied-launch receipt: {error}"),
         ),
     };
-    if receipt.owned_child_pid != process.child_pid() || !exact_request {
+    if receipt.owned_child_pid != process.child_pid()
+        || !exact_request
+        || !receipt.matches_post_release_mounts(
+            &lillux::LinuxSandboxMountPreparationCommitments {
+                schema: mount_preparation.schema,
+                mount_count: mount_preparation.mount_count,
+                destination_access_sha256: mount_preparation.destination_access_sha256,
+            },
+        )
+    {
         emit_refusal(
             status_fd,
-            "applied-launch receipt differs from translated signed plan".into(),
+            "applied-launch receipt or post-release mounts differ from translated signed plan".into(),
         );
     }
     let mut receipt_line = match serde_json::to_vec(&serde_json::json!({

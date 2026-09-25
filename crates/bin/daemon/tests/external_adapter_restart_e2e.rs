@@ -672,7 +672,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
     )?;
     let mut statement = db.prepare(
         "SELECT attempt_id, recipe_digest, recipe_generation, scenario_digest, \
-         natural_empty_receipt_digest, observation_object_hash, phase \
+         natural_empty_receipt_digest, observation_object_hash, phase, mount_preparation_evidence \
          FROM scoped_child_attempt WHERE owner_thread_id=?1",
     )?;
     let rows = statement
@@ -685,6 +685,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -692,7 +693,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         rows.len() == 1,
         "expected exactly one scoped attempt for root {root}"
     );
-    let (attempt, recipe, generation, scenario, receipt, object, phase) = &rows[0];
+    let (attempt, recipe, generation, scenario, receipt, object, phase, mount_evidence) = &rows[0];
     ensure!(
         matches!(phase.as_str(), "natural_scope_empty" | "retired"),
         "scoped producer has not settled naturally"
@@ -703,12 +704,15 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
     let object = object
         .as_deref()
         .context("missing scoped observation object")?;
+    let mount_evidence: Value = serde_json::from_str(
+        mount_evidence.as_deref().context("missing retained mount preparation")?
+    )?;
     let cas = lillux::CasStore::new(state.join(".ai/state/objects"));
     let observation = cas
         .get_object(object)?
         .context("retained scoped observation absent")?;
     ensure!(
-        observation["schema"] == "ryeos.scoped_producer_observation.v4"
+        observation["schema"] == "ryeos.scoped_producer_observation.v5"
             && observation["attempt_id"] == *attempt
             && observation["recipe_digest"] == *recipe
             && observation["recipe_generation"] == *generation
@@ -717,6 +721,18 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
             && observation["scenario_digest"] == *scenario
             && observation["natural_empty_receipt_digest"] == receipt,
         "scoped observation differs from exact journal attempt"
+    );
+    ensure!(
+        mount_evidence["expected"]["mount_count"].as_u64().is_some_and(|count| count > 0)
+            && mount_evidence["expected"]["schema"] == mount_evidence["observed"]["schema"]
+            && mount_evidence["expected"]["mount_count"] == mount_evidence["observed"]["mount_count"]
+            && mount_evidence["expected"]["destination_access_sha256"]
+                == mount_evidence["observed"]["destination_access_sha256"]
+            && mount_evidence["observed"]["owned_child_pid"]
+                == observation["process_identity"]["target_pid"]
+            && observation["applied_launch"]["post_release_mount_view"]
+                == mount_evidence["expected"],
+        "scoped observation mount echo differs from exact retained held preparation"
     );
     ensure!(
         observation["subprocess_success"] == true

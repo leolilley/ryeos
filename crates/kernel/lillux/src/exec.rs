@@ -6501,7 +6501,7 @@ fn parse_applied_launch_status_line(
 #[cfg(all(test, target_os = "linux"))]
 mod applied_status_tests {
     use super::*;
-    const TEST_SCHEMA: &str = "test.applied-launch/v1";
+    const TEST_SCHEMA: &str = "test.applied-launch/v2";
 
     #[test]
     fn mount_preparation_requirement_is_held_only_and_single_use() {
@@ -6524,6 +6524,11 @@ mod applied_status_tests {
             argv_sha256: [2; 32],
             environment_sha256: [3; 32],
             cwd_sha256: [4; 32],
+            post_release_mount_view: crate::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
         }
     }
 
@@ -6621,10 +6626,18 @@ mod applied_status_tests {
         assert!(run(&[pid.clone(), wrong]).1.is_err());
         let wrong_schema = format!(
             "{}\n",
-            serde_json::json!({"schema":"test.applied-launch/v0","applied-launch":receipt(42)})
+            serde_json::json!({"schema":"test.applied-launch/v1","applied-launch":receipt(42)})
         )
         .into_bytes();
-        assert!(run(&[pid, wrong_schema]).1.is_err());
+        assert!(run(&[pid.clone(), wrong_schema]).1.is_err());
+        let mut missing_echo = serde_json::to_value(receipt(42)).unwrap();
+        missing_echo.as_object_mut().unwrap().remove("post_release_mount_view");
+        let missing_echo = format!(
+            "{}\n",
+            serde_json::json!({"schema":TEST_SCHEMA,"applied-launch":missing_echo})
+        )
+        .into_bytes();
+        assert!(run(&[pid, missing_echo]).1.is_err());
     }
 }
 

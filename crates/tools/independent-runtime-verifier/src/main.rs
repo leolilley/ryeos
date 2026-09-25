@@ -394,7 +394,7 @@ async fn main() -> Result<()> {
     }
     check_scoped_applied_target(&locator, &observation.applied_launch)?;
     ensure!(
-        observation.schema == "ryeos.scoped_producer_observation.v4"
+        observation.schema == "ryeos.scoped_producer_observation.v5"
             && observation.attempt_id == locator.attempt_id
             && observation.launch_owner["thread_id"] == thread_id
             && observation.launch_owner["monotonic_launch_epoch"]
@@ -801,6 +801,12 @@ fn check_scoped_applied_target(
         receipt.matches_commitments(&locator.expected_applied_launch),
         "scoped producer applied target differs from prelaunch compiler commitment"
     );
+    ensure!(
+        receipt.matches_post_release_mounts(&locator.expected_mount_preparation)
+            && locator.held_mount_preparation.matches_commitments(&locator.expected_mount_preparation)
+            && receipt.owned_child_pid == locator.held_mount_preparation.owned_child_pid,
+        "scoped producer applied mounts differ from held final-root preparation"
+    );
     Ok(())
 }
 
@@ -893,12 +899,14 @@ struct ScopedAttemptLocator {
     scenario_digest: String,
     isolation_plan_digest: String,
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
+    held_mount_preparation: lillux::LinuxSandboxMountPreparationReceipt,
 }
 
 impl ScopedAttemptLocator {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.scoped_producer_locator.v3"
+            self.schema == "ryeos.scoped_producer_locator.v4"
                 && self.attempt_id.starts_with("scoped-")
                 && self.attempt_id.len() == 71
                 && self.attempt_id[7..]
@@ -911,7 +919,9 @@ impl ScopedAttemptLocator {
                     .strip_prefix("sha256:")
                     .is_some_and(lillux::valid_hash)
                 && !self.recipe_generation.is_empty()
-                && self.recipe_generation.len() <= 256,
+                && self.recipe_generation.len() <= 256
+                && self.expected_mount_preparation.mount_count > 0
+                && self.held_mount_preparation.matches_commitments(&self.expected_mount_preparation),
             "scoped child attempt identity is invalid"
         );
         Ok(())
@@ -1177,7 +1187,7 @@ mod tests {
             recipe_digest: digest.clone(),
         };
         let locator = ScopedAttemptLocator {
-            schema: "ryeos.scoped_producer_locator.v3".into(),
+            schema: "ryeos.scoped_producer_locator.v4".into(),
             attempt_id: format!("scoped-{}", "d".repeat(64)),
             recipe_digest: digest.clone(),
             recipe_generation: source.bundle_generation_identity.clone(),
@@ -1188,6 +1198,17 @@ mod tests {
                 argv_sha256: [2; 32],
                 environment_sha256: [3; 32],
                 cwd_sha256: [4; 32],
+            },
+            expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [0; 32],
+            },
+            held_mount_preparation: lillux::LinuxSandboxMountPreparationReceipt {
+                schema: 1,
+                owned_child_pid: 42,
+                mount_count: 1,
+                destination_access_sha256: [0; 32],
             },
         };
         assert!(
@@ -1251,7 +1272,7 @@ mod tests {
     #[test]
     fn scoped_locator_binds_attempt_to_retained_recipe_coordinate() {
         let valid = json!({
-            "schema": "ryeos.scoped_producer_locator.v3",
+            "schema": "ryeos.scoped_producer_locator.v4",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
@@ -1262,6 +1283,17 @@ mod tests {
                 "argv_sha256": vec![2; 32],
                 "environment_sha256": vec![3; 32],
                 "cwd_sha256": vec![4; 32],
+            },
+            "expected_mount_preparation": {
+                "schema": 1,
+                "mount_count": 1,
+                "destination_access_sha256": vec![0; 32],
+            },
+            "held_mount_preparation": {
+                "schema": 1,
+                "owned_child_pid": 42,
+                "mount_count": 1,
+                "destination_access_sha256": vec![0; 32],
             },
         });
         let locator: ScopedAttemptLocator = serde_json::from_value(valid.clone()).unwrap();
@@ -1292,6 +1324,11 @@ mod tests {
             argv_sha256: [2; 32],
             environment_sha256: [3; 32],
             cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [0; 32],
+            },
         };
         check_scoped_applied_target(&locator, &receipt).unwrap();
         for mut altered in [
@@ -1315,11 +1352,39 @@ mod tests {
                 value.cwd_sha256[0] ^= 1;
                 value
             },
+            {
+                let mut value = receipt.clone();
+                value.post_release_mount_view.destination_access_sha256[0] ^= 1;
+                value
+            },
         ] {
             assert!(check_scoped_applied_target(&locator, &altered).is_err());
             altered.owned_child_pid = 0;
             assert!(check_scoped_applied_target(&locator, &altered).is_err());
         }
+        let mut wrong_held = valid.clone();
+        wrong_held["held_mount_preparation"]["destination_access_sha256"][0] = json!(1);
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(wrong_held)
+            .unwrap()
+            .validate()
+            .is_err());
+        for (field, value) in [
+            ("schema", json!(2)),
+            ("mount_count", json!(2)),
+            ("owned_child_pid", json!(43)),
+        ] {
+            let mut changed = valid.clone();
+            changed["held_mount_preparation"][field] = value;
+            let changed: ScopedAttemptLocator = serde_json::from_value(changed).unwrap();
+            if field == "owned_child_pid" {
+                assert!(check_scoped_applied_target(&changed, &receipt).is_err());
+            } else {
+                assert!(changed.validate().is_err());
+            }
+        }
+        let mut missing_mounts = valid.clone();
+        missing_mounts.as_object_mut().unwrap().remove("expected_mount_preparation");
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_mounts).is_err());
         for field in ["recipe_digest", "scenario_digest", "isolation_plan_digest"] {
             let mut changed = valid.clone();
             changed[field] = json!("wrong");
@@ -1343,7 +1408,7 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("recipe_digest");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(legacy).is_err());
         let mut no_prelaunch_target = json!({
-            "schema": "ryeos.scoped_producer_locator.v3",
+            "schema": "ryeos.scoped_producer_locator.v4",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
