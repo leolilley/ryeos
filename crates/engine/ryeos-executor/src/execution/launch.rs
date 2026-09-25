@@ -7224,8 +7224,44 @@ async fn run_claimed_thread_row_inner(
     // compare-cleared the exact reaped attachment and its workspace
     // membership. Immediate spawn results and settlement errors retain the
     // ordinary stop-first fallback.
-    if wait_result.settled_attached_wait {
+    let settled_owned_root_wait = wait_result.settled_attached_wait;
+    if settled_owned_root_wait {
         lifecycle_owner.record_settled_owned_wait();
+        // A settled wait is the only proof that this exact verifier root was
+        // reaped and compare-cleared. Do this before decoding its result:
+        // malformed stdout can still accompany a released scoped child.
+        // Cleanup is not a root stop intent and does not change the outcome.
+        if state
+            .state_store
+            .has_unsettled_scoped_child_for_thread(&thread_id)?
+        {
+            let scoped_state = state.clone();
+            let scoped_owner: ryeos_app::runtime_db::LaunchOwner =
+                serde_json::from_str(launch_owner).map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "settled root has no canonical scoped launch owner: {error}"
+                    ))
+                })?;
+            if scoped_owner.thread_id != thread_id {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "settled scoped launch owner differs from root thread"
+                )));
+            }
+            tokio::task::spawn_blocking(move || {
+                ryeos_app::scoped_producer_stop::settle_released_scoped_producers_after_owned_root_wait(
+                    &scoped_state,
+                    &scoped_owner,
+                    std::time::Duration::from_secs(60),
+                )
+            })
+            .await
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "scoped root cleanup worker did not settle: {error}"
+                ))
+            })?
+            .map_err(BuildAndLaunchError::Internal)?;
+        }
     } else {
         lifecycle_owner.revoke_tokens_after_unsettled_wait();
     }

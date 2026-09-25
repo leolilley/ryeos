@@ -183,6 +183,12 @@ impl StateStore {
         self.lock()?.runtime_db.unsettled_scoped_child_attempt_ids()
     }
 
+    pub fn has_unsettled_scoped_child_for_thread(&self, thread_id: &str) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .has_unsettled_scoped_child_for_thread(thread_id)
+    }
+
     pub fn claim_bound_scoped_child_retirement(
         &self,
         attempt_id: &str,

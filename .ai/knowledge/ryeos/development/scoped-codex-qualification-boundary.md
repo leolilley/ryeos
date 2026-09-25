@@ -75,8 +75,13 @@ the acknowledged locator or exact RESUME point read to request that same
 child's abort. The abort and natural-observation CAS are mutually
 exclusive; focused `ryeos-app` tests pass for both outcome orderings. This is
 not yet a complete failure proof: a failed receiver may leave START waiting
-until its deadline; an expired or failed abort still needs root-terminal
-recovery evidence. Relay and scripted-provider settlement now retain their
+until its deadline. A proved, reaped owned-root wait now enters a separate
+cleanup-only path before runtime-result decoding or fallback finalization. It
+uses the exact released-attempt abort CAS and waits for a natural observation
+that won the race; it does not invent a cancel/kill stop intent. Pre-release
+or predecessor-owned attempts still refuse fallback finalization. This path
+has a focused CAS test and compile checks, but lacks a joined native root-death
+test. Relay and scripted-provider settlement now retain their
 owners on the first timeout, attempt explicit bounded cancellation, and refuse
 qualification after cancellation. Their final interrupting Drop joins remain
 potentially unbounded, so this is not a bounded terminal proof. Merely dropping

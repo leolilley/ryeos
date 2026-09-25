@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::runtime_db::LaunchOwner;
 use crate::runtime_db::scoped_child_attempt::{ScopedChildAttemptRecord, ScopedChildPhase};
 use crate::scoped_producer_process::{ScopedProducerProcessKey, ScopedProducerStopClaim};
 use crate::state::AppState;
@@ -127,6 +128,97 @@ pub fn abort_scoped_producer_for_attempt(
         &record,
         &lillux::time::MonotonicDeadline::after(maximum_wait),
     )
+}
+
+/// Cleanup at the abnormal root fallback, after the executor has proved its
+/// exact attached process was reaped and compare-cleared. This is deliberately
+/// separate from a root stop: no cancel/kill tombstone is invented and the
+/// root's original failed outcome remains authoritative. Only attempts owned
+/// by that same launch may be touched. An earlier-owner attempt or an
+/// in-progress pre-release start remains an explicit finalization blocker.
+pub fn settle_released_scoped_producers_after_owned_root_wait(
+    state: &AppState,
+    owner: &LaunchOwner,
+    maximum_wait: Duration,
+) -> Result<()> {
+    ensure!(
+        maximum_wait > Duration::ZERO,
+        "scoped root cleanup requires a bounded wait"
+    );
+    let deadline = lillux::time::MonotonicDeadline::after(maximum_wait);
+    for attempt_id in state.state_store.unsettled_scoped_child_attempt_ids()? {
+        let record = state
+            .state_store
+            .scoped_child_attempt(&attempt_id)?
+            .context("unsettled scoped child disappeared during root cleanup")?;
+        if record.initial.owner.thread_id != owner.thread_id {
+            continue;
+        }
+        ensure!(
+            record.initial.owner == *owner,
+            "root fallback cannot settle a predecessor-owned scoped child"
+        );
+        let key = ScopedProducerProcessKey::new(attempt_id, owner.clone())?;
+        match record.phase {
+            ScopedChildPhase::ReleasePermitted => {
+                if let Err(error) =
+                    abort_scoped_producer_for_attempt(state, &key, deadline.remaining())
+                {
+                    // A natural observation may have won the exact CAS. It
+                    // must finish its own retirement; cleanup cannot revoke
+                    // or overwrite that committed observation.
+                    let current = state
+                        .state_store
+                        .scoped_child_attempt(&key.attempt_id)?
+                        .context("scoped child disappeared after root cleanup race")?;
+                    if current.observation_object_hash.is_none()
+                        && current.natural_empty_receipt_digest.is_none()
+                    {
+                        return Err(error);
+                    }
+                    wait_for_exact_retirement(state, &key.attempt_id, &deadline)?;
+                }
+            }
+            ScopedChildPhase::NaturalScopeEmpty => {
+                ensure!(
+                    record.observation_object_hash.is_some()
+                        && record.natural_empty_receipt_digest.is_some(),
+                    "natural-empty scoped child lacks committed observation"
+                );
+                wait_for_exact_retirement(state, &key.attempt_id, &deadline)?;
+            }
+            ScopedChildPhase::BoundRetirementPending | ScopedChildPhase::BoundDeathProven => {
+                stop_exact_attempt(state, &record, &deadline)?;
+            }
+            ScopedChildPhase::Retired => require_exact_retirement(&record)?,
+            _ => bail!("root fallback cannot settle a pre-release scoped child"),
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_exact_retirement(
+    state: &AppState,
+    attempt_id: &str,
+    deadline: &lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    loop {
+        let record = state
+            .state_store
+            .scoped_child_attempt(attempt_id)?
+            .context("scoped child disappeared before exact retirement")?;
+        if record.phase == ScopedChildPhase::Retired {
+            return require_exact_retirement(&record);
+        }
+        let remaining = deadline.remaining();
+        ensure!(
+            remaining > Duration::ZERO,
+            "natural scoped observation did not retire before root fallback deadline"
+        );
+        state
+            .scoped_producer_processes
+            .wait_for_change(remaining.min(Duration::from_millis(50)))?;
+    }
 }
 
 fn stop_exact_attempt(
