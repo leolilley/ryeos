@@ -17,7 +17,7 @@ use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 use ryeos_state::external_content::products::producer_recipe::{
-    ProductProducerRecipe, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProductProducerRecipe, ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
     prepared_directory_mount_destination,
 };
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
@@ -401,7 +401,7 @@ async fn main() -> Result<()> {
         _ => bail!("scoped relay handoff presence differs from signed recipe"),
     }
     check_scoped_applied_target(&locator, &observation.applied_launch)?;
-    check_scoped_effective_environment(
+    check_scoped_direct_environment_and_cwd(
         expected_recipe,
         &realizations,
         &observation.applied_launch,
@@ -851,30 +851,39 @@ fn check_scoped_applied_target(
 /// Derive the complete direct Codex environment from the signed finite recipe
 /// and the verifier's separately admitted realization set. The daemon's
 /// prelaunch commitment alone is not an independent expectation of its env.
-fn check_scoped_effective_environment(
+fn check_scoped_direct_environment_and_cwd(
     recipe: &ProductProducerRecipe,
     admitted_realizations: &str,
     receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
 ) -> Result<()> {
     let environment = signed_direct_environment(recipe, admitted_realizations)?;
-    // Lillux exposes the canonical applied-env commitment through the same
-    // target projection as its pre-exec receipt. Other target fields below are
-    // inert placeholders: compare only environment_sha256.
+    // Lillux exposes the canonical applied environment and cwd commitments
+    // through the same target projection as its pre-exec receipt. Executable
+    // and argv below are inert placeholders; they remain joined separately to
+    // the daemon's held target while their independent source is established.
     let executable = std::path::Path::new("/bin/true");
     let argv0 = OsString::from("/bin/true");
-    let cwd = std::path::Path::new("/");
+    let cwd = match &recipe.cwd_source {
+        ProducerCwdSource::PreparedDirectory { id } => {
+            prepared_directory_mount_destination(id)?
+        }
+        ProducerCwdSource::VerifierPrivateWorkspace => {
+            bail!("direct Codex cwd cannot be verifier-private")
+        }
+    };
     let expected = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
         lillux::LinuxSandboxAppliedLaunchTarget {
             executable,
             argv0: &argv0,
             arguments: &[],
-            cwd,
+            cwd: &cwd,
             environment: &environment,
         },
     ).map_err(anyhow::Error::msg)?;
     ensure!(
-        receipt.environment_sha256 == expected.environment_sha256,
-        "direct Codex applied environment differs from signed recipe and admitted realizations"
+        receipt.environment_sha256 == expected.environment_sha256
+            && receipt.cwd_sha256 == expected.cwd_sha256,
+        "direct Codex applied environment or cwd differs from signed recipe and admitted realizations"
     );
     Ok(())
 }
@@ -1192,7 +1201,7 @@ mod tests {
     use lillux::subordinate_process::SubordinateProcessExit;
 
     #[test]
-    fn signed_direct_environment_matches_only_the_complete_applied_environment() {
+    fn signed_direct_environment_and_cwd_match_applied_fields() {
         let recipe = ProductProducerRecipe::from_value(json!({
             "schema":"ryeos.product_producer_recipe.v5",
             "executable_source":{
@@ -1239,7 +1248,7 @@ mod tests {
             Some(&OsString::from("0")));
         let executable = Path::new("/bin/true");
         let argv0 = OsString::from("/bin/true");
-        let cwd = Path::new("/");
+        let cwd = Path::new("/ryeos/producer-prepared/codex-occurrence");
         let commitment = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
             lillux::LinuxSandboxAppliedLaunchTarget {
                 executable,
@@ -1253,23 +1262,32 @@ mod tests {
             owned_child_pid:42, namespace_pid:1, effective_uid:1, effective_gid:1,
             no_new_privs:true, seccomp_mode:2,
             executable_sha256:[1;32], argv_sha256:[2;32],
-            environment_sha256:commitment.environment_sha256, cwd_sha256:[3;32],
+            environment_sha256:commitment.environment_sha256,
+            cwd_sha256:commitment.cwd_sha256,
             post_release_mount_view:lillux::LinuxSandboxMountPreparationCommitments {
                 schema:1, mount_count:1, destination_access_sha256:[0;32],
             },
         };
-        check_scoped_effective_environment(&recipe, admitted, &receipt).unwrap();
-        assert!(check_scoped_effective_environment(&recipe, "different", &receipt).is_err());
+        check_scoped_direct_environment_and_cwd(&recipe, admitted, &receipt).unwrap();
+        assert!(check_scoped_direct_environment_and_cwd(&recipe, "different", &receipt).is_err());
         let mut changed = receipt.clone();
         changed.environment_sha256[0] ^= 1;
-        assert!(check_scoped_effective_environment(&recipe, admitted, &changed).is_err());
+        assert!(check_scoped_direct_environment_and_cwd(&recipe, admitted, &changed).is_err());
+        let mut changed_cwd = receipt.clone();
+        changed_cwd.cwd_sha256[0] ^= 1;
+        assert!(check_scoped_direct_environment_and_cwd(&recipe, admitted, &changed_cwd).is_err());
         let mut altered_recipe = recipe.clone();
         altered_recipe.environment_bindings.insert(
             "LANG".into(), ProducerEnvironmentBinding::Literal { value:"POSIX".into() }
         );
-        assert!(check_scoped_effective_environment(&altered_recipe, admitted, &receipt).is_err());
+        assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
+        let mut different_cwd = recipe.clone();
+        different_cwd.cwd_source = ProducerCwdSource::PreparedDirectory {
+            id:"different-occurrence".into(),
+        };
+        assert!(check_scoped_direct_environment_and_cwd(&different_cwd, admitted, &receipt).is_err());
         altered_recipe.environment_sources.clear();
-        assert!(check_scoped_effective_environment(&altered_recipe, admitted, &receipt).is_err());
+        assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
     }
 
     #[test]
