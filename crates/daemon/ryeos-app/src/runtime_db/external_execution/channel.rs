@@ -4184,6 +4184,59 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn pending_activation_reopens_before_attachment_and_releases_only_after_ready() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let (reservation, activation, binding, owner, supervisor) = {
+            let db = RuntimeDb::open(&path).unwrap();
+            let (reservation, _, activation, binding, owner, supervisor) = pending_channel(
+                &db,
+                "pending-before-reopen",
+                "external-pending-before-reopen",
+                100,
+                1024 * 1024,
+            );
+            assert!(db
+                .external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .observation
+                .is_none());
+            (reservation, activation, binding, owner, supervisor)
+        };
+
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(!db
+            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+            .unwrap());
+        db.register_external_execution_channel(&binding).unwrap();
+        assert!(db
+            .admit_external_ready_and_author_release(
+                &binding.placement_thread_id,
+                &owner,
+                test_startup_deadline(),
+            )
+            .unwrap()
+            .is_none());
+        ready(&db, &binding, &supervisor);
+        let release = db
+            .admit_external_ready_and_author_release(
+                &binding.placement_thread_id,
+                &owner,
+                test_startup_deadline(),
+            )
+            .unwrap()
+            .expect("exact signed Ready must authorize one Release");
+        assert_eq!(release.frame().payload, ExecutionChannelPayload::Release);
+        assert!(db
+            .external_supervisor_activation(&reservation.placement_thread_id)
+            .unwrap()
+            .unwrap()
+            .observation
+            .is_none());
+    }
+
+    #[test]
     fn historical_release_is_not_live_readiness_after_cancel_or_quiesce() {
         for terminal in ["cancel", "quiesce"] {
             let root = tempfile::tempdir().unwrap();
