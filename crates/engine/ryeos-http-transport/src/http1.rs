@@ -14,6 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const IO_BUFFER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_STREAMED_REQUEST_BODY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -83,16 +84,24 @@ impl Drop for Header {
     }
 }
 
-/// A bounded, exact-length upload captured in host-owned memory.
+/// A bounded, exact-length upload.
 ///
 /// A captured regular file is accepted only through Lillux's retained stable
-/// snapshot type. No path is reopened and no arbitrary `Read` implementation
-/// can stall the lifecycle worker during transmission.
+/// snapshot type; a streamed file must carry registered descriptor authority.
+/// No path is reopened and no arbitrary `Read` implementation is admitted.
 pub enum RequestBodySource {
     /// Finite caller-owned bytes.
     Bytes(Vec<u8>),
     /// Stable byte snapshot captured by Lillux from an admitted regular file.
     CapturedRegularFile(lillux::secure_fs::CapturedRegularFile),
+    /// Exact registered inode streamed without a pathname reopen or full-body capture.
+    /// The caller must separately exclude writers; the final digest check
+    /// cannot prevent already transmitted bytes from reaching the peer.
+    InheritedRegularFile {
+        authority: lillux::InheritedDescriptorAuthority,
+        bytes: u64,
+        sha256: String,
+    },
 }
 
 impl RequestBodySource {
@@ -106,20 +115,93 @@ impl RequestBodySource {
         Self::CapturedRegularFile(file)
     }
 
-    fn as_bytes(&self) -> &[u8] {
+    /// Retain an exact registered regular inode for bounded streaming.
+    pub fn from_inherited_regular_file(
+        authority: lillux::InheritedDescriptorAuthority,
+        bytes: u64,
+        sha256: String,
+    ) -> Self {
+        Self::InheritedRegularFile {
+            authority,
+            bytes,
+            sha256,
+        }
+    }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Bytes(bytes) => bytes,
-            Self::CapturedRegularFile(file) => file.bytes(),
+            Self::Bytes(bytes) => Some(bytes),
+            Self::CapturedRegularFile(file) => Some(file.bytes()),
+            Self::InheritedRegularFile { .. } => None,
         }
     }
 
     /// Return the exact retained byte length used for Content-Length.
     pub fn exact_len(&self) -> u64 {
-        u64::try_from(self.as_bytes().len()).unwrap_or(u64::MAX)
+        match self {
+            Self::InheritedRegularFile { bytes, .. } => *bytes,
+            _ => u64::try_from(self.as_bytes().unwrap().len()).unwrap_or(u64::MAX),
+        }
+    }
+
+    fn maximum_len(&self) -> u64 {
+        match self {
+            Self::InheritedRegularFile { .. } => MAX_STREAMED_REQUEST_BODY_BYTES,
+            _ => MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
+    fn open_reader(&self) -> Result<BodyReader<'_>, HttpError> {
+        match self {
+            Self::InheritedRegularFile {
+                authority,
+                bytes,
+                sha256,
+            } => authority
+                .stable_regular_reader_exact(*bytes, sha256, self.maximum_len())
+                .map(BodyReader::Inherited)
+                .map_err(|_| {
+                    HttpError::before(
+                        io::ErrorKind::InvalidData,
+                        "HTTP request body source changed",
+                    )
+                }),
+            _ => Ok(BodyReader::Memory(io::Cursor::new(
+                self.as_bytes().unwrap(),
+            ))),
+        }
     }
 }
 
-/// Exact-length request body retained in memory for this one operation.
+enum BodyReader<'a> {
+    Memory(io::Cursor<&'a [u8]>),
+    Inherited(lillux::secure_fs::StableInheritedRegularReader<'a>),
+}
+
+impl Read for BodyReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Memory(reader) => reader.read(bytes),
+            Self::Inherited(reader) => reader.read(bytes),
+        }
+    }
+}
+
+impl BodyReader<'_> {
+    fn finish(self) -> Result<(), HttpError> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Inherited(reader) => reader.finish().map_err(|_| {
+                HttpError::ambiguous(
+                    io::ErrorKind::InvalidData,
+                    "HTTP request body source changed",
+                )
+            }),
+        }
+    }
+}
+
+/// Exact-length request body for this one operation.
 ///
 /// The transport writes it in bounded chunks and emits a fixed Content-Length.
 /// It accepts no arbitrary reader, reopened path, pipe, or chunked upload.
@@ -362,6 +444,8 @@ pub(crate) fn execute(
         build_http_call(&request)?,
         request.limits.request_header_bytes,
     )?;
+    // Establish the exact inode and length before any request bytes can leave.
+    let mut body_reader = request.body.open_reader()?;
 
     let setup_deadline = MonotonicDeadline::after(request.deadlines.setup_timeout);
     let socket = network
@@ -412,6 +496,13 @@ pub(crate) fn execute(
     })? {
         Some(SendRequestResult::SendBody(call)) => call,
         Some(SendRequestResult::RecvResponse(call)) => {
+            if request.body.exact_len() != 0 {
+                return Err(HttpError::ambiguous(
+                    io::ErrorKind::InvalidData,
+                    "HTTP request body was not transmitted",
+                ));
+            }
+            body_reader.finish()?;
             return receive_response(
                 stream,
                 call,
@@ -435,8 +526,11 @@ pub(crate) fn execute(
         }
     };
 
-    let body_bytes = request.body.as_bytes();
-    let mut offset = 0usize;
+    let body_len = request.body.exact_len();
+    let mut consumed_total = 0u64;
+    let mut input = [0u8; IO_BUFFER_BYTES];
+    let mut input_len = 0usize;
+    let mut input_offset = 0usize;
     let mut buffer = [0u8; IO_BUFFER_BYTES];
     while !send.can_proceed() {
         if request.cancellation.is_cancelled() || request.deadlines.absolute.has_elapsed() {
@@ -450,17 +544,35 @@ pub(crate) fn execute(
                 "HTTP request transmission was interrupted",
             ));
         }
-        let (consumed, produced) =
-            send.write(&body_bytes[offset..], &mut buffer)
-                .map_err(|_| {
-                    HttpError::ambiguous(io::ErrorKind::InvalidData, "invalid HTTP request body")
+        if input_offset == input_len && consumed_total < body_len {
+            let remaining = body_len - consumed_total;
+            let read_limit = usize::try_from(remaining.min(IO_BUFFER_BYTES as u64))
+                .expect("bounded HTTP buffer fits usize");
+            input_len = body_reader
+                .read(&mut input[..read_limit])
+                .map_err(|error| {
+                    HttpError::ambiguous(error.kind(), "HTTP request body source changed")
                 })?;
+            input_offset = 0;
+            if input_len == 0 {
+                return Err(HttpError::ambiguous(
+                    io::ErrorKind::UnexpectedEof,
+                    "HTTP request body ended before its declared length",
+                ));
+            }
+        }
+        let (consumed, produced) = send
+            .write(&input[input_offset..input_len], &mut buffer)
+            .map_err(|_| {
+                HttpError::ambiguous(io::ErrorKind::InvalidData, "invalid HTTP request body")
+            })?;
         if produced != 0 {
             stream.write_all(&buffer[..produced]).map_err(|error| {
                 HttpError::ambiguous(error.kind(), "HTTP request transmission failed")
             })?;
         }
-        offset = offset.saturating_add(consumed);
+        input_offset += consumed;
+        consumed_total += consumed as u64;
         if consumed == 0 && produced == 0 && !send.can_proceed() {
             return Err(HttpError::ambiguous(
                 io::ErrorKind::WriteZero,
@@ -468,12 +580,13 @@ pub(crate) fn execute(
             ));
         }
     }
-    if offset != body_bytes.len() {
+    if consumed_total != body_len || input_offset != input_len {
         return Err(HttpError::ambiguous(
             io::ErrorKind::InvalidData,
             "HTTP request body length did not match its declaration",
         ));
     }
+    body_reader.finish()?;
     stream
         .flush()
         .map_err(|error| HttpError::ambiguous(error.kind(), "HTTP request transmission failed"))?;
@@ -519,7 +632,7 @@ fn validate(request: &HttpRequest) -> Result<(), HttpError> {
             "HTTP method is empty, oversized, or attempts a tunnel",
         ));
     }
-    if request.limits.request_body_bytes > MAX_REQUEST_BODY_BYTES
+    if request.limits.request_body_bytes > request.body.maximum_len()
         || request.limits.request_header_bytes == 0
         || request.limits.request_header_bytes > MAX_REQUEST_HEADER_BYTES
         || request.limits.response_header_bytes == 0
@@ -669,17 +782,21 @@ fn build_http_call(
 fn encode_request_head(
     call: Call<ureq_proto::client::state::Prepare>,
     maximum: usize,
-) -> Result<(Zeroizing<Vec<u8>>, Call<ureq_proto::client::state::SendRequest>), HttpError> {
+) -> Result<
+    (
+        Zeroizing<Vec<u8>>,
+        Call<ureq_proto::client::state::SendRequest>,
+    ),
+    HttpError,
+> {
     let mut request = call.proceed();
     let mut encoded = Zeroizing::new(Vec::new());
-    encoded
-        .try_reserve_exact(maximum)
-        .map_err(|_| {
-            HttpError::before(
-                io::ErrorKind::OutOfMemory,
-                "HTTP request head allocation failed",
-            )
-        })?;
+    encoded.try_reserve_exact(maximum).map_err(|_| {
+        HttpError::before(
+            io::ErrorKind::OutOfMemory,
+            "HTTP request head allocation failed",
+        )
+    })?;
     let mut buffer = Zeroizing::new([0u8; IO_BUFFER_BYTES]);
     while !request.can_proceed() {
         let count = request.write(&mut buffer[..]).map_err(|_| {
@@ -904,6 +1021,223 @@ mod tests {
             ),
             cancellation: lillux::network::NetworkCancellation::default(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_body_streams_exact_inode_and_refuses_size_drift_before_contact() {
+        use std::ffi::OsStr;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("body");
+        std::fs::write(&path, b"exact upload").unwrap();
+        let parent = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("body"), false)
+            .unwrap()
+            .unwrap();
+        let authority = pinned.inherited_descriptor_authority().unwrap();
+        let digest = lillux::sha256_hex(b"exact upload");
+        let body = RequestBodySource::from_inherited_regular_file(authority, 12, digest);
+        let mut reader = body.open_reader().unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(bytes, b"exact upload");
+        assert_eq!(body.exact_len(), 12);
+
+        let mut reader = body.open_reader().unwrap();
+        let mut first_byte = [0u8; 1];
+        reader.read_exact(&mut first_byte).unwrap();
+        assert_eq!(first_byte, [b'e']);
+        assert_eq!(
+            reader.finish().unwrap_err().contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+
+        std::fs::write(&path, b"changed").unwrap();
+        let error = match body.open_reader() {
+            Ok(_) => panic!("changed inherited source was admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.contact_state(), crate::ContactState::NoRequestSent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_body_same_length_drift_after_read_is_ambiguous() {
+        use std::ffi::OsStr;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("body");
+        std::fs::write(&path, b"original").unwrap();
+        let parent = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("body"), false)
+            .unwrap()
+            .unwrap();
+        let authority = pinned.inherited_descriptor_authority().unwrap();
+        let body = RequestBodySource::from_inherited_regular_file(
+            authority,
+            8,
+            lillux::sha256_hex(b"original"),
+        );
+        let mut reader = body.open_reader().unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"original");
+        std::fs::write(&path, b"replaced").unwrap();
+        assert_eq!(
+            reader.finish().unwrap_err().contact_state(),
+            crate::ContactState::RequestMayHaveBeenSent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_body_ignores_replaced_pathname() {
+        use std::ffi::OsStr;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("body");
+        std::fs::write(&path, b"original").unwrap();
+        let parent = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("body"), false)
+            .unwrap()
+            .unwrap();
+        let authority = pinned.inherited_descriptor_authority().unwrap();
+        let body = RequestBodySource::from_inherited_regular_file(
+            authority,
+            8,
+            lillux::sha256_hex(b"original"),
+        );
+        std::fs::rename(&path, directory.path().join("retired")).unwrap();
+        std::fs::write(&path, b"attacker!").unwrap();
+        let mut reader = body.open_reader().unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(actual, b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_body_has_separate_finite_upload_ceiling() {
+        use std::ffi::OsStr;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("body"), b"x").unwrap();
+        let parent = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("body"), false)
+            .unwrap()
+            .unwrap();
+        let authority = pinned.inherited_descriptor_authority().unwrap();
+        let mut request = request(Vec::new());
+        request.body =
+            RequestBodySource::from_inherited_regular_file(authority, 1, lillux::sha256_hex(b"x"));
+        request.limits.request_body_bytes = MAX_REQUEST_BODY_BYTES + 1;
+        assert!(validate(&request).is_ok());
+        request.limits.request_body_bytes = MAX_STREAMED_REQUEST_BODY_BYTES + 1;
+        assert_eq!(
+            validate(&request).unwrap_err().contact_state(),
+            crate::ContactState::NoRequestSent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_body_crosses_local_tls_in_bounded_chunks() {
+        use std::ffi::OsStr;
+        use std::net::TcpListener;
+        use std::time::Duration as StdDuration;
+
+        let bytes = vec![0x5a; IO_BUFFER_BYTES * 3 + 7];
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("body"), &bytes).unwrap();
+        let parent = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let pinned = parent
+            .open_pinned_regular(OsStr::new("body"), false)
+            .unwrap()
+            .unwrap();
+        let authority = pinned.inherited_descriptor_authority().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = bytes.clone();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(StdDuration::from_secs(5)))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(
+                    include_bytes!("../tests/fixtures/test-server.der").to_vec(),
+                )],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        include_bytes!("../tests/fixtures/test-server-key.der").to_vec(),
+                    ),
+                ),
+            )
+            .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = rustls::StreamOwned::new(connection, socket);
+            let mut received = Vec::new();
+            let header_end = loop {
+                let mut buffer = [0u8; 4096];
+                let count = tls.read(&mut buffer).unwrap();
+                assert_ne!(count, 0);
+                received.extend_from_slice(&buffer[..count]);
+                if let Some(index) = received.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let head = std::str::from_utf8(&received[..header_end]).unwrap();
+            assert!(head.contains(&format!("content-length: {}\r\n", expected.len())));
+            while received.len() - header_end < expected.len() {
+                let mut buffer = [0u8; 4096];
+                let count = tls.read(&mut buffer).unwrap();
+                assert_ne!(count, 0);
+                received.extend_from_slice(&buffer[..count]);
+            }
+            assert_eq!(&received[header_end..], expected.as_slice());
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            tls.flush().unwrap();
+        });
+
+        let network =
+            NetworkContext::from_config_bytes(b"nameserver 127.0.0.1\n", b"127.0.0.1 localhost\n")
+                .unwrap();
+        let mut http_request = request(Vec::new());
+        http_request.url = url::Url::parse(&format!("https://localhost:{port}/upload")).unwrap();
+        http_request.tls_roots_der = vec![include_bytes!("../tests/fixtures/test-ca.der").to_vec()];
+        http_request.body = RequestBodySource::from_inherited_regular_file(
+            authority,
+            bytes.len() as u64,
+            lillux::sha256_hex(&bytes),
+        );
+        http_request.limits.request_body_bytes = bytes.len() as u64;
+        assert_eq!(execute(&network, http_request).unwrap().status, 200);
+        server.join().unwrap();
     }
 
     #[test]

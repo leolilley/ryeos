@@ -98,7 +98,8 @@ impl Deadlines {
 /// Independent byte ceilings for one exchange.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Maximum exact-length request body bytes, hard-capped at 64 MiB.
+    /// Maximum exact-length request body bytes. In-memory bodies are hard-capped
+    /// at 64 MiB; exact registered-inode streams are hard-capped at 4 GiB.
     pub request_body_bytes: u64,
     /// Maximum serialized request line and header bytes, hard-capped at 1 MiB.
     pub request_header_bytes: usize,

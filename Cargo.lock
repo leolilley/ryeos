@@ -3136,6 +3136,7 @@ version = "0.1.0"
 dependencies = [
  "lillux",
  "rustls",
+ "tempfile",
  "ureq-proto",
  "url",
  "zeroize",
