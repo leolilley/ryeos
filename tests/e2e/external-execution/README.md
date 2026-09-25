@@ -81,11 +81,12 @@ The first installed Render fixture must establish the following order, with
 exact IDs and contact counts retained at each cut:
 
 1. Produce and pin an available, unexpired runtime snapshot in the intended
-   sandbox group and source plan with an inert waiter. Establish image/content
-   lineage through RyeOS's own exact source-Sandbox capture and pin chain:
-   Render's snapshot response identifies kind, plan, group, source Sandbox and
-   status, but does not attest a content digest. No controller signer,
-   bootstrap capability, credential, project, or candidate may be in that
+   sandbox group and source plan with an inert waiter. Establish the source
+   image/file lineage through RyeOS's exact artifact capture and pin chain,
+   and bind the snapshot-create request to that source Sandbox. Render's
+   snapshot response identifies kind, plan, group, source Sandbox and status,
+   but does not attest the snapshot's memory or content digest. No controller
+   signer, bootstrap capability, credential, project, or candidate may be in that
    reusable snapshot.
 2. Create one Sandbox from its exact snapshot ID, requiring the same sandbox
    group and matching runtime plan. Verify the returned occurrence and region;
