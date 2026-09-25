@@ -295,17 +295,51 @@ pub struct LinuxSandboxMountPreparationReceipt {
     pub destination_access_sha256: [u8; 32],
 }
 
+/// Independently computed expectation from admitted source descriptors and
+/// destination/access policy. This is not an observation of the target view.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxSandboxMountPreparationCommitments {
+    pub schema: u32,
+    pub mount_count: u32,
+    pub destination_access_sha256: [u8; 32],
+}
+
+impl LinuxSandboxMountPreparationCommitments {
+    pub fn from_admitted_mounts(
+        mounts: &[LinuxSandboxMount],
+        writable_overlay_destinations: &[PathBuf],
+    ) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            imp::expected_mount_preparation_from_mounts(mounts, writable_overlay_destinations)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (mounts, writable_overlay_destinations);
+            Err("native mount commitments are unavailable on this platform".into())
+        }
+    }
+}
+
 impl LinuxSandboxMountPreparationReceipt {
+    pub fn matches_commitments(
+        &self,
+        expected: &LinuxSandboxMountPreparationCommitments,
+    ) -> bool {
+        self.schema == expected.schema
+            && self.owned_child_pid > 0
+            && self.mount_count == expected.mount_count
+            && self.destination_access_sha256 == expected.destination_access_sha256
+    }
+
     /// Compare the observed final-root tuple set with the complete admitted
     /// native request. This does not independently attest the source content.
     pub fn matches_request(&self, request: &LinuxSandboxRequest) -> Result<bool, String> {
         #[cfg(target_os = "linux")]
         {
             let expected = imp::expected_mount_preparation(request)?;
-            Ok(self.schema == expected.schema
-                && self.owned_child_pid > 0
-                && self.mount_count == expected.mount_count
-                && self.destination_access_sha256 == expected.destination_access_sha256)
+            Ok(self.matches_commitments(&expected))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -2681,20 +2715,39 @@ mod imp {
                 observed.push((&descendant.destination, kind, read_only));
             }
         }
-        digest_mount_tuples(observed)
+        let commitments = digest_mount_tuples(observed)?;
+        Ok(LinuxSandboxMountPreparationReceipt {
+            schema: commitments.schema,
+            owned_child_pid: 0,
+            mount_count: commitments.mount_count,
+            destination_access_sha256: commitments.destination_access_sha256,
+        })
     }
 
     pub(super) fn expected_mount_preparation(
         request: &LinuxSandboxRequest,
-    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
-        let mut expected = Vec::with_capacity(
-            request.mounts.len()
-                + request
-                    .overlay
-                    .as_ref()
-                    .map_or(0, |overlay| overlay.writable_descendant_mounts.len()),
-        );
-        for mount in &request.mounts {
+    ) -> Result<LinuxSandboxMountPreparationCommitments, String> {
+        let descendants = request
+            .overlay
+            .as_ref()
+            .map(|overlay| {
+                overlay
+                    .writable_descendant_mounts
+                    .iter()
+                    .map(|mount| mount.destination.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        expected_mount_preparation_from_mounts(&request.mounts, &descendants)
+    }
+
+    pub(super) fn expected_mount_preparation_from_mounts(
+        mounts: &[LinuxSandboxMount],
+        writable_overlay_destinations: &[PathBuf],
+    ) -> Result<LinuxSandboxMountPreparationCommitments, String> {
+        let mut expected = Vec::with_capacity(mounts.len() + writable_overlay_destinations.len());
+        for mount in mounts {
+            validate_absolute_path(&mount.destination, "expected mount destination")?;
             let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
             let kind = mount_kind_code(source.st_mode & libc::S_IFMT)?;
             expected.push((
@@ -2703,17 +2756,16 @@ mod imp {
                 mount.access == LinuxSandboxMountAccess::ReadOnly,
             ));
         }
-        if let Some(overlay) = &request.overlay {
-            for descendant in &overlay.writable_descendant_mounts {
-                expected.push((&descendant.destination, 1, false));
-            }
+        for destination in writable_overlay_destinations {
+            validate_absolute_path(destination, "expected overlay descendant")?;
+            expected.push((destination, 1, false));
         }
         digest_mount_tuples(expected)
     }
 
     fn digest_mount_tuples(
         mut observed: Vec<(&PathBuf, u8, bool)>,
-    ) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+    ) -> Result<LinuxSandboxMountPreparationCommitments, String> {
         observed.sort_by(|left, right| left.0.cmp(right.0));
         if observed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err("final target mount destinations are duplicated".into());
@@ -2731,9 +2783,8 @@ mod imp {
             digest.update(path);
             digest.update([kind, u8::from(read_only)]);
         }
-        Ok(LinuxSandboxMountPreparationReceipt {
+        Ok(LinuxSandboxMountPreparationCommitments {
             schema: u32::from(MOUNT_PREPARATION_SCHEMA),
-            owned_child_pid: 0,
             mount_count: count,
             destination_access_sha256: digest.finalize().into(),
         })

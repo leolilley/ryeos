@@ -200,6 +200,9 @@ pub struct AppliedIsolationLaunchAwaitingAttachment {
     /// Not a public provenance field: hashes of low-entropy inputs are
     /// sensitive and must remain in protected launch/evaluation custody.
     pub expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
+    /// Exact destination/kind/access expectation compiled independently of
+    /// adapter translation, before the held target or provider can run.
+    pub expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
 }
 
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {

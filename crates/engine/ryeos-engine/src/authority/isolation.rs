@@ -86,6 +86,7 @@ struct CompiledIsolationLaunch {
     request: lillux::SubprocessRequest,
     provenance: IsolationLaunchProvenance,
     expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
+    expected_mount_preparation: Option<lillux::LinuxSandboxMountPreparationCommitments>,
     loopback_transfer: Option<CompiledLoopbackTransfer>,
 }
 
@@ -101,6 +102,7 @@ pub struct AppliedIsolationLaunchWithLoopbackIngress {
     transfer: CompiledLoopbackTransfer,
     pub provenance: IsolationLaunchProvenance,
     pub expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    pub expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
 }
 
 pub struct HeldIsolationLaunchWithLoopbackIngress {
@@ -2378,6 +2380,7 @@ impl IsolationRuntime {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
         })
     }
 
@@ -2417,6 +2420,7 @@ impl IsolationRuntime {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
             expected_applied_launch: applied.expected_applied_launch,
+            expected_mount_preparation: applied.expected_mount_preparation,
         })
     }
 
@@ -2463,6 +2467,9 @@ impl IsolationRuntime {
             expected_applied_launch: applied
                 .expected_applied_launch
                 .ok_or_else(|| refused("compiled applied launch commitments are absent".into()))?,
+            expected_mount_preparation: applied
+                .expected_mount_preparation
+                .ok_or_else(|| refused("compiled mount preparation commitments are absent".into()))?,
         })
     }
 
@@ -2857,6 +2864,7 @@ impl IsolationRuntime {
                 request,
                 provenance: self.launch_provenance(None),
                 expected_applied_launch: None,
+                expected_mount_preparation: None,
                 loopback_transfer: None,
             });
         }
@@ -4595,6 +4603,8 @@ impl IsolationRuntime {
         }
         let plan_digest = redacted_plan_digest(&plan)?;
         let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
+        let expected_mount_preparation =
+            expected_mount_preparation_commitments(&plan, &authorities)?;
         let artifact_fds = backend
             .artifact_handles
             .iter()
@@ -4695,6 +4705,7 @@ impl IsolationRuntime {
             },
             provenance: self.launch_provenance(Some(plan_digest)),
             expected_applied_launch: Some(expected_applied_launch),
+            expected_mount_preparation: Some(expected_mount_preparation),
             loopback_transfer: transfer_receiver.map(|receiver| CompiledLoopbackTransfer {
                 receiver,
                 request: launch_request,
@@ -6680,6 +6691,53 @@ fn expected_applied_launch_commitments(
         },
     )
     .map_err(|error| refused(format!("compile applied target commitments: {error}")))
+}
+
+fn expected_mount_preparation_commitments(
+    plan: &IsolationPlan,
+    authorities: &[IsolationAuthority],
+) -> Result<lillux::LinuxSandboxMountPreparationCommitments, EngineError> {
+    // This compiler reads the admitted source descriptors and signed plan
+    // before the adapter sees its sealed request. It does not trust the
+    // adapter's later native translation or its child-origin receipt.
+    let by_id = authorities
+        .iter()
+        .map(|authority| (&authority.id, authority.inherited_fd))
+        .collect::<BTreeMap<_, _>>();
+    let mounts = plan
+        .mounts
+        .iter()
+        .map(|mount| {
+            let source_fd = *by_id
+                .get(&mount.source)
+                .ok_or_else(|| refused("compiled mount source has no admitted descriptor".into()))?;
+            Ok(lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(mount.destination.as_str()),
+                access: match mount.access {
+                    IsolationMountAccess::ReadOnly => lillux::LinuxSandboxMountAccess::ReadOnly,
+                    IsolationMountAccess::Writable => lillux::LinuxSandboxMountAccess::Writable,
+                },
+                layer: mount.layer,
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    let descendants = plan
+        .project_workspace
+        .as_ref()
+        .map(|workspace| {
+            workspace
+                .writable_descendant_mounts
+                .iter()
+                .map(|mount| PathBuf::from(mount.destination.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+        &mounts,
+        &descendants,
+    )
+    .map_err(|error| refused(format!("compile final-root mount commitments: {error}")))
 }
 
 fn refused(reason: String) -> EngineError {
@@ -9565,6 +9623,57 @@ mod tests {
 
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_mount_expectation_moves_with_exact_plan_before_adapter_contact() {
+        use std::os::fd::AsRawFd as _;
+
+        let source = tempfile::tempfile().unwrap();
+        let id = IsolationAuthorityId::new("target").unwrap();
+        let authority = IsolationAuthority {
+            id: id.clone(),
+            inherited_fd: source.as_raw_fd() as u32,
+            purpose: IsolationAuthorityPurpose::Executable,
+        };
+        let mut plan = IsolationPlan {
+            target: IsolationTarget {
+                executable: id.clone(),
+                argv0: "tool".into(),
+                arguments: Vec::new(),
+                cwd: IsolationPath::new("/workspace").unwrap(),
+            },
+            mounts: vec![IsolationMount {
+                source: id,
+                destination: IsolationPath::new("/run/ryeos/verified-code/tool").unwrap(),
+                access: IsolationMountAccess::ReadOnly,
+                layer: 0,
+            }],
+            fixed_parent_views: Vec::new(),
+            project_workspace: None,
+            target_channels: Vec::new(),
+            environment: IsolationEnvironment { values: BTreeMap::new() },
+            network: IsolationNetwork::Isolated,
+            loopback_ingress: None,
+            devices: IsolationDeviceSurface::Minimal,
+            character_devices: Vec::new(),
+            private_tmp: true,
+            proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
+            pid_namespace: IsolationPidNamespace::Isolated,
+            shared_process_group: true,
+            nested_sandbox: false,
+        };
+        let expected = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        assert_eq!(expected.schema, 1);
+        assert_eq!(expected.mount_count, 1);
+        plan.mounts[0].access = IsolationMountAccess::Writable;
+        let writable = expected_mount_preparation_commitments(&plan, &[authority.clone()]).unwrap();
+        assert_ne!(writable.destination_access_sha256, expected.destination_access_sha256);
+        plan.mounts[0].access = IsolationMountAccess::ReadOnly;
+        plan.mounts[0].destination = IsolationPath::new("/run/ryeos/verified-code/other").unwrap();
+        let moved = expected_mount_preparation_commitments(&plan, &[authority]).unwrap();
+        assert_ne!(moved.destination_access_sha256, expected.destination_access_sha256);
     }
 
     #[test]

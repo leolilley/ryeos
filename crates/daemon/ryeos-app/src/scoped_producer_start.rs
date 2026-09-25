@@ -220,7 +220,7 @@ pub fn start_scoped_producer(
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
         };
-        let (mut held, provenance, expected_applied_launch, mut validated_listener) =
+        let (mut held, provenance, expected_applied_launch, expected_mount_preparation, mut validated_listener) =
             if let Some(ingress) = &selected.recipe.loopback_ingress {
                 let compiled = state
                     .isolation
@@ -239,6 +239,7 @@ pub fn start_scoped_producer(
                     "scoped producer compiled isolation differs from root admission class"
                 );
                 let expected = compiled.expected_applied_launch.clone();
+                let expected_mounts = compiled.expected_mount_preparation.clone();
                 let spawned = compiled
                     .require_applied_launch_receipt()?
                     .spawn()
@@ -255,7 +256,7 @@ pub fn start_scoped_producer(
                         )));
                     }
                 };
-                (Some(held), provenance, expected, Some(listener))
+                (Some(held), provenance, expected, expected_mounts, Some(listener))
             } else {
                 let applied = state
                     .isolation
@@ -268,6 +269,10 @@ pub fn start_scoped_producer(
                     .expected_applied_launch
                     .clone()
                     .context("enforced scoped producer has no compiled target commitments")?;
+                let expected_mounts = applied
+                    .expected_mount_preparation
+                    .clone()
+                    .context("enforced scoped producer has no compiled mount commitments")?;
                 let provenance = applied.provenance;
                 ensure!(
                     provenance.plan_digest.is_some()
@@ -279,7 +284,7 @@ pub fn start_scoped_producer(
                     .require_applied_launch_receipt()?
                     .spawn()
                     .map_err(|failure| anyhow::anyhow!("held producer spawn failed: {failure:?}"))?;
-                (Some(held), provenance, expected, None)
+                (Some(held), provenance, expected, expected_mounts, None)
             };
         let mut ingress_handoff = None;
         let mut relay_handoff = None;
@@ -301,8 +306,9 @@ pub fn start_scoped_producer(
             ensure!(
                 mount_preparation.schema == 1
                     && mount_preparation.owned_child_pid > 0
-                    && i64::from(mount_preparation.owned_child_pid) == identity.target_pid,
-                "final-root mount preparation differs from exact held process identity"
+                    && i64::from(mount_preparation.owned_child_pid) == identity.target_pid
+                    && mount_preparation.matches_commitments(&expected_mount_preparation),
+                "final-root mount preparation differs from exact held identity or compiled plan"
             );
             state
                 .state_store
