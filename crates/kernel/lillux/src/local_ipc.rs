@@ -1133,7 +1133,6 @@ fn os_name_cstring(name: &OsStr) -> Result<CString> {
 mod local_connect_tests {
     use super::*;
     use crate::time::{Duration, MonotonicDeadline};
-    use std::io::{Read as _, Write as _};
 
     #[test]
     fn connect_until_shares_its_deadline_with_local_handshake_io() {
@@ -1174,7 +1173,7 @@ mod local_connect_tests {
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("deadline"));
+        assert!(format!("{error:#}").contains("deadline"));
     }
 }
 
