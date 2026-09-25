@@ -3369,6 +3369,92 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn uncertain_activation_can_be_retired_by_exact_occurrence_termination_after_restart() {
+        // A provider may have accepted activation even when its response was
+        // lost. Recovery cannot repeat that contact or infer its outcome, but
+        // cleanup may retire the already-bound occurrence by its exact ID.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let reservation = reservation(&db, "uncertain-activation");
+        reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact(
+            &reservation.placement_thread_id,
+            &reservation.request_digest,
+        )
+        .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-uncertain-activation".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(
+            &reservation.placement_thread_id,
+            &occurrence,
+            test_observation_timing(),
+        )
+        .unwrap();
+        let activation = activation_intent(&reservation, &occurrence);
+        assert!(db
+            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+            .unwrap());
+        assert!(db
+            .external_supervisor_activation(&reservation.placement_thread_id)
+            .unwrap()
+            .unwrap()
+            .observation
+            .is_none());
+        drop(db);
+
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(!db
+            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+            .unwrap());
+        let termination = ExternalTerminationIntent {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            termination_request_digest: "1".repeat(64),
+        };
+        assert!(db
+            .begin_external_termination(&reservation.placement_thread_id, &termination)
+            .unwrap());
+        assert!(!db
+            .begin_external_termination(&reservation.placement_thread_id, &termination)
+            .unwrap());
+        let terminal = ExternalTerminalObservation {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            termination_request_digest: termination.termination_request_digest.clone(),
+            terminal_state: "terminated".into(),
+            provider_observation_digest: "2".repeat(64),
+        };
+        db.settle_external_terminal(&reservation.placement_thread_id, &terminal)
+            .unwrap();
+        assert_eq!(
+            db.external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Terminated
+        );
+        assert!(!db
+            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+            .unwrap());
+        assert!(db
+            .external_supervisor_activation(&reservation.placement_thread_id)
+            .unwrap()
+            .unwrap()
+            .observation
+            .is_none());
+    }
+
+    #[test]
     fn external_reservation_atomically_retains_exact_binding_generation() {
         let dir = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
