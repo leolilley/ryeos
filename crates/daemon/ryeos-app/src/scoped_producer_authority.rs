@@ -14,7 +14,8 @@ use ryeos_engine::isolation::{
     IsolationReadOnlyMountAuthority,
 };
 use ryeos_state::external_content::products::producer_recipe::{
-    ProducerEnvironmentSource, ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
+    ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
 };
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 
@@ -291,11 +292,10 @@ impl ScopedProducerLiveAuthority {
     ) -> Result<lillux::SubprocessRequest> {
         recipe.validate()?;
         ensure!(
-            recipe.environment_bindings.is_empty()
-                && matches!(
-                    recipe.cwd_source,
-                    ryeos_state::external_content::products::producer_recipe::ProducerCwdSource::VerifierPrivateWorkspace
-                ),
+            matches!(recipe.cwd_source, ProducerCwdSource::VerifierPrivateWorkspace)
+                && !recipe.environment_bindings.values().any(|binding| {
+                    !matches!(binding, ProducerEnvironmentBinding::Literal { .. })
+                }),
             "signed producer prepared launch bindings lack retained directory authority"
         );
         let buffered_input = match (&recipe.executable_source, &recipe.stdin_source) {
@@ -345,6 +345,22 @@ impl ScopedProducerLiveAuthority {
                 }
             }
         }
+        let workspace_path = self
+            .workspace
+            .descriptor_path()?
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("scoped producer pinned cwd is not UTF-8"))?
+            .to_owned();
+        for (name, binding) in &recipe.environment_bindings {
+            let value = match binding {
+                ProducerEnvironmentBinding::Literal { value } => value.clone(),
+                ProducerEnvironmentBinding::VerifierPrivateWorkspace
+                | ProducerEnvironmentBinding::PreparedDirectory { .. } => {
+                    bail!("signed producer prepared launch bindings lack retained directory authority")
+                }
+            };
+            envs.push((name.clone(), value));
+        }
         let cmd = selected_command
             .authority()
             .identity()
@@ -352,17 +368,11 @@ impl ScopedProducerLiveAuthority {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("scoped producer command path is not UTF-8"))?
             .to_owned();
-        let cwd = self
-            .workspace
-            .descriptor_path()?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("scoped producer pinned cwd is not UTF-8"))?
-            .to_owned();
         Ok(lillux::SubprocessRequest {
             cmd,
             argv0: None,
             args: recipe.argv.clone(),
-            cwd: Some(cwd),
+            cwd: Some(workspace_path),
             envs,
             stdin_data: buffered_input.then(|| admitted_stdin.to_owned()),
             timeout: recipe.bounds.maximum_wall_time_ms as f64 / 1000.0,
@@ -631,6 +641,28 @@ mod tests {
         assert!(request.envs.is_empty());
         assert_eq!(request.timeout, 5.0);
         assert_eq!(request.limits.unwrap().max_stdout_bytes, Some(1024));
+        let mut signed_environment = recipe.clone();
+        signed_environment.environment_bindings.insert(
+            "LANG".into(),
+            ProducerEnvironmentBinding::Literal {
+                value: "C".into(),
+            },
+        );
+        let signed_request = authority
+            .request_for_recipe(&signed_environment, "{\"sealed\":true}", &selected_command)
+            .unwrap();
+        assert_eq!(
+            signed_request.envs,
+            vec![("LANG".into(), "C".into())]
+        );
+        let mut unmounted_workspace = recipe.clone();
+        unmounted_workspace.environment_bindings.insert(
+            "PRODUCER_WORKSPACE".into(),
+            ProducerEnvironmentBinding::VerifierPrivateWorkspace,
+        );
+        assert!(authority
+            .request_for_recipe(&unmounted_workspace, "{\"sealed\":true}", &selected_command)
+            .is_err());
         let unrelated =
             IsolationAdmittedCommand::DescriptorBound(IsolationDescriptorBoundCommand::new(
                 ryeos_engine::isolation::IsolationVerifiedCode {
