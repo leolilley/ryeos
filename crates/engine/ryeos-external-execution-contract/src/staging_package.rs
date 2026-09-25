@@ -8,9 +8,11 @@
 //! manifest alone authorizes Ready.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     ExternalGuestInputProjection, GuestMountContentAuthority, GuestMountKind, canonical_json,
@@ -22,6 +24,21 @@ pub const GUEST_STAGING_PACKAGE_SCHEMA: u32 = 1;
 // inputs share this package and must be accounted for by backend admission.
 pub const MAX_GUEST_STAGING_ENTRIES: usize = 500_000;
 pub const MAX_GUEST_STAGING_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
+pub const GUEST_STAGING_STREAM_MAGIC: &[u8; 16] = b"RYEOS-GUESTPKG-1";
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Retained semantic coordinates supplied independently of the stream. The
+/// caller must source these from the committed activation and signed artifacts,
+/// never from the package or an untrusted guest-supplied response.
+pub struct GuestStagingExpected<'a> {
+    pub inputs: &'a ExternalGuestInputProjection,
+    pub activation_request_digest: &'a str,
+    pub bootstrap_sha256: &'a str,
+    pub supervisor_sha256: &'a str,
+    pub launcher_sha256: &'a str,
+    pub maximum_regular_bytes: u64,
+    pub maximum_framed_bytes: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +95,21 @@ impl GuestStagingPackageManifest {
     /// validate it against the retained activation before reading entry bytes.
     pub fn from_bounded_json(bytes: &[u8]) -> Result<Self> {
         from_json_slice_strict(bytes, MAX_GUEST_STAGING_MANIFEST_BYTES)
+    }
+
+    /// Exact uncompressed wire length, including magic and manifest framing.
+    /// Backend admission must compare this with its signed upload limit before
+    /// staging or provider contact.
+    pub fn framed_bytes(&self) -> Result<u64> {
+        let manifest_bytes = canonical_json(self)?.len();
+        ensure!(
+            manifest_bytes <= MAX_GUEST_STAGING_MANIFEST_BYTES,
+            "guest staging manifest exceeds its encoded bound"
+        );
+        20_u64
+            .checked_add(u64::try_from(manifest_bytes)?)
+            .and_then(|bytes| bytes.checked_add(self.total_regular_bytes))
+            .ok_or_else(|| anyhow::anyhow!("guest staging framed byte count overflow"))
     }
 
     /// Validate the complete package inventory against the retained activation
@@ -290,6 +322,241 @@ impl GuestStagingPackageManifest {
     }
 }
 
+/// Write the canonical inventory header before any entry payload. Each
+/// regular file's bytes then follows in manifest order, without compression or
+/// implicit path headers. The producer must validate and retain the complete
+/// private package before provider upload; this function is not publication.
+fn write_staging_header<W: Write>(
+    writer: &mut W,
+    manifest: &GuestStagingPackageManifest,
+    expected: &GuestStagingExpected<'_>,
+) -> Result<()> {
+    manifest.validate_for(
+        expected.inputs,
+        expected.activation_request_digest,
+        expected.bootstrap_sha256,
+        expected.supervisor_sha256,
+        expected.launcher_sha256,
+        expected.maximum_regular_bytes,
+    )?;
+    ensure!(
+        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        "guest staging framed transfer budget exceeded"
+    );
+    let encoded = canonical_json(manifest)?;
+    let length = u32::try_from(encoded.len())?;
+    writer.write_all(GUEST_STAGING_STREAM_MAGIC)?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(&encoded)?;
+    Ok(())
+}
+
+/// Read a bounded canonical inventory before accepting any payload bytes.
+/// Consumers must still verify every entry and the exact base/content closure
+/// in a private guest staging area before installing supervisor descriptors.
+fn read_staging_header<R: Read>(
+    reader: &mut R,
+    expected: &GuestStagingExpected<'_>,
+) -> Result<GuestStagingPackageManifest> {
+    let mut magic = [0_u8; 16];
+    reader.read_exact(&mut magic)?;
+    ensure!(
+        &magic == GUEST_STAGING_STREAM_MAGIC,
+        "guest staging stream magic changed"
+    );
+    let mut length = [0_u8; 4];
+    reader.read_exact(&mut length)?;
+    let length = usize::try_from(u32::from_be_bytes(length))?;
+    ensure!(
+        length > 0 && length <= MAX_GUEST_STAGING_MANIFEST_BYTES,
+        "guest staging header length is invalid"
+    );
+    let mut encoded = vec![0_u8; length];
+    reader.read_exact(&mut encoded)?;
+    let manifest = GuestStagingPackageManifest::from_bounded_json(&encoded)?;
+    ensure!(
+        canonical_json(&manifest)? == encoded,
+        "guest staging header is noncanonical"
+    );
+    manifest.validate_for(
+        expected.inputs,
+        expected.activation_request_digest,
+        expected.bootstrap_sha256,
+        expected.supervisor_sha256,
+        expected.launcher_sha256,
+        expected.maximum_regular_bytes,
+    )?;
+    ensure!(
+        manifest.framed_bytes()? <= expected.maximum_framed_bytes,
+        "guest staging framed transfer budget exceeded"
+    );
+    Ok(manifest)
+}
+
+/// Copy one declared file through a bounded buffer while checking its exact
+/// size and digest. A digest failure leaves `writer` contaminated; it must be
+/// private, unpublished staging and discarded by the caller on any error.
+fn copy_staging_file<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    entry: &GuestStagingEntry,
+) -> Result<()> {
+    let GuestStagingEntry::RegularFile { bytes, sha256, .. } = entry else {
+        bail!("guest staging payload requested for a directory");
+    };
+    let mut remaining = *bytes;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
+    while remaining > 0 {
+        let length = usize::try_from(remaining.min(STREAM_CHUNK_BYTES as u64))?;
+        reader.read_exact(&mut buffer[..length])?;
+        digest.update(&buffer[..length]);
+        writer.write_all(&buffer[..length])?;
+        remaining -= u64::try_from(length)?;
+    }
+    ensure!(
+        hex::encode(digest.finalize()) == *sha256,
+        "guest staging file digest changed"
+    );
+    Ok(())
+}
+
+/// Refuse undeclared trailing bytes after all manifest payloads were copied.
+/// A caller-owned deadline must bound a slow or stalled stream.
+fn require_staging_eof<R: Read>(reader: &mut R) -> Result<()> {
+    let mut trailing = [0_u8; 1];
+    ensure!(
+        reader.read(&mut trailing)? == 0,
+        "guest staging stream has trailing bytes"
+    );
+    Ok(())
+}
+
+fn next_regular_entry(
+    manifest: &GuestStagingPackageManifest,
+    start: usize,
+) -> Option<(usize, &GuestStagingEntry)> {
+    manifest
+        .entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, entry)| !entry.is_directory())
+}
+
+/// Sequential producer over a private package file. A failed copy permanently
+/// aborts the writer; the caller must discard the contaminated package.
+#[must_use = "finish every declared file before using the private package"]
+pub struct GuestStagingStreamWriter<W: Write> {
+    writer: W,
+    manifest: GuestStagingPackageManifest,
+    next_index: usize,
+    failed: bool,
+}
+
+impl<W: Write> GuestStagingStreamWriter<W> {
+    pub fn new(
+        mut writer: W,
+        manifest: GuestStagingPackageManifest,
+        expected: &GuestStagingExpected<'_>,
+    ) -> Result<Self> {
+        write_staging_header(&mut writer, &manifest, expected)?;
+        Ok(Self {
+            writer,
+            manifest,
+            next_index: 0,
+            failed: false,
+        })
+    }
+
+    pub fn next_file(&self) -> Option<&GuestStagingEntry> {
+        next_regular_entry(&self.manifest, self.next_index).map(|(_, entry)| entry)
+    }
+
+    pub fn copy_next_file<R: Read>(&mut self, reader: &mut R) -> Result<()> {
+        ensure!(!self.failed, "guest staging writer was aborted");
+        let (index, entry) = next_regular_entry(&self.manifest, self.next_index)
+            .ok_or_else(|| anyhow::anyhow!("guest staging has no remaining file"))?;
+        let result = copy_staging_file(reader, &mut self.writer, entry)
+            .and_then(|()| require_staging_eof(reader));
+        match result {
+            Ok(()) => {
+                self.next_index = index + 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn finish(self) -> Result<W> {
+        ensure!(
+            !self.failed && next_regular_entry(&self.manifest, self.next_index).is_none(),
+            "guest staging writer did not complete its inventory"
+        );
+        Ok(self.writer)
+    }
+}
+
+/// Sequential consumer over a retained immutable package file. Its writer for
+/// each entry must be an unpublished private file. Neither successful `finish`
+/// nor a provider upload receipt replaces base/content authority verification.
+#[must_use = "finish every declared file and check EOF before using staged input"]
+pub struct GuestStagingStreamReader<R: Read> {
+    reader: R,
+    manifest: GuestStagingPackageManifest,
+    next_index: usize,
+    failed: bool,
+}
+
+impl<R: Read> GuestStagingStreamReader<R> {
+    pub fn new(mut reader: R, expected: &GuestStagingExpected<'_>) -> Result<Self> {
+        let manifest = read_staging_header(&mut reader, expected)?;
+        Ok(Self {
+            reader,
+            manifest,
+            next_index: 0,
+            failed: false,
+        })
+    }
+
+    pub fn manifest(&self) -> &GuestStagingPackageManifest {
+        &self.manifest
+    }
+
+    pub fn next_file(&self) -> Option<&GuestStagingEntry> {
+        next_regular_entry(&self.manifest, self.next_index).map(|(_, entry)| entry)
+    }
+
+    pub fn copy_next_file<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        ensure!(!self.failed, "guest staging reader was aborted");
+        let (index, entry) = next_regular_entry(&self.manifest, self.next_index)
+            .ok_or_else(|| anyhow::anyhow!("guest staging has no remaining file"))?;
+        let result = copy_staging_file(&mut self.reader, writer, entry);
+        match result {
+            Ok(()) => {
+                self.next_index = index + 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn finish(mut self) -> Result<R> {
+        ensure!(
+            !self.failed && next_regular_entry(&self.manifest, self.next_index).is_none(),
+            "guest staging reader did not complete its inventory"
+        );
+        require_staging_eof(&mut self.reader)?;
+        Ok(self.reader)
+    }
+}
+
 fn validate_package_path(path: &str) -> Result<()> {
     ensure!(
         !path.is_empty()
@@ -473,5 +740,139 @@ mod tests {
         assert!(
             GuestStagingPackageManifest::from_bounded_json(b"{\"schema\":1,\"schema\":2}").is_err()
         );
+    }
+
+    #[test]
+    fn framed_stream_round_trips_and_refuses_truncation_tampering_and_trailing_bytes() {
+        let (mut inputs, mut manifest) = fixture();
+        let payloads: [&[u8]; 5] = [b"bb", b"boot", b"cfg", b"start", b"runrun"];
+        for (entry, payload) in manifest
+            .entries
+            .iter_mut()
+            .filter(|entry| !entry.is_directory())
+            .zip(payloads)
+        {
+            let GuestStagingEntry::RegularFile { sha256, .. } = entry else {
+                unreachable!()
+            };
+            *sha256 = hex::encode(Sha256::digest(payload));
+        }
+        let GuestMountContentAuthority::RawFile { sha256 } =
+            &mut inputs.inputs[0].content_authority
+        else {
+            unreachable!()
+        };
+        *sha256 = hex::encode(Sha256::digest(payloads[2]));
+        manifest.guest_input_identity = inputs.identity_digest().unwrap();
+        manifest.bootstrap_sha256 = hex::encode(Sha256::digest(payloads[1]));
+        manifest.launcher_sha256 = hex::encode(Sha256::digest(payloads[3]));
+        manifest.supervisor_sha256 = hex::encode(Sha256::digest(payloads[4]));
+        let expected = GuestStagingExpected {
+            inputs: &inputs,
+            activation_request_digest: &manifest.activation_request_digest,
+            bootstrap_sha256: &manifest.bootstrap_sha256,
+            supervisor_sha256: &manifest.supervisor_sha256,
+            launcher_sha256: &manifest.launcher_sha256,
+            maximum_regular_bytes: 20,
+            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+        };
+
+        let writer =
+            GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
+        assert!(writer.finish().is_err());
+        let mut writer =
+            GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
+        for payload in payloads {
+            assert!(writer.next_file().is_some());
+            writer.copy_next_file(&mut payload.as_ref()).unwrap();
+        }
+        assert!(writer.next_file().is_none());
+        let stream = writer.finish().unwrap();
+        assert_eq!(
+            u64::try_from(stream.len()).unwrap(),
+            manifest.framed_bytes().unwrap()
+        );
+        let mut writer =
+            GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
+        assert!(writer.copy_next_file(&mut b"bbx".as_slice()).is_err());
+        assert!(writer.finish().is_err());
+        let header_end = stream.len() - 20;
+        let mut reader = GuestStagingStreamReader::new(stream.as_slice(), &expected).unwrap();
+        assert_eq!(reader.manifest(), &manifest);
+        for payload in payloads {
+            let mut observed = Vec::new();
+            reader.copy_next_file(&mut observed).unwrap();
+            assert_eq!(observed, payload);
+        }
+        assert!(reader.next_file().is_none());
+        reader.finish().unwrap();
+
+        assert!(GuestStagingStreamReader::new(&stream[..header_end - 1], &expected).is_err());
+        let mut truncated =
+            GuestStagingStreamReader::new(&stream[..stream.len() - 1], &expected).unwrap();
+        for _ in 0..4 {
+            truncated.copy_next_file(&mut Vec::new()).unwrap();
+        }
+        assert!(truncated.copy_next_file(&mut Vec::new()).is_err());
+        assert!(truncated.copy_next_file(&mut Vec::new()).is_err());
+        assert!(truncated.finish().is_err());
+
+        let mut tampered = stream.clone();
+        tampered[header_end] ^= 1;
+        let mut reader = GuestStagingStreamReader::new(tampered.as_slice(), &expected).unwrap();
+        assert!(reader.copy_next_file(&mut Vec::new()).is_err());
+
+        let mut trailing = stream;
+        trailing.push(1);
+        let mut reader = GuestStagingStreamReader::new(trailing.as_slice(), &expected).unwrap();
+        for _ in 0..5 {
+            reader.copy_next_file(&mut Vec::new()).unwrap();
+        }
+        assert!(reader.finish().is_err());
+
+        let mut wrong_magic = trailing.clone();
+        wrong_magic[0] ^= 1;
+        assert!(GuestStagingStreamReader::new(wrong_magic.as_slice(), &expected).is_err());
+        let mut excessive_header = trailing.clone();
+        excessive_header[16..20].copy_from_slice(
+            &u32::try_from(MAX_GUEST_STAGING_MANIFEST_BYTES + 1)
+                .unwrap()
+                .to_be_bytes(),
+        );
+        assert!(GuestStagingStreamReader::new(excessive_header.as_slice(), &expected).is_err());
+
+        struct RefuseWrite;
+        impl Write for RefuseWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("staging write refused"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut reader = GuestStagingStreamReader::new(trailing.as_slice(), &expected).unwrap();
+        assert!(reader.copy_next_file(&mut RefuseWrite).is_err());
+        assert!(reader.copy_next_file(&mut Vec::new()).is_err());
+        assert!(reader.finish().is_err());
+    }
+
+    #[test]
+    fn zero_length_file_requires_empty_digest() {
+        let entry = GuestStagingEntry::RegularFile {
+            path: "empty".to_owned(),
+            mode: 0o600,
+            bytes: 0,
+            sha256: hex::encode(Sha256::digest([])),
+        };
+        copy_staging_file(&mut &[][..], &mut Vec::new(), &entry).unwrap();
+        let GuestStagingEntry::RegularFile { sha256, .. } = &entry else {
+            unreachable!()
+        };
+        let mut changed = entry.clone();
+        if let GuestStagingEntry::RegularFile { sha256: digest, .. } = &mut changed {
+            *digest = hash('a');
+        }
+        assert_ne!(sha256, &hash('a'));
+        assert!(copy_staging_file(&mut &[][..], &mut Vec::new(), &changed).is_err());
     }
 }
