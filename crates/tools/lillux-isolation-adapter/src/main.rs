@@ -197,16 +197,12 @@ fn launch(request_fd: u32) -> ! {
             format!("compare applied-launch receipt: {error}"),
         ),
     };
-    if receipt.owned_child_pid != process.child_pid()
-        || !exact_request
-        || !receipt.matches_post_release_mounts(
-            &lillux::LinuxSandboxMountPreparationCommitments {
-                schema: mount_preparation.schema,
-                mount_count: mount_preparation.mount_count,
-                destination_access_sha256: mount_preparation.destination_access_sha256,
-            },
-        )
-    {
+    if !applied_receipt_matches_held(
+        &receipt,
+        &mount_preparation,
+        process.child_pid(),
+        exact_request,
+    ) {
         emit_refusal(
             status_fd,
             "applied-launch receipt or post-release mounts differ from translated signed plan".into(),
@@ -242,6 +238,22 @@ fn launch(request_fd: u32) -> ! {
         Ok(status) => lillux::exit_with_linux_sandbox_status(status),
         Err(error) => fail(&error),
     }
+}
+
+fn applied_receipt_matches_held(
+    receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    held: &lillux::LinuxSandboxMountPreparationReceipt,
+    child_pid: u32,
+    exact_request: bool,
+) -> bool {
+    exact_request
+        && held.owned_child_pid == child_pid
+        && receipt.owned_child_pid == child_pid
+        && receipt.matches_post_release_mounts(&lillux::LinuxSandboxMountPreparationCommitments {
+            schema: held.schema,
+            mount_count: held.mount_count,
+            destination_access_sha256: held.destination_access_sha256,
+        })
 }
 
 fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandboxRequest, String> {
@@ -784,6 +796,40 @@ fn fail(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applied_status_requires_exact_held_mount_echo_before_publication() {
+        let held = lillux::LinuxSandboxMountPreparationReceipt {
+            schema: 1,
+            owned_child_pid: 42,
+            mount_count: 3,
+            destination_access_sha256: [7; 32],
+        };
+        let mut receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 3,
+                destination_access_sha256: [7; 32],
+            },
+        };
+        assert!(applied_receipt_matches_held(&receipt, &held, 42, true));
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, false));
+        receipt.post_release_mount_view.destination_access_sha256[0] ^= 1;
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, true));
+        receipt.post_release_mount_view.destination_access_sha256[0] ^= 1;
+        receipt.owned_child_pid = 43;
+        assert!(!applied_receipt_matches_held(&receipt, &held, 42, true));
+    }
 
     #[test]
     fn workspace_translation_preserves_each_normalized_mutation() {
