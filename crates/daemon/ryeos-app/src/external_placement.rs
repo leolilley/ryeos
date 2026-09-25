@@ -7476,10 +7476,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn start_driver_opens_execution_only_after_signed_readiness() {
+    fn assert_start_driver_opens_only_after_signed_readiness(
+        activation_resolution: &'static str,
+        before_channel: ExternalCandidateStartProgress,
+    ) {
         let (store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
-        let backend = Arc::new(FaultBackend::new());
+        let backend = Arc::new(FaultBackend::with_reconciled_activation(activation_resolution));
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
 
@@ -7540,7 +7542,7 @@ mod tests {
                 test_startup_deadline()
             )
             .unwrap(),
-            ExternalCandidateStartProgress::AttachmentPending
+            before_channel
         );
 
         let occurrence = store
@@ -7641,6 +7643,22 @@ mod tests {
         );
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn start_driver_opens_execution_only_after_signed_readiness() {
+        assert_start_driver_opens_only_after_signed_readiness(
+            "started",
+            ExternalCandidateStartProgress::AttachmentPending,
+        );
+    }
+
+    #[test]
+    fn signed_ready_can_resolve_provider_pending_activation_without_retry() {
+        assert_start_driver_opens_only_after_signed_readiness(
+            "pending",
+            ExternalCandidateStartProgress::SupervisorPending,
+        );
     }
 
     #[test]
