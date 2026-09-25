@@ -89,10 +89,22 @@ pub fn stage_uploaded_guest_package(
     upload_sha256: &str,
     parent: &lillux::PinnedDirectory,
     expected: &GuestStagingExpected<'_>,
+    deadline: lillux::time::MonotonicDeadline,
 ) -> Result<StagedGuestPackage> {
+    ensure!(
+        !deadline.has_elapsed(),
+        "guest upload staging deadline expired"
+    );
     let mut reader =
         upload.stable_reader_exact(upload_bytes, upload_sha256, expected.maximum_framed_bytes)?;
-    let staged = stage_guest_package(&mut reader, parent, expected)?;
+    let staged = stage_guest_package(
+        &mut DeadlineReader {
+            inner: &mut reader,
+            deadline,
+        },
+        parent,
+        expected,
+    )?;
     if let Err(error) = reader.finish() {
         if let Err(cleanup_error) = staged.discard() {
             return Err(error.context(format!(
@@ -101,7 +113,32 @@ pub fn stage_uploaded_guest_package(
         }
         return Err(error);
     }
+    if deadline.has_elapsed() {
+        if let Err(cleanup_error) = staged.discard() {
+            anyhow::bail!(
+                "guest upload staging deadline expired and cleanup failed: {cleanup_error:#}"
+            );
+        }
+        anyhow::bail!("guest upload staging deadline expired");
+    }
     Ok(staged)
+}
+
+struct DeadlineReader<'a, R> {
+    inner: &'a mut R,
+    deadline: lillux::time::MonotonicDeadline,
+}
+
+impl<R: Read> Read for DeadlineReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.deadline.has_elapsed() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "guest upload staging deadline expired",
+            ));
+        }
+        self.inner.read(buffer)
+    }
 }
 
 fn remove_staged_generation(
@@ -746,6 +783,7 @@ mod tests {
                 &"0".repeat(64),
                 &parent,
                 &expected,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             )
             .is_err()
         );
@@ -756,6 +794,7 @@ mod tests {
             &lillux::sha256_hex(&bytes),
             &parent,
             &expected,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
         )
         .unwrap();
         assert_eq!(staged.base(), &measurement);
@@ -826,6 +865,225 @@ mod tests {
             writable.sync_all().unwrap();
             crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
         }
+
+        // A controller package is produced from retained descriptors, never
+        // from the diagnostic paths used to construct this test fixture.
+        let source_fixture = tempfile::tempdir().unwrap();
+        for entry in &manifest.entries {
+            let path = entry.path();
+            if path == "base" || path.starts_with("base/") {
+                continue;
+            }
+            let destination = source_fixture.path().join(path);
+            match entry {
+                GuestStagingEntry::Directory { mode, .. } => {
+                    std::fs::create_dir_all(&destination).unwrap();
+                    std::fs::set_permissions(
+                        &destination,
+                        std::os::unix::fs::PermissionsExt::from_mode(*mode),
+                    )
+                    .unwrap();
+                }
+                GuestStagingEntry::RegularFile { mode, .. } => {
+                    std::fs::write(&destination, files.get(path).unwrap()).unwrap();
+                    std::fs::set_permissions(
+                        &destination,
+                        std::os::unix::fs::PermissionsExt::from_mode(*mode),
+                    )
+                    .unwrap();
+                }
+                GuestStagingEntry::Symlink { target, .. } => {
+                    std::os::unix::fs::symlink(target, &destination).unwrap();
+                }
+            }
+        }
+        let source_root = lillux::PinnedDirectory::open(source_fixture.path())
+            .unwrap()
+            .unwrap();
+        let inherited_file = |name: &str| {
+            source_root
+                .open_inherited_regular(OsStr::new(name), false)
+                .unwrap()
+                .unwrap()
+        };
+        let config_authority = inherited_file("input-00");
+        let product_authority = source_root
+            .open_child_directory(OsStr::new("input-01"))
+            .unwrap()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
+        let source_authority = source_root
+            .open_child_directory(OsStr::new("input-02"))
+            .unwrap()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
+        let records = ["record-00", "record-01", "record-02"]
+            .into_iter()
+            .map(inherited_file)
+            .collect::<Vec<_>>();
+        let mut retained_inputs = inputs.clone();
+        retained_inputs.base_snapshot.descriptor =
+            transfer.descriptor().inherited_descriptor().unwrap();
+        for (input, authority) in retained_inputs.inputs.iter_mut().zip([
+            &config_authority,
+            &product_authority,
+            &source_authority,
+        ]) {
+            input.descriptor = authority.inherited_descriptor().unwrap();
+        }
+        if let GuestMountContentAuthority::ProductManifest {
+            manifest_descriptor,
+            ..
+        } = &mut retained_inputs.inputs[1].content_authority
+        {
+            *manifest_descriptor = records[0].inherited_descriptor().unwrap();
+        }
+        if let GuestMountContentAuthority::SourceClosure {
+            binding_descriptor,
+            manifest_descriptor,
+            ..
+        } = &mut retained_inputs.inputs[2].content_authority
+        {
+            *binding_descriptor = records[1].inherited_descriptor().unwrap();
+            *manifest_descriptor = records[2].inherited_descriptor().unwrap();
+        }
+        let retained = crate::guest_inputs::ExternalGuestInputAuthority::new(
+            retained_inputs.clone(),
+            transfer.descriptor().clone(),
+            None,
+            vec![config_authority, product_authority, source_authority],
+            records,
+            vec![],
+        )
+        .unwrap();
+        let produced_expected = GuestStagingExpected {
+            inputs: &retained_inputs,
+            activation_request_digest: &manifest.activation_request_digest,
+            bootstrap_sha256: &manifest.bootstrap_sha256,
+            supervisor_sha256: &manifest.supervisor_sha256,
+            launcher_sha256: &manifest.launcher_sha256,
+            maximum_regular_bytes: 16 * 1024 * 1024,
+            maximum_framed_bytes: 16 * 1024 * 1024,
+        };
+        let (produced_bytes, produced_manifest) =
+            crate::guest_package_producer::write_guest_package(
+                Vec::new(),
+                &retained,
+                &inherited_file("bootstrap"),
+                &inherited_file("supervisor"),
+                &inherited_file("launcher"),
+                &produced_expected,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .unwrap();
+        assert_eq!(
+            produced_manifest.guest_input_identity,
+            manifest.guest_input_identity
+        );
+        let produced_stage =
+            stage_guest_package(produced_bytes.as_slice(), &parent, &produced_expected).unwrap();
+        crate::guest_content::recheck_staged_guest_content(&produced_stage, &retained_inputs)
+            .unwrap();
+        produced_stage.discard().unwrap();
+        let prepare = || {
+            crate::guest_package_producer::prepare_private_guest_package(
+                &parent,
+                &retained,
+                &inherited_file("bootstrap"),
+                &inherited_file("supervisor"),
+                &inherited_file("launcher"),
+                &produced_expected,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+        };
+        let prepared = prepare().unwrap();
+        assert_eq!(prepared.manifest(), &produced_manifest);
+        assert_eq!(prepared.bytes(), produced_bytes.len() as u64);
+        assert_eq!(prepared.sha256(), lillux::sha256_hex(&produced_bytes));
+        prepared.discard().unwrap();
+        assert!(
+            crate::guest_package_producer::prepare_private_guest_package(
+                &parent,
+                &retained,
+                &inherited_file("bootstrap"),
+                &inherited_file("supervisor"),
+                &inherited_file("launcher"),
+                &produced_expected,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            )
+            .is_err()
+        );
+        let undersized = GuestStagingExpected {
+            maximum_regular_bytes: 1,
+            ..produced_expected
+        };
+        let size_error = crate::guest_package_producer::write_guest_package(
+            Vec::new(),
+            &retained,
+            &inherited_file("bootstrap"),
+            &inherited_file("supervisor"),
+            &inherited_file("launcher"),
+            &undersized,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{size_error:#}").contains("budget"));
+        let short_frame = GuestStagingExpected {
+            maximum_framed_bytes: produced_manifest.framed_bytes().unwrap() - 1,
+            ..produced_expected
+        };
+        assert!(
+            crate::guest_package_producer::prepare_private_guest_package(
+                &parent,
+                &retained,
+                &inherited_file("bootstrap"),
+                &inherited_file("supervisor"),
+                &inherited_file("launcher"),
+                &short_frame,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .is_err()
+        );
+        assert_eq!(parent.entries_no_follow_bounded(1).unwrap().len(), 1);
+        struct StopWriter {
+            remaining: usize,
+        }
+        impl Write for StopWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(std::io::Error::other("injected package writer failure"));
+                }
+                let count = bytes.len().min(self.remaining);
+                self.remaining -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(
+            crate::guest_package_producer::write_guest_package(
+                StopWriter { remaining: 128 },
+                &retained,
+                &inherited_file("bootstrap"),
+                &inherited_file("supervisor"),
+                &inherited_file("launcher"),
+                &produced_expected,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .is_err()
+        );
+        std::fs::write(
+            source_fixture.path().join("input-01/ambient-secret"),
+            b"secret",
+        )
+        .unwrap();
+        assert!(prepare().is_err());
+        std::fs::remove_file(source_fixture.path().join("input-01/ambient-secret")).unwrap();
+        assert_eq!(parent.entries_no_follow_bounded(1).unwrap().len(), 1);
         assert!(
             staged
                 .root()

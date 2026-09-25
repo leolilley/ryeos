@@ -115,6 +115,25 @@ impl ExternalGuestInputAuthority {
         &self.projection
     }
 
+    pub(crate) fn base_snapshot(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.base_snapshot
+    }
+
+    pub(crate) fn workspace_outputs(&self) -> Option<&lillux::InheritedDescriptorAuthority> {
+        self.workspace_outputs.as_ref()
+    }
+
+    pub(crate) fn input(&self, index: usize) -> Option<&lillux::InheritedDescriptorAuthority> {
+        self.inputs.get(index)
+    }
+
+    pub(crate) fn content_record(
+        &self,
+        index: usize,
+    ) -> Option<&lillux::InheritedDescriptorAuthority> {
+        self.content_records.get(index)
+    }
+
     pub fn identity_digest(&self) -> Result<String> {
         self.projection.identity_digest()
     }
