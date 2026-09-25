@@ -22,9 +22,38 @@ use crate::scripted_relay::{self, RunningScriptedRelay};
 /// has settled. Dropping this before settlement is a failed attempt, not a
 /// clean observation or permission to replay provider traffic.
 pub struct RunningScopedRelay {
-    pub handoff: ScopedRelayHandoff,
-    pub channel: InheritedDuplexChannel,
-    pub relay: RunningScriptedRelay,
+    handoff: ScopedRelayHandoff,
+    channel: InheritedDuplexChannel,
+    relay: RunningScriptedRelay,
+}
+
+impl RunningScopedRelay {
+    pub fn handoff(&self) -> &ScopedRelayHandoff {
+        &self.handoff
+    }
+
+    /// Only the daemon's settled target and joined observation permit a
+    /// provider transcript to be accepted. Retain the exact peer channel
+    /// while the relay is settling; timeout returns both live owners rather
+    /// than silently dropping an uncertain task.
+    pub fn finish_after_target_settlement(
+        self,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<Result<usize>, Self> {
+        let Self {
+            handoff,
+            channel,
+            relay,
+        } = self;
+        match relay.finish_after_codex_stop(deadline) {
+            Ok(result) => Ok(result),
+            Err(relay) => Err(Self {
+                handoff,
+                channel,
+                relay,
+            }),
+        }
+    }
 }
 
 /// Called concurrently with the root's START point request: START waits for
@@ -35,6 +64,7 @@ pub fn receive_and_ack(
     scenario_id: &str,
     expected_source: &ProductProducerRecipeSourceIdentity,
     expected_ingress: &ProducerLoopbackIngress,
+    expected_origin: &str,
     provider_directory: PinnedDirectory,
     provider_socket_name: OsString,
     deadline: MonotonicDeadline,
@@ -53,6 +83,7 @@ pub fn receive_and_ack(
         scenario_id,
         expected_source,
         expected_ingress,
+        expected_origin,
         provider_directory,
         provider_socket_name,
         deadline,
@@ -70,6 +101,7 @@ fn receive_and_ack_over_channel(
     scenario_id: &str,
     expected_source: &ProductProducerRecipeSourceIdentity,
     expected_ingress: &ProducerLoopbackIngress,
+    expected_origin: &str,
     provider_directory: PinnedDirectory,
     provider_socket_name: OsString,
     deadline: MonotonicDeadline,
@@ -78,8 +110,8 @@ fn receive_and_ack_over_channel(
     let origin = format!("http://{}", expected_ingress.address);
     let address: SocketAddr = expected_ingress.address.parse()?;
     ensure!(
-        origin == format!("http://{address}"),
-        "signed scoped relay ingress is not canonical"
+        origin == format!("http://{address}") && origin == expected_origin,
+        "signed scoped relay ingress differs from scripted provider origin"
     );
     let listener =
         ExactLoopbackListener::receive_over_inherited_duplex(channel, address, deadline)
