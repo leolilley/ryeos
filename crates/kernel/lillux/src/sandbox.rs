@@ -2601,6 +2601,65 @@ mod imp {
         Ok(())
     }
 
+    fn verify_final_descriptor_mounts(request: &LinuxSandboxRequest) -> Result<(), String> {
+        for mount in &request.mounts {
+            verify_final_descriptor_mount(mount)?;
+        }
+        if let Some(overlay) = &request.overlay {
+            for descendant in &overlay.writable_descendant_mounts {
+                // Reanchoring selected the exact mounted source before pivot.
+                // The original descriptor may name the enclosing template,
+                // so this final-view check covers kind and access only.
+                verify_final_mount_view(
+                    &descendant.destination,
+                    libc::S_IFDIR,
+                    LinuxSandboxMountAccess::Writable,
+                    None,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_final_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(), String> {
+        let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
+        let kind = source.st_mode & libc::S_IFMT;
+        let inode = (kind != libc::S_IFDIR).then_some((source.st_dev, source.st_ino));
+        verify_final_mount_view(&mount.destination, kind, mount.access, inode)
+    }
+
+    fn verify_final_mount_view(
+        destination: &PathBuf,
+        expected_kind: libc::mode_t,
+        access: LinuxSandboxMountAccess,
+        expected_inode: Option<(libc::dev_t, libc::ino_t)>,
+    ) -> Result<(), String> {
+        let mounted = open_mount_destination_beneath(Path::new("/"), destination)?;
+        let observed = mount_source_stat(mounted.as_raw_fd())?;
+        if observed.st_mode & libc::S_IFMT != expected_kind
+            || expected_inode
+                .is_some_and(|(dev, ino)| observed.st_dev != dev || observed.st_ino != ino)
+        {
+            return Err(format!(
+                "final target mount {} differs in kind or non-directory inode",
+                destination.display()
+            ));
+        }
+        let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        syscall_zero(
+            unsafe { libc::fstatvfs(mounted.as_raw_fd(), filesystem.as_mut_ptr()) },
+            "observe final target mount access",
+        )?;
+        let read_only = unsafe { filesystem.assume_init() }.f_flag & libc::ST_RDONLY != 0;
+        if read_only != (access == LinuxSandboxMountAccess::ReadOnly) {
+            return Err(format!(
+                "final target mount {} differs in access",
+                destination.display()
+            ));
+        }
+        Ok(())
+    }
+
     fn bind_fd_to_mount_target(
         source_fd: RawFd,
         target_fd: RawFd,
@@ -3141,6 +3200,10 @@ mod imp {
         if request.nested_sandbox {
             detach_nested_target_terminal()?;
         }
+        // Earlier attachment checks ran against the private root before pivot.
+        // Recheck the target view after layering, fixed-parent changes and pivot,
+        // while admitted descriptors are live and before readiness or exec.
+        verify_final_descriptor_mounts(request)?;
         let mut mapped_channels = Vec::with_capacity(request.target_channels.len());
         if let Some(stdio) = stdio {
             use std::os::fd::AsRawFd as _;
@@ -4654,8 +4717,15 @@ mod imp {
     }
 
     fn open_mount_target_no_symlinks(destination: &PathBuf) -> Result<File, String> {
+        open_mount_destination_beneath(Path::new(ROOT), destination)
+    }
+
+    fn open_mount_destination_beneath(
+        root_path: &Path,
+        destination: &PathBuf,
+    ) -> Result<File, String> {
         validate_absolute_path(destination, "sandbox mount destination")?;
-        let root = CString::new(ROOT).expect("static sandbox root");
+        let root = c_string(root_path.as_os_str(), "sandbox mount root")?;
         let root_fd = unsafe {
             libc::open(
                 root.as_ptr(),
@@ -5200,7 +5270,16 @@ mod imp {
                     let target = rooted(&mount.destination)?;
                     create_target(&target, descriptor_kind(mount.source_fd)?)?;
                     bind_descriptor_mount(&mount)?;
-                    std::os::unix::net::UnixStream::connect(target)
+                    pivot_into_private_root()?;
+                    verify_final_descriptor_mount(&mount)?;
+                    let wrong_access = LinuxSandboxMount {
+                        access: LinuxSandboxMountAccess::Writable,
+                        ..mount.clone()
+                    };
+                    if verify_final_descriptor_mount(&wrong_access).is_ok() {
+                        return Err("final target socket access drift was accepted".into());
+                    }
+                    std::os::unix::net::UnixStream::connect(&mount.destination)
                         .and_then(|mut stream| stream.write_all(b"exact socket"))
                         .map_err(|error| error.to_string())
                 })();
