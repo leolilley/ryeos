@@ -132,6 +132,20 @@ remain `SupervisorPending`; this document grants no deployment or paid-provider
 contact authority. The generic activation, channel and cleanup owner must not
 be replaced with a Render-specific worker workflow.
 
+The existing supervisor uses direct HTTPS POST to the signed controller
+origin. The pinned Render create schema offers only `allow-all` or `deny-all`
+outbound defaults, not a controller-destination allowlist. The shortest
+compatible route to qualify is an explicitly signed `allow-all` outer Sandbox
+policy, paired with the already-required Lillux isolated network namespace for
+the untrusted candidate. Qualification must separately prove the supervisor's
+exact TLS route and the candidate's inability to reach that route or arbitrary
+egress in the *same* restored Sandbox. The native Lillux fixture now checks
+that a candidate cannot reach a live listener in its enclosing network; its
+local pass is not a Render egress or cross-region reachability result. Keeping
+`deny-all` would instead require a new provider-mediated, authenticated reverse
+transport; changing only an endpoint URL cannot make the current protocol
+work. Neither route is enabled or qualified by this note.
+
 ## Historical implementation and acceptance chronology
 
 The entries below retain their dated scope. Earlier statements that a boundary

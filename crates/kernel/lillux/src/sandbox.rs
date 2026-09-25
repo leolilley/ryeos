@@ -6256,6 +6256,22 @@ mod imp {
                 assert!(!std::path::Path::new("/proc/sys").exists());
                 assert!(!std::path::Path::new("/proc/meminfo").exists());
             }
+            let host_loopback: std::net::SocketAddr = std::env::var("LILLUX_PROBE_HOST_LOOPBACK")
+                .expect("native fixture supplies a live enclosing-network listener")
+                .parse()
+                .unwrap();
+            let network_error = std::net::TcpStream::connect_timeout(
+                &host_loopback,
+                std::time::Duration::from_millis(250),
+            )
+            .expect_err("isolated target reached the enclosing host network");
+            assert!(
+                matches!(
+                    network_error.raw_os_error(),
+                    Some(libc::ECONNREFUSED | libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ENETDOWN)
+                ),
+                "isolated target failed to connect for an unrelated reason: {network_error}"
+            );
             let authority_fd: RawFd = std::env::var("LILLUX_PROBE_CLOSED_FD")
                 .unwrap()
                 .parse()
@@ -6596,6 +6612,11 @@ mod imp {
                 {
                     continue;
                 }
+                let host_loopback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let host_loopback_address = host_loopback.local_addr().unwrap();
+                let host_connection = std::net::TcpStream::connect(host_loopback_address).unwrap();
+                let (accepted, _) = host_loopback.accept().unwrap();
+                drop((host_connection, accepted));
                 let runtime_fixture = tempfile::tempdir().unwrap();
                 std::os::unix::fs::symlink("/work", runtime_fixture.path().join("alias")).unwrap();
                 std::fs::write(
@@ -6724,6 +6745,10 @@ mod imp {
                         } else {
                             "/probe"
                         }),
+                    ),
+                    (
+                        OsString::from("LILLUX_PROBE_HOST_LOOPBACK"),
+                        OsString::from(host_loopback_address.to_string()),
                     ),
                 ]
                 .into();
