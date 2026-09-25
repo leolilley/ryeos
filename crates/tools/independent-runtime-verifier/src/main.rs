@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
                 .is_some(),
         "direct scoped race requires the admitted Codex ingress"
     );
-    let (start, running_relay) = if let Some(ingress) = parameters
+    let (start, mut running_relay) = if let Some(ingress) = parameters
         .configuration
         .expected_producer_recipe
         .loopback_ingress
@@ -146,52 +146,31 @@ async fn main() -> Result<()> {
             Ok(relay) => relay,
             Err(receiver_error) => {
                 // START may have released and acknowledged an exact child
-                // before the receiver failed. Prefer either exact locator
-                // already returned; only an unknown START with no successful
-                // RESUME needs another owner-bound point read. Never START
-                // another child to clean up an ambiguous attempt.
-                let locator = match (started, resumed) {
-                    (Ok(value), _) | (_, Some(Ok(value))) => Ok(value),
-                    (Err(CallbackError::Transport(_)), _) => {
-                        client.resume_scoped_child(&thread_id).await
-                    }
-                    (Err(error), _) => Err(error),
-                };
-                let cleanup = match locator {
-                    Ok(value) => match serde_json::from_value::<ScopedAttemptLocator>(value) {
-                        Ok(locator) => {
-                            abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await
-                        }
-                        Err(error) => Err(error.into()),
-                    },
-                    Err(error) => Err(error.into()),
-                };
+                // before the receiver failed. Collect BOTH independently
+                // returned locators. A disagreement is never permission to
+                // retire just one and declare the whole attempt clean.
+                let mut known = returned_scoped_locators(&started, resumed.as_ref());
+                let recovery =
+                    if known.is_empty() && matches!(started, Err(CallbackError::Transport(_))) {
+                        Some(client.resume_scoped_child(&thread_id).await)
+                    } else {
+                        None
+                    };
+                if let Some(Ok(value)) = recovery.as_ref() {
+                    known.push(value.clone());
+                }
+                let cleanup = abort_known_scoped_locators(&client, &thread_id, &known).await;
                 return Err(receiver_error.context(format!(
-                    "direct-target relay receiver failed; exact scoped cleanup={cleanup:?}"
+                    "direct-target relay receiver failed; exact scoped cleanup={cleanup:?}; point-read recovery={recovery:?}"
                 )));
             }
         };
         let started = if let Some(resumed) = resumed {
+            let known = returned_scoped_locators(&started, Some(&resumed));
             let (accepted, failure) = reconcile_race_locators(started, resumed);
             if let Some(error) = failure {
-                let abort = match accepted {
-                    Some(value) => match serde_json::from_value::<ScopedAttemptLocator>(value) {
-                        Ok(locator) => {
-                            abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await
-                        }
-                        Err(error) => Err(error.into()),
-                    },
-                    None => Ok(()),
-                };
-                let relay_cancel = match relay.cancel_until(lillux::time::MonotonicDeadline::after(
-                    lillux::time::Duration::from_secs(5),
-                )) {
-                    Ok(result) => format!("{result:?}"),
-                    Err(unsettled) => {
-                        drop(unsettled);
-                        "relay remained unsettled after cancellation".to_owned()
-                    }
-                };
+                let abort = abort_known_scoped_locators(&client, &thread_id, &known).await;
+                let relay_cancel = cancel_scoped_relay(relay);
                 return Err(error.context(format!(
                     "direct scoped race failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
                 )));
@@ -243,15 +222,7 @@ async fn main() -> Result<()> {
                 let abort =
                     abort_exact_scoped_child(&client, &thread_id, &relay.handoff().attempt_id)
                         .await;
-                let relay_cancel = match relay.cancel_until(lillux::time::MonotonicDeadline::after(
-                    lillux::time::Duration::from_secs(5),
-                )) {
-                    Ok(result) => format!("{result:?}"),
-                    Err(unsettled) => {
-                        drop(unsettled);
-                        "relay remained unsettled after cancellation".to_owned()
-                    }
-                };
+                let relay_cancel = cancel_scoped_relay(relay);
                 return Err(error.context(format!(
                     "direct-target START/locator failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
                 )));
@@ -281,8 +252,12 @@ async fn main() -> Result<()> {
             Err(error) => {
                 let abort =
                     abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+                let relay_cancel = running_relay
+                    .take()
+                    .map(cancel_scoped_relay)
+                    .context("direct-target conversation lost its owned relay")?;
                 return Err(error.context(format!(
-                    "direct-target conversation failed; exact scoped abort={abort:?}"
+                    "direct-target conversation failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
                 )));
             }
         };
@@ -304,21 +279,41 @@ async fn main() -> Result<()> {
             // natural result. The exact abort CAS refuses in that case; it
             // cannot turn the committed observation into cleanup evidence.
             let abort = abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+            let relay_cancel = running_relay
+                .take()
+                .map(cancel_scoped_relay)
+                .context("direct-target observation lost its owned relay")?;
             return Err(anyhow::Error::new(error).context(format!(
-                "direct-target observation failed; exact scoped abort={abort:?}"
+                "direct-target observation failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
             )));
         }
         Err(error) => {
             return Err(anyhow::Error::new(error).context("scoped producer observation refused"));
         }
     };
-    let observation: ScopedObservationCut = serde_json::from_value(observed)
-        .context("scoped producer returned an invalid observation envelope")?;
+    let observation: ScopedObservationCut = match serde_json::from_value(observed) {
+        Ok(observation) => observation,
+        Err(error) => {
+            if let Some(relay) = running_relay.take() {
+                // The observation may already have committed a natural
+                // result. Abort is an exact CAS, never proof of cleanliness.
+                let abort =
+                    abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+                let relay_cancel = cancel_scoped_relay(relay);
+                return Err(anyhow::Error::new(error).context(format!(
+                    "direct-target observation envelope invalid; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
+                )));
+            }
+            return Err(error).context("scoped producer returned an invalid observation envelope");
+        }
+    };
     let direct_evidence = if let Some(relay) = running_relay {
-        ensure!(
-            observation.relay_handoff.as_ref() == Some(relay.handoff()),
-            "live scoped relay handoff differs from settled daemon observation"
-        );
+        if observation.relay_handoff.as_ref() != Some(relay.handoff()) {
+            let relay_cancel = cancel_scoped_relay(relay);
+            bail!(
+                "live scoped relay handoff differs from settled daemon observation; relay cancellation={relay_cancel}"
+            );
+        }
         let contacts = match relay.finish_after_target_settlement(
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
         ) {
@@ -650,6 +645,48 @@ async fn abort_exact_scoped_child(
     Ok(())
 }
 
+/// Cleanup every independently returned locator for this root. The daemon
+/// remains the authority for whether each ID belongs to the admitted owner;
+/// no malformed or unequal reply can be silently converted to clean success.
+async fn abort_known_scoped_locators(
+    client: &UdsRuntimeClient,
+    thread_id: &str,
+    values: &[serde_json::Value],
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut outcomes = Vec::with_capacity(values.len());
+    for value in values.iter().take(2) {
+        match serde_json::from_value::<ScopedAttemptLocator>(value.clone()) {
+            Ok(locator) => {
+                if let Err(error) = locator.validate() {
+                    outcomes.push(format!("invalid locator: {error}"));
+                } else if seen.insert(locator.attempt_id.clone()) {
+                    let result =
+                        abort_exact_scoped_child(client, thread_id, &locator.attempt_id).await;
+                    outcomes.push(format!("{}: {result:?}", locator.attempt_id));
+                }
+            }
+            Err(error) => outcomes.push(format!("noncanonical locator: {error}")),
+        }
+    }
+    outcomes
+}
+
+fn cancel_scoped_relay(relay: scoped_relay::RunningScopedRelay) -> String {
+    match relay.cancel_until(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(5),
+    )) {
+        Ok(result) => format!("{result:?}"),
+        Err(unsettled) => {
+            // This is NOT a five-second wall-clock bound: Drop performs the
+            // final interrupting join and may wait longer. Returning with a
+            // live provider relay would be an unsafe false settlement.
+            drop(unsettled);
+            "relay remained unsettled after cancellation".to_owned()
+        }
+    }
+}
+
 fn finish_scripted_provider(provider: RunningScriptedPeer) -> Result<Vec<serde_json::Value>> {
     match provider.finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
         lillux::time::Duration::from_secs(10),
@@ -777,6 +814,22 @@ fn check_observed_full_source(
         "scoped observation full source differs from pre-launch admitted source"
     );
     Ok(())
+}
+
+/// Preserve both independently returned exact locators for cleanup. A
+/// divergent RESUME response must not disappear behind START precedence.
+fn returned_scoped_locators(
+    started: &std::result::Result<serde_json::Value, CallbackError>,
+    resumed: Option<&std::result::Result<serde_json::Value, CallbackError>>,
+) -> Vec<serde_json::Value> {
+    let mut known = Vec::with_capacity(2);
+    if let Ok(value) = started {
+        known.push(value.clone());
+    }
+    if let Some(Ok(value)) = resumed {
+        known.push(value.clone());
+    }
+    known
 }
 
 /// Reconcile only the exact point read with START. A lost START reply may use
@@ -1025,6 +1078,13 @@ mod tests {
         );
         assert_eq!(accepted, Some(locator));
         assert!(failure.unwrap().to_string().contains("START refused"));
+
+        let divergent = returned_scoped_locators(
+            &Ok(json!({"attempt_id":"scoped-first"})),
+            Some(&Ok(json!({"attempt_id":"scoped-second"}))),
+        );
+        assert_eq!(divergent.len(), 2);
+        assert_ne!(divergent[0], divergent[1]);
     }
 
     #[test]
