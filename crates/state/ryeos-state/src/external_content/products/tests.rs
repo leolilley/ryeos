@@ -70,6 +70,13 @@ fn authored_product_configs_decode_through_the_exact_state_contract() {
                 "/../../../.ai/config/development/ryeos/gnu-python-products.yaml"
             )),
         ),
+        (
+            "codex-guest-runtime-products",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../bundles/codex/.ai/config/codex/guest-runtime-products.yaml"
+            )),
+        ),
     ];
     for (name, source) in fixtures {
         let document: serde_yaml::Value =

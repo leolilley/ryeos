@@ -5,8 +5,12 @@
 //! permission. Storage owners still serialize claims and sticky revocation
 //! with actual dispatch, and independently validate retained application state.
 
-use super::{ExecutionChannelPayload, ExecutionFrame};
+use super::{
+    ExecutionChannelPayload, ExecutionFrame, ExternalCommandOutputCommitment,
+    ExternalCommandOutputStream, ExternalExecutionMode,
+};
 use anyhow::{Result, bail, ensure};
+use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPhase {
@@ -62,9 +66,21 @@ impl ChannelPhase {
         use ExecutionChannelPayload::*;
         Ok(match payload {
             Ready { .. } if self == Self::Prepared && before_execution_deadline => Self::Ready,
+            // Cancellation can cross the first authenticated Ready in flight.
+            // Retain that observation to preserve the supervisor's signed
+            // predecessor chain, without restoring readiness/Release authority.
+            // The wire contract permits Ready only at supervisor sequence one.
+            Ready { .. } if matches!(self, Self::Stopping | Self::Stopped) => self,
             Release if self == Self::Ready && before_execution_deadline => Self::Running,
             ProtocolBytes { .. } if self == Self::Running && before_execution_deadline => {
                 Self::Running
+            }
+            // These are bounded observations, not executable input. They may
+            // drain after cancellation/deadline until channel expiry.
+            CommandOutput { .. } if matches!(self, Self::Running | Self::Stopping) => self,
+            // A target exit is not allocation cleanup or descendant-death proof.
+            CommandTerminated { .. } if matches!(self, Self::Running | Self::Stopping) => {
+                Self::Stopping
             }
             ProtocolEof if matches!(self, Self::Running | Self::Quiescing) => self,
             Quiesce { .. } if self == Self::Running => Self::Quiescing,
@@ -77,7 +93,11 @@ impl ChannelPhase {
             {
                 Self::Exported
             }
-            Cancel if !matches!(self, Self::Stopped | Self::Stopping) => Self::Stopping,
+            // Target termination is not cancellation. A first legitimate Cancel
+            // may arrive after it; exact sticky-frame and sequence checks, not
+            // this projection, reject a distinct second cancellation.
+            Cancel if self == Self::Stopped => Self::Stopped,
+            Cancel => Self::Stopping,
             Stopped { .. } if self != Self::Stopped => Self::Stopped,
             Acknowledge { .. } => self,
             _ => bail!(
@@ -85,6 +105,100 @@ impl ChannelPhase {
                 self.as_str()
             ),
         })
+    }
+}
+
+/// Validate the next retained stream chunk without retaining all prior bytes.
+/// Authentication/direction belong to the frame owner; offsets and bounds must
+/// be checked against the journal, never a sender-provided resume coordinate.
+pub(crate) fn command_output_bytes(
+    mode: ExternalExecutionMode,
+    stream: ExternalCommandOutputStream,
+    offset: u64,
+    expected_offset: u64,
+    bytes_base64: &str,
+) -> Result<Vec<u8>> {
+    let limit = mode.output_limit(stream)?;
+    ensure!(
+        offset == expected_offset,
+        "external command output has a gap or overlap"
+    );
+    let bytes = super::chunk(bytes_base64, false)?;
+    ensure!(
+        offset
+            .checked_add(bytes.len() as u64)
+            .is_some_and(|end| end <= limit),
+        "external command output exceeds admitted stream bounds"
+    );
+    Ok(bytes)
+}
+
+#[derive(Default)]
+struct CommandStreamTranscript {
+    bytes: u64,
+    digest: Sha256,
+}
+
+impl CommandStreamTranscript {
+    fn require_commitment(&self, commitment: &ExternalCommandOutputCommitment) -> Result<()> {
+        ensure!(
+            self.bytes == commitment.bytes
+                && format!("{:x}", self.digest.clone().finalize()) == commitment.sha256,
+            "external command termination contradicts retained output"
+        );
+        Ok(())
+    }
+}
+
+/// One-pass projection of authenticated output for terminal verification and
+/// recovery. This carries no command, candidate, evaluation or cleanup authority.
+/// Raw target termination stays truthful after cancel; success eligibility is
+/// checked independently against sticky revocation by the journal owner.
+#[derive(Default)]
+pub(crate) struct DirectCommandTranscript {
+    stdout: CommandStreamTranscript,
+    stderr: CommandStreamTranscript,
+    terminated: bool,
+}
+
+impl DirectCommandTranscript {
+    pub(crate) fn observe(
+        &mut self,
+        mode: ExternalExecutionMode,
+        payload: &ExecutionChannelPayload,
+    ) -> Result<()> {
+        match payload {
+            ExecutionChannelPayload::CommandOutput {
+                stream,
+                offset,
+                bytes_base64,
+            } => {
+                ensure!(
+                    !self.terminated,
+                    "external command output follows termination"
+                );
+                let retained = match stream {
+                    ExternalCommandOutputStream::Stdout => &mut self.stdout,
+                    ExternalCommandOutputStream::Stderr => &mut self.stderr,
+                };
+                let bytes =
+                    command_output_bytes(mode, *stream, *offset, retained.bytes, bytes_base64)?;
+                retained.bytes += bytes.len() as u64;
+                retained.digest.update(&bytes);
+            }
+            ExecutionChannelPayload::CommandTerminated { observation } => {
+                ensure!(
+                    !self.terminated,
+                    "external command has more than one termination"
+                );
+                observation.validate(mode)?;
+                self.stdout.require_commitment(&observation.stdout)?;
+                self.stderr.require_commitment(&observation.stderr)?;
+                self.terminated = true;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -145,7 +259,159 @@ pub fn urgent_control(payload: &ExecutionChannelPayload) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_execution::{ChannelDirection, ExternalStopReason};
+    use crate::external_execution::{
+        ChannelDirection, ExternalCommandTermination, ExternalCommandTerminationReason,
+        ExternalStopReason, ExternalTargetExit,
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    fn direct_mode() -> ExternalExecutionMode {
+        ExternalExecutionMode::DirectCommand {
+            stdout_max_bytes: 8,
+            stderr_max_bytes: 8,
+        }
+    }
+
+    fn output(
+        stream: ExternalCommandOutputStream,
+        offset: u64,
+        bytes: &[u8],
+    ) -> ExecutionChannelPayload {
+        ExecutionChannelPayload::CommandOutput {
+            stream,
+            offset,
+            bytes_base64: STANDARD.encode(bytes),
+        }
+    }
+
+    fn terminal(stdout: &[u8], stderr: &[u8]) -> ExecutionChannelPayload {
+        let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            truncated: false,
+        };
+        ExecutionChannelPayload::CommandTerminated {
+            observation: ExternalCommandTermination {
+                target_exit: ExternalTargetExit::Code(0),
+                reason: ExternalCommandTerminationReason::TargetExited,
+                stdout: commitment(stdout),
+                stderr: commitment(stderr),
+            },
+        }
+    }
+
+    #[test]
+    fn command_transcript_checks_each_stream_and_terminal_digest_once() {
+        let mut transcript = DirectCommandTranscript::default();
+        for payload in [
+            output(ExternalCommandOutputStream::Stdout, 0, b"abc"),
+            output(ExternalCommandOutputStream::Stderr, 0, b"err"),
+            output(ExternalCommandOutputStream::Stdout, 3, b"def"),
+        ] {
+            transcript.observe(direct_mode(), &payload).unwrap();
+        }
+        assert!(
+            transcript
+                .observe(direct_mode(), &terminal(b"abcdef", b"wrong"))
+                .is_err()
+        );
+        assert!(
+            transcript
+                .observe(direct_mode(), &terminal(b"abcde", b"err"))
+                .is_err()
+        );
+        transcript
+            .observe(direct_mode(), &terminal(b"abcdef", b"err"))
+            .unwrap();
+        assert!(
+            transcript
+                .observe(direct_mode(), &terminal(b"abcdef", b"err"))
+                .is_err()
+        );
+        assert!(
+            transcript
+                .observe(
+                    direct_mode(),
+                    &output(ExternalCommandOutputStream::Stdout, 6, b"x")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn command_transcript_refuses_gaps_overlap_malformed_and_cumulative_excess() {
+        let mut transcript = DirectCommandTranscript::default();
+        transcript
+            .observe(
+                direct_mode(),
+                &output(ExternalCommandOutputStream::Stdout, 0, b"abc"),
+            )
+            .unwrap();
+        for payload in [
+            output(ExternalCommandOutputStream::Stdout, 0, b"x"),
+            output(ExternalCommandOutputStream::Stdout, 4, b"x"),
+            output(ExternalCommandOutputStream::Stdout, 3, b"123456"),
+            output(ExternalCommandOutputStream::Stdout, 3, b""),
+            ExecutionChannelPayload::CommandOutput {
+                stream: ExternalCommandOutputStream::Stdout,
+                offset: 3,
+                bytes_base64: "not-base64!".into(),
+            },
+        ] {
+            assert!(transcript.observe(direct_mode(), &payload).is_err());
+        }
+        transcript
+            .observe(direct_mode(), &terminal(b"abc", b""))
+            .unwrap();
+        assert!(
+            DirectCommandTranscript::default()
+                .observe(
+                    ExternalExecutionMode::StructuredSession {},
+                    &output(ExternalCommandOutputStream::Stdout, 0, b"x"),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn command_termination_drains_but_never_projects_cleanup() {
+        for phase in [ChannelPhase::Running, ChannelPhase::Stopping] {
+            assert_eq!(
+                phase
+                    .advance(
+                        None,
+                        &output(ExternalCommandOutputStream::Stdout, 0, b"x"),
+                        false
+                    )
+                    .unwrap(),
+                phase
+            );
+            assert_eq!(
+                phase.advance(None, &terminal(b"x", b""), false).unwrap(),
+                ChannelPhase::Stopping
+            );
+        }
+        assert!(
+            ChannelPhase::Stopped
+                .advance(None, &terminal(b"", b""), true)
+                .is_err()
+        );
+        assert!(
+            ChannelPhase::Ready
+                .advance(
+                    None,
+                    &output(ExternalCommandOutputStream::Stdout, 0, b"x"),
+                    true
+                )
+                .is_err()
+        );
+        assert!(!urgent_control(&terminal(b"", b"")));
+        assert!(!urgent_control(&output(
+            ExternalCommandOutputStream::Stdout,
+            0,
+            b"x"
+        )));
+    }
 
     #[test]
     fn phase_projection_preserves_drain_and_terminal_rules() {
@@ -177,6 +443,7 @@ mod tests {
         assert!(phase.permits_pending_input());
         let seal = ExecutionChannelPayload::ExportSealed {
             candidate_snapshot_hash: "b".repeat(64),
+            candidate_output_capture_hash: None,
             completion_request_digest: completion.clone(),
             writer_exclusion_evidence_hash: "c".repeat(64),
         };
@@ -194,10 +461,11 @@ mod tests {
                 .advance(None, &ExecutionChannelPayload::Release, true)
                 .is_err()
         );
-        assert!(
+        assert_eq!(
             stopped
                 .advance(None, &ExecutionChannelPayload::Cancel, true)
-                .is_err()
+                .unwrap(),
+            ChannelPhase::Stopping
         );
         assert_eq!(
             stopped

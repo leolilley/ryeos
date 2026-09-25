@@ -671,6 +671,8 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         commands: vec![],
     };
 
+    let controller_lifetime =
+        ryeos_app::state_lock::test_controller_lifetime(&config.app_root).unwrap();
     let state = AppState {
         config: Arc::new(config),
         daemon_build: ryeos_app::build_info::get(),
@@ -689,6 +691,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+        controller_lifetime,
         extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
         write_barrier: Arc::new(write_barrier),
         started_at: std::time::Instant::now(),
@@ -702,6 +705,7 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         node_config: Arc::new(node_config),
         external_placement_backends: Arc::new(Default::default()),
         external_candidate_connectors: Arc::new(Default::default()),
+        external_provider_configurations: Arc::new(Default::default()),
         external_candidate_imports: Arc::new(Default::default()),
         node_policy: Arc::new(
             ryeos_app::node_policy::NodePolicySnapshot::from_test_records(vec![Arc::new(
@@ -728,6 +732,8 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
         execution_resources: Arc::new(
             ryeos_app::execution_resources::ExecutionResourcePool::deny_all(),
         ),
+        scoped_producer_authorities: Arc::new(Default::default()),
+        scoped_producer_processes: Arc::new(Default::default()),
     };
     (tmpdir, state)
 }

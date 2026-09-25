@@ -8,6 +8,10 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use lillux::crypto::{Signature, Signer as _, SigningKey, VerifyingKey};
+pub use ryeos_external_execution_contract::{
+    ExternalCommandOutputCommitment, ExternalCommandOutputStream, ExternalCommandTermination,
+    ExternalCommandTerminationReason, ExternalExecutionMode, ExternalTargetExit,
+};
 use serde::{Deserialize, Serialize};
 
 pub mod admission;
@@ -21,6 +25,13 @@ pub mod transport;
 
 pub const MAX_FRAME_BYTES: usize = 384 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
+/// Immutable wire identity for an occurrence-scoped execution channel.
+///
+/// Keep this independent from the enclosing persistent-session capsule,
+/// external-candidate requirement and supervisor-bootstrap schemas. Those
+/// documents evolve under different authorities and are not compatibility
+/// aliases for this binding.
+pub const EXECUTION_CHANNEL_BINDING_SCHEMA: u32 = 4;
 /// First-generation logical base/candidate ceiling shared by native capture
 /// and receiver verification; transport budgets may independently be smaller.
 pub const MAX_CANDIDATE_CONTENT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -34,6 +45,7 @@ const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-execution.frame.v1\0";
 #[serde(deny_unknown_fields)]
 pub struct ExecutionChannelBinding {
     pub schema: u32,
+    pub execution_mode: ExternalExecutionMode,
     pub placement_thread_id: String,
     pub allocation_request_digest: String,
     pub occurrence_id: String,
@@ -56,7 +68,8 @@ pub struct ExecutionChannelBinding {
     /// Maximum raw candidate bytes that may cross the export protocol. This is
     /// distinct from `max_bytes`, which bounds the larger authenticated wire
     /// transcript after JSON, base64, signatures, acknowledgements and control
-    /// frames are included.
+    /// frames are included. Direct commands require zero: their immutable input
+    /// view has no candidate export authority.
     pub candidate_export_max_bytes: u64,
     /// Per-direction ordinary journal bounds including acknowledged frames.
     /// One bounded Cancel/Stopped frame is reserved independently.
@@ -66,7 +79,11 @@ pub struct ExecutionChannelBinding {
 
 impl ExecutionChannelBinding {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 3, "unsupported external channel schema");
+        ensure!(
+            self.schema == EXECUTION_CHANNEL_BINDING_SCHEMA,
+            "unsupported external channel schema"
+        );
+        self.execution_mode.validate()?;
         text(&self.placement_thread_id, 256)?;
         text(&self.occurrence_id, 512)?;
         for digest in [
@@ -93,9 +110,16 @@ impl ExecutionChannelBinding {
         );
         ensure!(
             (1..=65_536).contains(&self.max_frames)
-                && (1..=64 * 1024 * 1024).contains(&self.max_bytes)
-                && (1..=self.max_bytes).contains(&self.candidate_export_max_bytes),
+                && (1..=64 * 1024 * 1024).contains(&self.max_bytes),
             "external channel journal exceeds bounds"
+        );
+        ensure!(
+            match self.execution_mode {
+                ExternalExecutionMode::StructuredSession {} =>
+                    (1..=self.max_bytes).contains(&self.candidate_export_max_bytes),
+                ExternalExecutionMode::DirectCommand { .. } => self.candidate_export_max_bytes == 0,
+            },
+            "external channel export authority does not match execution mode"
         );
         Ok(())
     }
@@ -146,6 +170,18 @@ pub enum ExecutionChannelPayload {
     /// Candidate protocol stdout reached EOF. This is an endpoint transport
     /// observation, not candidate success, writer exclusion, or cleanup.
     ProtocolEof,
+    /// A bounded, ordered prefix of the actual executable's stdout or stderr.
+    /// Per-stream continuity and terminal commitments are journal-owned.
+    CommandOutput {
+        stream: ExternalCommandOutputStream,
+        offset: u64,
+        bytes_base64: String,
+    },
+    /// Actual target exit plus exact retained output commitments. This is not
+    /// a surrogate cleanup init's exit, a writer-exclusion proof, or cleanup evidence.
+    CommandTerminated {
+        observation: ExternalCommandTermination,
+    },
     Quiesce {
         completion_request_digest: String,
     },
@@ -158,6 +194,8 @@ pub enum ExecutionChannelPayload {
     },
     ExportSealed {
         candidate_snapshot_hash: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        candidate_output_capture_hash: Option<String>,
         completion_request_digest: String,
         writer_exclusion_evidence_hash: String,
     },
@@ -273,6 +311,8 @@ impl ExecutionChannelPayload {
             self,
             Ready { .. }
                 | ProtocolEof
+                | CommandOutput { .. }
+                | CommandTerminated { .. }
                 | ExportObjectChunk { .. }
                 | ExportSealed { .. }
                 | Stopped { .. }
@@ -284,6 +324,20 @@ impl ExecutionChannelPayload {
         ensure!(
             !supervisor_only || direction == ChannelDirection::SupervisorToOwner,
             "owner cannot author supervisor observations"
+        );
+        ensure!(
+            !matches!(
+                self,
+                ProtocolBytes { .. }
+                    | ProtocolEof
+                    | Quiesce { .. }
+                    | ExportObjectChunk { .. }
+                    | ExportSealed { .. }
+            ) || matches!(
+                binding.execution_mode,
+                ExternalExecutionMode::StructuredSession {}
+            ),
+            "direct command channel cannot carry session protocol or candidate export"
         );
         match self {
             Ready {
@@ -298,6 +352,23 @@ impl ExecutionChannelPayload {
             }
             ProtocolBytes { bytes_base64 } => {
                 chunk(bytes_base64, false)?;
+            }
+            CommandOutput {
+                stream,
+                offset,
+                bytes_base64,
+            } => {
+                let limit = binding.execution_mode.output_limit(*stream)?;
+                let bytes = chunk(bytes_base64, false)?;
+                ensure!(
+                    offset
+                        .checked_add(bytes.len() as u64)
+                        .is_some_and(|n| n <= limit),
+                    "external command output exceeds admitted stream bounds"
+                );
+            }
+            CommandTerminated { observation } => {
+                observation.validate(binding.execution_mode)?;
             }
             Quiesce {
                 completion_request_digest,
@@ -320,10 +391,14 @@ impl ExecutionChannelPayload {
             }
             ExportSealed {
                 candidate_snapshot_hash,
+                candidate_output_capture_hash,
                 completion_request_digest,
                 writer_exclusion_evidence_hash,
             } => {
                 hash(candidate_snapshot_hash)?;
+                if let Some(hash_value) = candidate_output_capture_hash {
+                    hash(hash_value)?;
+                }
                 hash(completion_request_digest)?;
                 hash(writer_exclusion_evidence_hash)?;
             }
@@ -342,6 +417,14 @@ impl ExecutionChannelPayload {
         }
         Ok(())
     }
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +540,12 @@ fn validate_frame(frame: &ExecutionFrame, binding: &ExecutionChannelBinding) -> 
         (1, None) => {}
         (2.., Some(digest)) => hash(digest)?,
         _ => bail!("external frame predecessor is missing or unexpected"),
+    }
+    if matches!(frame.payload, ExecutionChannelPayload::Ready { .. }) {
+        ensure!(
+            frame.direction == ChannelDirection::SupervisorToOwner && frame.sequence == 1,
+            "external readiness must be the first supervisor observation"
+        );
     }
     if let ExecutionChannelPayload::Acknowledge {
         peer_frame_sequence,
@@ -645,7 +734,8 @@ mod tests {
         let supervisor = lillux::crypto::generate_signing_key();
         (
             ExecutionChannelBinding {
-                schema: 3,
+                schema: EXECUTION_CHANNEL_BINDING_SCHEMA,
+                execution_mode: ExternalExecutionMode::StructuredSession {},
                 placement_thread_id: "T-external".into(),
                 occurrence_id: "occurrence".into(),
                 allocation_request_digest: "a".repeat(64),
@@ -668,6 +758,21 @@ mod tests {
             supervisor,
         )
     }
+    #[test]
+    fn channel_schema_is_independent_from_enclosing_external_documents() {
+        let (binding, _, _) = binding();
+        binding.validate().unwrap();
+
+        let mut changed = binding;
+        changed.schema = 5;
+        assert!(
+            changed
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported external channel schema")
+        );
+    }
     fn frame(binding: &ExecutionChannelBinding) -> ExecutionFrame {
         ExecutionFrame {
             schema: 1,
@@ -677,6 +782,186 @@ mod tests {
             previous_frame_digest: None,
             acknowledged_peer_sequence: 0,
             payload: ExecutionChannelPayload::Release,
+        }
+    }
+
+    fn direct_binding() -> (ExecutionChannelBinding, SigningKey, SigningKey) {
+        let (mut binding, owner, supervisor) = binding();
+        binding.execution_mode = ExternalExecutionMode::DirectCommand {
+            stdout_max_bytes: 4,
+            stderr_max_bytes: 2,
+        };
+        binding.candidate_export_max_bytes = 0;
+        (binding, owner, supervisor)
+    }
+
+    fn terminated() -> ExecutionChannelPayload {
+        let empty = ExternalCommandOutputCommitment {
+            bytes: 0,
+            sha256: lillux::sha256_hex(b""),
+            truncated: false,
+        };
+        ExecutionChannelPayload::CommandTerminated {
+            observation: ExternalCommandTermination {
+                target_exit: ExternalTargetExit::Code(0),
+                reason: ExternalCommandTerminationReason::TargetExited,
+                stdout: empty.clone(),
+                stderr: empty,
+            },
+        }
+    }
+
+    #[test]
+    fn channel_execution_mode_is_required_and_committed() {
+        let (binding, _, _) = binding();
+        let mut changed = binding.clone();
+        changed.execution_mode = direct_binding().0.execution_mode;
+        changed.candidate_export_max_bytes = 0;
+        assert_ne!(binding.digest().unwrap(), changed.digest().unwrap());
+        let mut value = serde_json::to_value(&binding).unwrap();
+        value.as_object_mut().unwrap().remove("execution_mode");
+        assert!(serde_json::from_value::<ExecutionChannelBinding>(value).is_err());
+        changed.schema = 3;
+        assert!(changed.validate().is_err());
+    }
+
+    #[test]
+    fn channel_export_authority_matches_only_session_mode() {
+        let (mut session, _, _) = binding();
+        session.candidate_export_max_bytes = 0;
+        assert!(session.validate().is_err());
+        let (mut direct, _, _) = direct_binding();
+        direct.validate().unwrap();
+        direct.candidate_export_max_bytes = 1;
+        assert!(direct.validate().is_err());
+    }
+
+    #[test]
+    fn direct_command_observations_require_supervisor_signature_and_exact_mode() {
+        let (binding, owner, supervisor) = direct_binding();
+        let mut value = frame(&binding);
+        value.payload = terminated();
+        assert!(SignedExecutionFrame::sign(value.clone(), &binding, &owner).is_err());
+        value.direction = ChannelDirection::SupervisorToOwner;
+        assert!(SignedExecutionFrame::sign(value.clone(), &binding, &owner).is_err());
+        let signed = SignedExecutionFrame::sign(value, &binding, &supervisor).unwrap();
+        let wire = lillux::canonical_json(&serde_json::to_value(signed).unwrap()).unwrap();
+        SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &binding, 50).unwrap();
+        let mut changed = binding.clone();
+        changed.execution_mode = ExternalExecutionMode::StructuredSession {};
+        changed.candidate_export_max_bytes = 1;
+        assert!(SignedExecutionFrame::decode_and_verify(wire.as_bytes(), &changed, 50).is_err());
+        let mut value = frame(&changed);
+        value.direction = ChannelDirection::SupervisorToOwner;
+        value.payload = terminated();
+        assert!(SignedExecutionFrame::sign(value, &changed, &supervisor).is_err());
+        assert!(!terminated().uses_terminal_reserve());
+    }
+
+    #[test]
+    fn direct_command_channel_refuses_session_and_export_payloads() {
+        let (binding, owner, supervisor) = direct_binding();
+        for (direction, payload) in [
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"input"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolBytes {
+                    bytes_base64: STANDARD.encode(b"output"),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ProtocolEof,
+            ),
+            (
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Quiesce {
+                    completion_request_digest: "a".repeat(64),
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportObjectChunk {
+                    content_kind: ExportContentKind::Blob,
+                    object_hash: "a".repeat(64),
+                    offset: 0,
+                    bytes_base64: STANDARD.encode(b"x"),
+                    final_chunk: true,
+                },
+            ),
+            (
+                ChannelDirection::SupervisorToOwner,
+                ExecutionChannelPayload::ExportSealed {
+                    candidate_snapshot_hash: "a".repeat(64),
+                    candidate_output_capture_hash: None,
+                    completion_request_digest: "b".repeat(64),
+                    writer_exclusion_evidence_hash: "c".repeat(64),
+                },
+            ),
+        ] {
+            let mut value = frame(&binding);
+            value.direction = direction;
+            value.payload = payload;
+            let signer = match direction {
+                ChannelDirection::OwnerToSupervisor => &owner,
+                ChannelDirection::SupervisorToOwner => &supervisor,
+            };
+            assert!(SignedExecutionFrame::sign(value, &binding, signer).is_err());
+        }
+    }
+
+    #[test]
+    fn direct_command_chunks_validate_direction_stream_bounds_and_overflow() {
+        let (binding, owner, supervisor) = direct_binding();
+        for (stream, offset, bytes, accepted) in [
+            (
+                ExternalCommandOutputStream::Stdout,
+                0,
+                b"four".as_slice(),
+                true,
+            ),
+            (
+                ExternalCommandOutputStream::Stderr,
+                0,
+                b"four".as_slice(),
+                false,
+            ),
+            (
+                ExternalCommandOutputStream::Stdout,
+                4,
+                b"x".as_slice(),
+                false,
+            ),
+            (
+                ExternalCommandOutputStream::Stdout,
+                u64::MAX,
+                b"x".as_slice(),
+                false,
+            ),
+            (
+                ExternalCommandOutputStream::Stdout,
+                0,
+                b"".as_slice(),
+                false,
+            ),
+        ] {
+            let mut value = frame(&binding);
+            value.payload = ExecutionChannelPayload::CommandOutput {
+                stream,
+                offset,
+                bytes_base64: STANDARD.encode(bytes),
+            };
+            assert!(SignedExecutionFrame::sign(value.clone(), &binding, &owner).is_err());
+            value.direction = ChannelDirection::SupervisorToOwner;
+            assert_eq!(
+                SignedExecutionFrame::sign(value, &binding, &supervisor).is_ok(),
+                accepted
+            );
         }
     }
     #[test]

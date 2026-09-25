@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-09-17T00:05:36Z:69362417812ba226cb0822b18b04264714f2f8379f09cd698b8b6ce5a204801b:O5s7fBCj6W7j7GcGWwaafNDkqD0C7k1vQ+Kh0074mHJTk7fBXPe+Kub1Fx9+x+hUnjvmaDkxqgj6/dHRqHV6BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-22T00:31:25Z:7496f8c85964b955aea2cce0145a13cade76f2683312c414c6635deae89fda1b:Ng67p1AcPv8u7fwcARTnU9rGCShgqQkHX6z1o8GPjyA/4HQBQ0JbYHj/Q4svtbWB4kNiQwRZLUyoFL937tCMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.2"
+version: "1.0.3"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -36,6 +36,8 @@ contributor guide rather than duplicating the product documentation.
 
 - `architecture` and `dependency-constitution`: repository layout, ownership,
   and dependency direction.
+- `host-capability-boundary`: required ownership and review gates for complete
+  host operations, interactive process migration, fixtures and diagnostics.
 - `dev-workflow`, `build-and-test`, `remote-development-and-qualification`,
   `ui-development`, `mcp-setup`, and `source-local-bundle-development`:
   contributor workflows.

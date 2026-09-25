@@ -7,7 +7,6 @@
 
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
@@ -43,8 +42,7 @@ impl ExternalConnectorCapabilityAccess {
     }
 
     pub(crate) fn generate_value(&self) -> Result<String> {
-        let mut capability = Zeroizing::new([0_u8; 32]);
-        rand::rngs::OsRng.fill_bytes(capability.as_mut());
+        let capability = Zeroizing::new(lillux::crypto::generate_random_bytes::<32>());
         Ok(lillux::canonical_json(&serde_json::to_value(
             ExternalConnectorCapabilityDocument {
                 schema: 1,
@@ -76,7 +74,6 @@ impl ExternalConnectorCapabilityAccess {
     pub(crate) fn decode(&self, value: Zeroizing<String>) -> Result<ExternalConnectorCapability> {
         let document = self.decode_document(value.as_str())?;
         Ok(ExternalConnectorCapability {
-            generation: document.generation,
             capability: Zeroizing::new(document.capability),
         })
     }
@@ -89,15 +86,10 @@ impl ExternalConnectorCapabilityAccess {
 /// Decrypted only while preparing or authenticating the exact local connector.
 /// It deliberately implements neither `Debug`, serialization, nor cloning.
 pub(crate) struct ExternalConnectorCapability {
-    generation: String,
     capability: Zeroizing<String>,
 }
 
 impl ExternalConnectorCapability {
-    pub(crate) fn generation(&self) -> &str {
-        &self.generation
-    }
-
     pub(crate) fn expose_for_connector_configuration(&self) -> &str {
         self.capability.as_str()
     }
@@ -159,7 +151,6 @@ mod tests {
         let access = ExternalConnectorCapabilityAccess::new(&"a".repeat(64)).unwrap();
         let value = access.generate_value().unwrap();
         let capability = access.decode(Zeroizing::new(value)).unwrap();
-        assert_eq!(capability.generation(), "a".repeat(64));
         assert_eq!(capability.expose_for_connector_configuration().len(), 44);
         let hash = capability.capability_hash().unwrap();
         capability.authenticate_hash(&hash).unwrap();

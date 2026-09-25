@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
@@ -16,8 +19,11 @@ ryeos-app = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-effect-contract = { workspace = true }
+ryeos-external-execution = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
+ryeos-project-capture = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }

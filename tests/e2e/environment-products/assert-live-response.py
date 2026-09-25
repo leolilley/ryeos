@@ -752,6 +752,16 @@ def composed(
         },
     ]:
         fail("composition returned a different exact product selection batch")
+    selection_identities = response.get("selection_identity_digests")
+    if not isinstance(selection_identities, dict) or set(selection_identities) != {
+        "distribution",
+        "runtime",
+    }:
+        fail("composition did not return the exact selection identity digest map")
+    # The product owner derives these semantic identities after revalidation.
+    # This fixture checks their closed shape, not a reconstruction of authority.
+    for declaration, digest in selection_identities.items():
+        require_hash(f"{declaration} selection identity", digest)
     bindings = response["bindings"]
     if len(bindings) != 2:
         fail("composition did not return exactly two independent manifest bindings")

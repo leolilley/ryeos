@@ -58,6 +58,7 @@ pub fn admit_root_product_selections(
         .filter_map(|input| match &input.target {
             ProductSelectionTarget::Root {} => Some(input.selection.clone()),
             ProductSelectionTarget::ContentDependency { .. }
+            | ProductSelectionTarget::ExecutionDependency { .. }
             | ProductSelectionTarget::WorkloadExecution { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -184,7 +185,20 @@ pub struct ComposeRetainedProductsResponse {
     pub pre_selection_effective_definition_digest: String,
     pub selected_effective_definition_digest: String,
     pub selections: Vec<ProductSelection>,
+    /// Exact admitted semantic identity per consumer slot. These measurements
+    /// support binding authoring; launch still verifies the full retained proof.
+    pub selection_identity_digests: BTreeMap<String, String>,
     pub bindings: Vec<ProductCompositionBinding>,
+}
+
+fn selection_identity_digests(
+    selections: &ResolvedExternalProductSelections,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    selections.validate()?;
+    selections
+        .iter()
+        .map(|(id, selection)| Ok((id.clone(), selection.semantic_identity_digest()?)))
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -492,14 +506,10 @@ fn select_verified_product(
         bail!("signed product relationship names a different consumer or slot");
     }
     let evidence = &witness.evidence;
-    if relationship_resolution.root.resolved_ref != slot.relationship_ref
-        || evidence.recipe_ref != slot.relationship_ref
-        || evidence.recipe_raw_content_digest != relationship_resolution.root.raw_content_digest
-        || evidence.relationships != relationships
-    {
-        bail!("selected product testimony disagrees with the exact signed relationship Config");
+    if relationship_resolution.root.resolved_ref != slot.relationship_ref {
+        bail!("resolved product relationship disagrees with the exact signed consumer slot");
     }
-    relationship.validate_product_evidence(evidence)?;
+    relationship.validate_compatible_product_evidence(evidence)?;
     let qualification = admit_selected_qualification(
         state,
         context,
@@ -522,7 +532,7 @@ fn select_verified_product(
         declaration_id: slot.id.clone(),
         relationship_name: slot.relationship.clone(),
         relationship_ref: slot.relationship_ref.clone(),
-        relationship_raw_content_digest: evidence.recipe_raw_content_digest.clone(),
+        relationship_raw_content_digest: relationship_resolution.root.raw_content_digest.clone(),
         relationship,
         witness_hash: selector.witness_hash.clone(),
         witness_source: selector.witness_source.clone(),
@@ -777,19 +787,14 @@ fn verify_witness_projection(
         || selection.witness_coordinate != ProductCaptureCoordinate::from_evidence(evidence)?
         || selection.owner_principal != evidence.owner_principal
         || selection.producer != evidence.root_producer
-        || selection.relationship_ref != evidence.recipe_ref
-        || selection.relationship_raw_content_digest != evidence.recipe_raw_content_digest
-        || !evidence
-            .relationships
-            .relationships
-            .iter()
-            .any(|relationship| relationship == &selection.relationship)
         || selection.manifest_hash != evidence.manifest_hash
         || selection.manifest_kind != evidence.manifest_kind
     {
         bail!("retained product witness contradicts the admitted selection testimony");
     }
-    selection.relationship.validate_product_evidence(evidence)?;
+    selection
+        .relationship
+        .validate_compatible_product_evidence(evidence)?;
     Ok(())
 }
 
@@ -872,6 +877,7 @@ pub async fn compose_selected_products(
     if selected != prepared.selections || resolution.root.resolved_ref != request.consumer_ref {
         bail!("product batch lost its exact prepared consumer selection");
     }
+    let selection_identity_digests = selection_identity_digests(&selected)?;
     let consumer = crate::external_content_admission::consumer_authority(resolution, &subject)?;
     let mut bindings = Vec::with_capacity(prepared.imports.len());
     for (declaration_ids, imported) in prepared.imports {
@@ -900,6 +906,7 @@ pub async fn compose_selected_products(
         pre_selection_effective_definition_digest: prepared.d0,
         selected_effective_definition_digest: selected_digest,
         selections: request.selections,
+        selection_identity_digests,
         bindings,
     })
 }
@@ -908,6 +915,45 @@ pub async fn compose_selected_products(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn selection_identity_map_preserves_distinct_slots_sharing_one_manifest() {
+        let requirement =
+            ryeos_state::external_execution::admission::test_support::fixture_requirement();
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
+        let selections = ryeos_state::external_execution::admission::test_support::qualified_external_candidate_selections(
+            &"7".repeat(64),
+            &requirement,
+            &qualification_use,
+        ).unwrap();
+        let first = selections.get("auxiliary").unwrap();
+        let mut second = first.clone();
+        second.declaration_id = "second".into();
+        second.declaration.id = "second".into();
+        second.declaration.mount = "qualification/second".into();
+        second.relationship.consumer.declaration_id = "second".into();
+        second.relationship.name = "second_to_consumer".into();
+        second.relationship_name = second.relationship.name.clone();
+        let both = ResolvedExternalProductSelections::new(BTreeMap::from([
+            (first.declaration_id.clone(), first.clone()),
+            (second.declaration_id.clone(), second),
+        ]))
+        .unwrap();
+        let measured = selection_identity_digests(&both).unwrap();
+        assert_eq!(measured.len(), 2);
+        assert_eq!(
+            both.get("auxiliary").unwrap().manifest_hash,
+            both.get("second").unwrap().manifest_hash
+        );
+        for (id, selection) in both.iter() {
+            assert_eq!(measured[id], selection.semantic_identity_digest().unwrap());
+        }
+        assert_ne!(measured["auxiliary"], measured["second"]);
+    }
 
     fn request() -> ComposeRetainedProductsRequest {
         ComposeRetainedProductsRequest {

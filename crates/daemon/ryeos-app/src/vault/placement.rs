@@ -91,7 +91,6 @@ impl PlacementCredentialAccess {
         Ok(PlacementCredential {
             backend: document.backend,
             account: document.account,
-            generation: document.generation,
             secret: Zeroizing::new(document.secret),
         })
     }
@@ -100,8 +99,8 @@ impl PlacementCredentialAccess {
         self.decode_document(value).map(|_| ())
     }
 
-    #[cfg(test)]
-    fn test_value(&self, secret: &str) -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_value(&self, secret: &str) -> String {
         lillux::canonical_json(
             &serde_json::to_value(PlacementCredentialDocument {
                 schema: 1,
@@ -121,7 +120,6 @@ impl PlacementCredentialAccess {
 pub(crate) struct PlacementCredential {
     backend: String,
     account: String,
-    generation: String,
     secret: Zeroizing<String>,
 }
 
@@ -131,9 +129,6 @@ impl PlacementCredential {
     }
     pub(crate) fn account(&self) -> &str {
         &self.account
-    }
-    pub(crate) fn generation(&self) -> &str {
-        &self.generation
     }
     pub(crate) fn secret(&self) -> &str {
         self.secret.as_str()

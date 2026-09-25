@@ -1,0 +1,10 @@
+# ryeos:signed:2026-09-24T09:18:26Z:fb912008b4efaffac03030fe9965a95d840f6da36da3867b00a6f00d47c1b69a:RvHuH/PSTZnaw/TijVAAOKM3vN9sxty1ulTNtQMOpUtc0XRBkIYZYggZK0DdUUsRK5Sa3kagcjlmpVA5//SAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.launch-product-qualification
+required_caps: ["ryeos.execute.service.external-content/launch-product-qualification"]
+schema:
+  launch_id: string
+  witness_hash: string
+  witness_source: object
+  relationship_name: string
+description: Accept one exact operator-owned product qualification launch; the signed relationship and current Bundle select its verifier and policy

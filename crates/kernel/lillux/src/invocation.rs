@@ -216,7 +216,7 @@ impl StartupInvocation {
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
+pub(crate) mod linux {
     use super::*;
     use crate::exec::{InheritedDescriptorAuthority, retain_fork_sensitive_descriptors_until};
     use std::{
@@ -224,7 +224,7 @@ mod linux {
         os::fd::{AsRawFd, FromRawFd},
     };
 
-    pub(super) unsafe fn acquire(
+    pub(crate) unsafe fn acquire(
         input: u32,
         output: u32,
         deadline: MonotonicDeadline,
@@ -307,13 +307,13 @@ mod linux {
 
     // A pipe write must report BrokenPipe even if the executable inherited the
     // default SIGPIPE disposition. Do not change the process-wide disposition.
-    pub(super) struct BlockedSigpipe {
+    pub(crate) struct BlockedSigpipe {
         previous: libc::sigset_t,
         set: libc::sigset_t,
         already_pending: bool,
     }
     impl BlockedSigpipe {
-        pub(super) fn new() -> io::Result<Self> {
+        pub(crate) fn new() -> io::Result<Self> {
             unsafe {
                 let mut set = std::mem::zeroed();
                 libc::sigemptyset(&mut set);
@@ -336,7 +336,7 @@ mod linux {
                 Ok(owner)
             }
         }
-        pub(super) fn consume_new_sigpipe(&self) {
+        pub(crate) fn consume_new_sigpipe(&self) {
             if !self.already_pending {
                 let zero = libc::timespec {
                     tv_sec: 0,

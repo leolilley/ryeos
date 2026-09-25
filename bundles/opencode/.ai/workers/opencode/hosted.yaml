@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-20T07:51:51Z:e8ad44ec3edfda92133fba536e31182a69ecc5dd4e5a1904e0ed3e0f8c0eecf2:lpduBZGrL+RmcHMksbErAxJn4h09rPE0Vz/rp/s9IBBqLj4sHQiNSAkc4tUxRDmSl6Qx3XPXOos+13BEUSz0Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-22T11:23:58Z:24568e0479b8124df317859ce8f086e96b61abaf12e5687810915e93047bc315:A4A+thp7ztKFGKZ66FmLs0AmymPhGLDOAOuKBxReuLRljaKuSnMJnVK1CouSCXFIIkqR9k+dK3Oe8I4cZoLaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "opencode"
 version: "0.1.0"
 executor_id: "@subprocess"
 description: opencode server profile for one RyeOS session-bound worker execution.
 execution_protocol: protocol:ryeos/core/structured_session
+external_product_slots: []
 supported_target:
   os: linux
   arch: x86_64
@@ -18,7 +19,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "1917e4ee88da99090ebd9227ab4b0771c0346819a08830d6966b993f36740de4"
+  digest: "aba86ea9d71834db71c36204feebd7f333651b112d3fdc592038384ac009857b"
 
 external_content:
   # Runtime dependencies must never create mountpoints in the project CoW.

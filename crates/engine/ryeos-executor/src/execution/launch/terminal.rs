@@ -234,6 +234,7 @@ pub(super) fn fallback_finalization(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{BuildAndLaunchError, retained_launch_failure};
     use super::*;
 
     fn runtime_result(status: RuntimeResultStatus) -> RuntimeResult {
@@ -376,6 +377,175 @@ mod tests {
         );
         assert_eq!(fallback.managed_envelope["success"], false);
         assert_eq!(fallback.managed_envelope["result"], "payload");
+    }
+
+    #[test]
+    fn cleanup_unresolved_retains_exact_fallback_error_not_runtime_io() {
+        for status in [
+            RuntimeResultStatus::Failed,
+            RuntimeResultStatus::TimedOut,
+            RuntimeResultStatus::Killed,
+            RuntimeResultStatus::Completed,
+        ] {
+            let mut runtime = runtime_result(status);
+            runtime.result = Some(json!({
+                "code": "fixture_runtime_failure",
+                "details": {"exact": [null, 7, {"reason": "retained result"}]}
+            }));
+            runtime.outputs = json!({"private": "OUTPUT_SENTINEL_NOT_RETAINED"});
+            runtime.warnings = vec!["WARNING_SENTINEL_NOT_RETAINED".into()];
+            let fallback = fallback_finalization(
+                &runtime.thread_id,
+                &runtime,
+                runtime_terminal_status(status),
+            );
+            let exact_error = fallback.params.error.clone();
+            let error = BuildAndLaunchError::RuntimeCleanupUnresolved {
+                runtime_status: status,
+                runtime_error: fallback.params.error,
+            };
+            let retained = retained_launch_failure(&error);
+            assert_eq!(
+                retained,
+                json!({
+                    "code": "runtime_cleanup_unresolved",
+                    "retryable": false,
+                    "runtime_status": status,
+                    "runtime_error": exact_error,
+                    "cleanup": {"code": "cleanup_unproved"},
+                })
+            );
+            ryeos_state::objects::validate_thread_result_content(None, Some(&retained)).unwrap();
+            assert!(!error.retryable_launch_interruption());
+            assert!(std::error::Error::source(&error).is_none());
+            let mut representations = vec![
+                retained.to_string(),
+                error.to_string(),
+                format!("{error:#}"),
+                format!("{error:?}"),
+                error.diagnostic_message(),
+            ];
+            let chained = anyhow::Error::new(error).context("fixture launch context");
+            representations.push(format!("{chained:#}"));
+            representations.push(format!("{chained:?}"));
+            assert_eq!(chained.chain().count(), 2);
+            for rendered in representations {
+                assert!(!rendered.contains("OUTPUT_SENTINEL_NOT_RETAINED"));
+                assert!(!rendered.contains("WARNING_SENTINEL_NOT_RETAINED"));
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_unresolved_is_nonretryable_and_dispatch_remains_opaque() {
+        let private_cleanup = std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "CLEANUP_SENTINEL_NOT_RETAINED",
+        );
+        // The original interruption classifier recognizes this OS error.
+        // Unresolved cleanup must not carry it into that retryable chain.
+        let internal = BuildAndLaunchError::Internal(anyhow::Error::new(private_cleanup));
+        assert!(internal.retryable_launch_interruption());
+        let error = BuildAndLaunchError::RuntimeCleanupUnresolved {
+            runtime_status: RuntimeResultStatus::TimedOut,
+            runtime_error: Some(json!({"reason": "exact runtime failure"})),
+        };
+        assert!(!error.retryable_launch_interruption());
+        assert_eq!(
+            super::super::admission_stage_for(&error),
+            (
+                ryeos_app::admission_events::AdmissionStage::Internal,
+                "runtime_cleanup_unresolved".to_owned(),
+            )
+        );
+        assert!(
+            !retained_launch_failure(&error)
+                .to_string()
+                .contains("CLEANUP_SENTINEL")
+        );
+        assert!(!error.diagnostic_message().contains("CLEANUP_SENTINEL"));
+        let dispatch = error.into_dispatch_error("worker_execution:test/fixture");
+        assert_eq!(dispatch.code(), "internal");
+        assert!(!dispatch.retryable());
+        for rendered in [
+            dispatch.to_string(),
+            format!("{dispatch:#}"),
+            format!("{dispatch:?}"),
+            format!("{:#}", anyhow::Error::new(dispatch)),
+        ] {
+            assert!(!rendered.contains("CLEANUP_SENTINEL_NOT_RETAINED"));
+        }
+    }
+
+    #[test]
+    fn cleanup_unresolved_retention_uses_existing_thread_content_bound() {
+        let mut runtime = runtime_result(RuntimeResultStatus::Failed);
+        runtime.result = Some(json!(""));
+        let empty_fallback =
+            fallback_finalization(&runtime.thread_id, &runtime, ThreadStatus::Failed);
+        let overhead = serde_json::to_vec(empty_fallback.params.error.as_ref().unwrap())
+            .unwrap()
+            .len();
+        let maximum = ryeos_state::objects::MAX_THREAD_RESULT_CONTENT_BYTES;
+        let empty_result_size = serde_json::to_vec(empty_fallback.params.result.as_ref().unwrap())
+            .unwrap()
+            .len();
+        // Ordinary failed fallback retains the payload twice: directly in
+        // params.result and inside params.error. Exercise that actual shared
+        // budget near its ceiling before projecting only the existing error.
+        runtime.result = Some(json!(
+            "x".repeat((maximum - overhead - empty_result_size) / 2)
+        ));
+        let full_fallback =
+            fallback_finalization(&runtime.thread_id, &runtime, ThreadStatus::Failed);
+        let (result_size, error_size) = ryeos_state::objects::validate_thread_result_content(
+            full_fallback.params.result.as_ref(),
+            full_fallback.params.error.as_ref(),
+        )
+        .unwrap();
+        assert!(maximum - (result_size + error_size) <= 1);
+        let error = BuildAndLaunchError::RuntimeCleanupUnresolved {
+            runtime_status: RuntimeResultStatus::Failed,
+            runtime_error: full_fallback.params.error.clone(),
+        };
+        let retained = retained_launch_failure(&error);
+        assert_eq!(
+            retained["runtime_error"],
+            full_fallback.params.error.unwrap()
+        );
+        let (_, retained_size) =
+            ryeos_state::objects::validate_thread_result_content(None, Some(&retained)).unwrap();
+        assert!(retained_size < result_size + error_size);
+
+        // Separately, an error occupying the entire standalone error budget
+        // leaves no room for a wrapper. This is NOT a valid prior full fallback:
+        // including its duplicate params.result already exceeds the shared cap.
+        runtime.result = Some(json!("x".repeat(maximum - overhead)));
+        let fallback = fallback_finalization(&runtime.thread_id, &runtime, ThreadStatus::Failed);
+        assert!(
+            ryeos_state::objects::validate_thread_result_content(
+                fallback.params.result.as_ref(),
+                fallback.params.error.as_ref(),
+            )
+            .is_err()
+        );
+        let (_, standalone_error_size) = ryeos_state::objects::validate_thread_result_content(
+            None,
+            fallback.params.error.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(standalone_error_size, maximum);
+        let error = BuildAndLaunchError::RuntimeCleanupUnresolved {
+            runtime_status: RuntimeResultStatus::Failed,
+            runtime_error: fallback.params.error.clone(),
+        };
+        let retained = retained_launch_failure(&error);
+        assert_eq!(retained["runtime_error"], fallback.params.error.unwrap());
+        // Projection has no store or settlement authority and does not replace
+        // the normal state writer's bound with truncation or a larger allowance.
+        assert!(
+            ryeos_state::objects::validate_thread_result_content(None, Some(&retained)).is_err()
+        );
     }
 
     #[test]

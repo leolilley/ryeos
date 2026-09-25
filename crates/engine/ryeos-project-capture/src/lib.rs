@@ -1,9 +1,413 @@
-use std::fs;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use ryeos_state::objects::{ProjectFile, ProjectSnapshotPolicy, ProjectTree};
+
+mod workspace_outputs;
+pub use workspace_outputs::{WorkspaceOutputObjectStage, capture_native_workspace_outputs};
+
+const MAX_TRANSFER_ENTRIES: usize = 400_010;
+const MAX_TRANSFER_DEPTH: usize = 4;
+
+/// Content testimony for one exact, self-contained project-snapshot CAS
+/// closure.  The digest is independent of filesystem layout and descriptor
+/// coordinates; counts and bytes additionally bound transfer admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSnapshotTransferMeasurement {
+    pub snapshot_hash: String,
+    pub closure_digest: String,
+    pub object_count: u64,
+    pub blob_count: u64,
+    pub total_bytes: u64,
+}
+
+impl ProjectSnapshotTransferMeasurement {
+    pub fn validate_against(
+        &self,
+        snapshot_hash: &str,
+        closure_digest: &str,
+        object_count: u64,
+        blob_count: u64,
+        total_bytes: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.snapshot_hash == snapshot_hash
+                && self.closure_digest == closure_digest
+                && self.object_count == object_count
+                && self.blob_count == blob_count
+                && self.total_bytes == total_bytes,
+            "external base snapshot transfer contradicts its admitted testimony"
+        );
+        Ok(())
+    }
+}
+
+/// Descriptor-held, bounded partial CAS containing exactly one complete
+/// project-snapshot closure. This is the transferable B authority for an
+/// external candidate; it never exposes the controller's complete CAS.
+pub struct PreparedProjectSnapshotTransfer {
+    parent: lillux::PinnedDirectory,
+    name: OsString,
+    root: lillux::PinnedDirectory,
+    descriptor: lillux::InheritedDescriptorAuthority,
+    snapshot_hash: String,
+    closure_digest: String,
+    object_count: u64,
+    blob_count: u64,
+    total_bytes: u64,
+}
+
+impl PreparedProjectSnapshotTransfer {
+    pub fn descriptor(&self) -> lillux::InheritedDescriptorAuthority {
+        self.descriptor.clone()
+    }
+
+    pub fn closure_digest(&self) -> &str {
+        &self.closure_digest
+    }
+
+    pub fn object_count(&self) -> u64 {
+        self.object_count
+    }
+
+    pub fn blob_count(&self) -> u64 {
+        self.blob_count
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub fn measurement(&self) -> ProjectSnapshotTransferMeasurement {
+        ProjectSnapshotTransferMeasurement {
+            snapshot_hash: self.snapshot_hash.clone(),
+            closure_digest: self.closure_digest.clone(),
+            object_count: self.object_count,
+            blob_count: self.blob_count,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
+impl Drop for PreparedProjectSnapshotTransfer {
+    fn drop(&mut self) {
+        let _ = self.root.remove_contents_recursive().and_then(|()| {
+            self.parent
+                .remove_empty_child_if_same(&self.name, &self.root)
+                .and_then(|removed| {
+                    if removed {
+                        Ok(())
+                    } else {
+                        anyhow::bail!("project snapshot transfer identity changed during cleanup")
+                    }
+                })
+        });
+    }
+}
+
+/// Copy exactly one verified project snapshot closure into a private partial
+/// CAS. Object and blob addresses, canonical bytes and aggregate bounds are
+/// reverified while copying. The returned root is a CAS root (`objects/` and
+/// `blobs/`), not a state/runtime root.
+pub fn prepare_project_snapshot_transfer(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    snapshot_hash: &str,
+) -> Result<PreparedProjectSnapshotTransfer> {
+    authority.ensure_guard(guard)?;
+    let source = authority.cas_store()?;
+    let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &source,
+        [snapshot_hash.to_owned()],
+        ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
+    )?;
+    anyhow::ensure!(
+        closure.is_complete() && closure.large_object_hashes.is_empty(),
+        "external base snapshot closure is incomplete or contains non-CAS content"
+    );
+    let transfer_parent = authority
+        .runtime_directory()
+        .open_or_create_child(std::ffi::OsStr::new("external-project-transfers"), 0o700)?;
+    transfer_parent.require_owner_private_directory()?;
+    let (name, root) = transfer_parent.create_unique_child("snapshot", 0o700)?;
+    root.require_owner_private_directory()?;
+    let result = (|| -> Result<ProjectSnapshotTransferMeasurement> {
+        let target = lillux::CasStore::from_pinned_root(root.try_clone()?);
+        let mut entries =
+            Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+        let mut total_bytes = 0_u64;
+        for hash in &closure.object_hashes {
+            let value = source
+                .get_object(hash)?
+                .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} disappeared"))?;
+            let bytes = lillux::canonical_json(&value)?.len() as u64;
+            total_bytes = total_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+            anyhow::ensure!(
+                target.store_object(&value)? == *hash,
+                "base snapshot object address changed during transfer"
+            );
+            entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
+        }
+        for hash in &closure.blob_hashes {
+            let (file, bytes) = source
+                .open_blob(hash)?
+                .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} disappeared"))?;
+            total_bytes = total_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+            let copied = target.put_blob_from_open_regular_bounded(
+                file,
+                Path::new("<external-base-snapshot-blob>"),
+                bytes,
+            )?;
+            anyhow::ensure!(
+                copied.hash == *hash && copied.size == bytes,
+                "base snapshot blob address changed during transfer"
+            );
+            entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
+        }
+        let pruned = target.prune_abandoned_blob_captures(false)?;
+        anyhow::ensure!(
+            pruned.files == 0 && pruned.bytes == 0,
+            "fresh base snapshot transfer contained interrupted blob capture state"
+        );
+        let expected = ProjectSnapshotTransferMeasurement {
+            snapshot_hash: snapshot_hash.to_owned(),
+            closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
+            object_count: u64::try_from(closure.object_hashes.len())?,
+            blob_count: u64::try_from(closure.blob_hashes.len())?,
+            total_bytes,
+        };
+        let observed = inspect_project_snapshot_transfer(&root, snapshot_hash)?;
+        anyhow::ensure!(
+            observed == expected,
+            "prepared base snapshot transfer changed during verification"
+        );
+        Ok(observed)
+    })();
+    let measurement = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = root.remove_contents_recursive();
+            let _ = transfer_parent.remove_empty_child_if_same(&name, &root);
+            return Err(error);
+        }
+    };
+    let descriptor = root.inherited_descriptor_authority()?;
+    Ok(PreparedProjectSnapshotTransfer {
+        parent: transfer_parent,
+        name,
+        root,
+        descriptor,
+        snapshot_hash: snapshot_hash.to_owned(),
+        closure_digest: measurement.closure_digest,
+        object_count: measurement.object_count,
+        blob_count: measurement.blob_count,
+        total_bytes: measurement.total_bytes,
+    })
+}
+
+/// Inspect a descriptor-pinned partial CAS and prove that it contains exactly
+/// one complete project snapshot closure: no missing entries, no additional
+/// files or directories, no links, and no independently addressed content.
+pub fn inspect_project_snapshot_transfer(
+    root: &lillux::PinnedDirectory,
+    snapshot_hash: &str,
+) -> Result<ProjectSnapshotTransferMeasurement> {
+    root.require_owner_private_directory()?;
+    let cas = lillux::CasStore::from_pinned_root(root.try_clone()?);
+    let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &cas,
+        [snapshot_hash.to_owned()],
+        ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
+    )?;
+    anyhow::ensure!(
+        closure.is_complete() && closure.large_object_hashes.is_empty(),
+        "external base snapshot transfer is incomplete or contains non-CAS content"
+    );
+
+    let mut entries = Vec::with_capacity(closure.object_hashes.len() + closure.blob_hashes.len());
+    let mut expected_files = std::collections::BTreeMap::<PathBuf, u64>::new();
+    let mut total_bytes = 0_u64;
+    for hash in &closure.object_hashes {
+        let value = cas
+            .get_object(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot object {hash} is missing"))?;
+        let bytes = u64::try_from(lillux::canonical_json(&value)?.len())?;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        let relative = lillux::shard_path(Path::new(""), "objects", hash, ".json");
+        anyhow::ensure!(
+            expected_files.insert(relative, bytes).is_none(),
+            "base snapshot object address is duplicated"
+        );
+        entries.push(serde_json::json!({"kind":"object","hash":hash,"bytes":bytes}));
+    }
+    for hash in &closure.blob_hashes {
+        let (mut file, bytes) = cas
+            .open_blob(hash)?
+            .ok_or_else(|| anyhow::anyhow!("base snapshot blob {hash} is missing"))?;
+        let (outcome, _) = lillux::digest_open_regular_file_stable_exact(&mut file, bytes)?;
+        anyhow::ensure!(
+            outcome == *hash,
+            "base snapshot blob {hash} changed content address"
+        );
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("base snapshot transfer byte overflow"))?;
+        let relative = lillux::shard_path(Path::new(""), "blobs", hash, "");
+        anyhow::ensure!(
+            expected_files.insert(relative, bytes).is_none(),
+            "base snapshot blob address is duplicated"
+        );
+        entries.push(serde_json::json!({"kind":"blob","hash":hash,"bytes":bytes}));
+    }
+    ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+        &cas,
+        snapshot_hash,
+    )?;
+
+    let expected_directories = expected_files
+        .keys()
+        .flat_map(|path| path.ancestors().skip(1))
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect::<std::collections::BTreeSet<_>>();
+    let remaining = std::cell::RefCell::new(expected_files);
+    root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(MAX_TRANSFER_ENTRIES, MAX_TRANSFER_DEPTH),
+        |relative, is_directory| {
+            if is_directory {
+                anyhow::ensure!(
+                    expected_directories.contains(relative),
+                    "external base snapshot transfer contains an unexpected directory {}",
+                    relative.display()
+                );
+            }
+            Ok(false)
+        },
+        |relative, file| {
+            let expected = remaining.borrow_mut().remove(relative).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "external base snapshot transfer contains an unexpected file {}",
+                    relative.display()
+                )
+            })?;
+            anyhow::ensure!(
+                lillux::observe_open_regular_file(&file)?.size() == expected,
+                "external base snapshot transfer file {} changed size",
+                relative.display()
+            );
+            Ok(())
+        },
+    )?;
+    anyhow::ensure!(
+        remaining.borrow().is_empty(),
+        "external base snapshot transfer is missing an expected CAS entry"
+    );
+
+    Ok(ProjectSnapshotTransferMeasurement {
+        snapshot_hash: snapshot_hash.to_owned(),
+        closure_digest: transfer_closure_digest(snapshot_hash, &entries)?,
+        object_count: u64::try_from(closure.object_hashes.len())?,
+        blob_count: u64::try_from(closure.blob_hashes.len())?,
+        total_bytes,
+    })
+}
+
+/// Install a verified transfer into an empty private candidate runtime.  The
+/// runtime layout is the one consumed by `PinnedStateAuthority`: its partial
+/// CAS lives under `objects/` and its mutable candidate refs start empty.
+pub fn install_project_snapshot_transfer(
+    source: &lillux::PinnedDirectory,
+    candidate_runtime: &lillux::PinnedDirectory,
+    expected: &ProjectSnapshotTransferMeasurement,
+) -> Result<()> {
+    candidate_runtime.require_owner_private_directory()?;
+    anyhow::ensure!(
+        candidate_runtime.entries_no_follow_bounded(0)?.is_empty(),
+        "external candidate runtime is not empty before base installation"
+    );
+    let observed = inspect_project_snapshot_transfer(source, &expected.snapshot_hash)?;
+    anyhow::ensure!(
+        &observed == expected,
+        "external base snapshot transfer contradicts its admitted measurement"
+    );
+    let cas_root = candidate_runtime.create_child(std::ffi::OsStr::new("objects"), 0o700)?;
+    let refs_root = match candidate_runtime.create_child(std::ffi::OsStr::new("refs"), 0o700) {
+        Ok(root) => root,
+        Err(error) => {
+            let _ = candidate_runtime
+                .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
+            return Err(error);
+        }
+    };
+    let result = (|| -> Result<()> {
+        source.copy_contents_to_filtered(
+            &cas_root,
+            lillux::DirectoryTraversalBudget::new(MAX_TRANSFER_ENTRIES, MAX_TRANSFER_DEPTH),
+            |_| Ok(false),
+        )?;
+        let installed = inspect_project_snapshot_transfer(&cas_root, &expected.snapshot_hash)?;
+        anyhow::ensure!(
+            &installed == expected,
+            "installed external base snapshot changed identity"
+        );
+        anyhow::ensure!(
+            refs_root.entries_no_follow_bounded(0)?.is_empty(),
+            "external candidate refs root was not initialized empty"
+        );
+        // Candidate capture is a real durable CAS publication. Establish its
+        // minimal recovery generation relative to this exact pinned runtime
+        // before the runtime is handed to another process; the launcher must
+        // only acquire already-established guard/staging authority, never
+        // manufacture it during capture.
+        ryeos_state::CasMutationGuard::initialize_fresh_recovery_in_pinned_runtime(
+            candidate_runtime,
+        )?;
+        candidate_runtime.sync_tree_bounded(lillux::DirectoryTraversalBudget::new(
+            MAX_TRANSFER_ENTRIES,
+            MAX_TRANSFER_DEPTH,
+        ))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        if let Ok(Some(recovery)) =
+            candidate_runtime.open_child_directory(std::ffi::OsStr::new("recovery"))
+        {
+            let _ = recovery.remove_contents_recursive_bounded(
+                lillux::DirectoryTraversalBudget::new(MAX_TRANSFER_ENTRIES, MAX_TRANSFER_DEPTH),
+            );
+            let _ = candidate_runtime
+                .remove_empty_child_if_same(std::ffi::OsStr::new("recovery"), &recovery);
+        }
+        let _ = cas_root.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(
+            MAX_TRANSFER_ENTRIES,
+            MAX_TRANSFER_DEPTH,
+        ));
+        let _ = candidate_runtime
+            .remove_empty_child_if_same(std::ffi::OsStr::new("objects"), &cas_root);
+        let _ =
+            candidate_runtime.remove_empty_child_if_same(std::ffi::OsStr::new("refs"), &refs_root);
+    }
+    result
+}
+
+fn transfer_closure_digest(snapshot_hash: &str, entries: &[serde_json::Value]) -> Result<String> {
+    Ok(lillux::sha256_hex(
+        lillux::canonical_json(&serde_json::json!({
+            "domain":"ryeos.external-base-snapshot-transfer.v1",
+            "snapshot_hash":snapshot_hash,
+            "entries":entries,
+        }))?
+        .as_bytes(),
+    ))
+}
 
 /// Capture one complete project tree with descriptor-relative traversal and
 /// streaming blob ingestion. The policy is immutable input to this capture.
@@ -43,13 +447,13 @@ pub fn ingest_project_tree_with_operational_exclusions(
 #[derive(Clone, Copy)]
 pub struct ProjectCaptureBudget {
     pub max_bytes: u64,
-    pub deadline: std::time::Instant,
+    pub deadline: lillux::time::MonotonicDeadline,
 }
 
 impl ProjectCaptureBudget {
     fn check(&self) -> Result<()> {
         anyhow::ensure!(
-            std::time::Instant::now() < self.deadline,
+            !self.deadline.has_elapsed(),
             "project capture deadline expired"
         );
         Ok(())
@@ -64,6 +468,24 @@ pub fn ingest_project_tree_bounded(
     budget: ProjectCaptureBudget,
 ) -> Result<ProjectTree> {
     ingest_project_tree_inner(authority, guard, project_root, policy, &[], Some(budget))
+}
+
+pub fn ingest_project_tree_bounded_with_exclusions(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+    operational_exclusions: &[String],
+    budget: ProjectCaptureBudget,
+) -> Result<ProjectTree> {
+    ingest_project_tree_inner(
+        authority,
+        guard,
+        project_root,
+        policy,
+        operational_exclusions,
+        Some(budget),
+    )
 }
 
 fn ingest_project_tree_inner(
@@ -176,7 +598,7 @@ fn ingest_project_tree_inner(
     Ok(tree)
 }
 
-pub(super) fn validate_operational_exclusions(exclusions: &[String]) -> Result<()> {
+pub fn validate_operational_exclusions(exclusions: &[String]) -> Result<()> {
     let mut previous: Option<&str> = None;
     for exclusion in exclusions {
         ryeos_state::project_sync::validate_safe_relative_path(exclusion)?;
@@ -188,7 +610,7 @@ pub(super) fn validate_operational_exclusions(exclusions: &[String]) -> Result<(
     Ok(())
 }
 
-pub(super) fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bool {
+pub fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bool {
     exclusions.iter().any(|root| {
         path == root
             || path
@@ -197,7 +619,7 @@ pub(super) fn is_operationally_excluded(path: &str, exclusions: &[String]) -> bo
     })
 }
 
-pub(super) fn restore_operational_shadow_files(
+pub fn restore_operational_shadow_files(
     captured: &mut ProjectTree,
     base: &ProjectTree,
     exclusions: &[String],
@@ -244,7 +666,7 @@ pub fn materialize_project_file(
     let size =
         cas.materialize_blob_to_new_file(&file.blob_hash, target_path, file.normalized_mode)?;
     if size != file.size {
-        let _ = fs::remove_file(target_path);
+        let _ = lillux::remove_file_durable(target_path);
         anyhow::bail!(
             "project_file {} declared size {}, materialized {}",
             object_hash,
@@ -257,6 +679,8 @@ pub fn materialize_project_file(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -299,7 +723,9 @@ mod tests {
             &policy,
             super::ProjectCaptureBudget {
                 max_bytes: 1024,
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                deadline: lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(10),
+                ),
             },
         )
         .unwrap();
@@ -448,7 +874,7 @@ mod tests {
 
         let budget = super::ProjectCaptureBudget {
             max_bytes: 1024,
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+            deadline: lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(10)),
         };
         assert_eq!(
             super::ingest_project_tree_bounded(
@@ -482,7 +908,7 @@ mod tests {
                 &project_root,
                 &snapshot_policy,
                 super::ProjectCaptureBudget {
-                    deadline: std::time::Instant::now(),
+                    deadline: lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO,),
                     ..budget
                 }
             )
@@ -524,7 +950,62 @@ mod tests {
             .unwrap();
         assert!(object_closure.is_complete());
 
+        let transfer =
+            super::prepare_project_snapshot_transfer(&authority, &guard, &snapshot_hash).unwrap();
+        let transfer_root = transfer
+            .descriptor()
+            .try_clone_pinned_directory(std::path::PathBuf::from("<project-transfer-test>"))
+            .unwrap();
+        assert_eq!(
+            super::inspect_project_snapshot_transfer(&transfer_root, &snapshot_hash).unwrap(),
+            transfer.measurement()
+        );
+        drop(guard);
+        let candidate_runtime_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            candidate_runtime_dir.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let candidate_runtime = lillux::PinnedDirectory::open(candidate_runtime_dir.path())
+            .unwrap()
+            .unwrap();
+        super::install_project_snapshot_transfer(
+            &transfer_root,
+            &candidate_runtime,
+            &transfer.measurement(),
+        )
+        .unwrap();
+        let candidate_authority =
+            ryeos_state::PinnedStateAuthority::from_external_candidate_runtime(
+                candidate_runtime.try_clone().unwrap(),
+            )
+            .unwrap();
+        let candidate_guard = candidate_authority.acquire_shared_guard().unwrap();
+        candidate_authority.ensure_guard(&candidate_guard).unwrap();
+        candidate_authority.require_recovery().unwrap();
+        ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+            &candidate_authority.cas_store().unwrap(),
+            &snapshot_hash,
+        )
+        .unwrap();
+        drop(candidate_guard);
+        let mut extra = transfer_root
+            .open_regular_create(std::ffi::OsStr::new("ambient"), true, true, 0o600)
+            .unwrap();
+        use std::io::Write as _;
+        extra.write_all(b"ambient").unwrap();
+        extra.sync_all().unwrap();
+        assert!(
+            super::inspect_project_snapshot_transfer(&transfer_root, &snapshot_hash)
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected file")
+        );
+
         let materialized = tempfile::tempdir().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
         for (relative, object_hash) in &tree.files {
             let target = materialized.path().join(relative);
             std::fs::create_dir_all(target.parent().unwrap()).unwrap();

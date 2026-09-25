@@ -1844,6 +1844,11 @@ impl Engine {
     }
 
     fn admit_plan_resources(&self, plan: ExecutionPlan) -> Result<ExecutionPlan, EngineError> {
+        plan.validate_endpoint_for_planning().map_err(|error| {
+            EngineError::IsolationPolicyRefused {
+                reason: error.to_string(),
+            }
+        })?;
         self.admit_execution_target(
             plan.target_requirement.as_ref(),
             plan.resource_authority_ceiling,

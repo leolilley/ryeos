@@ -1,0 +1,14 @@
+# ryeos:signed:2026-09-24T09:18:26Z:eac2a4c69178c43097acbc8f3b373ba11b9825f729db747e982a4f68f10967b2:IvcC+579ZbD8ziKhsV9X5lpfFLZtZfjjd6n8GfEIl+suEC01HoCCqOaHF1Hk6Mx0oD8xm6843bfkREkzeDWiDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, launch-product-qualification]
+description: Launch the signed verifier for one exact product qualification relationship
+forms:
+  - slots:
+      - field: launch_id
+      - field: witness_hash
+      - field: witness_source
+      - field: relationship_name
+help:
+  usage: ryeos external-content launch-product-qualification <launch-id> <witness-hash> <witness-source-json> <relationship-name>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/launch-product-qualification

@@ -1,0 +1,35 @@
+# ryeos:signed:2026-09-22T11:47:01Z:aee79f0f70ec29b0ab6024cc3d1e7184d16c90a9a02fb0ce89a5aa73678d0f0d:qEh+3l7sMd931b45M3U9wrkiqE1/yfU2Z2/g+27Sk/Y/83uwqLq6G++hd3GsOFY+1WL6tNceRSQK9cI2lKCXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: "1.0.0"
+description: Produce one exact pinned Codex guest runtime product
+effects: recorded
+product_recipe: config:codex/guest-runtime-products
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.config.codex/guest-runtime-products
+      - ryeos.execute.tool.codex/guest-runtime/produce
+config:
+  start: produce
+  max_steps: 2
+  on_error: fail
+  config_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  nodes:
+    produce:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:codex/guest-runtime/produce
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      assign:
+        production: "${result}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.production}"

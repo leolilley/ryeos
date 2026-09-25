@@ -172,7 +172,7 @@ pub(crate) fn admit_or_verify(
     let launch_authority_digest = launch_authority.digest()?;
     let artifact_identity_digest = launch_authority.artifact_identity_digest()?;
     let execution_closure_digest = launch_authority.execution_closure_digest()?;
-    let (filesystem, network, target, resource_authority) = match metadata
+    let properties = match metadata
         .admitted_execution_closure
         .as_ref()
         .context("execution realization has no admitted closure")?
@@ -184,12 +184,12 @@ pub(crate) fn admit_or_verify(
             let plan: ryeos_engine::contracts::ExecutionPlan =
                 serde_json::from_value(execution_plan.clone())
                     .context("decode execution-realization admitted direct plan")?;
-            (
-                plan.filesystem_authority_ceiling,
-                plan.network_authority_ceiling,
-                plan.target_requirement,
-                plan.resource_authority_ceiling,
-            )
+            direct_execution_properties(
+                state.isolation.inspection(),
+                state.isolation.is_enforced(),
+                &plan,
+                selected_resources,
+            )?
         }
         ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
             prepared_runtime_launch,
@@ -198,22 +198,16 @@ pub(crate) fn admit_or_verify(
             let prepared: super::launch_preparation::PreparedRuntimeLaunch =
                 serde_json::from_value(prepared_runtime_launch.clone())
                     .context("decode execution-realization admitted managed launch")?;
-            (
+            execution_properties(
+                state,
                 prepared.filesystem_authority_ceiling,
                 prepared.network_authority_ceiling,
-                prepared.target_requirement,
+                prepared.target_requirement.as_ref(),
                 prepared.resource_authority_ceiling,
-            )
+                selected_resources,
+            )?
         }
     };
-    let properties = execution_properties(
-        state,
-        filesystem,
-        network,
-        target.as_ref(),
-        resource_authority,
-        selected_resources,
-    )?;
 
     if let Some(existing_hash) = metadata.execution_realization_hash.as_deref() {
         let existing = load_realization(state, existing_hash)?;
@@ -248,11 +242,7 @@ pub(crate) fn admit_or_verify(
         contract_ref,
         contract_digest,
         components,
-        filesystem,
-        network,
-        target.as_ref(),
-        resource_authority,
-        selected_resources,
+        properties,
         staged_publication,
     )
 }
@@ -270,6 +260,14 @@ pub(crate) fn admit_persistent_session(
     let (filesystem, network, target, resource_authority) =
         persistent_session_execution_authority(&authority.execution_closure)?;
     let selected_resources = state.execution_resources.select(target.as_ref())?;
+    let properties = execution_properties(
+        state,
+        filesystem,
+        network,
+        target.as_ref(),
+        resource_authority,
+        selected_resources.selections(),
+    )?;
     store_new_realization(
         state,
         authority.digest()?,
@@ -279,11 +277,7 @@ pub(crate) fn admit_persistent_session(
         contract_ref,
         contract_digest,
         execution_components(state, resolution)?,
-        filesystem,
-        network,
-        target.as_ref(),
-        resource_authority,
-        selected_resources.selections(),
+        properties,
         staged_publication,
     )
 }
@@ -342,6 +336,9 @@ fn persistent_session_execution_authority(
     let plan: ryeos_engine::contracts::ExecutionPlan =
         serde_json::from_value(execution_plan.clone())
             .context("decode persistent-session retained isolation ceilings")?;
+    // This owner is the existing controller-local persistent process. An
+    // external candidate workload is not permission to relocate that process.
+    plan.require_local_endpoint_for_dispatch()?;
     Ok((
         plan.filesystem_authority_ceiling,
         plan.network_authority_ceiling,
@@ -406,11 +403,7 @@ fn store_new_realization(
     contract_ref: &str,
     contract_digest: &str,
     components: Vec<ExecutionComponentReference>,
-    filesystem_authority_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
-    network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling,
-    target_requirement: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
-    resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
-    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
+    properties: BTreeMap<String, serde_json::Value>,
     staged_publication: Option<&mut ryeos_state::PendingCasPublication>,
 ) -> Result<ExecutionRealizationAdmission> {
     let node = state
@@ -418,14 +411,6 @@ fn store_new_realization(
         .get::<ryeos_app::execution_identity_probe::NodeExecutionIdentity>()
         .ok_or_else(|| anyhow::anyhow!("node execution substrate evidence is unavailable"))?;
     verify_node_evidence(state, &node)?;
-    let properties = execution_properties(
-        state,
-        filesystem_authority_ceiling,
-        network_authority_ceiling,
-        target_requirement,
-        resource_authority_ceiling,
-        selected_resources,
-    )?;
     let candidate = AdmittedExecutionRealization {
         schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
         kind: ADMITTED_EXECUTION_REALIZATION_KIND.to_owned(),
@@ -526,6 +511,65 @@ fn execution_properties(
     )
 }
 
+/// Select evidence from the already sealed ordinary plan. External endpoint
+/// properties are admitted requirements and controller provenance ONLY. They
+/// are not guest isolation qualification, target readiness, or permission to
+/// contact a placement provider. Those observations retain their own owners.
+fn direct_execution_properties(
+    controller_inspection: &ryeos_engine::isolation::IsolationInspection,
+    controller_isolation_enforced: bool,
+    plan: &ryeos_engine::contracts::ExecutionPlan,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    plan.validate_endpoint_for_sealing()?;
+    match &plan.endpoint_requirement {
+        ryeos_engine::contracts::ExecutionEndpointRequirement::Local {} => {
+            execution_properties_from_inspection(
+                controller_inspection,
+                controller_isolation_enforced,
+                plan.filesystem_authority_ceiling,
+                plan.network_authority_ceiling,
+                plan.target_requirement.as_ref(),
+                plan.resource_authority_ceiling,
+                selected_resources,
+            )
+        }
+        ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. } => {
+            anyhow::ensure!(
+                selected_resources.is_empty(),
+                "external endpoint cannot claim controller-local resource selections"
+            );
+            let binding = plan
+                .external_endpoint_binding
+                .as_ref()
+                .context("sealed external endpoint lost its binding identity")?;
+            let mut properties = execution_authority_properties(
+                plan.filesystem_authority_ceiling,
+                plan.network_authority_ceiling,
+                plan.target_requirement.as_ref(),
+                plan.resource_authority_ceiling,
+                selected_resources,
+            )?;
+            // The realization's existing substrate identity/attestation still
+            // names the admitting controller, never the as-yet-unobserved guest.
+            properties.insert("execution_substrate_role".into(), "controller".into());
+            properties.insert(
+                "execution_endpoint_requirement".into(),
+                serde_json::Value::String(lillux::canonical_json(&serde_json::to_value(
+                    &plan.endpoint_requirement,
+                )?)?),
+            );
+            properties.insert(
+                "external_endpoint_binding".into(),
+                serde_json::Value::String(lillux::canonical_json(&serde_json::to_value(binding)?)?),
+            );
+            // Deliberately no isolation_enforced/policy/backend observation:
+            // a controller observation cannot qualify the external target.
+            Ok(properties)
+        }
+    }
+}
+
 fn execution_properties_from_inspection(
     inspection: &ryeos_engine::isolation::IsolationInspection,
     isolation_enforced: bool,
@@ -535,14 +579,16 @@ fn execution_properties_from_inspection(
     resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
     selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
 ) -> Result<BTreeMap<String, serde_json::Value>> {
-    let mut properties = BTreeMap::new();
+    let mut properties = execution_authority_properties(
+        filesystem_authority_ceiling,
+        network_authority_ceiling,
+        target_requirement,
+        resource_authority_ceiling,
+        selected_resources,
+    )?;
     properties.insert(
         "isolation_enforced".to_owned(),
         serde_json::Value::Bool(isolation_enforced),
-    );
-    properties.insert(
-        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
-        serde_json::to_value(resource_authority_ceiling)?,
     );
     properties.insert(
         "isolation_policy_digest".to_owned(),
@@ -556,10 +602,26 @@ fn execution_properties_from_inspection(
         "isolation_backend_inspection_digest".to_owned(),
         serde_json::Value::String(isolation_backend_inspection_digest(&inspection.backend)?),
     );
-    properties.extend(authority_ceiling_properties(
-        filesystem_authority_ceiling,
-        network_authority_ceiling,
-    ));
+    Ok(properties)
+}
+
+/// Parent/workload ceilings and requested suitability are requirements, not
+/// evidence of a particular host's enforcement. Preserve their existing keys
+/// so continuation and borrowed-child narrowing keep the same authoritative
+/// read path for either endpoint.
+fn execution_authority_properties(
+    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
+    network_authority_ceiling: IsolationNetworkAuthorityCeiling,
+    target_requirement: Option<&ryeos_engine::contracts::ExecutionTargetRequirement>,
+    resource_authority_ceiling: ryeos_engine::contracts::ExecutionResourceAuthorityCeiling,
+    selected_resources: &[ryeos_engine::contracts::ExecutionResourceSelection],
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut properties =
+        authority_ceiling_properties(filesystem_authority_ceiling, network_authority_ceiling);
+    properties.insert(
+        ryeos_engine::contracts::ExecutionResourceAuthorityCeiling::REALIZATION_PROPERTY.to_owned(),
+        serde_json::to_value(resource_authority_ceiling)?,
+    );
     properties.insert(
         ryeos_engine::contracts::ExecutionTargetRequirement::REALIZATION_PROPERTY.to_owned(),
         target_requirement
@@ -808,6 +870,197 @@ mod tests {
         InspectedArtifact, IsolationArtifactRole, IsolationBackendSelection,
     };
 
+    // Property projection fixture only: an empty plan is not executable
+    // admission and these tests do not qualify a guest or contact a provider.
+    fn endpoint_plan(external: bool) -> ryeos_engine::contracts::ExecutionPlan {
+        serde_json::from_value(serde_json::json!({
+            "plan_id":"plan:properties", "root_executor_id":"tool:test/runtime",
+            "root_ref":"tool:test/evaluate", "item_kind":"tool", "nodes":[],
+            "entrypoint":"entry", "capabilities":{
+                "requires_model":false, "requires_subprocess":true,
+                "requires_network":false, "custom":[]
+            },
+            "materialization_requirements":[],
+            "filesystem_authority_ceiling":"captured_execution",
+            "network_authority_ceiling":"isolated",
+            "target_requirement":null,
+            "endpoint_requirement": if external { serde_json::json!({
+                "kind":"external", "binding_id":"evaluate", "stdout_max_bytes":1024,
+                "stderr_max_bytes":1024
+            }) } else { serde_json::json!({"kind":"local"}) },
+            "external_endpoint_binding": if external { serde_json::json!({
+                "binding_id":"evaluate", "binding_digest":"9".repeat(64)
+            }) } else { serde_json::Value::Null },
+            "resource_authority_ceiling":"node_policy", "cache_key":"properties",
+            "executor_authorities":[]
+        }))
+        .unwrap()
+    }
+
+    fn resource_selection_fixture() -> ryeos_engine::contracts::ExecutionResourceSelection {
+        serde_json::from_value(serde_json::json!({
+            "stable_id": "gpu-0", "class": "gpu", "matched_facts": {"memory": 1024, "vendor": "fixture"},
+            "observation_contract_digest": "2".repeat(64),
+            "device_binding_digest": "3".repeat(64),
+            "access": "execution_restricted", "enforcement": "character_device_grant",
+            "character_devices": [{"role": "compute", "destination": "/dev/test-gpu",
+                "access": "read_write", "major": 195, "minor": 0}]
+        })).unwrap()
+    }
+
+    #[test]
+    fn local_endpoint_preserves_exact_controller_isolation_properties() {
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let plan = endpoint_plan(false);
+        let properties = direct_execution_properties(
+            isolation.inspection(),
+            isolation.is_enforced(),
+            &plan,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(properties).unwrap(),
+            serde_json::json!({
+                "isolation_enforced":false,
+                "isolation_policy_digest":isolation.inspection().digest,
+                "isolation_backend_inspection_digest":isolation_backend_inspection_digest(&isolation.inspection().backend).unwrap(),
+                "isolation_filesystem_authority_ceiling":"captured_execution",
+                "isolation_network_authority_ceiling":"isolated",
+                "execution_resource_authority_ceiling":"node_policy",
+                "execution_target_requirement":null,
+                "execution_resource_selections":"[]"
+            })
+        );
+    }
+
+    #[test]
+    fn external_endpoint_records_requirements_not_guest_isolation_testimony() {
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let mut plan = endpoint_plan(true);
+        plan.target_requirement = Some(
+            serde_json::from_value(serde_json::json!({
+                "os":"linux", "arch":"x86_64", "resources":[]
+            }))
+            .unwrap(),
+        );
+        let properties =
+            direct_execution_properties(isolation.inspection(), false, &plan, &[]).unwrap();
+        assert_eq!(properties["execution_substrate_role"], "controller");
+        for observed in [
+            "isolation_enforced",
+            "isolation_policy_digest",
+            "isolation_backend_inspection_digest",
+        ] {
+            assert!(
+                !properties.contains_key(observed),
+                "controller evidence must not become guest {observed}"
+            );
+        }
+        // An enforcement verifier requiring observed true has no testimony to
+        // consume here. This is not a qualification or readiness result.
+        assert_ne!(
+            properties.get("isolation_enforced"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            properties["isolation_filesystem_authority_ceiling"],
+            "captured_execution"
+        );
+        assert_eq!(
+            properties["isolation_network_authority_ceiling"],
+            "isolated"
+        );
+        assert_eq!(
+            properties["execution_resource_authority_ceiling"],
+            "node_policy"
+        );
+        assert_eq!(properties["execution_resource_selections"], "[]");
+        assert_eq!(
+            properties["execution_target_requirement"],
+            lillux::canonical_json(&serde_json::to_value(&plan.target_requirement).unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<ryeos_engine::contracts::ExecutionEndpointRequirement>(
+                properties["execution_endpoint_requirement"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            plan.endpoint_requirement
+        );
+        assert_eq!(
+            serde_json::from_str::<ryeos_engine::contracts::ExternalEndpointBindingIdentity>(
+                properties["external_endpoint_binding"].as_str().unwrap()
+            )
+            .unwrap(),
+            plan.external_endpoint_binding.clone().unwrap()
+        );
+        // Even stronger controller enforcement cannot turn this requirement
+        // projection into an observation about the external guest.
+        assert_eq!(
+            properties,
+            direct_execution_properties(isolation.inspection(), true, &plan, &[]).unwrap()
+        );
+
+        let mut realization = realization_with_resources(&[]);
+        realization.properties = properties.clone();
+        let hash = realization.content_hash().unwrap();
+        let round_trip =
+            AdmittedExecutionRealization::from_current_value(&realization.to_value().unwrap())
+                .unwrap();
+        assert_eq!(
+            round_trip.properties,
+            direct_execution_properties(isolation.inspection(), false, &plan.clone(), &[]).unwrap()
+        );
+        assert_eq!(round_trip.content_hash().unwrap(), hash);
+        plan.external_endpoint_binding
+            .as_mut()
+            .unwrap()
+            .binding_digest = "8".repeat(64);
+        realization.properties =
+            direct_execution_properties(isolation.inspection(), false, &plan, &[]).unwrap();
+        assert_ne!(realization.properties, properties);
+        assert_ne!(realization.content_hash().unwrap(), hash);
+    }
+
+    #[test]
+    fn external_endpoint_refuses_local_resources_and_unsealed_selection() {
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        let mut plan = endpoint_plan(true);
+        let selection = resource_selection_fixture();
+        selection.validate().unwrap();
+        let error = direct_execution_properties(isolation.inspection(), false, &plan, &[selection])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("controller-local resource selections")
+        );
+        plan.external_endpoint_binding = None;
+        assert!(direct_execution_properties(isolation.inspection(), false, &plan, &[]).is_err());
+        plan = endpoint_plan(true);
+        plan.external_endpoint_binding.as_mut().unwrap().binding_id = "other".into();
+        assert!(direct_execution_properties(isolation.inspection(), false, &plan, &[]).is_err());
+    }
+
+    #[test]
+    fn external_endpoint_cannot_reuse_controller_persistent_session_realization() {
+        let closure = |plan: &ryeos_engine::contracts::ExecutionPlan| {
+            ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+                execution_plan: serde_json::to_value(plan).unwrap(),
+                protocol_descriptor_document: String::new(),
+                command: ryeos_state::objects::AdmittedDirectCommandClosure::NodePolicy,
+                admitted_project_root: None,
+            }
+        };
+        persistent_session_execution_authority(&closure(&endpoint_plan(false))).unwrap();
+        let error =
+            persistent_session_execution_authority(&closure(&endpoint_plan(true))).unwrap_err();
+        assert!(error.to_string().contains("external launch owner"));
+    }
+
     fn realization_with_resources(
         selections: &[ryeos_engine::contracts::ExecutionResourceSelection],
     ) -> AdmittedExecutionRealization {
@@ -845,15 +1098,7 @@ mod tests {
         let empty = realization_with_resources(&[]);
         empty.validate().unwrap();
         assert_eq!(empty.properties[key], serde_json::json!("[]"));
-        let mut selection: ExecutionResourceSelection = serde_json::from_value(serde_json::json!({
-            "stable_id": "gpu-0", "class": "gpu", "matched_facts": {"memory": 1024, "vendor": "fixture"},
-            "observation_contract_digest": "2".repeat(64),
-            "device_binding_digest": "3".repeat(64),
-            "access": "execution_restricted", "enforcement": "character_device_grant",
-            "character_devices": [{"role": "compute", "destination": "/dev/test-gpu",
-                "access": "read_write", "major": 195, "minor": 0}]
-        }))
-        .unwrap();
+        let mut selection = resource_selection_fixture();
         let admitted = realization_with_resources(&[selection.clone()]);
         let encoded = admitted.to_value().unwrap();
         assert_eq!(

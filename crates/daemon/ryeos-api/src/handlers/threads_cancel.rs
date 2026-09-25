@@ -7,6 +7,7 @@
 //! Ownership check: callers can only cancel their own threads.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -150,6 +151,27 @@ pub async fn handle(
         // No PGID — thread was never attached (still in "created").
         json!({"pgid": null, "note": "no_process_to_kill"})
     };
+    let scoped_state = Arc::clone(&state);
+    let scoped_root = req.thread_id.clone();
+    tokio::task::spawn_blocking(move || {
+        ryeos_app::scoped_producer_stop::stop_scoped_producer_for_root(
+            &scoped_state,
+            &scoped_root,
+            Duration::from_secs(60),
+        )
+    })
+    .await
+    .map_err(|error| {
+        HandlerError::Internal(format!(
+            "scoped child stop worker failed for thread {}: {error}",
+            req.thread_id
+        ))
+    })?
+    .map_err(|error| {
+        HandlerError::Conflict(format!(
+            "scoped child could not be safely settled before root cancellation: {error:#}"
+        ))
+    })?;
 
     if hosted_root_terminalization.is_some() {
         ryeos_app::dedicated_session_service::abort_session_for_root_stop(&state, &req.thread_id)
@@ -158,6 +180,38 @@ pub async fn handle(
                 "hosted session could not be safely settled before root cancellation: {error:#}"
             ))
         })?;
+    }
+
+    // Descendant scopes must be settled before claiming the root terminal.
+    // The root process has already been signalled and its stop is durable.
+    let cascade_mode = match effective_intent {
+        StopIntent::Cancel => CascadeMode::Graceful,
+        StopIntent::Kill => CascadeMode::Hard,
+    };
+    let cascade_state = Arc::clone(&state);
+    let cascade_thread_id = req.thread_id.clone();
+    let (queued_cancelled, cascade) = tokio::task::spawn_blocking(move || {
+        let queued_cancelled = cancel_queued_descendants(&cascade_state, &cascade_thread_id)?;
+        let cascade = cascade_descendants(&cascade_state, &cascade_thread_id, cascade_mode)?;
+        Ok::<_, anyhow::Error>((queued_cancelled, cascade))
+    })
+    .await
+    .map_err(|error| {
+        HandlerError::Internal(format!(
+            "descendant cascade worker failed for thread {}: {error}",
+            req.thread_id
+        ))
+    })?
+    .map_err(|error| {
+        HandlerError::Conflict(format!(
+            "descendant stop or scoped-child settlement failed before root cancellation: {error:#}"
+        ))
+    })?;
+    if !queued_cancelled.is_empty() {
+        ryeos_executor::execution::launch::kick_launch_window_after_discard(&state);
+    }
+    for root in &queued_cancelled {
+        ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
     }
 
     // Finalize via ThreadLifecycleService so scheduler fire records
@@ -215,49 +269,6 @@ pub async fn handle(
 
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.
-
-    // Cascade to live descendants: killing this thread's own pgid does not reach
-    // the children it spawned (each runs as its own setsid group), so a graph
-    // blocked on an inline child would leave that child running — and authoring —
-    // past the parent's cancel. Graceful, honouring each child's declared mode. A
-    // walk failure is logged, not raised: the primary is already settled.
-    let cascade_mode = match effective_intent {
-        StopIntent::Cancel => CascadeMode::Graceful,
-        StopIntent::Kill => CascadeMode::Hard,
-    };
-    let cascade_state = Arc::clone(&state);
-    let cascade_thread_id = req.thread_id.clone();
-    let (queued_cancelled, cascade_result) = tokio::task::spawn_blocking(move || {
-        let queued_cancelled = cancel_queued_descendants(&cascade_state, &cascade_thread_id)?;
-        let cascade =
-            cascade_descendants(&cascade_state.state_store, &cascade_thread_id, cascade_mode);
-        Ok::<_, anyhow::Error>((queued_cancelled, cascade))
-    })
-    .await
-    .map_err(|error| {
-        HandlerError::Internal(format!(
-            "descendant cascade worker failed for thread {}: {error}",
-            req.thread_id
-        ))
-    })?
-    .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    if !queued_cancelled.is_empty() {
-        ryeos_executor::execution::launch::kick_launch_window_after_discard(&state);
-    }
-    for root in &queued_cancelled {
-        ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
-    }
-    let cascade = match cascade_result {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::warn!(
-                thread_id = %req.thread_id,
-                error = %e,
-                "descendant cascade failed during cancel"
-            );
-            Vec::new()
-        }
-    };
 
     // If the cancelled thread was a followed child's chain terminal, its finalize
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —

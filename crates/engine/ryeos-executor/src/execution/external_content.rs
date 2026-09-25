@@ -32,6 +32,10 @@ fn realization_mount_authority(
 /// leases. This value must live until the spawned process exits.
 pub(crate) struct BoundExternalRealizations {
     mounts: Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+    /// Exact materialization descriptors retained independently for external
+    /// guest transfer. They are kept in the same canonical order as
+    /// `realized`; local mount wrappers are not reopened or unwrapped.
+    guest_sources: Vec<lillux::InheritedDescriptorAuthority>,
     realized: RealizedExternalContentSet,
     /// Canonical JSON of the sealed realization set, injected into the spawn
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
@@ -110,6 +114,37 @@ impl BoundExternalRealizations {
             .into())
     }
 
+    /// Promote a signed producer recipe's member without accepting mount
+    /// coordinates from the callback, recipe, or serialized environment.
+    /// The retained realization set is the sole source of those coordinates.
+    pub(crate) fn bind_recipe_member_command(
+        &self,
+        isolation: &ryeos_engine::isolation::IsolationRuntime,
+        realization_id: &str,
+        manifest_hash: &str,
+        relative_path: &Path,
+        executable_sha256: &str,
+    ) -> anyhow::Result<ryeos_engine::isolation::IsolationAdmittedCommand> {
+        let realized = self
+            .realized
+            .iter()
+            .find(|entry| entry.id == realization_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "producer realization `{realization_id}` is absent from the retained set"
+                )
+            })?;
+        self.bind_realization_member_command(
+            isolation,
+            realization_id,
+            manifest_hash,
+            realized.mount_root,
+            &realized.mount,
+            relative_path,
+            executable_sha256,
+        )
+    }
+
     pub(crate) fn into_spawn_parts(
         self,
     ) -> (
@@ -118,6 +153,16 @@ impl BoundExternalRealizations {
         Vec<fs::File>,
     ) {
         (self.mounts, self.sealed_set_env, self._leases)
+    }
+
+    pub(crate) fn into_external_guest_parts(
+        self,
+    ) -> (
+        RealizedExternalContentSet,
+        Vec<lillux::InheritedDescriptorAuthority>,
+        Vec<fs::File>,
+    ) {
+        (self.realized, self.guest_sources, self._leases)
     }
 }
 
@@ -172,6 +217,39 @@ struct MaterializedExternalGeneration {
     source_path: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
     leases: Vec<fs::File>,
+}
+
+impl MaterializedExternalGeneration {
+    /// Guest transport and verification need readable file bytes, while the
+    /// local mount source deliberately retains an O_PATH authority. Derive the
+    /// readable handle from the held generation and rejoin its exact inode;
+    /// never reopen the diagnostic source_path or replace the generation lease.
+    fn guest_source(
+        &self,
+        kind: ExternalContentKind,
+    ) -> anyhow::Result<lillux::InheritedDescriptorAuthority> {
+        match kind {
+            ExternalContentKind::Tree => Ok(self.source.clone()),
+            ExternalContentKind::File => {
+                let expected = self.source.file_identity()?;
+                let readable = self
+                    .root
+                    .open_inherited_regular(
+                        OsStr::new(ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH),
+                        false,
+                    )?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("guest file realization lost its retained content entry")
+                    })?;
+                anyhow::ensure!(
+                    readable.file_identity()? == expected
+                        && self.source.file_identity()? == expected,
+                    "guest file realization changed its exact materialized file identity"
+                );
+                Ok(readable)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1010,6 +1088,23 @@ pub(crate) fn bind_external_realizations(
     )
 }
 
+/// Redeem every exact retained realization into descriptor authority for an
+/// external guest. This is independent of the controller's own isolation
+/// mode: no private host-workspace copy may substitute for the guest's signed
+/// mount inventory.
+pub(crate) fn bind_external_guest_realizations(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        Path::new("/workspace"),
+        ExternalRealizationBinding::IsolationMounts,
+        None,
+    )
+}
+
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.
@@ -1131,6 +1226,7 @@ fn bind_external_realizations_with(
         None
     };
     let mut mounts = Vec::with_capacity(realized.iter().len());
+    let mut guest_sources = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
     for entry in realized.iter() {
         if let Some(manifest) =
@@ -1225,6 +1321,7 @@ fn bind_external_realizations_with(
                     },
                 )?;
             } else {
+                guest_sources.push(generation.guest_source(entry.kind)?);
                 mounts.push(realization_mount_authority(
                     entry.mount_root,
                     generation.source_path,
@@ -1296,6 +1393,7 @@ fn bind_external_realizations_with(
                 },
             )?;
         } else {
+            guest_sources.push(generation.guest_source(entry.kind)?);
             mounts.push(realization_mount_authority(
                 entry.mount_root,
                 generation.source_path,
@@ -1315,6 +1413,7 @@ fn bind_external_realizations_with(
     }
     Ok(Some(BoundExternalRealizations {
         mounts,
+        guest_sources,
         realized,
         sealed_set_env,
         _leases: leases,
@@ -2600,6 +2699,143 @@ mod tests {
             std::fs::read(workspace_path.join("config/model.bin")).unwrap(),
             b"payload"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn guest_file_redemption_rejects_replaced_entry_without_changing_mount_authority() {
+        let (dir, cas) = temp_cas();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(dir.path());
+        let closure = store_tree_closure(&cas, &[("content", b"retained")]);
+        let generation = cache
+            .materialize(&cas, &closure, ExternalContentKind::File)
+            .unwrap();
+        let mount_identity = generation.source.file_identity().unwrap();
+        let guest = generation.guest_source(ExternalContentKind::File).unwrap();
+        assert_eq!(guest.file_identity().unwrap(), mount_identity);
+        assert_eq!(
+            guest.read_regular_file_stable_bounded(8).unwrap().0,
+            b"retained"
+        );
+        // Harness-only mutation keeps the old descriptor alive while changing
+        // its parent's content name. Redemption must refuse that substitution.
+        std::fs::rename(
+            generation.root.path().join("content"),
+            generation.root.path().join("old-content"),
+        )
+        .unwrap();
+        std::fs::write(generation.root.path().join("content"), b"retained").unwrap();
+        assert!(generation.guest_source(ExternalContentKind::File).is_err());
+        assert!(generation.source.same_file_identity(&guest).unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn prepared_guest_file_products_keep_real_generation_leases_for_both_tiers() {
+        use ryeos_external_execution_contract::{
+            GuestMountContentAuthority, GuestProductManifestKind,
+        };
+        use ryeos_state::objects::{
+            ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,
+            ExternalContentRealizationSet,
+        };
+        for large in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = ryeos_app::state::test_support::build(root.path()).unwrap();
+            let authority = state.state_store.pinned_state_authority().unwrap();
+            let cas = authority.cas_store().unwrap();
+            let ordinary = store_tree_closure(&cas, &[("content", b"retained")]);
+            let mut manifest = serde_json::to_value(ordinary.manifest()).unwrap();
+            if large {
+                manifest["schema"] =
+                    serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA);
+                manifest["kind"] =
+                    serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND);
+            }
+            let hash = cas.store_object(&manifest).unwrap();
+            let realization = ExternalContentRealization {
+                id: "runtime".into(),
+                kind: ryeos_state::objects::ExternalContentKind::File,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: hash.clone(),
+                entry_count: 1,
+                total_bytes: 8,
+                mount_root: ExternalContentMountRoot::Project,
+                mount: "vendor/runtime".into(),
+            };
+            let invocation = serde_json::to_value(
+                ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture(),
+            )
+            .unwrap();
+            let mut resolution: ryeos_engine::resolution::ResolutionOutput =
+                serde_json::from_value(invocation["resolution_output"].clone()).unwrap();
+            resolution.composed.derived.insert(
+                ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY.into(),
+                ExternalContentRealizationSet::new(vec![realization])
+                    .unwrap()
+                    .to_value()
+                    .unwrap(),
+            );
+            let prepared = super::super::external_guest_inputs::prepare_product_inputs(
+                &state,
+                &resolution,
+                Path::new("/workspace"),
+                None,
+            )
+            .unwrap();
+            let [input] = prepared.inputs.as_slice() else {
+                panic!("expected one product")
+            };
+            let GuestMountContentAuthority::ProductManifest {
+                manifest_kind,
+                manifest_hash,
+                manifest_bytes,
+                ..
+            } = &input.content_authority
+            else {
+                panic!("lost product manifest")
+            };
+            assert_eq!(
+                *manifest_kind,
+                if large {
+                    GuestProductManifestKind::LargeContent
+                } else {
+                    GuestProductManifestKind::Content
+                }
+            );
+            let source = &prepared.authorities[0];
+            assert_eq!(
+                source.read_regular_file_stable_bounded(8).unwrap().0,
+                b"retained"
+            );
+            ryeos_state::external_content::realization_verification::verify_staged_external_realization(
+                source, &prepared.manifest_authorities[0],
+                if large { ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND } else { ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND },
+                manifest_hash, *manifest_bytes, ryeos_state::objects::ExternalContentKind::File, 8,
+            ).unwrap();
+            let descriptor = source.clone();
+            let cache = ExternalMaterializationCache::from_runtime_state_root(
+                &state.config.runtime_state_dir(),
+            );
+            let path = cache.root.join(&hash);
+            cache.sweep_to_budget(0).unwrap();
+            assert!(
+                path.exists(),
+                "prepared input lost its exact generation lease"
+            );
+            drop(prepared);
+            cache.sweep_to_budget(0).unwrap();
+            assert!(
+                !path.exists(),
+                "descriptor alone must not act as a generation lease"
+            );
+            // The removed file remains readable by its exact descriptor, but
+            // that cannot substitute for preserving the full generation tree.
+            assert_eq!(
+                descriptor.read_regular_file_stable_bounded(8).unwrap().0,
+                b"retained"
+            );
+        }
     }
 
     #[test]

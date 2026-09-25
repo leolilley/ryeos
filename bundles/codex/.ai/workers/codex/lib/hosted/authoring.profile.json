@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "external_candidate": null,
   "transport": "stdio_jsonrpc",
   "http_sse": null,
@@ -37,7 +37,7 @@
     "-c",
     "agents={ enabled=false }",
     "-c",
-    "features={ apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
+    "features={ apps=false, plugins=false, skill_mcp_dependency_install=false, remote_plugin=false, hooks=false, multi_agent=false, multi_agent_v2=false, memories=false, network_proxy=false, code_mode_host=true, code_mode={ enabled=false } }",
     "app-server"
   ],
   "workload_home_env": "CODEX_HOME",
@@ -588,8 +588,8 @@
           "equals": "never"
         },
         {
-          "pointer": "/response/result/sandbox/networkAccess",
-          "equals": true
+          "pointer": "/response/result/sandbox/type",
+          "equals": "dangerFullAccess"
         }
       ]
     },
@@ -683,8 +683,8 @@
           "equals": "never"
         },
         {
-          "pointer": "/response/result/sandbox/networkAccess",
-          "equals": true
+          "pointer": "/response/result/sandbox/type",
+          "equals": "dangerFullAccess"
         }
       ]
     },

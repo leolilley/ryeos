@@ -644,7 +644,7 @@ impl CasStore {
         source: fs::File,
         display_path: &Path,
         max_bytes: u64,
-        deadline: std::time::Instant,
+        deadline: crate::time::MonotonicDeadline,
     ) -> Result<StreamedBlobOutcome> {
         self.put_blob_from_open_regular_inner(source, display_path, Some(max_bytes), Some(deadline))
     }
@@ -654,7 +654,7 @@ impl CasStore {
         mut source: fs::File,
         display_path: &Path,
         max_bytes: Option<u64>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<crate::time::MonotonicDeadline>,
     ) -> Result<StreamedBlobOutcome> {
         check_capture_deadline(deadline)?;
         #[cfg(not(unix))]
@@ -919,7 +919,7 @@ fn verify_existing_streamed_entry(
     expected_hash: &str,
     expected_size: u64,
     path: &Path,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<crate::time::MonotonicDeadline>,
 ) -> Result<()> {
     check_capture_deadline(deadline)?;
     let metadata = file.metadata()?;
@@ -951,8 +951,8 @@ fn verify_existing_streamed_entry(
     Ok(())
 }
 
-fn check_capture_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+fn check_capture_deadline(deadline: Option<crate::time::MonotonicDeadline>) -> Result<()> {
+    if deadline.is_some_and(|deadline| deadline.has_elapsed()) {
         anyhow::bail!("regular-file capture deadline expired");
     }
     Ok(())

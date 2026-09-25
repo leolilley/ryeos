@@ -66,6 +66,7 @@ skill_mcp_dependency_install = false
 remote_plugin = false
 hooks = false
 multi_agent = false
+multi_agent_v2 = false
 memories = false
 network_proxy = false
 # RyeOS presents admitted executions as direct dynamic tools. Advertising the

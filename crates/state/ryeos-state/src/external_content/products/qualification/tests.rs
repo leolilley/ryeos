@@ -11,6 +11,7 @@ use super::super::{ProductBounds, ProductProducerAdmission, ProductShape, Produc
 use crate::objects::{
     EXTERNAL_CONTENT_MANIFEST_KIND, ExternalContentKind, ExternalContentMountRoot,
 };
+#[cfg(test)]
 use crate::signer::TestSigner;
 use serde_json::json;
 
@@ -20,8 +21,125 @@ fn policy() -> ProductQualificationPolicy {
         verifier_ref: "tool:fixtures/qualify_runtime".into(),
         subject_declaration_id: "runtime".into(),
         allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
+        minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope":"bounded_fixture"}),
+        producer_scenarios: BTreeMap::new(),
     }
+}
+
+#[cfg(test)]
+fn launch_purpose() -> ProductQualificationLaunchPurpose {
+    let policy = policy();
+    ProductQualificationLaunchPurpose {
+        schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.into(),
+        launch_id: format!("L-{}", "a".repeat(32)),
+        owner_fingerprint: "fp:operator".into(),
+        product_witness_hash: "b".repeat(64),
+        witness_source: ProductWitnessSource::LocalCapture {},
+        relationship_name: "runtime_to_worker".into(),
+        policy_source: ProductQualificationPolicySource {
+            canonical_ref: "config:fixtures/qualification_policy".into(),
+            raw_content_digest: "c".repeat(64),
+            effective_definition_digest: "d".repeat(64),
+            publisher_fingerprint: "e".repeat(64),
+            policy: policy.clone(),
+        },
+        producer_recipe_sources: BTreeMap::new(),
+        subject_declaration_id: policy.subject_declaration_id.clone(),
+        subject_manifest_hash: "f".repeat(64),
+        required_claims: vec!["command_probe".into()],
+        admitted_parameters_digest: policy.admitted_parameters_digest().unwrap(),
+        verifier_ref: policy.verifier_ref.clone(),
+        verifier_effective_definition_digest: "1".repeat(64),
+        verifier_realized_definition_digest: "2".repeat(64),
+    }
+}
+
+#[test]
+fn launch_purpose_pins_every_signed_producer_recipe_source() {
+    let mut purpose = launch_purpose();
+    let recipe_ref = "config:fixtures/producer".to_owned();
+    purpose.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: recipe_ref.clone(),
+        },
+    );
+    assert!(purpose.validate().is_err());
+    purpose.producer_recipe_sources.insert(
+        "native_codex".into(),
+        ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            canonical_ref: recipe_ref,
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            recipe_digest: "d".repeat(64),
+        },
+    );
+    purpose.validate().unwrap();
+    purpose
+        .producer_recipe_sources
+        .get_mut("native_codex")
+        .unwrap()
+        .canonical_ref = "config:fixtures/other".into();
+    assert!(purpose.validate().is_err());
+}
+
+#[test]
+fn launch_purpose_requires_exact_signed_policy_subject_parameters_and_owner_coordinate() {
+    let purpose = launch_purpose();
+    purpose.validate().unwrap();
+    let mut wire = serde_json::to_value(&purpose).unwrap();
+    wire.as_object_mut().unwrap().remove("witness_source");
+    assert!(serde_json::from_value::<ProductQualificationLaunchPurpose>(wire).is_err());
+    for mutate in [
+        (|p: &mut ProductQualificationLaunchPurpose| p.launch_id = "L-bad".into())
+            as fn(&mut ProductQualificationLaunchPurpose),
+        |p| p.owner_fingerprint = "".into(),
+        |p| p.product_witness_hash = "bad".into(),
+        |p| p.subject_declaration_id = "other".into(),
+        |p| p.subject_manifest_hash = "bad".into(),
+        |p| p.required_claims = vec!["unapproved".into()],
+        |p| p.admitted_parameters_digest = "0".repeat(64),
+        |p| p.verifier_ref = "tool:fixtures/other".into(),
+        |p| p.verifier_effective_definition_digest = "bad".into(),
+        |p| p.verifier_realized_definition_digest = "bad".into(),
+    ] {
+        let mut changed = purpose.clone();
+        mutate(&mut changed);
+        assert!(changed.validate().is_err());
+    }
+}
+
+#[test]
+fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
+    let mut policy_wire = serde_json::to_value(policy()).unwrap();
+    policy_wire
+        .as_object_mut()
+        .unwrap()
+        .remove("minimum_verifier_process_settlement");
+    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    policy_wire["minimum_verifier_process_settlement"] = json!("unknown");
+    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    policy_wire["minimum_verifier_process_settlement"] = json!("scope_empty");
+    ProductQualificationPolicy::from_value(&policy_wire).unwrap();
+
+    let mut evidence = evidence();
+    evidence.verifier.process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    assert!(evidence.validate().is_err());
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+    evidence.validate().unwrap();
+    evidence.verifier.process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::ScopeEmpty);
+    evidence.validate().unwrap();
+    evidence.verifier.process_settlement_authority = None;
+    assert!(evidence.validate().is_err());
 }
 
 #[test]
@@ -35,6 +153,8 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     graph.verifier.canonical_ref = "graph:fixtures/qualify_runtime".into();
     graph.policy_source.policy.verifier_ref = graph.verifier.canonical_ref.clone();
     graph.verifier.artifact_identity = graph_artifact_identity();
+    graph.verifier.process_settlement_witness_digest = None;
+    graph.verifier.process_settlement_authority = None;
     graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
     let mut child = direct.verifier.clone();
     child.chain_root_id = "T-probe".into();
@@ -52,6 +172,18 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
         });
     graph.validate().unwrap();
     assert_eq!(graph.execution_verifiers().count(), 2);
+    let mut weak_participant = graph.clone();
+    weak_participant.execution_proof.participants[0]
+        .verifier
+        .process_settlement_authority =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    assert!(weak_participant.validate().is_err());
+    weak_participant
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+    weak_participant.validate().unwrap();
     for mutate in [
         (|p: &mut ProductQualificationParticipant| p.call_id = "".into())
             as fn(&mut ProductQualificationParticipant),
@@ -137,6 +269,7 @@ pub(crate) fn execution_proof(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn graph_artifact_identity() -> AdmittedLaunchArtifactIdentity {
     AdmittedLaunchArtifactIdentity::ManagedRuntime {
         runtime_ref: "runtime:fixtures/graph".into(),
@@ -231,6 +364,8 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             subject_declaration_id: policy.subject_declaration_id.clone(),
             subject_manifest_hash: result.subject_manifest_hash.clone(),
             terminal_snapshot_hash: "4".repeat(64),
+            process_settlement_witness_digest: Some("9".repeat(64)),
+            process_settlement_authority: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
             result_digest: result.digest().unwrap(),
         },
         policy_source: ProductQualificationPolicySource {
@@ -334,6 +469,8 @@ fn logical_root_is_owned_by_launch_driver_not_kind_name() {
     };
     assert!(verifier.validate().is_err());
     verifier.admitted_project_root = None;
+    verifier.process_settlement_witness_digest = None;
+    verifier.process_settlement_authority = None;
     verifier.validate().unwrap();
     verifier.canonical_ref = "tool:fixtures/qualify_runtime".into();
     verifier.validate().unwrap();
@@ -406,6 +543,7 @@ fn subject_selection(evidence: &ProductQualificationEvidence) -> ResolvedExterna
     }
 }
 
+#[cfg(test)]
 pub(crate) fn dynamic_evidence() -> ProductQualificationEvidence {
     let mut evidence = evidence();
     let selection = subject_selection(&evidence);
@@ -625,6 +763,63 @@ fn policy_is_closed_bounded_and_has_no_shell_or_wildcard_lane() {
     assert!(value.validate().is_err());
     let mut wire = serde_json::to_value(policy()).unwrap();
     wire["command"] = json!("host-python");
+    assert!(ProductQualificationPolicy::from_value(&wire).is_err());
+}
+
+#[test]
+fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
+    let mut value = policy();
+    value.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:fixtures/independent-runtime/native-codex-producer".into(),
+        },
+    );
+    assert!(value.validate().is_ok());
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&serde_json::to_value(&value).unwrap())
+            .unwrap()
+            .producer_scenarios,
+        value.producer_scenarios
+    );
+
+    for name in ["", "NativeCodex", "native.codex", "../escape"] {
+        let mut invalid = policy();
+        invalid.producer_scenarios.insert(
+            name.into(),
+            ProductQualificationProducerScenario {
+                recipe_ref: "config:fixtures/recipe".into(),
+            },
+        );
+        assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
+    }
+    for reference in [
+        "bin:fixtures/producer",
+        "tool:fixtures/producer",
+        "config:fixtures/producer@latest",
+        " config:fixtures/producer",
+        "config:../producer",
+    ] {
+        let mut invalid = value.clone();
+        invalid
+            .producer_scenarios
+            .get_mut("native_codex")
+            .unwrap()
+            .recipe_ref = reference.into();
+        assert!(invalid.validate().is_err(), "accepted recipe {reference:?}");
+    }
+    let mut too_many = policy();
+    for index in 0..=MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
+        too_many.producer_scenarios.insert(
+            format!("scenario_{index}"),
+            ProductQualificationProducerScenario {
+                recipe_ref: "config:fixtures/recipe".into(),
+            },
+        );
+    }
+    assert!(too_many.validate().is_err());
+    let mut wire = serde_json::to_value(value).unwrap();
+    wire["producer_scenarios"]["native_codex"]["command"] = json!("/bin/sh");
     assert!(ProductQualificationPolicy::from_value(&wire).is_err());
 }
 

@@ -6,7 +6,9 @@
 //! the dispatcher must serialize actual delivery against sticky revocation.
 //! Reopening validates evidence only; it never recreates or releases a launcher.
 
-use super::transcript::{ChannelPhase, FrameFrontier, urgent_control};
+use super::transcript::{
+    ChannelPhase, DirectCommandTranscript, FrameFrontier, command_output_bytes, urgent_control,
+};
 use super::{
     AuthenticatedExecutionFrame, ChannelDirection, ExecutionChannelBinding, ExecutionChannelBudget,
     ExecutionChannelPayload, ExecutionFrame, ExecutionFrameApplication, SignedExecutionFrame,
@@ -28,8 +30,9 @@ CREATE TABLE external_execution_channel (
         ('prepared','ready','running','quiescing','exported','stopping','stopped')),
     completion_request_digest TEXT,
     export_snapshot_hash TEXT,
+    export_output_capture_hash TEXT,
     export_evidence_hash TEXT,
-    CHECK ((export_snapshot_hash IS NULL AND export_evidence_hash IS NULL)
+    CHECK ((export_snapshot_hash IS NULL AND export_output_capture_hash IS NULL AND export_evidence_hash IS NULL)
         OR (export_snapshot_hash IS NOT NULL AND export_evidence_hash IS NOT NULL
             AND completion_request_digest IS NOT NULL))
 );
@@ -68,7 +71,8 @@ BEGIN SELECT RAISE(ABORT, 'external channel cannot change its occurrence or keys
 CREATE TRIGGER external_execution_channel_initial_state
 BEFORE INSERT ON external_execution_channel
 WHEN NEW.state!='prepared' OR NEW.completion_request_digest IS NOT NULL
- OR NEW.export_snapshot_hash IS NOT NULL OR NEW.export_evidence_hash IS NOT NULL
+ OR NEW.export_snapshot_hash IS NOT NULL OR NEW.export_output_capture_hash IS NOT NULL
+ OR NEW.export_evidence_hash IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'external channel must begin prepared without a projection'); END;
 CREATE TRIGGER external_execution_frame_initial_application
 BEFORE INSERT ON external_execution_frame WHEN NEW.application!='pending'
@@ -82,7 +86,8 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
  OR NEW.acknowledged_peer_sequence != OLD.acknowledged_peer_sequence
  OR NOT ((OLD.application='pending' AND NEW.application='claimed')
      OR (OLD.application='pending' AND NEW.application='revoked'
-         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof'),0))
+         AND OLD.direction='owner_to_supervisor'
+         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes'),0))
      OR (OLD.application='claimed' AND NEW.application='applied'))
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
@@ -103,6 +108,17 @@ pub trait JournalOwner {
         binding: &ExecutionChannelBinding,
         payload: &ExecutionChannelPayload,
     ) -> Result<()>;
+    /// Recheck current execution authority before retransmitting retained owner
+    /// Release or ProtocolBytes input. Supervisor observations are not input.
+    /// False withholds the contiguous backlog without asserting that previously
+    /// sent input was revoked or unapplied. Historical acknowledgements and
+    /// urgent cancellation must remain available through their existing gates.
+    /// Errors (including failed authority reads) are not a negative observation.
+    fn permits_execution_input_transport(
+        &self,
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+    ) -> Result<bool>;
     /// Exact durable export retention, not a transport acknowledgement or a
     /// caller success flag. Node imports and supervisor exports have different
     /// retention authorities; each must implement its own check.
@@ -112,6 +128,7 @@ pub trait JournalOwner {
         binding: &ExecutionChannelBinding,
         frame_digest: &str,
         candidate_snapshot_hash: &str,
+        candidate_output_capture_hash: Option<&str>,
         completion_request_digest: &str,
         writer_exclusion_evidence_hash: &str,
     ) -> Result<()>;
@@ -133,6 +150,18 @@ pub trait JournalOwner {
     /// controller must return false: missing peer evidence is uncertainty, and
     /// a late exact Applied acknowledgement remains admissible after cancel.
     fn can_prove_pending_input_revoked(&self) -> bool;
+}
+
+/// Only owner commands can release work or feed its executable protocol input.
+/// Supervisor bytes and EOF are retained output observations, not revocable
+/// input. Keep the SQL transition guard and revocation updates identical to
+/// this predicate; neither signed direction nor application state is inferred.
+fn is_execution_input(direction: ChannelDirection, payload: &ExecutionChannelPayload) -> bool {
+    direction == ChannelDirection::OwnerToSupervisor
+        && matches!(
+            payload,
+            ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+        )
 }
 
 /// Exact durable result of trying to acquire one retained application.
@@ -225,7 +254,8 @@ pub fn record_revocation(
         tx.execute(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
+            AND direction='owner_to_supervisor'
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
             [binding.digest()?],
         )?;
     }
@@ -308,6 +338,7 @@ pub fn append_frame(
         "SELECT state,completion_request_digest FROM external_execution_channel WHERE placement_thread_id=?1",
         [placement], |row|Ok((row.get(0)?,row.get(1)?)))?;
     owner.authorize_frame(tx, &binding, &frame.payload)?;
+    require_direct_command_append(tx, &binding, &frame.payload)?;
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
         &frame.payload,
@@ -356,7 +387,8 @@ pub fn append_frame(
         tx.execute(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
+            AND direction='owner_to_supervisor'
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
             [&frame.binding_digest],
         )?;
     }
@@ -369,7 +401,8 @@ pub fn append_frame(
             // relabel it as uncontacted or completed.
             tx.execute("UPDATE external_execution_frame SET application='revoked'
                 WHERE binding_digest=?1 AND application='pending'
-                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_eof')",
+                AND direction='owner_to_supervisor'
+                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
@@ -380,15 +413,275 @@ pub fn append_frame(
         }
         ExecutionChannelPayload::ExportSealed {
             candidate_snapshot_hash,
+            candidate_output_capture_hash,
             writer_exclusion_evidence_hash,
             ..
         } => {
-            tx.execute("UPDATE external_execution_channel SET export_snapshot_hash=?2,export_evidence_hash=?3 WHERE placement_thread_id=?1",
-                params![placement,candidate_snapshot_hash,writer_exclusion_evidence_hash])?;
+            tx.execute("UPDATE external_execution_channel SET export_snapshot_hash=?2,export_output_capture_hash=?3,export_evidence_hash=?4 WHERE placement_thread_id=?1",
+                params![placement,candidate_snapshot_hash,candidate_output_capture_hash,writer_exclusion_evidence_hash])?;
         }
         _ => {}
     }
     Ok(true)
+}
+
+/// Chunks need only the last authenticated same-stream frontier, not a repeated
+/// digest scan over all previous output. Terminal verification hashes each
+/// retained chunk once; reopen performs the same check in its existing pass.
+fn require_direct_command_append(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+    payload: &ExecutionChannelPayload,
+) -> Result<()> {
+    let stream = match payload {
+        ExecutionChannelPayload::CommandOutput { stream, .. } => Some(*stream),
+        ExecutionChannelPayload::CommandTerminated { .. } => None,
+        _ => return Ok(()),
+    };
+    let digest = binding.digest()?;
+    let terminated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame WHERE binding_digest=?1
+         AND direction='supervisor_to_owner'
+         AND json_extract(frame_json,'$.frame.payload.kind')='command_terminated')",
+        [&digest],
+        |row| row.get(0),
+    )?;
+    if terminated {
+        bail!("external command observation follows termination");
+    }
+    if let Some(stream) = stream {
+        let stream_name = match stream {
+            super::ExternalCommandOutputStream::Stdout => "stdout",
+            super::ExternalCommandOutputStream::Stderr => "stderr",
+        };
+        let prior: Option<(i64, String, String)> = conn
+            .query_row(
+                "SELECT sequence,frame_digest,frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+             AND json_extract(frame_json,'$.frame.payload.kind')='command_output'
+             AND json_extract(frame_json,'$.frame.payload.stream')=?2
+             ORDER BY sequence DESC LIMIT 1",
+                params![digest, stream_name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let expected_offset = if let Some((sequence, digest, wire)) = prior {
+            let prior = authenticate_retained_frame(
+                binding,
+                ChannelDirection::SupervisorToOwner,
+                sequence,
+                &digest,
+                wire.as_bytes(),
+                binding.issued_at_ms,
+            )?;
+            let ExecutionChannelPayload::CommandOutput {
+                stream: prior_stream,
+                offset,
+                bytes_base64,
+            } = &prior.frame().payload
+            else {
+                bail!("external command stream frontier is not an output observation");
+            };
+            if *prior_stream != stream {
+                bail!("external command stream frontier changed stream");
+            }
+            let bytes = super::chunk(bytes_base64, false)?;
+            offset
+                .checked_add(bytes.len() as u64)
+                .context("external command output offset overflow")?
+        } else {
+            0
+        };
+        let ExecutionChannelPayload::CommandOutput {
+            offset,
+            bytes_base64,
+            ..
+        } = payload
+        else {
+            unreachable!("stream selected only from command output");
+        };
+        command_output_bytes(
+            binding.execution_mode,
+            stream,
+            *offset,
+            expected_offset,
+            bytes_base64,
+        )?;
+    } else {
+        retained_direct_command_transcript(conn, binding)?
+            .observe(binding.execution_mode, payload)?;
+    }
+    Ok(())
+}
+
+fn retained_direct_command_transcript(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+) -> Result<DirectCommandTranscript> {
+    visit_retained_direct_command_observations(conn, binding, |_| Ok(()))
+}
+
+/// Authenticated, bounded target observations for deterministic controller
+/// reconstruction. These are data, not success, cleanup or publication
+/// authority. The ordinary result owner must check those authorities at commit.
+pub fn retained_direct_command_observations(
+    conn: &Connection,
+    owner: &impl JournalOwner,
+    placement: &str,
+) -> Result<Vec<AuthenticatedExecutionFrame>> {
+    let binding = load_binding(conn, placement)?;
+    owner.require_owner(conn, &binding)?;
+    if !matches!(
+        binding.execution_mode,
+        super::ExternalExecutionMode::DirectCommand { .. }
+    ) {
+        bail!("external command observations require a direct-command channel");
+    }
+    let mut frames = Vec::new();
+    visit_retained_direct_command_observations(conn, &binding, |frame| {
+        frames.push(frame);
+        Ok(())
+    })?;
+    Ok(frames)
+}
+
+fn visit_retained_direct_command_observations(
+    conn: &Connection,
+    binding: &ExecutionChannelBinding,
+    mut visit: impl FnMut(AuthenticatedExecutionFrame) -> Result<()>,
+) -> Result<DirectCommandTranscript> {
+    let mut transcript = DirectCommandTranscript::default();
+    let mut retained_frames = 0_u32;
+    let mut retained_bytes = 0_u64;
+    let mut statement = conn.prepare(
+        "SELECT sequence,frame_digest,frame_json FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+         AND json_extract(frame_json,'$.frame.payload.kind') IN ('command_output','command_terminated')
+         ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([binding.digest()?])?;
+    while let Some(row) = rows.next()? {
+        let wire: String = row.get(2)?;
+        retained_frames = retained_frames
+            .checked_add(1)
+            .context("external command frame count overflow")?;
+        retained_bytes = retained_bytes
+            .checked_add(u64::try_from(wire.len())?)
+            .context("external command encoded byte count overflow")?;
+        if retained_frames > binding.max_frames || retained_bytes > binding.max_bytes {
+            bail!("retained external command observations exceed channel bounds");
+        }
+        let frame = authenticate_retained_frame(
+            binding,
+            ChannelDirection::SupervisorToOwner,
+            row.get(0)?,
+            &row.get::<_, String>(1)?,
+            wire.as_bytes(),
+            binding.issued_at_ms,
+        )?;
+        transcript.observe(binding.execution_mode, &frame.frame().payload)?;
+        visit(frame)?;
+    }
+    Ok(transcript)
+}
+
+/// Check only whether one exact applied target observation can support a
+/// success claim. This does not authorize evaluator acceptance, settle the
+/// allocation, prove descendant death, or grant publication. The caller must
+/// independently require its execution/evaluation and cleanup authorities.
+/// Consume this observation in the same owner writer transaction; never turn a
+/// successful check into permission to bank a result in a later transaction.
+/// A late target exit remains truthful retained evidence, but sticky revocation
+/// prevents success eligibility without inventing cancellation chronology.
+pub fn require_direct_command_success_observation(
+    conn: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    sequence: u64,
+    digest: &str,
+) -> Result<()> {
+    let observation = require_direct_command_complete_observation_inner(
+        conn, owner, placement, sequence, digest,
+    )?;
+    if observation.target_exit != super::ExternalTargetExit::Code(0) {
+        bail!("external command target observation does not report complete success");
+    }
+    Ok(())
+}
+
+/// Check complete applied target termination without interpreting a nonzero
+/// exit or signal as success. This permits normal occurrence settlement, never
+/// target execution, result publication or descendant-death claims.
+pub fn require_direct_command_complete_observation(
+    conn: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    sequence: u64,
+    digest: &str,
+) -> Result<()> {
+    require_direct_command_complete_observation_inner(conn, owner, placement, sequence, digest)
+        .map(|_| ())
+}
+
+fn require_direct_command_complete_observation_inner(
+    conn: &Transaction<'_>,
+    owner: &impl JournalOwner,
+    placement: &str,
+    sequence: u64,
+    digest: &str,
+) -> Result<super::ExternalCommandTermination> {
+    let binding = load_binding(conn, placement)?;
+    owner.require_owner(conn, &binding)?;
+    if revoked(conn, &binding.digest()?)? {
+        bail!("external command normal settlement is ineligible after retained revocation");
+    }
+    let (stored_digest, wire, application): (String, String, String) = conn.query_row(
+        "SELECT frame_digest,frame_json,application FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction='supervisor_to_owner' AND sequence=?2",
+        params![binding.digest()?, i64::try_from(sequence)?],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if stored_digest != digest || application != "applied" {
+        bail!("external command completion requires the exact applied terminal observation");
+    }
+    let pending_output: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+         AND json_extract(frame_json,'$.frame.payload.kind')='command_output'
+         AND application!='applied')",
+        [binding.digest()?],
+        |row| row.get(0),
+    )?;
+    let release_applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+         WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+         AND json_extract(frame_json,'$.frame.payload.kind')='release'
+         AND application='applied')",
+        [binding.digest()?],
+        |row| row.get(0),
+    )?;
+    if pending_output || !release_applied {
+        bail!("external command completion requires applied release and complete applied output");
+    }
+    let frame = authenticate_retained_frame(
+        &binding,
+        ChannelDirection::SupervisorToOwner,
+        i64::try_from(sequence)?,
+        digest,
+        wire.as_bytes(),
+        binding.issued_at_ms,
+    )?;
+    let ExecutionChannelPayload::CommandTerminated { observation } = &frame.frame().payload else {
+        bail!("external command completion requires a target termination observation");
+    };
+    if observation.reason != super::ExternalCommandTerminationReason::TargetExited
+        || observation.stdout.truncated
+        || observation.stderr.truncated
+    {
+        bail!("external command target observation does not report complete normal termination");
+    }
+    retained_direct_command_transcript(conn, &binding)?;
+    Ok(observation.clone())
 }
 
 fn reconcile_peer_application(
@@ -403,14 +696,14 @@ fn reconcile_peer_application(
 ) -> Result<()> {
     let retained: Option<(String, String, String)> = tx
         .query_row(
-            "SELECT frame_digest,application,json_extract(frame_json,'$.frame.payload.kind')
+            "SELECT frame_digest,application,frame_json
          FROM external_execution_frame
          WHERE binding_digest=?1 AND direction=?2 AND sequence=?3",
             params![binding_digest, direction.as_str(), i64::try_from(sequence)?],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((stored_digest, mut state, payload_kind)) = retained else {
+    let Some((stored_digest, mut state, wire)) = retained else {
         let actual = owner
             .out_of_band_application_state(tx, binding, direction, sequence, digest)?
             .context("external acknowledgement target is not retained")?;
@@ -461,10 +754,15 @@ fn reconcile_peer_application(
             }
         }
         ExecutionFrameApplication::Revoked => {
-            if !matches!(
-                payload_kind.as_str(),
-                "release" | "protocol_bytes" | "protocol_eof"
-            ) {
+            let verified = authenticate_retained_frame(
+                binding,
+                direction,
+                i64::try_from(sequence)?,
+                digest,
+                wire.as_bytes(),
+                binding.issued_at_ms,
+            )?;
+            if !is_execution_input(direction, &verified.frame().payload) {
                 bail!("external revocation acknowledgement named a non-input frame");
             }
             match state.as_str() {
@@ -770,17 +1068,20 @@ pub fn pending_transport_frames_after(
             // callers cannot accidentally serialize it behind ordinary input.
             break;
         }
-        if terminally_revoked
-            && matches!(
-                verified.frame().payload,
-                ExecutionChannelPayload::Release
-                    | ExecutionChannelPayload::ProtocolBytes { .. }
-                    | ExecutionChannelPayload::ProtocolEof
-            )
-        {
+        if terminally_revoked && is_execution_input(direction, &verified.frame().payload) {
             // Cancellation fences this uncertain source-side input. Its exact
             // bytes are not replayed, while later signed Claimed/Applied proof
             // remains admissible as historical evidence.
+            break;
+        }
+        if is_execution_input(direction, &verified.frame().payload)
+            && !owner.permits_execution_input_transport(conn, &binding)?
+        {
+            // Retention is not continuing execution authority. Check even the
+            // predecessors hidden by a process-local cursor, so reconnect can
+            // never skip a withheld executable input and send its successors.
+            // Absence of authority is not proof of non-delivery: preserve the
+            // transcript and accept exact late application evidence as usual.
             break;
         }
         if sequence <= after_sequence {
@@ -970,16 +1271,21 @@ pub fn claim_application(
         lillux::time::timestamp_millis(),
     )?;
     owner.authorize_frame(tx, &binding, &verified.frame().payload)?;
-    if revoked(tx, &binding_digest)? && !urgent_control(&verified.frame().payload) {
+    let command_observation = matches!(
+        verified.frame().payload,
+        ExecutionChannelPayload::CommandOutput { .. }
+            | ExecutionChannelPayload::CommandTerminated { .. }
+    );
+    // Drained target observations are not input authority. Keep normal ordered
+    // application (no urgent bypass), and keep channel expiry validation above.
+    if revoked(tx, &binding_digest)?
+        && !urgent_control(&verified.frame().payload)
+        && !command_observation
+    {
         bail!("external execution is durably revoked");
     }
     if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
-        && matches!(
-            verified.frame().payload,
-            ExecutionChannelPayload::Release
-                | ExecutionChannelPayload::ProtocolBytes { .. }
-                | ExecutionChannelPayload::ProtocolEof
-        )
+        && is_execution_input(direction, &verified.frame().payload)
     {
         bail!("external execution deadline passed before application");
     }
@@ -988,12 +1294,8 @@ pub fn claim_application(
         [placement],
         |row| row.get(0),
     )?;
-    if matches!(
-        verified.frame().payload,
-        ExecutionChannelPayload::Release
-            | ExecutionChannelPayload::ProtocolBytes { .. }
-            | ExecutionChannelPayload::ProtocolEof
-    ) && !ChannelPhase::parse(&state)?.permits_pending_input()
+    if is_execution_input(direction, &verified.frame().payload)
+        && !ChannelPhase::parse(&state)?.permits_pending_input()
     {
         bail!("external execution was revoked before pending application");
     }
@@ -1067,6 +1369,7 @@ pub fn finish_application(
     )?;
     if let ExecutionChannelPayload::ExportSealed {
         candidate_snapshot_hash,
+        candidate_output_capture_hash,
         completion_request_digest,
         writer_exclusion_evidence_hash,
     } = &verified.frame().payload
@@ -1076,6 +1379,7 @@ pub fn finish_application(
             &binding,
             digest,
             candidate_snapshot_hash,
+            candidate_output_capture_hash.as_deref(),
             completion_request_digest,
             writer_exclusion_evidence_hash,
         )?;
@@ -1163,7 +1467,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
     }
     let mut statement = conn.prepare(
         "SELECT placement_thread_id,state,completion_request_digest,
-        export_snapshot_hash,export_evidence_hash FROM external_execution_channel",
+        export_snapshot_hash,export_output_capture_hash,export_evidence_hash FROM external_execution_channel",
     )?;
     let channels = statement
         .query_map([], |row| {
@@ -1173,10 +1477,19 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (placement, stored_state, stored_completion, stored_snapshot, stored_evidence) in channels {
+    for (
+        placement,
+        stored_state,
+        stored_completion,
+        stored_snapshot,
+        stored_output_capture,
+        stored_evidence,
+    ) in channels
+    {
         let binding = load_binding(conn, &placement)?;
         owner.require_owner(conn, &binding)?;
         let binding_digest = binding.digest()?;
@@ -1202,8 +1515,10 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         let mut claimed_export_batch = [false; 2];
         let mut claimed_export_sealed = [false; 2];
         let mut state = ChannelPhase::Prepared;
+        let mut command_transcript = DirectCommandTranscript::default();
         let mut completion: Option<String> = None;
         let mut snapshot: Option<String> = None;
+        let mut output_capture: Option<String> = None;
         let mut evidence: Option<String> = None;
         let mut owner_quiesced_applied = false;
         let mut terminal_close_observed = sticky_revoked;
@@ -1263,12 +1578,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             ) {
                 bail!("retained external application has unknown state");
             }
-            let is_input = matches!(
-                frame.payload,
-                ExecutionChannelPayload::Release
-                    | ExecutionChannelPayload::ProtocolBytes { .. }
-                    | ExecutionChannelPayload::ProtocolEof
-            );
+            let is_input = is_execution_input(frame.direction, &frame.payload);
             if application == "revoked" {
                 if !is_input {
                     bail!("external control observation was incorrectly revoked");
@@ -1292,6 +1602,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
             if application == "applied"
                 && let ExecutionChannelPayload::ExportSealed {
                     candidate_snapshot_hash,
+                    candidate_output_capture_hash,
                     completion_request_digest,
                     writer_exclusion_evidence_hash,
                 } = &frame.payload
@@ -1301,6 +1612,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                     &binding,
                     verified.digest(),
                     candidate_snapshot_hash,
+                    candidate_output_capture_hash.as_deref(),
                     completion_request_digest,
                     writer_exclusion_evidence_hash,
                 )?;
@@ -1365,6 +1677,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 frame.acknowledged_peer_sequence,
             )?;
             budgets[index].retain(&binding, &frame.payload, wire.len() as u64)?;
+            command_transcript.observe(binding.execution_mode, &frame.payload)?;
             state = state.advance(completion.as_deref(), &frame.payload, true)?;
             match &frame.payload {
                 ExecutionChannelPayload::Quiesce {
@@ -1372,10 +1685,12 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
                 } => completion = Some(completion_request_digest.clone()),
                 ExecutionChannelPayload::ExportSealed {
                     candidate_snapshot_hash,
+                    candidate_output_capture_hash,
                     writer_exclusion_evidence_hash,
                     ..
                 } => {
                     snapshot = Some(candidate_snapshot_hash.clone());
+                    output_capture = candidate_output_capture_hash.clone();
                     evidence = Some(writer_exclusion_evidence_hash.clone());
                 }
                 _ => {}
@@ -1397,6 +1712,7 @@ pub fn validate_channels(conn: &Connection, owner: &impl JournalOwner) -> Result
         if state != ChannelPhase::parse(&stored_state)?
             || completion != stored_completion
             || snapshot != stored_snapshot
+            || output_capture != stored_output_capture
             || evidence != stored_evidence
         {
             bail!("external lifecycle projection contradicts signed transcript");
@@ -1500,12 +1816,25 @@ mod tests {
             Ok(())
         }
 
+        fn permits_execution_input_transport(
+            &self,
+            conn: &Connection,
+            binding: &ExecutionChannelBinding,
+        ) -> Result<bool> {
+            Ok(conn.query_row(
+                "SELECT permits_input_transport FROM test_owner WHERE binding_digest=?1",
+                [binding.digest()?],
+                |row| row.get(0),
+            )?)
+        }
+
         fn require_export_retention(
             &self,
             conn: &Connection,
             binding: &ExecutionChannelBinding,
             frame_digest: &str,
             candidate_snapshot_hash: &str,
+            _candidate_output_capture_hash: Option<&str>,
             completion_request_digest: &str,
             writer_exclusion_evidence_hash: &str,
         ) -> Result<()> {
@@ -1576,10 +1905,24 @@ mod tests {
         execution_deadline_ms: i64,
         expires_at_ms: i64,
     ) -> (Connection, ExecutionChannelBinding, SigningKey, SigningKey) {
-        let conn = Connection::open_in_memory().unwrap();
+        setup_with_connection(
+            Connection::open_in_memory().unwrap(),
+            issued_at_ms,
+            execution_deadline_ms,
+            expires_at_ms,
+        )
+    }
+
+    fn setup_with_connection(
+        conn: Connection,
+        issued_at_ms: i64,
+        execution_deadline_ms: i64,
+        expires_at_ms: i64,
+    ) -> (Connection, ExecutionChannelBinding, SigningKey, SigningKey) {
         conn.execute_batch(CHANNEL_SQL).unwrap();
         conn.execute_batch(
-            "CREATE TABLE test_owner(binding_digest TEXT PRIMARY KEY);
+            "CREATE TABLE test_owner(binding_digest TEXT PRIMARY KEY,
+                permits_input_transport INTEGER NOT NULL DEFAULT 1 CHECK (permits_input_transport IN (0,1)));
              CREATE TABLE test_retention(
                 binding_digest TEXT NOT NULL,
                 frame_digest TEXT NOT NULL,
@@ -1592,7 +1935,9 @@ mod tests {
         let owner = lillux::crypto::generate_signing_key();
         let supervisor = lillux::crypto::generate_signing_key();
         let binding = ExecutionChannelBinding {
-            schema: 3,
+            schema: crate::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
             placement_thread_id: "T-shared-journal".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -1615,12 +1960,12 @@ mod tests {
         let digest = binding.digest().unwrap();
         let canonical = lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap();
         conn.execute(
-            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL)",
+            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
             params![binding.placement_thread_id, digest, canonical],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO test_owner VALUES(?1)",
+            "INSERT INTO test_owner(binding_digest) VALUES(?1)",
             [binding.digest().unwrap()],
         )
         .unwrap();
@@ -1761,6 +2106,713 @@ mod tests {
         digest
     }
 
+    fn direct_setup(
+        path: Option<&std::path::Path>,
+    ) -> (Connection, ExecutionChannelBinding, SigningKey, SigningKey) {
+        let (_, mut binding, owner, supervisor) = setup();
+        binding.execution_mode = super::super::ExternalExecutionMode::DirectCommand {
+            stdout_max_bytes: 8,
+            stderr_max_bytes: 8,
+        };
+        binding.candidate_export_max_bytes = 0;
+        let conn = match path {
+            Some(path) => Connection::open(path),
+            None => Connection::open_in_memory(),
+        }
+        .unwrap();
+        conn.execute_batch(CHANNEL_SQL).unwrap();
+        conn.execute_batch("CREATE TABLE test_owner(binding_digest TEXT PRIMARY KEY,
+            permits_input_transport INTEGER NOT NULL DEFAULT 1 CHECK (permits_input_transport IN (0,1)))")
+            .unwrap();
+        let digest = binding.digest().unwrap();
+        conn.execute(
+            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
+            params![binding.placement_thread_id, digest, lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO test_owner(binding_digest) VALUES(?1)",
+            [&digest],
+        )
+        .unwrap();
+        (conn, binding, owner, supervisor)
+    }
+
+    fn author_direct(
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        key: &SigningKey,
+        direction: ChannelDirection,
+        payload: ExecutionChannelPayload,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let frame = author_frame(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            direction,
+            key,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(frame)
+    }
+
+    fn apply_direct(
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        frame: &AuthenticatedExecutionFrame,
+    ) {
+        assert!(
+            claim(
+                conn,
+                binding,
+                frame.frame().direction,
+                frame.frame().sequence,
+                frame.digest()
+            )
+            .unwrap()
+        );
+        finish(
+            conn,
+            binding,
+            frame.frame().direction,
+            frame.frame().sequence,
+            frame.digest(),
+        )
+        .unwrap();
+    }
+
+    fn start_direct(
+        conn: &Connection,
+        binding: &ExecutionChannelBinding,
+        owner: &SigningKey,
+        supervisor: &SigningKey,
+    ) {
+        ready(conn, binding, supervisor);
+        let release = author_direct(
+            conn,
+            binding,
+            owner,
+            ChannelDirection::OwnerToSupervisor,
+            ExecutionChannelPayload::Release,
+        )
+        .unwrap();
+        apply_direct(conn, binding, &release);
+    }
+
+    #[test]
+    fn direct_first_cancel_after_target_exit_or_stop_preserves_phase_and_survives_reopen() {
+        for stopped in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("late-cancel.sqlite3");
+            let (conn, binding, owner, supervisor) = direct_setup(Some(&path));
+            start_direct(&conn, &binding, &owner, &supervisor);
+            let terminal = author_direct(
+                &conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                command_terminal(b"", b""),
+            )
+            .unwrap();
+            if stopped {
+                author_direct(
+                    &conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    ExecutionChannelPayload::Stopped {
+                        reason: super::super::ExternalStopReason::Cancelled,
+                    },
+                )
+                .unwrap();
+            }
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let cancel = prepare_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            record_revocation(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                cancel.canonical().as_bytes(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            // Crash cut after the durable fence, before ordinary append.
+            drop(conn);
+            let conn = Connection::open(&path).unwrap();
+            assert!(append(&conn, &binding, cancel.canonical().as_bytes()).unwrap());
+            assert!(!append(&conn, &binding, cancel.canonical().as_bytes()).unwrap());
+            let phase: String = conn
+                .query_row(
+                    "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                    [&binding.placement_thread_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(phase, if stopped { "stopped" } else { "stopping" });
+            assert!(
+                author_direct(
+                    &conn,
+                    &binding,
+                    &owner,
+                    ChannelDirection::OwnerToSupervisor,
+                    ExecutionChannelPayload::Release
+                )
+                .is_err()
+            );
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let different = prepare_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            assert_ne!(different.digest(), cancel.digest());
+            assert!(
+                record_revocation(
+                    &tx,
+                    &TestOwner,
+                    &binding.placement_thread_id,
+                    different.canonical().as_bytes()
+                )
+                .is_err()
+            );
+            drop(tx);
+            validate_channels(&conn, &TestOwner).unwrap();
+            assert!(
+                require_direct_command_success_observation(
+                    &conn,
+                    &TestOwner,
+                    &binding.placement_thread_id,
+                    terminal.frame().sequence,
+                    terminal.digest(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn canceled_first_ready_retains_peer_chain_without_reopening_execution() {
+        let (conn, binding, owner, supervisor) = direct_setup(None);
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        let cancel = prepare_frame(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+            &owner,
+            ExecutionChannelPayload::Cancel,
+        )
+        .unwrap();
+        record_revocation(
+            &tx,
+            &TestOwner,
+            &binding.placement_thread_id,
+            cancel.canonical().as_bytes(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        append(&conn, &binding, cancel.canonical().as_bytes()).unwrap();
+        let observation = ExecutionChannelPayload::Ready {
+            supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+            base_snapshot_hash: binding.base_snapshot_hash.clone(),
+        };
+        let ready = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            observation.clone(),
+        )
+        .unwrap();
+        assert_eq!(ready.frame().sequence, 1);
+        assert!(!append(&conn, &binding, ready.canonical().as_bytes()).unwrap());
+        assert!(
+            author_direct(
+                &conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                observation
+            )
+            .is_err()
+        );
+        assert!(
+            author_direct(
+                &conn,
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Release
+            )
+            .is_err()
+        );
+        let ack = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: cancel.frame().sequence,
+                peer_frame_digest: cancel.digest().to_owned(),
+                application: super::super::ExecutionFrameApplication::Retained,
+            },
+        )
+        .unwrap();
+        assert_eq!(ack.frame().sequence, 2);
+        assert_eq!(
+            ack.frame().previous_frame_digest.as_deref(),
+            Some(ready.digest())
+        );
+        let phase: String = conn
+            .query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [&binding.placement_thread_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(phase, "stopping");
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
+
+    fn command_output(
+        stream: super::super::ExternalCommandOutputStream,
+        offset: u64,
+        bytes: &[u8],
+    ) -> ExecutionChannelPayload {
+        ExecutionChannelPayload::CommandOutput {
+            stream,
+            offset,
+            bytes_base64: STANDARD.encode(bytes),
+        }
+    }
+
+    fn command_terminal(stdout: &[u8], stderr: &[u8]) -> ExecutionChannelPayload {
+        use super::super::{
+            ExternalCommandOutputCommitment, ExternalCommandTermination,
+            ExternalCommandTerminationReason, ExternalTargetExit,
+        };
+        let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            truncated: false,
+        };
+        ExecutionChannelPayload::CommandTerminated {
+            observation: ExternalCommandTermination {
+                target_exit: ExternalTargetExit::Code(0),
+                reason: ExternalCommandTerminationReason::TargetExited,
+                stdout: commitment(stdout),
+                stderr: commitment(stderr),
+            },
+        }
+    }
+
+    // Tests only observe eligibility; product callers must keep this same
+    // writer transaction through their independent acceptance transition.
+    fn require_direct_command_success_observation(
+        conn: &Connection,
+        owner: &impl JournalOwner,
+        placement: &str,
+        sequence: u64,
+        digest: &str,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        super::require_direct_command_success_observation(&tx, owner, placement, sequence, digest)
+    }
+
+    #[test]
+    fn direct_command_journal_checks_output_terminal_and_reopens_without_cleanup_claim() {
+        use super::super::ExternalCommandOutputStream::{Stderr, Stdout};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("channel.sqlite3");
+        let (conn, binding, owner, supervisor) = direct_setup(Some(&path));
+        start_direct(&conn, &binding, &owner, &supervisor);
+        for payload in [
+            command_output(Stdout, 0, b"abc"),
+            command_output(Stderr, 0, b"err"),
+            command_output(Stdout, 3, b"def"),
+        ] {
+            let frame = author_direct(
+                &conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                payload,
+            )
+            .unwrap();
+            apply_direct(&conn, &binding, &frame);
+        }
+        for payload in [
+            command_output(Stdout, 5, b"x"),
+            command_output(Stdout, 7, b"x"),
+            command_terminal(b"wrong!", b"err"),
+            command_terminal(b"abcde", b"err"),
+        ] {
+            assert!(
+                author_direct(
+                    &conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    payload
+                )
+                .is_err()
+            );
+        }
+        let terminal = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_terminal(b"abcdef", b"err"),
+        )
+        .unwrap();
+        assert!(
+            require_direct_command_success_observation(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                terminal.frame().sequence,
+                terminal.digest()
+            )
+            .is_err()
+        );
+        apply_direct(&conn, &binding, &terminal);
+        require_direct_command_success_observation(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            terminal.frame().sequence,
+            terminal.digest(),
+        )
+        .unwrap();
+        for payload in [
+            command_output(Stdout, 6, b"x"),
+            command_terminal(b"abcdef", b"err"),
+        ] {
+            assert!(
+                author_direct(
+                    &conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    payload
+                )
+                .is_err()
+            );
+        }
+        // Transport replay is exact idempotence, not a second termination.
+        assert!(!append(&conn, &binding, terminal.canonical().as_bytes()).unwrap());
+        let phase: String = conn
+            .query_row("SELECT state FROM external_execution_channel", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(phase, "stopping", "target exit cannot settle cleanup");
+        drop(conn);
+        let conn = Connection::open(path).unwrap();
+        validate_channels(&conn, &TestOwner).unwrap();
+        require_direct_command_success_observation(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            terminal.frame().sequence,
+            terminal.digest(),
+        )
+        .unwrap();
+        let stopped = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            ExecutionChannelPayload::Stopped {
+                reason: ExternalStopReason::EndpointExited,
+            },
+        )
+        .unwrap();
+        apply_direct(&conn, &binding, &stopped);
+        assert_eq!(
+            conn.query_row("SELECT state FROM external_execution_channel", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "stopped"
+        );
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
+
+    #[test]
+    fn direct_command_cancel_preserves_raw_exit_but_refuses_success_and_keeps_ordered_drain() {
+        use super::super::ExternalCommandOutputStream::Stdout;
+        let (conn, binding, owner, supervisor) = direct_setup(None);
+        start_direct(&conn, &binding, &owner, &supervisor);
+        let cancel = {
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let cancel = prepare_frame(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            record_revocation(
+                &tx,
+                &TestOwner,
+                &binding.placement_thread_id,
+                cancel.canonical().as_bytes(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            cancel
+        };
+        append(&conn, &binding, cancel.canonical().as_bytes()).unwrap();
+        apply_direct(&conn, &binding, &cancel);
+        let output = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_output(Stdout, 0, b"tail"),
+        )
+        .unwrap();
+        let terminal = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_terminal(b"tail", b""),
+        )
+        .unwrap();
+        assert!(
+            claim(
+                &conn,
+                &binding,
+                ChannelDirection::SupervisorToOwner,
+                terminal.frame().sequence,
+                terminal.digest()
+            )
+            .is_err(),
+            "drain must not bypass its pending output predecessor"
+        );
+        apply_direct(&conn, &binding, &output);
+        apply_direct(&conn, &binding, &terminal);
+        assert!(revoked(&conn, &binding.digest().unwrap()).unwrap());
+        assert!(
+            require_direct_command_success_observation(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                terminal.frame().sequence,
+                terminal.digest()
+            )
+            .is_err()
+        );
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
+
+    #[test]
+    fn direct_command_success_requires_applied_release_and_all_output() {
+        use super::super::ExternalCommandOutputStream::Stdout;
+        for with_output in [false, true] {
+            let (conn, binding, owner, supervisor) = direct_setup(None);
+            ready(&conn, &binding, &supervisor);
+            let release = author_direct(
+                &conn,
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                ExecutionChannelPayload::Release,
+            )
+            .unwrap();
+            let output = with_output.then(|| {
+                author_direct(
+                    &conn,
+                    &binding,
+                    &supervisor,
+                    ChannelDirection::SupervisorToOwner,
+                    command_output(Stdout, 0, b"x"),
+                )
+                .unwrap()
+            });
+            let terminal = author_direct(
+                &conn,
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                command_terminal(if with_output { b"x" } else { b"" }, b""),
+            )
+            .unwrap();
+            // Model retained terminal application without its prerequisites.
+            // These permitted SQL transitions intentionally bypass the normal
+            // claim owner; the eligibility seam must not infer its guards ran.
+            for application in ["claimed", "applied"] {
+                conn.execute(
+                    "UPDATE external_execution_frame SET application=?1
+                    WHERE direction='supervisor_to_owner' AND sequence=?2",
+                    params![application, terminal.frame().sequence as i64],
+                )
+                .unwrap();
+            }
+            assert!(
+                require_direct_command_success_observation(
+                    &conn,
+                    &TestOwner,
+                    &binding.placement_thread_id,
+                    terminal.frame().sequence,
+                    terminal.digest()
+                )
+                .is_err()
+            );
+            // Terminal projection has already stopped input, so do not claim
+            // this Release as fresh execution. Project historical application
+            // with fixture SQL to isolate the independent output requirement.
+            for application in ["claimed", "applied"] {
+                conn.execute(
+                    "UPDATE external_execution_frame SET application=?1
+                    WHERE direction='owner_to_supervisor' AND sequence=?2",
+                    params![application, release.frame().sequence as i64],
+                )
+                .unwrap();
+            }
+            if let Some(output) = output {
+                assert!(
+                    require_direct_command_success_observation(
+                        &conn,
+                        &TestOwner,
+                        &binding.placement_thread_id,
+                        terminal.frame().sequence,
+                        terminal.digest()
+                    )
+                    .is_err()
+                );
+                apply_direct(&conn, &binding, &output);
+            }
+            require_direct_command_success_observation(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                terminal.frame().sequence,
+                terminal.digest(),
+            )
+            .unwrap();
+            validate_channels(&conn, &TestOwner).unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_command_reopen_rechecks_signed_terminal_against_retained_chunks() {
+        use super::super::ExternalCommandOutputStream::Stdout;
+        let (conn, binding, owner, supervisor) = direct_setup(None);
+        start_direct(&conn, &binding, &owner, &supervisor);
+        let output = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_output(Stdout, 0, b"abc"),
+        )
+        .unwrap();
+        apply_direct(&conn, &binding, &output);
+        let terminal = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_terminal(b"abc", b""),
+        )
+        .unwrap();
+        apply_direct(&conn, &binding, &terminal);
+        validate_channels(&conn, &TestOwner).unwrap();
+        // Corrupt retained content with a correctly signed but false terminal.
+        // Recovery must check its commitment, not just authentication or phase.
+        let (false_wire, false_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            terminal.frame().sequence,
+            terminal.frame().previous_frame_digest.clone(),
+            terminal.frame().acknowledged_peer_sequence,
+            command_terminal(b"xyz", b""),
+        );
+        conn.execute_batch("DROP TRIGGER external_execution_frame_immutable")
+            .unwrap();
+        conn.execute("UPDATE external_execution_frame SET frame_json=?1,frame_digest=?2,frame_bytes=?3 WHERE direction='supervisor_to_owner' AND sequence=?4",
+            params![String::from_utf8(false_wire.clone()).unwrap(), false_digest, false_wire.len() as i64, terminal.frame().sequence as i64]).unwrap();
+        assert!(
+            validate_channels(&conn, &TestOwner)
+                .unwrap_err()
+                .to_string()
+                .contains("contradicts retained output")
+        );
+    }
+
+    #[test]
+    fn direct_command_later_gap_cancel_preserves_historical_exit_without_success_authority() {
+        let (conn, binding, owner, supervisor) = direct_setup(None);
+        start_direct(&conn, &binding, &owner, &supervisor);
+        let terminal = author_direct(
+            &conn,
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            command_terminal(b"", b""),
+        )
+        .unwrap();
+        apply_direct(&conn, &binding, &terminal);
+        require_direct_command_success_observation(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            terminal.frame().sequence,
+            terminal.digest(),
+        )
+        .unwrap();
+        let (cancel, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            3,
+            Some("9".repeat(64)),
+            terminal.frame().sequence,
+            ExecutionChannelPayload::Cancel,
+        );
+        let tx =
+            Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+        record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel).unwrap();
+        tx.commit().unwrap();
+        assert!(append(&conn, &binding, &cancel).is_err());
+        validate_channels(&conn, &TestOwner).unwrap();
+        assert!(
+            require_direct_command_success_observation(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                terminal.frame().sequence,
+                terminal.digest()
+            )
+            .is_err()
+        );
+        assert!(!append(&conn, &binding, terminal.canonical().as_bytes()).unwrap());
+    }
+
     #[test]
     fn shared_journal_borrows_transaction_and_rechecks_duplicate_owner() {
         let (conn, binding, _owner, supervisor) = setup();
@@ -1874,6 +2926,522 @@ mod tests {
     }
 
     #[test]
+    fn transport_owner_gate_withholds_retained_release_before_cursor_without_revoking_it() {
+        let (conn, binding, owner, supervisor) = setup();
+        let ready_digest = ready(&conn, &binding, &supervisor);
+        let (release_wire, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release_wire).unwrap();
+        let (input_wire, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest.clone()),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"command"),
+            },
+        );
+        append(&conn, &binding, &input_wire).unwrap();
+        let pending = |after_sequence| {
+            pending_transport_frames_after(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                after_sequence,
+                8,
+                64 * 1024,
+            )
+            .unwrap()
+        };
+        let allowed = pending(0);
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed[0].wire(), release_wire);
+        assert_eq!(allowed[1].wire(), input_wire);
+        conn.execute("UPDATE test_owner SET permits_input_transport=0", [])
+            .unwrap();
+        for cursor in [0, 1, 2] {
+            assert!(pending(cursor).is_empty());
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM external_execution_frame
+                 WHERE direction='owner_to_supervisor' AND application='pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(!revoked(&conn, &binding.digest().unwrap()).unwrap());
+
+        // Withheld retransmission proves neither non-delivery nor revocation.
+        // Exact late application evidence still settles the original release.
+        let (late_ack, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: release_digest,
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        append(&conn, &binding, &late_ack).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT application FROM external_execution_frame
+                 WHERE direction='owner_to_supervisor' AND sequence=1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "applied"
+        );
+        assert!(pending(1).is_empty());
+        validate_channels(&conn, &TestOwner).unwrap();
+    }
+
+    #[test]
+    fn transport_owner_gate_checks_protocol_bytes_but_not_supervisor_eof() {
+        let (conn, binding, owner, supervisor) = setup();
+        let ready_digest = ready(&conn, &binding, &supervisor);
+        let (release_wire, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release_wire).unwrap();
+        let (ack, ack_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: release_digest.clone(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        append(&conn, &binding, &ack).unwrap();
+        let (input, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"command"),
+            },
+        );
+        append(&conn, &binding, &input).unwrap();
+        conn.execute("UPDATE test_owner SET permits_input_transport=0", [])
+            .unwrap();
+        assert!(
+            pending_transport_frames(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                8,
+                64 * 1024,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(!revoked(&conn, &binding.digest().unwrap()).unwrap());
+        // EOF is a supervisor observation, never an owner input. Even a
+        // failed execution-authority query must not hide its exact bytes.
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM external_execution_channel WHERE placement_thread_id=?1",
+                [&binding.placement_thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "running"
+        );
+        let (eof_wire, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(ack_digest),
+            1,
+            ExecutionChannelPayload::ProtocolEof,
+        );
+        append(&conn, &binding, &eof_wire).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE test_owner RENAME COLUMN permits_input_transport TO unavailable",
+        )
+        .unwrap();
+        let observations = pending_transport_frames(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            8,
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].wire(), ack);
+        assert_eq!(observations[1].wire(), eof_wire);
+    }
+
+    #[test]
+    fn transport_owner_and_authority_query_errors_are_not_negative_observations() {
+        let (conn, binding, owner, supervisor) = setup();
+        ready(&conn, &binding, &supervisor);
+        let (release_wire, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release_wire).unwrap();
+        let pending = || {
+            pending_transport_frames_after(
+                &conn,
+                &TestOwner,
+                &binding.placement_thread_id,
+                ChannelDirection::OwnerToSupervisor,
+                1,
+                8,
+                64 * 1024,
+            )
+        };
+        // The cursor has passed this release, but cannot bypass the SQL read.
+        conn.execute_batch(
+            "ALTER TABLE test_owner RENAME COLUMN permits_input_transport TO unavailable",
+        )
+        .unwrap();
+        let error = pending().err().expect("authority read must fail");
+        assert!(error.to_string().contains("permits_input_transport"));
+        conn.execute("DELETE FROM test_owner", []).unwrap();
+        let error = pending().err().expect("missing owner must fail");
+        assert!(error.to_string().contains("lost exact owner"));
+    }
+
+    #[test]
+    fn transport_does_not_query_execution_gate_for_observations_or_acknowledgements() {
+        let (conn, binding, owner, supervisor) = setup();
+        let (ready_wire, ready_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            1,
+            None,
+            0,
+            ExecutionChannelPayload::Ready {
+                supervisor_runtime_hash: binding.supervisor_runtime_hash.clone(),
+                base_snapshot_hash: binding.base_snapshot_hash.clone(),
+            },
+        );
+        append(&conn, &binding, &ready_wire).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE test_owner RENAME COLUMN permits_input_transport TO unavailable",
+        )
+        .unwrap();
+        let observations = pending_transport_frames(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            8,
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].wire(), ready_wire);
+        let (ack, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: ready_digest,
+                application: ExecutionFrameApplication::Retained,
+            },
+        );
+        append(&conn, &binding, &ack).unwrap();
+        let acknowledgements = pending_transport_frames(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::OwnerToSupervisor,
+            8,
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].wire(), ack);
+    }
+
+    #[test]
+    fn cancellation_preserves_output_replay_and_late_acknowledgements_across_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("journal.sqlite3");
+        let now = lillux::time::timestamp_millis();
+        let (conn, binding, owner, supervisor) = setup_with_connection(
+            Connection::open(&database).unwrap(),
+            now - 1_000,
+            now + 60_000,
+            now + 120_000,
+        );
+        let ready_digest = ready(&conn, &binding, &supervisor);
+        let (release, release_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        append(&conn, &binding, &release).unwrap();
+        let (release_ack, release_ack_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            1,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 1,
+                peer_frame_digest: release_digest.clone(),
+                application: ExecutionFrameApplication::Applied,
+            },
+        );
+        append(&conn, &binding, &release_ack).unwrap();
+        let (input, input_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            2,
+            Some(release_digest),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"input"),
+            },
+        );
+        append(&conn, &binding, &input).unwrap();
+        let (output, output_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(release_ack_digest),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"output"),
+            },
+        );
+        append(&conn, &binding, &output).unwrap();
+        let (eof, eof_digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            4,
+            Some(output_digest.clone()),
+            1,
+            ExecutionChannelPayload::ProtocolEof,
+        );
+        append(&conn, &binding, &eof).unwrap();
+        let assert_output_pending = |conn: &Connection| {
+            for sequence in [3, 4] {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT application FROM external_execution_frame
+                     WHERE direction='supervisor_to_owner' AND sequence=?1",
+                        [sequence],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                    "pending"
+                );
+            }
+        };
+        // The immutable SQL contract itself refuses direction-blind revocation.
+        for sequence in [3, 4] {
+            assert!(
+                conn.execute(
+                    "UPDATE external_execution_frame SET application='revoked'
+                 WHERE direction='supervisor_to_owner' AND sequence=?1",
+                    [sequence],
+                )
+                .is_err()
+            );
+        }
+        let (cancel, cancel_digest) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            3,
+            Some(input_digest),
+            1,
+            ExecutionChannelPayload::Cancel,
+        );
+        {
+            let tx = Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            record_revocation(&tx, &TestOwner, &binding.placement_thread_id, &cancel).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_output_pending(&conn);
+        append(&conn, &binding, &cancel).unwrap();
+        assert_output_pending(&conn);
+        assert_eq!(
+            conn.query_row(
+                "SELECT application FROM external_execution_frame
+             WHERE direction='owner_to_supervisor' AND sequence=2",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "revoked"
+        );
+        // Retention/replay is not permission for new connector delivery.
+        assert!(
+            claim(
+                &conn,
+                &binding,
+                ChannelDirection::SupervisorToOwner,
+                3,
+                &output_digest
+            )
+            .is_err()
+        );
+        for payload in [
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"late"),
+            },
+            ExecutionChannelPayload::ProtocolEof,
+        ] {
+            let (fresh_output, _) = wire(
+                &binding,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                5,
+                Some(eof_digest.clone()),
+                1,
+                payload,
+            );
+            assert!(append(&conn, &binding, &fresh_output).is_err());
+        }
+        let (stopped, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            5,
+            Some(eof_digest.clone()),
+            1,
+            ExecutionChannelPayload::Stopped {
+                reason: ExternalStopReason::Cancelled,
+            },
+        );
+        append(&conn, &binding, &stopped).unwrap();
+        assert_output_pending(&conn);
+        validate_channels(&conn, &TestOwner).unwrap();
+        drop(conn);
+        let conn = Connection::open(&database).unwrap();
+        validate_channels(&conn, &TestOwner).unwrap();
+        assert_output_pending(&conn);
+        let pending = pending_transport_frames(
+            &conn,
+            &TestOwner,
+            &binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            8,
+            64 * 1024,
+        )
+        .unwrap();
+        assert_eq!(pending.len(), 4);
+        assert_eq!(pending[0].wire(), release_ack);
+        assert_eq!(pending[1].wire(), output);
+        assert_eq!(pending[2].wire(), eof);
+        assert_eq!(pending[3].wire(), stopped);
+        let (false_revocation, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            4,
+            Some(cancel_digest.clone()),
+            3,
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: 3,
+                peer_frame_digest: output_digest.clone(),
+                application: ExecutionFrameApplication::Revoked,
+            },
+        );
+        assert!(
+            append(&conn, &binding, &false_revocation)
+                .unwrap_err()
+                .to_string()
+                .contains("non-input")
+        );
+        let mut prior = cancel_digest;
+        for (sequence, target, digest) in [(4, 3, output_digest), (5, 4, eof_digest)] {
+            let (ack, digest) = wire(
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                sequence,
+                Some(prior),
+                target,
+                ExecutionChannelPayload::Acknowledge {
+                    peer_frame_sequence: target,
+                    peer_frame_digest: digest,
+                    application: ExecutionFrameApplication::Applied,
+                },
+            );
+            append(&conn, &binding, &ack).unwrap();
+            prior = digest;
+        }
+        validate_channels(&conn, &TestOwner).unwrap();
+        drop(conn);
+        let conn = Connection::open(&database).unwrap();
+        validate_channels(&conn, &TestOwner).unwrap();
+        for sequence in [3, 4] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT application FROM external_execution_frame
+                 WHERE direction='supervisor_to_owner' AND sequence=?1",
+                    [sequence],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "applied"
+            );
+        }
+    }
+
+    #[test]
     fn sticky_cancellation_uses_urgent_lane_across_revoked_input_gap() {
         let (conn, binding, owner, supervisor) = setup();
         let ready_digest = ready(&conn, &binding, &supervisor);
@@ -1887,6 +3455,8 @@ mod tests {
             ExecutionChannelPayload::Release,
         );
         append(&conn, &binding, &release_wire).unwrap();
+        conn.execute("UPDATE test_owner SET permits_input_transport=0", [])
+            .unwrap();
         let (cancel_wire, cancel_digest) = wire(
             &binding,
             &owner,
@@ -2356,6 +3926,7 @@ mod tests {
             2,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: snapshot.clone(),
+                candidate_output_capture_hash: None,
                 completion_request_digest: completion.clone(),
                 writer_exclusion_evidence_hash: evidence.clone(),
             },
@@ -2453,6 +4024,7 @@ mod tests {
             2,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: "6".repeat(64),
+                candidate_output_capture_hash: None,
                 completion_request_digest: completion,
                 writer_exclusion_evidence_hash: "7".repeat(64),
             },
@@ -2581,7 +4153,7 @@ mod tests {
     fn schema_refuses_advanced_initial_channel_and_application() {
         let (conn, binding, _owner, _supervisor) = setup();
         assert!(conn.execute(
-            "INSERT INTO external_execution_channel VALUES('T-other','other','{}','ready',NULL,NULL,NULL)",
+            "INSERT INTO external_execution_channel VALUES('T-other','other','{}','ready',NULL,NULL,NULL,NULL)",
             [],
         ).is_err());
         assert!(conn.execute(
@@ -2589,7 +4161,7 @@ mod tests {
             [binding.digest().unwrap()],
         ).is_err());
         assert!(conn.execute(
-            "INSERT INTO external_execution_channel VALUES('T-projected','projected','{}','prepared',?1,NULL,NULL)",
+            "INSERT INTO external_execution_channel VALUES('T-projected','projected','{}','prepared',?1,NULL,NULL,NULL)",
             ["8".repeat(64)],
         ).is_err());
     }

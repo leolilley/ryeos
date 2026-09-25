@@ -39,18 +39,27 @@ def observed_error(error):
 
 
 class Server:
-    def __init__(self, executable, root):
+    def __init__(self, executable, root, *, environments=None, inherited_fds=(),
+                 private_transport_log=None):
         self.root = root
         self.root.mkdir()
+        if environments is not None:
+            (root / "environments.toml").write_text(environments)
         self.environment = {
             "HOME": str(root), "CODEX_HOME": str(root),
             "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
         }
+        self.transport_log = None
+        if private_transport_log is not None:
+            descriptor = os.open(private_transport_log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            self.transport_log = os.fdopen(descriptor, "wb")
+            self.environment["RUST_LOG"] = "codex_exec_server=debug"
         self.process = subprocess.Popen(
             [str(executable), "app-server", "--listen", "stdio://"],
             cwd=root, env=self.environment, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=self.transport_log or subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=inherited_fds,
         )
         self.selector = selectors.DefaultSelector()
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -87,6 +96,8 @@ class Server:
             # Retire only the exact fresh diagnostic process group we own.
             os.killpg(self.process.pid, signal.SIGKILL)
         self.process.communicate(timeout=5)
+        if self.transport_log is not None:
+            self.transport_log.close()
 
 
 def registration(executable, root, experimental):

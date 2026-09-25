@@ -42,6 +42,7 @@ ryeos-core-tools = { workspace = true }
 ryeos-directive-definition = { workspace = true }
 ryeos-effect-contract = { workspace = true }
 ryeos-provider-contract = { workspace = true }
+ryeos-project-capture = { workspace = true }
 ryeos-tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

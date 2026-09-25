@@ -1,0 +1,25 @@
+# ryeos:signed:2026-09-23T07:33:59Z:9ff4a28c5378b0573c645584fccacac37c6d572d53c705e8de6174d6e1a015ec:j0U8NSDu7VnBckoEBVxYrSTSn8JeNx4Bg81EEuyJkqQtaOTSqUBRcU8DR7mrqL7YTJWtJR2vGyEHUnWvXq1SAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex/guest-runtime
+version: "1.0.0"
+description: Produce the exact pinned Codex guest executable as a retained private-workspace tree
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: captured_execution
+network_authority: isolated
+external_content:
+  - id: codex-guest-input
+    kind: file
+    mode: pinned
+    digest: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
+    metadata_hint: openai-codex-rust-v0.147.0-x86_64-unknown-linux-musl
+    mount_root: execution_runtime
+    mount: codex-guest-input
+config:
+  command: bin:codex/ryeos-codex-guest-runtime-producer
+  args: [--project-path, "${project_path}"]
+  timeout_secs: 300
+config_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

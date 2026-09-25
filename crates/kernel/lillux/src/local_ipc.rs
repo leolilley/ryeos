@@ -7,8 +7,12 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{PinnedDirectory, protect_descriptor_from_exec};
 
@@ -271,6 +275,22 @@ pub struct LocalDuplexStream {
     stream: std::os::unix::net::UnixStream,
 }
 
+/// One-way cancellation of a pending local connection. Cancellation never
+/// converts a partially established connection into successful protocol
+/// evidence; the connecting descriptor is closed on refusal.
+#[derive(Clone, Default)]
+pub struct LocalConnectInterrupt(Arc<AtomicBool>);
+
+impl LocalConnectInterrupt {
+    pub fn interrupt(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 impl LocalDuplexStream {
     /// Capture the kernel-authenticated peer for this exact connected local
     /// channel. Applications do not receive a Unix stream or descriptor.
@@ -312,6 +332,45 @@ impl LocalDuplexStream {
             let stream = std::os::unix::net::UnixStream::connect(endpoint)
                 .with_context(|| format!("connect local endpoint {}", endpoint.display()))?;
             protect_descriptor_from_exec(&stream).map_err(anyhow::Error::msg)?;
+            Ok(Self { stream })
+        }
+    }
+
+    /// Connect to a socket name beneath an already-pinned directory. The
+    /// process-local descriptor path avoids both ambient directory lookup and
+    /// the Unix sockaddr length of a potentially deep workspace pathname.
+    /// The caller must separately authenticate the protocol peer.
+    pub fn connect_at(directory: &PinnedDirectory, name: &OsStr) -> Result<Self> {
+        validate_endpoint_name(name.to_str().context("non-UTF8 local endpoint name")?)?;
+        directory.ensure_path_binding()?;
+        let endpoint = directory.descriptor_path()?.join(name);
+        let stream = Self::connect(&endpoint)?;
+        directory.ensure_path_binding()?;
+        Ok(stream)
+    }
+
+    /// Deadline- and cancellation-bound descriptor-rooted Unix connection.
+    /// This is the correct form for a retained worker relay: an unresponsive
+    /// listener cannot trap its owner in a blocking `connect` after failure.
+    pub fn connect_at_until(
+        directory: &PinnedDirectory,
+        name: &OsStr,
+        deadline: crate::time::MonotonicDeadline,
+        interrupt: &LocalConnectInterrupt,
+    ) -> Result<Self> {
+        validate_endpoint_name(name.to_str().context("non-UTF8 local endpoint name")?)?;
+        directory.ensure_path_binding()?;
+        let endpoint = directory.descriptor_path()?.join(name);
+        validate_endpoint_path(&endpoint)?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (endpoint, deadline, interrupt);
+            bail!("deadline-bound local connections require Linux")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let stream = connect_local_until(&endpoint, deadline, interrupt)?;
+            directory.ensure_path_binding()?;
             Ok(Self { stream })
         }
     }
@@ -374,6 +433,22 @@ impl LocalDuplexStream {
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "local duplex shutdown is unavailable",
+            ))
+        }
+    }
+
+    /// Finish only the response direction while retaining the read side to
+    /// detect additional bytes until the producer's terminal fence.
+    pub fn shutdown_write(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.stream.shutdown(std::net::Shutdown::Write)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "local duplex write shutdown is unavailable",
             ))
         }
     }
@@ -462,6 +537,23 @@ impl OwnerPrivateLocalDuplexListener {
     /// Create a fresh socket below `directory` without replacing any entry.
     /// The caller creates and retains the private directory through Lillux.
     pub fn bind(directory: &PinnedDirectory, stem: &str) -> Result<Self> {
+        Self::bind_in(directory, stem, false)
+    }
+
+    /// Bind through the retained directory descriptor rather than its ambient
+    /// pathname. This supports deep private workspaces without granting the
+    /// listener authority to resolve a replacement parent directory. Clients
+    /// use [`LocalDuplexStream::connect_at`] with the exact returned name.
+    pub fn bind_pinned(directory: &PinnedDirectory, stem: &str) -> Result<Self> {
+        Self::bind_in(directory, stem, true)
+    }
+
+    #[cfg(unix)]
+    pub fn endpoint_name(&self) -> &OsStr {
+        &self.name
+    }
+
+    fn bind_in(directory: &PinnedDirectory, stem: &str, descriptor_rooted: bool) -> Result<Self> {
         validate_stem(stem)?;
         directory.ensure_path_binding()?;
         #[cfg(not(unix))]
@@ -476,12 +568,17 @@ impl OwnerPrivateLocalDuplexListener {
             let random = crate::crypto::generate_random_bytes::<32>();
             let name = OsString::from(format!("{stem}-{}.sock", &crate::sha256_hex(&random)[..32]));
             let endpoint = directory.path().join(&name);
-            validate_endpoint_path(&endpoint)?;
-            let listener = std::os::unix::net::UnixListener::bind(&endpoint)
-                .with_context(|| format!("bind fresh local endpoint {}", endpoint.display()))?;
+            let binding_path = if descriptor_rooted {
+                directory.descriptor_path()?.join(&name)
+            } else {
+                endpoint.clone()
+            };
+            validate_endpoint_path(&binding_path)?;
+            let listener = std::os::unix::net::UnixListener::bind(&binding_path)
+                .with_context(|| format!("bind fresh local endpoint {}", binding_path.display()))?;
             protect_descriptor_from_exec(&listener).map_err(anyhow::Error::msg)?;
-            let metadata = std::fs::symlink_metadata(&endpoint)
-                .with_context(|| format!("inspect local endpoint {}", endpoint.display()))?;
+            let metadata = std::fs::symlink_metadata(&binding_path)
+                .with_context(|| format!("inspect local endpoint {}", binding_path.display()))?;
             if !metadata.file_type().is_socket() {
                 bail!("published local endpoint is not a Unix socket");
             }
@@ -497,6 +594,9 @@ impl OwnerPrivateLocalDuplexListener {
         }
     }
 
+    /// Published host pathname for legacy direct-path clients and diagnostics.
+    /// For a descriptor-rooted bind this may exceed sockaddr limits; use
+    /// `endpoint_name` with `LocalDuplexStream::connect_at` instead.
     pub fn endpoint(&self) -> &Path {
         &self.endpoint
     }
@@ -509,6 +609,60 @@ impl OwnerPrivateLocalDuplexListener {
             let (stream, _) = self.listener.accept().context("accept local endpoint")?;
             protect_descriptor_from_exec(&stream).map_err(anyhow::Error::msg)?;
             Ok(LocalDuplexStream { stream })
+        }
+    }
+
+    /// Wait for one connection until the caller's absolute process-local
+    /// deadline. A timeout returns `None`; it never changes the listener or
+    /// manufactures a connection outcome. This is the cancellation boundary
+    /// for owners that must retain the listener while another process starts.
+    pub fn accept_before(
+        &self,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<Option<LocalDuplexStream>> {
+        #[cfg(not(unix))]
+        {
+            let _ = deadline;
+            bail!("local duplex endpoints are unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+
+            loop {
+                let remaining = deadline.remaining();
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                let timeout_ms = remaining
+                    .as_millis()
+                    .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+                    .min(i32::MAX as u128) as i32;
+                let mut descriptor = libc::pollfd {
+                    fd: self.listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: poll receives one live listener descriptor and a
+                // bounded timeout derived from the opaque Lillux deadline.
+                let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error).context("wait for local endpoint connection");
+                }
+                if ready == 0 || deadline.has_elapsed() {
+                    return Ok(None);
+                }
+                if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    bail!("local endpoint listener failed while awaiting a connection");
+                }
+                let (stream, _) = self.listener.accept().context("accept local endpoint")?;
+                protect_descriptor_from_exec(&stream).map_err(anyhow::Error::msg)?;
+                return Ok(Some(LocalDuplexStream { stream }));
+            }
         }
     }
 
@@ -639,6 +793,20 @@ fn validate_private_directory_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_endpoint_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > MAX_ENDPOINT_PATH_BYTES
+        || name == "."
+        || name == ".."
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+    {
+        bail!("local endpoint name is not canonical");
+    }
+    Ok(())
+}
+
 fn validate_endpoint_path(endpoint: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -659,6 +827,119 @@ fn validate_endpoint_path(endpoint: &Path) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn connect_local_until(
+    endpoint: &Path,
+    deadline: crate::time::MonotonicDeadline,
+    interrupt: &LocalConnectInterrupt,
+) -> Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    ensure!(!interrupt.is_interrupted(), "local connect was interrupted");
+    ensure!(!deadline.has_elapsed(), "local connect deadline elapsed");
+    let path = endpoint.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    ensure!(
+        path.len() < address.sun_path.len(),
+        "local endpoint exceeds sockaddr capacity"
+    );
+    for (target, byte) in address.sun_path.iter_mut().zip(path.iter().copied()) {
+        *target = byte as libc::c_char;
+    }
+    let address_len = std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        .checked_add(path.len())
+        .and_then(|size| size.checked_add(1))
+        .context("local endpoint sockaddr length overflow")?;
+    // SAFETY: socket takes no caller-owned pointers and returns one owned FD.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error()).context("create bounded local socket");
+    }
+    // SAFETY: a successful socket call returned a fresh FD owned here.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: address is initialized, NUL-terminated, and its exact supplied
+    // length fits sockaddr_un. The live descriptor retains the socket.
+    let connected = unsafe {
+        libc::connect(
+            descriptor.as_raw_fd(),
+            (&raw const address).cast::<libc::sockaddr>(),
+            address_len as libc::socklen_t,
+        )
+    };
+    if connected != 0 {
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS) | Some(libc::EAGAIN)
+        ) {
+            return Err(error).context("connect bounded local socket");
+        }
+        loop {
+            ensure!(!interrupt.is_interrupted(), "local connect was interrupted");
+            let remaining = deadline.remaining();
+            ensure!(!remaining.is_zero(), "local connect deadline elapsed");
+            let timeout_ms = remaining.as_millis().min(10).max(1) as i32;
+            let mut poll = libc::pollfd {
+                fd: descriptor.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: poll sees one retained descriptor and writable pollfd.
+            let ready = unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("wait for bounded local connect");
+            }
+            if ready == 0 {
+                continue;
+            }
+            let mut socket_error = 0;
+            let mut error_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: getsockopt writes one initialized c_int and its length.
+            if unsafe {
+                libc::getsockopt(
+                    descriptor.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&raw mut socket_error).cast(),
+                    &raw mut error_len,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error()).context("inspect local connect");
+            }
+            ensure!(
+                error_len as usize == std::mem::size_of::<libc::c_int>(),
+                "local connect returned an invalid socket error length"
+            );
+            if socket_error != 0 {
+                return Err(std::io::Error::from_raw_os_error(socket_error))
+                    .context("bounded local connect failed");
+            }
+            break;
+        }
+    }
+    ensure!(!interrupt.is_interrupted(), "local connect was interrupted");
+    ensure!(
+        !deadline.has_elapsed(),
+        "local connect completed after deadline"
+    );
+    let stream = std::os::unix::net::UnixStream::from(descriptor);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 #[cfg(unix)]
 fn os_name_cstring(name: &OsStr) -> Result<CString> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -669,6 +950,92 @@ fn os_name_cstring(name: &OsStr) -> Result<CString> {
 mod peer_process_tests {
     use super::*;
     use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    #[test]
+    fn pinned_local_endpoint_works_below_deep_private_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        for _ in 0..8 {
+            directory = directory
+                .create_child(OsStr::new("deep-private-root"), 0o700)
+                .unwrap();
+        }
+        assert!(directory.path().join("peer.sock").as_os_str().len() > MAX_ENDPOINT_PATH_BYTES);
+        let listener = OwnerPrivateLocalDuplexListener::bind_pinned(&directory, "peer").unwrap();
+        let mut client =
+            LocalDuplexStream::connect_at(&directory, listener.endpoint_name()).unwrap();
+        let mut server = listener
+            .accept_before(crate::time::MonotonicDeadline::after(
+                crate::time::Duration::from_secs(1),
+            ))
+            .unwrap()
+            .unwrap();
+        client.write_all(b"pinned endpoint").unwrap();
+        let mut received = [0u8; 15];
+        server.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"pinned endpoint");
+    }
+
+    #[test]
+    fn pinned_listener_name_is_always_accepted_by_pinned_connector() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let prefix = directory.descriptor_path().unwrap().as_os_str().len() + 1;
+        let stem = "a".repeat(MAX_ENDPOINT_PATH_BYTES - prefix - 38);
+        let listener = OwnerPrivateLocalDuplexListener::bind_pinned(&directory, &stem).unwrap();
+        assert!(listener.endpoint_name().len() > 85);
+        let _client = LocalDuplexStream::connect_at(&directory, listener.endpoint_name()).unwrap();
+        assert!(
+            listener
+                .accept_before(crate::time::MonotonicDeadline::after(
+                    crate::time::Duration::from_secs(1),
+                ))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn bounded_pinned_connect_refuses_cancel_and_expiry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let listener = OwnerPrivateLocalDuplexListener::bind_pinned(&directory, "peer").unwrap();
+        let interrupt = LocalConnectInterrupt::default();
+        let _connected = LocalDuplexStream::connect_at_until(
+            &directory,
+            listener.endpoint_name(),
+            crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+            &interrupt,
+        )
+        .unwrap();
+        assert!(
+            listener
+                .accept_before(crate::time::MonotonicDeadline::after(
+                    crate::time::Duration::from_secs(1),
+                ))
+                .unwrap()
+                .is_some()
+        );
+        interrupt.interrupt();
+        assert!(
+            LocalDuplexStream::connect_at_until(
+                &directory,
+                listener.endpoint_name(),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1)),
+                &interrupt,
+            )
+            .is_err()
+        );
+        assert!(
+            LocalDuplexStream::connect_at_until(
+                &directory,
+                listener.endpoint_name(),
+                crate::time::MonotonicDeadline::after(crate::time::Duration::ZERO),
+                &LocalConnectInterrupt::default(),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     #[ignore = "native Linux SO_PEERPIDFD qualification; sandboxed kernels may deny the socket option"]

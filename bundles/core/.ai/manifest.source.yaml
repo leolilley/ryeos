@@ -6,7 +6,7 @@ runtime_authority:
   project_snapshots: [status, log, show, create]
 isolation_backends:
   - id: linux-lillux
-    protocol: ryeos.isolation-adapter/v11
+    protocol: ryeos.isolation-adapter/v12
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu

@@ -34,6 +34,7 @@ pub use runtime_db::{
 };
 
 mod projection_access;
+mod scoped_child;
 
 use projection_access::committed_value;
 
@@ -359,6 +360,35 @@ pub struct FinalizeThreadRecord {
     /// established only by the terminal transition.
     pub result_project_snapshot_hash: Option<String>,
     pub result_workspace_output_capture_hash: Option<String>,
+}
+
+/// The external transcript is the input to the same ordinary result interpreter
+/// used by the runner, never permission to sign an unrelated caller result.
+fn validate_external_direct_result(
+    update: &FinalizeThreadRecord,
+    output: &runtime_db::external_execution::ExternalDirectOutput,
+) -> Result<()> {
+    let expected = ryeos_engine::dispatch::interpret_external_terminal(
+        &output.termination,
+        &output.stdout,
+        &output.stderr,
+    );
+    anyhow::ensure!(
+        update.status == expected.status.as_str()
+            && update.outcome_code == expected.outcome_code
+            && update.result_json == expected.result
+            && update.error_json == expected.error,
+        "external direct final result differs from its authenticated target output"
+    );
+    anyhow::ensure!(
+        update.artifacts.is_empty()
+            && update.final_cost.is_none()
+            && update.managed_envelope.is_none()
+            && update.result_project_snapshot_hash.is_none()
+            && update.result_workspace_output_capture_hash.is_none(),
+        "external direct result cannot add unadmitted artifacts, cost or project publication"
+    );
+    Ok(())
 }
 
 fn runtime_status_for_thread_status(
@@ -1206,6 +1236,34 @@ struct Inner {
     signer: Arc<dyn Signer>,
 }
 
+/// Ephemeral handoff from authoritative born-thread/CAS verification to the
+/// allocation transaction. Not caller-deserializable and not a second ledger.
+pub(crate) struct VerifiedExternalDirectOwner {
+    thread_id: String,
+    chain_root_id: String,
+    capsule_hash: String,
+    snapshot_hash: String,
+    endpoint_binding_hash: String,
+    program_digest: String,
+    launch_owner: runtime_db::LaunchOwner,
+}
+
+impl VerifiedExternalDirectOwner {
+    pub(crate) fn matches(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+    ) -> bool {
+        self.thread_id == reservation.placement_thread_id
+            && self.capsule_hash == reservation.admitted_capsule_hash
+            && self.snapshot_hash == reservation.base_snapshot_hash
+            && self.endpoint_binding_hash == reservation.binding_hash
+            && matches!(&reservation.owner,
+                runtime_db::external_execution::ExternalAllocationOwner::DirectThread { chain_root_id, launch_owner, program }
+                if chain_root_id == &self.chain_root_id && launch_owner == &self.launch_owner
+                    && program.digest().ok().as_ref() == Some(&self.program_digest))
+    }
+}
+
 enum WorkspaceProcessSettlementOwner {
     Live,
     Abandoned,
@@ -1470,6 +1528,154 @@ pub struct StateStore {
     /// proves current ownership and gives cancellation/shutdown one exact task
     /// control instead of terminalizing a row while its handler keeps running.
     active_in_process_handlers: Mutex<HashMap<String, InProcessHandlerControl>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct TestWorkspaceBinding {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub launch_owner: Option<String>,
+    pub backend_id: Option<String>,
+    pub backend_version: Option<String>,
+    pub pinned_root_identities: Option<String>,
+    pub mount_identity: Option<String>,
+    pub workspace_output_partition_identity: Option<String>,
+    pub base_output_capture_hash: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn external_fixture_launch_metadata(
+    project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    prepared_runtime_launch: serde_json::Value,
+    turn_start_payload: serde_json::Value,
+) -> crate::launch_metadata::RuntimeLaunchMetadata {
+    use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+
+    let snapshot_hash = project_authority
+        .operational_snapshot_projection()
+        .expect("external fixture project authority is pinned")
+        .to_owned();
+    let project_context = ProjectContext::SnapshotHash {
+        hash: snapshot_hash.clone(),
+    };
+    let parameters = serde_json::json!({
+        "goal": {
+            "session_start_payload": {},
+            "turn_start_payload": turn_start_payload
+        }
+    });
+    let resolved_ref_bindings: BTreeMap<String, serde_json::Value> = prepared_runtime_launch
+        .get("binding_records")
+        .and_then(serde_json::Value::as_object)
+        .expect("external fixture prepared launch has binding records")
+        .iter()
+        .map(|(name, record)| (name.clone(), record.clone()))
+        .collect();
+    let ref_bindings: BTreeMap<String, String> = resolved_ref_bindings
+        .iter()
+        .map(|(name, record)| {
+            (
+                name.clone(),
+                record["canonical_ref"]
+                    .as_str()
+                    .expect("external fixture binding has an exact ref")
+                    .to_owned(),
+            )
+        })
+        .collect();
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+        project_context.clone(),
+        project_authority.clone(),
+    )
+    .with_storage_test_parameters(parameters.clone())
+    .with_storage_test_ref_bindings(ref_bindings.clone(), resolved_ref_bindings);
+    let resume = crate::launch_metadata::ResumeContext {
+        kind: "graph_run".into(),
+        item_ref: "graph:test/storage-fixture".into(),
+        ref_bindings,
+        product_selections: Vec::new(),
+        launch_mode: "detached".into(),
+        parameters,
+        project_context,
+        project_authority: project_authority.clone(),
+        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+        stable_project_identity: None,
+        local_overlay_root: None,
+        original_snapshot_hash: Some(snapshot_hash),
+        original_pushed_head_ref: None,
+        state_root: None,
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "session:test".into(),
+            scopes: Vec::new(),
+        }),
+        execution_hints: ExecutionHints::default(),
+        scheduled_fire: None,
+        effective_caps: Vec::new(),
+        parent_delegation_caps: None,
+        executor_ref: Some("native:storage-fixture".into()),
+        runtime_ref: Some("runtime:storage-fixture".into()),
+    };
+    let runtime_key = lillux::crypto::SigningKey::from_bytes(&[21; 32]);
+    let runtime_document =
+        lillux::signature::sign_content("runtime fixture\n", &runtime_key, "#", None);
+    let runtime_header = lillux::signature::parse_signature_line(
+        runtime_document.lines().next().expect("runtime signature"),
+        "#",
+        None,
+    )
+    .expect("runtime signature header");
+    let protocol_key = lillux::crypto::SigningKey::from_bytes(&[22; 32]);
+    let protocol_document =
+        lillux::signature::sign_content("protocol fixture\n", &protocol_key, "#", None);
+    let protocol_header = lillux::signature::parse_signature_line(
+        protocol_document
+            .lines()
+            .next()
+            .expect("protocol signature"),
+        "#",
+        None,
+    )
+    .expect("protocol signature header");
+    let executor_hash = "7".repeat(64);
+    let metadata = crate::launch_metadata::RuntimeLaunchMetadata {
+        launch_driver: Some(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime),
+        resume_context: Some(resume),
+        sealed_root_request: Some(sealed),
+        admitted_project_authority: Some(project_authority),
+        admitted_artifact_identity: Some(
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref: "runtime:storage-fixture".into(),
+                runtime_content_hash: runtime_header.content_hash,
+                runtime_signer_fingerprint: runtime_header.signer_fingerprint,
+                protocol_ref: "protocol:test/fixture".into(),
+                protocol_content_hash: protocol_header.content_hash,
+                protocol_signer_fingerprint: protocol_header.signer_fingerprint,
+                executor_ref: "native:storage-fixture".into(),
+                executor_content_hash: executor_hash.clone(),
+                executor_bundle_manifest_hash: "8".repeat(64),
+                executor_bundle_signer_fingerprint: "9".repeat(64),
+            },
+        ),
+        admitted_launch_capsule_schema: Some(
+            ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+        ),
+        execution_realization_hash: Some("a".repeat(64)),
+        admitted_execution_closure: Some(
+            ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document: runtime_document,
+                protocol_descriptor_document: protocol_document,
+                executor_blob_hash: executor_hash,
+            },
+        ),
+        ..Default::default()
+    };
+    metadata
+        .validate()
+        .expect("valid external fixture launch metadata");
+    metadata
 }
 
 fn active_source_worker_handoff_for_placement_in_db(
@@ -4496,6 +4702,7 @@ impl StateStore {
             runtime,
             update,
             true,
+            None,
         )?;
         Ok(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
@@ -6363,6 +6570,53 @@ impl StateStore {
         g.runtime_db.reserve_process_resource_launch(reservation)
     }
 
+    pub fn reserve_thread_process_scope(
+        &self,
+        reservation: &runtime_db::ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+            bail!("thread scope reservation is closed for daemon shutdown");
+        }
+        g.runtime_db.reserve_thread_process_scope(reservation)
+    }
+
+    pub fn bind_thread_process_scope(
+        &self, thread_id: &str, launch_owner: &str, recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+            bail!("thread scope binding is closed for daemon shutdown");
+        }
+        g.runtime_db.bind_thread_process_scope(thread_id, launch_owner, recovery)
+    }
+
+    pub fn thread_process_scope_reservation(
+        &self, thread_id: &str,
+    ) -> Result<Option<runtime_db::ThreadProcessScopeReservationRecord>> {
+        self.lock()?.runtime_db.thread_process_scope_reservation(thread_id)
+    }
+
+    pub fn thread_process_scope_reservations(
+        &self,
+    ) -> Result<Vec<runtime_db::ThreadProcessScopeReservationRecord>> {
+        self.lock()?.runtime_db.thread_process_scope_reservations()
+    }
+
+    pub fn fence_thread_scope_recovery(
+        &self,
+        reservation: &runtime_db::ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.fence_thread_process_scope_recovery(reservation)
+    }
+
+    pub fn clear_thread_process_scope_reservation(
+        &self, reservation: &runtime_db::ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        self.lock()?.runtime_db.clear_thread_process_scope_reservation(reservation)
+    }
+
     pub fn bind_process_resource_scope(
         &self,
         owner_kind: &str,
@@ -8211,6 +8465,24 @@ impl StateStore {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn create_root_thread_for_test_with_launch_metadata(
+        &self,
+        thread: &NewThreadRecord,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        anyhow::ensure!(
+            thread.thread_id == thread.chain_root_id,
+            "launch-metadata fixture must be a chain root"
+        );
+        self.create_root_thread_with_events_and_launch_metadata(
+            thread,
+            Vec::new(),
+            Some(launch_metadata),
+        )
+        .map(|publication| publication.persisted)
+    }
+
     /// Deliberately corrupt only the replaceable thread projection so recovery
     /// tests can prove authoritative reservation reconciliation does not
     /// depend on projected status.
@@ -8963,7 +9235,14 @@ impl StateStore {
         if claim.claimed_by != launch_owner {
             anyhow::bail!("stale launch owner cannot finalize thread {thread_id}");
         }
-        self.finalize_thread_with_guard(&g, permit.cas_guard(), thread_id, update, false)
+        self.finalize_thread_with_guard(
+            &g,
+            permit.cas_guard(),
+            thread_id,
+            update,
+            false,
+            Some(&claim.owner),
+        )
     }
 
     fn finalize_thread_locked(
@@ -8973,7 +9252,7 @@ impl StateStore {
     ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        self.finalize_thread_with_guard(&g, permit.cas_guard(), thread_id, update, false)
+        self.finalize_thread_with_guard(&g, permit.cas_guard(), thread_id, update, false, None)
     }
 
     /// Atomically finalize a child-link failure only while the child is still a
@@ -9024,6 +9303,7 @@ impl StateStore {
             runtime,
             update,
             true,
+            None,
         )?;
         Ok(FinalizeCreatedUnattachedOutcome::Finalized {
             persisted,
@@ -9071,6 +9351,7 @@ impl StateStore {
             runtime,
             update,
             false,
+            None,
         )?;
         Ok(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
@@ -9192,6 +9473,7 @@ impl StateStore {
             runtime,
             update,
             false,
+            None,
         )?;
         Ok(Some(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
@@ -9246,6 +9528,7 @@ impl StateStore {
             runtime,
             update,
             false,
+            Some(&claim.owner),
         )?;
         Ok(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
@@ -9260,6 +9543,7 @@ impl StateStore {
         thread_id: &str,
         update: &FinalizeThreadRecord,
         allow_closed_admission: bool,
+        owned_launch_owner: Option<&runtime_db::LaunchOwner>,
     ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
         let thread_row = g
             .state_db
@@ -9277,7 +9561,105 @@ impl StateStore {
             runtime,
             update,
             allow_closed_admission,
+            owned_launch_owner,
         )
+    }
+
+    /// This runs inside the existing StateStore writer exclusion, retained
+    /// through the signed terminal CAS commit below. Every production runtime
+    /// mutation uses the same private Inner guard; a returned output projection
+    /// is not a reusable finalization capability outside this critical section.
+    fn validate_external_direct_finalization_locked(
+        &self,
+        inner: &Inner,
+        thread_id: &str,
+        chain_root_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<()> {
+        use runtime_db::external_execution::ExternalAllocationOwner;
+        let snapshot = authoritative_snapshot_for_transition(inner, chain_root_id, thread_id)?;
+        let capsule = snapshot
+            .admitted_launch_capsule_hash
+            .as_deref()
+            .map(|hash| load_admitted_launch_capsule(&self.state_authority, hash))
+            .transpose()?;
+        let is_external = capsule
+            .as_ref()
+            .map(crate::thread_lifecycle::capsule_requires_external_direct)
+            .transpose()?
+            .unwrap_or(false);
+        let allocation = inner.runtime_db.external_allocation(thread_id)?;
+        if !is_external {
+            anyhow::ensure!(
+                !allocation.as_ref().is_some_and(|allocation| matches!(
+                    allocation.reservation.owner,
+                    ExternalAllocationOwner::DirectThread { .. }
+                )),
+                "external direct allocation has no authoritative external capsule"
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            update.status != ThreadStatus::Continued.as_str(),
+            "one-shot external direct execution cannot author a continuation"
+        );
+        anyhow::ensure!(
+            update.result_project_snapshot_hash.is_none()
+                && update.result_workspace_output_capture_hash.is_none()
+                && update.managed_envelope.is_none()
+                && update.artifacts.is_empty()
+                && update.final_cost.is_none(),
+            "external direct execution cannot add unadmitted artifacts, cost or project publication"
+        );
+        // A substrate/administrative failure may settle the thread without
+        // inventing a target result. The external cleanup obligation remains in
+        // its existing journal; a null local PID is never its death proof.
+        if update.status != ThreadStatus::Completed.as_str() && update.result_json.is_none() {
+            return Ok(());
+        }
+        let allocation = allocation.context("external direct result has no allocation evidence")?;
+        let ExternalAllocationOwner::DirectThread {
+            chain_root_id: retained_root,
+            program,
+            ..
+        } = &allocation.reservation.owner
+        else {
+            bail!("external direct result has a different allocation owner");
+        };
+        anyhow::ensure!(
+            snapshot.thread_id == thread_id
+                && snapshot.chain_root_id == *retained_root
+                && snapshot.admitted_launch_capsule_hash.as_deref()
+                    == Some(allocation.reservation.admitted_capsule_hash.as_str()),
+            "external direct finalization changed its authoritative born capsule"
+        );
+        let capsule = capsule.context("external direct result lost its authoritative capsule")?;
+        let endpoint =
+            crate::thread_lifecycle::validate_retained_external_direct_program(&capsule, program)?;
+        anyhow::ensure!(
+            capsule.project_authority == snapshot.project_authority
+                && capsule.executor_ref == snapshot.executor_ref
+                && endpoint.binding_digest == allocation.reservation.binding_hash,
+            "external direct finalization changed its admitted program or project authority"
+        );
+        anyhow::ensure!(
+            matches!(&capsule.project_authority,
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    snapshot_hash,
+                    realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                    environment: ryeos_state::objects::EnvironmentAuthority::None,
+                    workspace_outputs: None, ..
+                } if snapshot_hash == &allocation.reservation.base_snapshot_hash),
+            "external direct finalization lost its immutable admitted generation"
+        );
+        let claim = inner
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .context("external direct finalization has no current settlement owner")?;
+        let output = inner
+            .runtime_db
+            .external_direct_finalization_output(thread_id, &claim.claimed_by)?;
+        validate_external_direct_result(update, &output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9290,7 +9672,11 @@ impl StateStore {
         runtime: RuntimeInfo,
         update: &FinalizeThreadRecord,
         allow_closed_admission: bool,
+        owned_launch_owner: Option<&runtime_db::LaunchOwner>,
     ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        if g.runtime_db.has_unsettled_scoped_child_for_thread(thread_id)? {
+            bail!("thread finalization requires exact scoped child retirement");
+        }
         let validated_final_cost = update
             .final_cost
             .as_ref()
@@ -9347,6 +9733,12 @@ impl StateStore {
         if !terminal_status.is_terminal() {
             bail!("finalize_thread requires a terminal status");
         }
+        self.validate_external_direct_finalization_locked(
+            g,
+            thread_id,
+            &thread_row.chain_root_id,
+            update,
+        )?;
         if let Some(cost) = update.final_cost.as_ref() {
             validate_final_cost_for_settlement(cost)?;
         }
@@ -9489,6 +9881,24 @@ impl StateStore {
             "error_digest": terminal_value_digest(update.error_json.as_ref(), "error")?,
             "artifact_count": update.artifacts.len(),
         });
+        // This reference is daemon-derived under the same launch-owner lock
+        // as the signed terminal. The operational slot alone is mutable and
+        // must never qualify a later attempt; an unowned or non-completed
+        // finalizer cannot mint this bridge.
+        if terminal_status == ThreadStatus::Completed
+            && runtime.process_identity.is_none()
+            && let Some(owner) = owned_launch_owner
+            && let Some(settlement) = g.runtime_db.latest_thread_process_settlement(thread_id)?
+            && settlement.launch_owner == *owner
+            && matches!(
+                settlement.kind,
+                runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty
+                    | runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent
+            )
+        {
+            terminal_payload["process_settlement_witness_digest"] =
+                Value::String(settlement.digest()?);
+        }
         if let Some(err) = &update.error_json
             && let Some(map) = terminal_payload.as_object_mut()
         {
@@ -11745,7 +12155,7 @@ impl StateStore {
             successor_thread_id,
             requested_by: thread_row.requested_by,
             project_root: thread_row.project_root,
-            project_authority,
+            project_authority: project_authority.clone(),
             result_project_snapshot_hash,
             result_workspace_output_capture_hash,
             lifecycle_authority,
@@ -13803,11 +14213,25 @@ impl StateStore {
         Ok(())
     }
 
-    pub(crate) fn external_allocation(
+    /// Inspect the retained placement and its original deadlines. This read
+    /// does not reserve contact, renew authority, or settle its obligation.
+    pub fn external_allocation(
         &self,
         placement: &str,
     ) -> Result<Option<runtime_db::external_execution::ExternalAllocationRecord>> {
         self.lock()?.runtime_db.external_allocation(placement)
+    }
+
+    pub(crate) fn unsettled_external_allocation_placements(&self) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .unsettled_external_allocation_placements()
+    }
+
+    pub(crate) fn recoverable_external_cleanup_placements(&self) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .recoverable_external_cleanup_placements()
     }
 
     pub(crate) fn retained_external_binding(
@@ -13826,9 +14250,139 @@ impl StateStore {
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
         binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
     ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
-        self.lock()?
+        self.reserve_external_allocation_inner(reservation, binding, None)
+    }
+
+    /// First direct reservation consumes evidence from the sole full-capsule
+    /// compiler. Retained JSON alone cannot produce this non-serializable token.
+    pub(crate) fn reserve_external_direct_allocation(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        compiled: crate::thread_lifecycle::CompiledExternalDirectProgram,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        compiled.verify_reservation(reservation)?;
+        self.reserve_external_allocation_inner(reservation, binding, Some(&compiled))
+    }
+
+    fn reserve_external_allocation_inner(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        compiled: Option<&crate::thread_lifecycle::CompiledExternalDirectProgram>,
+    ) -> Result<runtime_db::external_execution::ExternalAllocationRecord> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let existing = g
             .runtime_db
-            .reserve_external_allocation(reservation, binding)
+            .external_allocation(&reservation.placement_thread_id)?;
+        let proof = match &existing {
+            Some(existing)
+                if existing.phase
+                    != runtime_db::external_execution::ExternalAllocationPhase::Reserved =>
+            {
+                anyhow::ensure!(
+                    existing.reservation == *reservation,
+                    "external allocation replay changed its exact reservation"
+                );
+                // This is the existing occurrence's observation/cleanup path,
+                // not fresh admission. Rotation, stop or terminal history may
+                // invalidate a live proof without erasing original ownership.
+                None
+            }
+            _ => self.verify_external_direct_owner(&g, reservation)?,
+        };
+        if existing.is_none() && proof.is_some() {
+            compiled
+                .context("first direct allocation requires one-use compiler evidence")?
+                .verify_reservation(reservation)?;
+        }
+        g.runtime_db
+            .reserve_external_allocation_with_verified_owner(reservation, binding, proof.as_ref())
+    }
+
+    /// Caller holds the mutation permit and StateStore lock until the runtime
+    /// transaction has compared the current launch claim and stop state.
+    fn verify_external_direct_owner(
+        &self,
+        inner: &Inner,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+    ) -> Result<Option<VerifiedExternalDirectOwner>> {
+        use runtime_db::external_execution::ExternalAllocationOwner;
+        let ExternalAllocationOwner::DirectThread {
+            chain_root_id,
+            launch_owner,
+            program,
+        } = &reservation.owner
+        else {
+            return Ok(None);
+        };
+        reservation.validate()?;
+        let snapshot = authoritative_snapshot_for_transition(
+            inner,
+            chain_root_id,
+            &reservation.placement_thread_id,
+        )?;
+        anyhow::ensure!(
+            snapshot.thread_id == reservation.placement_thread_id
+                && snapshot.chain_root_id == *chain_root_id
+                && !snapshot.status.is_terminal(),
+            "external direct allocation requires its exact nonterminal born thread"
+        );
+        let capsule_hash = snapshot
+            .admitted_launch_capsule_hash
+            .as_deref()
+            .context("external direct born thread has no admitted capsule")?;
+        anyhow::ensure!(
+            capsule_hash == reservation.admitted_capsule_hash,
+            "external direct allocation changed its born capsule"
+        );
+        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        anyhow::ensure!(
+            capsule.project_authority == snapshot.project_authority
+                && capsule.executor_ref == snapshot.executor_ref
+                && matches!(
+                    &capsule.execution_closure,
+                    ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor { .. }
+                ),
+            "external direct allocation has no exact ordinary executable capsule"
+        );
+        let endpoint =
+            crate::thread_lifecycle::validate_retained_external_direct_program(&capsule, program)?;
+        anyhow::ensure!(
+            endpoint.binding_digest == reservation.binding_hash,
+            "external direct allocation changed its sealed endpoint binding"
+        );
+        let ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            environment: ryeos_state::objects::EnvironmentAuthority::None,
+            ..
+        } = &capsule.project_authority
+        else {
+            bail!("external direct allocation requires an immutable pinned execution generation");
+        };
+        anyhow::ensure!(
+            snapshot_hash == &reservation.base_snapshot_hash,
+            "external direct allocation changed its immutable execution generation"
+        );
+        let claim = inner
+            .runtime_db
+            .get_launch_claim(&reservation.placement_thread_id)?
+            .context("external direct allocation has no current launch claim")?;
+        anyhow::ensure!(
+            &claim.owner == launch_owner,
+            "external direct allocation changed its current launch owner"
+        );
+        Ok(Some(VerifiedExternalDirectOwner {
+            thread_id: snapshot.thread_id,
+            chain_root_id: snapshot.chain_root_id,
+            capsule_hash: capsule_hash.to_owned(),
+            snapshot_hash: snapshot_hash.clone(),
+            endpoint_binding_hash: endpoint.binding_digest,
+            program_digest: program.digest()?,
+            launch_owner: claim.owner,
+        }))
     }
 
     pub(crate) fn claim_external_allocation_contact(
@@ -13836,9 +14390,26 @@ impl StateStore {
         placement: &str,
         request_digest: &str,
     ) -> Result<runtime_db::external_execution::ExternalAllocationContactClaim> {
-        self.lock()?
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let record = g
             .runtime_db
-            .claim_external_allocation_contact(placement, request_digest)
+            .external_allocation(placement)?
+            .context("external allocation was not reserved")?;
+        let proof =
+            if record.phase == runtime_db::external_execution::ExternalAllocationPhase::Reserved {
+                self.verify_external_direct_owner(&g, &record.reservation)?
+            } else {
+                // Already-contacted work retains the original owner for cleanup;
+                // a rotated or absent live claim is not permission to relaunch it.
+                None
+            };
+        g.runtime_db
+            .claim_external_allocation_contact_with_verified_owner(
+                placement,
+                request_digest,
+                proof.as_ref(),
+            )
     }
 
     pub(crate) fn cancel_uncontacted_external_allocation(&self, placement: &str) -> Result<()> {
@@ -13851,10 +14422,21 @@ impl StateStore {
         &self,
         placement: &str,
         occurrence: &runtime_db::external_execution::ExternalAllocationOccurrence,
+        timing: runtime_db::external_execution::ExternalObservationTiming,
     ) -> Result<()> {
         self.lock()?
             .runtime_db
-            .bind_external_allocation(placement, occurrence)
+            .bind_external_allocation(placement, occurrence, timing)
+    }
+
+    pub(crate) fn observe_external_lifecycle_pending(
+        &self,
+        placement: &str,
+        timing: runtime_db::external_execution::ExternalObservationTiming,
+    ) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .observe_external_lifecycle_pending(placement, timing)
     }
 
     pub(crate) fn register_external_execution_channel(
@@ -13870,10 +14452,11 @@ impl StateStore {
         &self,
         placement: &str,
         signing_key: &lillux::crypto::SigningKey,
+        live_deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Option<ryeos_state::external_execution::AuthenticatedExecutionFrame>> {
         self.lock()?
             .runtime_db
-            .admit_external_ready_and_author_release(placement, signing_key)
+            .admit_external_ready_and_author_release(placement, signing_key, live_deadline)
     }
 
     pub(crate) fn claim_next_external_protocol_output(
@@ -13883,6 +14466,98 @@ impl StateStore {
         self.lock()?
             .runtime_db
             .claim_next_external_protocol_output(placement)
+    }
+
+    /// Complete authenticated direct-command data, not a finalization permit.
+    /// The ordinary terminal writer still owns current authority and cleanup.
+    pub fn collect_external_direct_output(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalDirectOutput>> {
+        self.lock()?
+            .runtime_db
+            .collect_external_direct_output(placement)
+    }
+
+    /// Complete applied target data with the peer's exact applied Release.
+    /// Readiness data only; termination and finalization writers revalidate.
+    pub fn external_direct_applied_output(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalDirectOutput>> {
+        self.lock()?
+            .runtime_db
+            .external_direct_applied_output(placement)
+    }
+
+    /// Historical normal-settlement data; grants no fresh command contact.
+    /// Explicit cancellation remains a separate operation and invalidates this
+    /// eligibility even when the original target had already exited.
+    pub fn external_direct_normal_settlement_output(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::ExternalDirectOutput>> {
+        self.lock()?
+            .runtime_db
+            .external_direct_normal_settlement_output(placement)
+    }
+
+    pub(crate) fn external_connector_capability_generation(
+        &self,
+        placement: &str,
+    ) -> Result<String> {
+        self.lock()?
+            .runtime_db
+            .external_connector_capability_generation(placement)
+    }
+
+    pub(crate) fn prepare_external_connector(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+    ) -> Result<runtime_db::external_execution::connector::ExternalConnectorPreparation> {
+        self.lock()?.runtime_db.prepare_external_connector(
+            placement,
+            capability_generation,
+            capability_hash,
+        )
+    }
+
+    pub(crate) fn connect_external_connector(
+        &self,
+        placement: &str,
+        capability_generation: &str,
+        capability_hash: &str,
+        peer: &lillux::ExactProcessIdentity,
+    ) -> Result<bool> {
+        self.lock()?.runtime_db.connect_external_connector(
+            placement,
+            capability_generation,
+            capability_hash,
+            peer,
+        )
+    }
+
+    pub(crate) fn close_external_connector(
+        &self,
+        placement: &str,
+        reason: &str,
+    ) -> Result<runtime_db::external_execution::connector::ExternalConnectorRecord> {
+        self.lock()?
+            .runtime_db
+            .close_external_connector(placement, reason)
+    }
+
+    pub(crate) fn external_connector_retired(&self, placement: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .runtime_db
+            .external_connector(placement)?
+            .is_none_or(|record| {
+                record.phase
+                    == runtime_db::external_execution::connector::ExternalConnectorPhase::Closed
+            }))
     }
 
     pub(crate) fn finish_external_protocol_output(
@@ -13958,6 +14633,29 @@ impl StateStore {
             .author_external_owner_revocation(placement, signing_key)
     }
 
+    pub(crate) fn ensure_external_candidate_quiesce(
+        &self,
+        placement: &str,
+        completion_request_digest: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<ryeos_state::external_execution::AuthenticatedExecutionFrame> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.ensure_external_candidate_quiesce(
+            placement,
+            completion_request_digest,
+            signing_key,
+        )
+    }
+
+    pub(crate) fn retained_external_candidate_import(
+        &self,
+        placement: &str,
+    ) -> Result<Option<runtime_db::external_execution::RetainedExternalCandidateImport>> {
+        self.lock()?
+            .runtime_db
+            .retained_external_candidate_import(placement)
+    }
+
     pub(crate) fn settle_external_no_occurrence(
         &self,
         placement: &str,
@@ -13991,10 +14689,11 @@ impl StateStore {
         &self,
         placement: &str,
         observation: &runtime_db::external_execution::ExternalSupervisorActivationObservation,
+        timing: runtime_db::external_execution::ExternalObservationTiming,
     ) -> Result<()> {
         self.lock()?
             .runtime_db
-            .settle_external_supervisor_activation(placement, observation)
+            .settle_external_supervisor_activation(placement, observation, timing)
     }
 
     pub(crate) fn begin_external_termination(
@@ -14007,15 +14706,6 @@ impl StateStore {
             .begin_external_termination(placement, intent)
     }
 
-    pub(crate) fn external_termination_intent(
-        &self,
-        placement: &str,
-    ) -> Result<Option<runtime_db::external_execution::ExternalTerminationIntent>> {
-        self.lock()?
-            .runtime_db
-            .external_termination_intent(placement)
-    }
-
     pub(crate) fn settle_external_terminal(
         &self,
         placement: &str,
@@ -14026,86 +14716,302 @@ impl StateStore {
             .settle_external_terminal(placement, observation)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_external_placement_test_fixture(
         &self,
         reservation: &runtime_db::external_execution::ExternalAllocationReservation,
         binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
     ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace(
+            reservation,
+            binding,
+            std::path::Path::new("/external-placement-test"),
+            |_| {
+                Ok(TestWorkspaceBinding {
+                    workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
+                    thread_id: reservation.placement_thread_id.clone(),
+                    launch_owner: None,
+                    backend_id: Some("fixture".into()),
+                    backend_version: Some("fixture".into()),
+                    pinned_root_identities: Some("fixture".into()),
+                    mount_identity: Some("view:external-composed-controller".into()),
+                    workspace_output_partition_identity: None,
+                    base_output_capture_hash: None,
+                })
+            },
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_external_placement_test_fixture_with_workspace(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        project_root: &std::path::Path,
+        prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            reservation,
+            Some(binding),
+            project_root,
+            "fp:operator",
+            false,
+            false,
+            None,
+            prepare_workspace,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_external_placement_test_fixture_with_workspace_owner(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        project_root: &std::path::Path,
+        owner_principal: &str,
+        prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            reservation,
+            Some(binding),
+            project_root,
+            owner_principal,
+            true,
+            false,
+            None,
+            prepare_workspace,
+        )
+    }
+
+    /// Install only the ordinary thread/session/workspace prerequisites for a
+    /// real external-placement start. Unlike the composed fixture above this
+    /// does not reserve allocation authority or create a provider occurrence.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn install_external_session_test_fixture_with_workspace_owner(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        project_root: &std::path::Path,
+        owner_principal: &str,
+        retained_for_review: bool,
+        root_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
+    ) -> Result<()> {
+        self.install_external_placement_test_fixture_with_workspace_inner(
+            reservation,
+            None,
+            project_root,
+            owner_principal,
+            true,
+            retained_for_review,
+            Some(root_launch_metadata),
+            prepare_workspace,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn install_external_placement_test_fixture_with_workspace_inner(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        binding: Option<
+            &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        >,
+        project_root: &std::path::Path,
+        owner_principal: &str,
+        placement_is_chain_root: bool,
+        retained_for_review: bool,
+        root_launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+        prepare_workspace: impl FnOnce(&str) -> Result<TestWorkspaceBinding>,
+    ) -> Result<()> {
+        let source_root_id = if placement_is_chain_root {
+            reservation.placement_thread_id.clone()
+        } else {
+            "T-test-root".to_owned()
+        };
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "project:external-placement-test".to_owned(),
+            Some(project_root.to_path_buf()),
+            reservation.base_snapshot_hash.clone(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )?
+        .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)?;
+        let captured_history_policy = ryeos_state::objects::CapturedThreadHistoryPolicy {
+            retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+            canonical_item_ref: "worker_execution:test/external-candidate".to_owned(),
+            item_content_hash: "a".repeat(64),
+            item_signer_fingerprint: Some("b".repeat(64)),
+            item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+            kind_schema_content_hash: "c".repeat(64),
+            resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(
+                ),
+            },
+        };
+        let placement_executor_ref = root_launch_metadata
+            .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
+            .transpose()?
+            .flatten()
+            .map(|capsule| capsule.executor_ref)
+            .unwrap_or_else(|| "runtime:test/external-candidate".to_owned());
+        if !placement_is_chain_root {
+            self.create_thread_for_test(&NewThreadRecord {
+                thread_id: source_root_id.clone(),
+                chain_root_id: source_root_id.clone(),
+                kind: "worker_execution".to_owned(),
+                item_ref: "worker_execution:test/external-candidate".to_owned(),
+                executor_ref: placement_executor_ref.clone(),
+                launch_mode: "detached".to_owned(),
+                current_site_id: "site:composed-test".to_owned(),
+                origin_site_id: "site:composed-test".to_owned(),
+                upstream_thread_id: None,
+                requested_by: Some(owner_principal.to_owned()),
+                project_root: Some(project_root.to_path_buf()),
+                project_authority: project_authority.clone(),
+                base_project_snapshot_hash: Some(reservation.base_snapshot_hash.clone()),
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                captured_history_policy: Some(captured_history_policy.clone()),
+            })?;
+        }
+        let placement_thread = NewThreadRecord {
+            thread_id: reservation.placement_thread_id.clone(),
+            chain_root_id: source_root_id.clone(),
+            kind: "worker_execution".to_owned(),
+            item_ref: "worker_execution:test/external-candidate".to_owned(),
+            executor_ref: placement_executor_ref,
+            launch_mode: "detached".to_owned(),
+            current_site_id: "site:composed-test".to_owned(),
+            origin_site_id: "site:composed-test".to_owned(),
+            upstream_thread_id: (!placement_is_chain_root).then_some(source_root_id.clone()),
+            requested_by: Some(owner_principal.to_owned()),
+            project_root: Some(project_root.to_path_buf()),
+            project_authority: project_authority.clone(),
+            base_project_snapshot_hash: Some(reservation.base_snapshot_hash.clone()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: placement_is_chain_root.then_some(captured_history_policy),
+        };
+        if let Some(metadata) = root_launch_metadata {
+            self.create_root_thread_for_test_with_launch_metadata(&placement_thread, metadata)?;
+        } else {
+            self.create_thread_for_test(&placement_thread)?;
+        }
+        self.mark_thread_running(
+            &reservation.placement_thread_id,
+            Some(&reservation.base_snapshot_hash),
+        )?;
+        if root_launch_metadata.is_none() {
+            self.seed_launch_metadata(
+                &reservation.placement_thread_id,
+                &external_fixture_launch_metadata(
+                    project_authority,
+                    serde_json::json!({
+                        "binding_records": {},
+                        "required_secrets": [],
+                        "admitted_sessions": {},
+                    }),
+                    serde_json::json!({}),
+                ),
+            )?;
+        }
+        let launch_claim = self
+            .claim_thread_launch_active(
+                &reservation.placement_thread_id,
+                "claim-external-composed-controller",
+                "daemon:external-composed-test",
+            )?
+            .context("composed external fixture lost its launch claim")?;
+        self.reserve_execution_workspace(
+            &reservation.owner.dedicated_session()?.workspace_id,
+            &reservation.base_snapshot_hash,
+            project_root
+                .to_str()
+                .context("composed workspace project path is not UTF-8")?,
+        )?;
+        self.transition_execution_workspace(
+            &reservation.owner.dedicated_session()?.workspace_id,
+            &[runtime_db::WorkspaceState::Reserved],
+            runtime_db::WorkspaceState::Constructing,
+            None,
+        )?;
+        self.claim_execution_workspace_construction(
+            &reservation.owner.dedicated_session()?.workspace_id,
+            &reservation.placement_thread_id,
+            &launch_claim.claimed_by,
+        )?;
+        let workspace = prepare_workspace(&launch_claim.claimed_by)?;
+        anyhow::ensure!(
+            workspace.workspace_id == reservation.owner.dedicated_session()?.workspace_id
+                && workspace.thread_id == reservation.placement_thread_id,
+            "composed workspace preparation changed its durable owner"
+        );
+        let view_identity = workspace
+            .mount_identity
+            .as_deref()
+            .context("composed workspace preparation omitted its view identity")?;
+        let workspace_binding = runtime_db::RuntimeWorkspaceBinding {
+            workspace_id: reservation.owner.dedicated_session()?.workspace_id.clone(),
+            view_identity: view_identity.to_owned(),
+            borrower_launch_owner: launch_claim.owner.clone(),
+        };
         let g = self.lock()?;
         let profile = format!("P-{}", reservation.placement_thread_id);
         g.runtime_db
             .create_credential_profile(runtime_db::NewCredentialProfile {
                 profile_id: &profile,
-                owner_principal: "fp:operator",
+                owner_principal,
                 home_id: "external-placement-test",
             })?;
         g.runtime_db.acquire_credential_profile(
             &profile,
-            "fp:operator",
-            &reservation.worker_instance_id,
+            owner_principal,
+            &reservation.owner.dedicated_session()?.worker_instance_id,
         )?;
         g.runtime_db
             .admit_dedicated_session(runtime_db::NewDedicatedSession {
                 placement_thread_id: &reservation.placement_thread_id,
-                chain_root_id: "T-test-root",
-                owner_principal: "fp:operator",
+                chain_root_id: &source_root_id,
+                owner_principal,
                 admitted_capsule_hash: &reservation.admitted_capsule_hash,
-                workspace_id: &reservation.workspace_id,
+                workspace_id: &reservation.owner.dedicated_session()?.workspace_id,
                 candidate_required: true,
-                candidate_disposition: runtime_db::DedicatedCandidateDisposition::OwnerDecision,
+                candidate_disposition: if retained_for_review {
+                    runtime_db::DedicatedCandidateDisposition::RetainedForReview
+                } else {
+                    runtime_db::DedicatedCandidateDisposition::OwnerDecision
+                },
                 credential_profile_id: &profile,
                 credential_generation: 1,
-                credential_lock_owner: &reservation.worker_instance_id,
+                credential_lock_owner: &reservation.owner.dedicated_session()?.worker_instance_id,
             })?;
-        g.runtime_db.reserve_workspace(
-            &reservation.workspace_id,
-            &reservation.base_snapshot_hash,
-            "/external-placement-test",
-        )?;
-        g.runtime_db.transition_workspace(
-            &reservation.workspace_id,
-            &[runtime_db::WorkspaceState::Reserved],
-            runtime_db::WorkspaceState::Constructing,
-            None,
-        )?;
-        g.runtime_db.claim_workspace_construction(
-            &reservation.workspace_id,
-            &reservation.placement_thread_id,
-            "dedicated_worker_session",
-        )?;
-        g.runtime_db.bind_workspace(runtime_db::WorkspaceBinding {
-            workspace_id: &reservation.workspace_id,
-            thread_id: &reservation.placement_thread_id,
-            launch_owner: Some("dedicated_worker_session"),
-            backend_id: Some("fixture"),
-            backend_version: Some("fixture"),
-            pinned_root_identities: Some("fixture"),
-            mount_identity: Some("fixture"),
-            workspace_output_partition_identity: None,
-            base_output_capture_hash: None,
-        })?;
-        g.runtime_db
-            .reserve_external_allocation(reservation, binding)?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn apply_external_frame_test_fixture(
-        &self,
-        placement: &str,
-        direction: ryeos_state::external_execution::ChannelDirection,
-        sequence: u64,
-        digest: &str,
-    ) -> Result<()> {
-        let g = self.lock()?;
         anyhow::ensure!(
-            g.runtime_db
-                .claim_external_frame_application(placement, direction, sequence, digest,)?,
-            "external frame test fixture was already claimed"
+            workspace.launch_owner.as_deref().is_none()
+                || workspace.launch_owner.as_deref() == Some(launch_claim.claimed_by.as_str()),
+            "composed workspace preparation changed its launch owner"
         );
-        g.runtime_db
-            .finish_external_frame_application(placement, direction, sequence, digest)
+        g.runtime_db.bind_workspace(runtime_db::WorkspaceBinding {
+            workspace_id: &workspace.workspace_id,
+            thread_id: &workspace.thread_id,
+            launch_owner: Some(&launch_claim.claimed_by),
+            backend_id: workspace.backend_id.as_deref(),
+            backend_version: workspace.backend_version.as_deref(),
+            pinned_root_identities: workspace.pinned_root_identities.as_deref(),
+            mount_identity: workspace.mount_identity.as_deref(),
+            workspace_output_partition_identity: workspace
+                .workspace_output_partition_identity
+                .as_deref(),
+            base_output_capture_hash: workspace.base_output_capture_hash.as_deref(),
+        })?;
+        if let Some(binding) = binding {
+            g.runtime_db
+                .reserve_external_allocation(reservation, binding)?;
+        }
+        drop(g);
+        self.bind_thread_workspace(&reservation.placement_thread_id, &workspace_binding)?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -14187,6 +15093,7 @@ impl StateStore {
                     permit.cas_guard(),
                     &retained.binding,
                     &retained.candidate_snapshot_hash,
+                    retained.candidate_output_capture_hash.as_deref(),
                     &retained.completion_request_digest,
                     &retained.writer_exclusion_evidence_hash,
                 )?;
@@ -14311,6 +15218,7 @@ impl StateStore {
         roots.extend(g.runtime_db.retained_candidate_snapshot_roots()?);
         roots.extend(g.runtime_db.runtime_child_cas_object_roots()?);
         roots.extend(g.runtime_db.external_execution_cas_roots()?);
+        roots.extend(g.runtime_db.scoped_child_observation_cas_roots()?);
         Ok(roots.into_iter().collect())
     }
 
@@ -14593,6 +15501,65 @@ impl StateStore {
         }
     }
 
+    /// Retire the root's workspace-view membership after an externally hosted
+    /// candidate has completed and its exact provider occurrence is proved
+    /// terminal. There is no node-local PID to reap for this execution class;
+    /// the retained external allocation and completion fence are its process-
+    /// lifetime authority. The ordinary workspace owner still performs the
+    /// separate freeze and physical view closure.
+    pub fn settle_completed_external_workspace_owned(
+        &self,
+        placement_thread_id: &str,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let binding = match g.runtime_db.thread_workspace_binding(placement_thread_id)? {
+            Some(binding) => binding,
+            None => return Ok(true),
+        };
+        let claim = g
+            .runtime_db
+            .get_launch_claim(placement_thread_id)?
+            .ok_or_else(|| anyhow!("external workspace settlement has no live launch claim"))?;
+        let active = self
+            .active_launch_owners
+            .lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        if claim.owner != binding.borrower_launch_owner || !active.contains(&claim.claimed_by) {
+            bail!("external workspace settlement requires its exact active launch owner");
+        }
+        let session = g
+            .runtime_db
+            .dedicated_session(placement_thread_id)?
+            .ok_or_else(|| anyhow!("external workspace settlement has no dedicated session"))?;
+        if session.state != "freezing"
+            || session.terminal_reason.as_deref() != Some("completed")
+            || session.completion_fence.is_none()
+        {
+            bail!("external workspace settlement has no completed freeze boundary");
+        }
+        let allocation = g
+            .runtime_db
+            .external_allocation(placement_thread_id)?
+            .ok_or_else(|| anyhow!("external workspace settlement lost its allocation"))?;
+        if !allocation.phase.is_settled() {
+            bail!("external workspace settlement retains unresolved provider contact");
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(placement_thread_id)?
+            .ok_or_else(|| anyhow!("external workspace settlement runtime row is absent"))?;
+        if runtime.process_identity.is_some()
+            || g.runtime_db
+                .in_process_handler_reservation(placement_thread_id)?
+                .is_some()
+        {
+            bail!("external workspace settlement retains a local execution owner");
+        }
+        g.runtime_db
+            .clear_thread_workspace_owned(placement_thread_id, &binding)
+    }
+
     /// Settle one completed process attempt before its active claim rotates or
     /// its exact attachment is compare-cleared. The caller MUST have completed
     /// the owned wait/reap and settled held-launch/request lifelines. Unlike
@@ -14683,9 +15650,30 @@ impl StateStore {
         {
             return Ok(false);
         }
-        let cleared = g
-            .runtime_db
-            .clear_reaped_workspace_process_if_matches(thread_id, binding, identity)?;
+        let settlement_kind = match owner {
+            WorkspaceProcessSettlementOwner::Live if identity.process_scope.is_some() => {
+                runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty
+            }
+            WorkspaceProcessSettlementOwner::Live => {
+                runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent
+            }
+            WorkspaceProcessSettlementOwner::Abandoned => {
+                runtime_db::ThreadProcessSettlementKind::RecoveryDeath
+            }
+        };
+        let settlement = runtime_db::ThreadProcessSettlement::new(
+            thread_id,
+            &binding.borrower_launch_owner,
+            identity,
+            Some(binding),
+            settlement_kind,
+        )?;
+        let cleared = g.runtime_db.clear_reaped_workspace_process_if_matches(
+            thread_id,
+            binding,
+            identity,
+            &settlement,
+        )?;
         if cleared {
             self.attached_process_registry().remove(thread_id);
         }
@@ -15141,13 +16129,37 @@ impl StateStore {
         if claim.claimed_by != launch_owner {
             bail!("stale launch owner cannot detach process from {thread_id}");
         }
-        let cleared = g
-            .runtime_db
-            .clear_process_if_matches(thread_id, process_identity)?;
+        let settlement = runtime_db::ThreadProcessSettlement::new(
+            thread_id,
+            &claim.owner,
+            process_identity,
+            None,
+            if process_identity.process_scope.is_some() {
+                runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty
+            } else {
+                runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent
+            },
+        )?;
+        let cleared = g.runtime_db.clear_process_if_matches_with_settlement(
+            thread_id,
+            process_identity,
+            Some(&settlement),
+        )?;
         if cleared {
             self.attached_process_registry().remove(thread_id);
         }
         Ok(cleared)
+    }
+
+    /// Read the exact operational settlement retained after compare-clear.
+    /// Product qualification must also bind it to a signed terminal event and
+    /// independently recheck Lillux scope emptiness before using it.
+    pub fn latest_thread_process_settlement(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<runtime_db::ThreadProcessSettlement>> {
+        let g = self.lock()?;
+        g.runtime_db.latest_thread_process_settlement(thread_id)
     }
 
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
@@ -18484,6 +19496,557 @@ mod tests {
         .expect("state store")
     }
 
+    // Signed persistence fixture only: no RootAdmission, compiler token, or
+    // claim that the resolver/launcher admitted these storage inputs. Birth,
+    // substrate attestation, capsule verification and finalization are real.
+    fn signed_direct_storage_root(store: &StateStore, thread_id: &str, external: bool) {
+        use ryeos_state::objects::*;
+        let cas = store.state_authority.cas_store().unwrap();
+        let command_hash = cas.store_blob(b"storage-only executable bytes").unwrap();
+        let project = ExecutionProjectAuthority::pinned(
+            "project:direct-storage".into(),
+            None,
+            "b".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut metadata = external_fixture_launch_metadata(
+            project.clone(),
+            json!({"binding_records":{}}),
+            json!({}),
+        );
+        let root_history = metadata
+            .sealed_root_request
+            .as_ref()
+            .unwrap()
+            .captured_history_policy()
+            .clone();
+        let AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref,
+            runtime_content_hash,
+            runtime_signer_fingerprint,
+            protocol_ref,
+            protocol_content_hash,
+            protocol_signer_fingerprint,
+            executor_ref,
+            ..
+        } = metadata.admitted_artifact_identity.take().unwrap()
+        else {
+            unreachable!()
+        };
+        let AdmittedExecutionClosure::ManagedRuntime {
+            protocol_descriptor_document,
+            ..
+        } = metadata.admitted_execution_closure.take().unwrap()
+        else {
+            unreachable!()
+        };
+        let runtime = DirectRuntimeIdentity {
+            runtime_ref,
+            runtime_content_hash,
+            runtime_signer_fingerprint,
+            runtime_source_space: DirectRuntimeSourceSpace::Project,
+            runtime_bundle_manifest_hash: None,
+            runtime_bundle_signer_fingerprint: None,
+        };
+        let command_path = admitted_direct_command_execution_path(
+            &command_hash,
+            std::path::Path::new("/storage-command"),
+        )
+        .unwrap();
+        let plan: ryeos_engine::contracts::ExecutionPlan = serde_json::from_value(json!({
+            "plan_id":"signed-storage-direct", "root_executor_id":executor_ref,
+            "root_ref":"graph:test/storage-fixture", "item_kind":"graph",
+            "nodes":[{"node_type":"dispatch_subprocess","id":"spawn","spec":{
+                "cmd":command_path,"verified_command":if external {json!({"authority":"captured_content",
+                    "code":{"source_path":command_path,"content_hash":command_hash}})} else {Value::Null},
+                "args":[],"cwd":"/workspace","env":{},"stdin":null,"timeout_secs":30
+            },"executor_chain":["graph:test/storage-fixture",executor_ref]}],
+            "entrypoint":"spawn", "capabilities":{"requires_model":false,
+                "requires_subprocess":true,"requires_network":false,"custom":[]},
+            "materialization_requirements":[],"network_authority_ceiling":"node_policy",
+            "filesystem_authority_ceiling":"node_policy","target_requirement":null,
+            "endpoint_requirement":if external {json!({"kind":"external",
+                "binding_id":"storage-direct","stdout_max_bytes":4096,"stderr_max_bytes":4096})}
+                else {json!({"kind":"local"})},
+            "external_endpoint_binding":if external {json!({"binding_id":"storage-direct",
+                "binding_digest":"c".repeat(64)})} else {Value::Null},
+            "resource_authority_ceiling":"node_policy","cache_key":"storage",
+            "executor_chain":["graph:test/storage-fixture",executor_ref],
+            "executor_authorities":[],"runtime_identity":runtime
+        }))
+        .unwrap();
+        plan.validate_endpoint_for_sealing().unwrap();
+        let execution_plan = serde_json::to_value(plan).unwrap();
+        metadata.launch_driver = Some(ExecutionLaunchDriver::DirectItemExecutor);
+        if !external {
+            metadata
+                .resume_context
+                .as_mut()
+                .unwrap()
+                .lifecycle_authority = ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE;
+        }
+        metadata.admitted_artifact_identity =
+            Some(AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                executor_ref: executor_ref.clone(),
+                root_subject_source_content_digest: root_history.item_content_hash.clone(),
+                root_subject_signer_fingerprint: root_history.item_signer_fingerprint.clone(),
+                root_subject_source_identity: DirectRootSourceIdentity::Project,
+                protocol_ref,
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                execution_plan_hash: lillux::sha256_hex(
+                    lillux::canonical_json(&execution_plan).unwrap().as_bytes(),
+                ),
+                executable_identity: if external {
+                    DirectExecutableIdentity::CapturedContent {
+                        content_hash: command_hash.clone(),
+                    }
+                } else {
+                    DirectExecutableIdentity::NodePolicy
+                },
+                runtime_identity: runtime.clone(),
+            });
+        metadata.admitted_execution_closure = Some(AdmittedExecutionClosure::DirectItemExecutor {
+            execution_plan,
+            protocol_descriptor_document,
+            admitted_project_root: None,
+            command: if external {
+                AdmittedDirectCommandClosure::ContentAddressed {
+                    executable_blob_hash: command_hash,
+                    execution_path: command_path,
+                }
+            } else {
+                AdmittedDirectCommandClosure::NodePolicy
+            },
+        });
+        let provisional = metadata.admitted_launch_capsule().unwrap().unwrap();
+        let authority = provisional.launch_authority();
+        let cas_root = store.cas_root().unwrap();
+        let identity = crate::identity::NodeIdentity::load(
+            &cas_root.ancestors().nth(3).unwrap().join("node-key.pem"),
+        )
+        .unwrap();
+        let substrate = crate::execution_identity_probe::boot_node_execution_identity(
+            store,
+            &identity,
+            &crate::build_info::get(),
+        )
+        .unwrap();
+        let realization = AdmittedExecutionRealization {
+            schema: EXECUTION_REALIZATION_SCHEMA_VERSION,
+            kind: ADMITTED_EXECUTION_REALIZATION_KIND.into(),
+            substrate_identity_hash: substrate.identity_hash.clone(),
+            substrate_attestation_hash: substrate.attestation_hash.clone(),
+            launch_authority_digest: authority.digest().unwrap(),
+            effective_definition_digest: provisional.exact_program["effective_definition_digest"]
+                .as_str()
+                .unwrap()
+                .into(),
+            artifact_identity_digest: authority.artifact_identity_digest().unwrap(),
+            execution_closure_digest: authority.execution_closure_digest().unwrap(),
+            contract_ref: runtime.runtime_ref,
+            contract_digest: runtime.runtime_content_hash,
+            components: Vec::new(),
+            properties: BTreeMap::new(),
+        };
+        metadata.execution_realization_hash =
+            Some(cas.store_object(&realization.to_value().unwrap()).unwrap());
+        let mut thread = thread_record(thread_id, thread_id);
+        let resume = metadata.resume_context.as_ref().unwrap();
+        thread.kind = resume.kind.clone();
+        thread.item_ref = resume.item_ref.clone();
+        thread.captured_history_policy = Some(root_history);
+        thread.launch_mode = resume.launch_mode.clone();
+        thread.executor_ref = executor_ref;
+        thread.project_authority = project;
+        thread.base_project_snapshot_hash = Some("b".repeat(64));
+        store
+            .create_root_thread_for_test_with_launch_metadata(&thread, &metadata)
+            .unwrap();
+        let retained = store.admitted_launch_capsule(thread_id).unwrap().unwrap();
+        assert_eq!(
+            crate::thread_lifecycle::capsule_requires_external_direct(&retained).unwrap(),
+            external,
+        );
+    }
+
+    fn storage_direct_success() -> FinalizeThreadRecord {
+        FinalizeThreadRecord {
+            status: "completed".into(),
+            outcome_code: Some("exit:0".into()),
+            result_json: Some(json!({"answer":42})),
+            error_json: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
+        }
+    }
+
+    #[test]
+    fn signed_storage_external_direct_cannot_complete_without_allocation() {
+        let store = test_store();
+        let thread = "T-storage-external-direct";
+        signed_direct_storage_root(&store, thread, true);
+        assert!(store.external_allocation(thread).unwrap().is_none());
+        let head = || {
+            store
+                .lock()
+                .unwrap()
+                .state_db
+                .read_generic_head_ref("chains", thread)
+                .unwrap()
+                .unwrap()
+                .target_hash
+        };
+        let before = head();
+        let events = replayed_event_types(&store, thread);
+        let error = store
+            .finalize_thread(thread, &storage_direct_success())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("external direct result has no allocation evidence"),
+            "{error:#}"
+        );
+        assert_eq!(head(), before);
+        assert_eq!(replayed_event_types(&store, thread), events);
+        assert_eq!(store.get_thread(thread).unwrap().unwrap().status, "created");
+        assert!(store.external_allocation(thread).unwrap().is_none());
+    }
+
+    #[test]
+    fn external_finalization_preserves_signed_storage_local_node_policy() {
+        let store = test_store();
+        let thread = "T-storage-local-node-policy";
+        signed_direct_storage_root(&store, thread, false);
+        store
+            .finalize_thread(thread, &storage_direct_success())
+            .unwrap();
+        let inner = store.lock().unwrap();
+        let snapshot = authoritative_snapshot_for_transition(&inner, thread, thread).unwrap();
+        assert_eq!(snapshot.status, ThreadStatus::Completed);
+        assert_eq!(snapshot.result, Some(json!({"answer":42})));
+        drop(inner);
+        assert!(replayed_event_types(&store, thread).contains(&"thread_completed".into()));
+        assert!(store.external_allocation(thread).unwrap().is_none());
+    }
+
+    fn direct_owner_test_reservation(
+        store: &StateStore,
+    ) -> runtime_db::external_execution::ExternalAllocationReservation {
+        use runtime_db::external_execution::{
+            ExternalAllocationOwner, ExternalAllocationReservation,
+        };
+        let thread = "T-direct-owner-proof";
+        store
+            .create_thread_for_test(&thread_record(thread, thread))
+            .unwrap();
+        let owner = store
+            .claim_thread_launch_active(thread, "direct-proof-claim", "daemon:direct-proof")
+            .unwrap()
+            .unwrap()
+            .owner;
+        let binding=crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        ExternalAllocationReservation {
+            schema: runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+            placement_thread_id: thread.into(),
+            admitted_capsule_hash: "a".repeat(64),
+            owner: ExternalAllocationOwner::DirectThread {
+                chain_root_id: thread.into(),
+                launch_owner: owner,
+                program: crate::thread_lifecycle::external_direct_program_test_fixture(),
+            },
+            base_snapshot_hash: "b".repeat(64),
+            binding_hash: binding.digest().into(),
+            capacity_owner: binding.capacity_owner().into(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &lillux::crypto::SigningKey::from_bytes(&[19; 32]).verifying_key(),
+            )
+            .unwrap(),
+            channel_bootstrap_capability_hash: "4".repeat(64),
+            request_digest: "e".repeat(64),
+            max_active: 1,
+            timeout_seconds: 60,
+            contact_deadline_ms: now + 30_000,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
+        }
+    }
+
+    #[test]
+    fn external_direct_finalization_binds_exact_ordinary_result_meaning() {
+        // Content-comparison fixture, not proof of a born launch, signed
+        // transcript, or cleanup. The production caller checks those under its
+        // existing writer guard before comparing this projection.
+        use ryeos_state::external_execution::{
+            ExternalCommandOutputCommitment, ExternalCommandTermination,
+            ExternalCommandTerminationReason, ExternalTargetExit,
+        };
+        let stdout = br#"{"answer":42}"#.to_vec();
+        let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            truncated: false,
+        };
+        let output = runtime_db::external_execution::ExternalDirectOutput {
+            binding_digest: "a".repeat(64),
+            terminal_sequence: 3,
+            terminal_digest: "b".repeat(64),
+            termination: ExternalCommandTermination {
+                target_exit: ExternalTargetExit::Code(0),
+                reason: ExternalCommandTerminationReason::TargetExited,
+                stdout: commitment(&stdout),
+                stderr: commitment(b""),
+            },
+            stdout,
+            stderr: Vec::new(),
+        };
+        let expected = ryeos_engine::dispatch::interpret_external_terminal(
+            &output.termination,
+            &output.stdout,
+            &output.stderr,
+        );
+        let exact = FinalizeThreadRecord {
+            status: expected.status.as_str().into(),
+            outcome_code: expected.outcome_code,
+            result_json: expected.result,
+            error_json: expected.error,
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+            result_workspace_output_capture_hash: None,
+        };
+        validate_external_direct_result(&exact, &output).unwrap();
+        for part in [
+            "status", "outcome", "result", "error", "managed", "snapshot", "capture",
+        ] {
+            let mut changed = exact.clone();
+            match part {
+                "status" => changed.status = "failed".into(),
+                "outcome" => changed.outcome_code = Some("invented".into()),
+                "result" => changed.result_json = Some(json!({"answer":99})),
+                "error" => changed.error_json = Some(json!({"error":"invented"})),
+                "managed" => changed.managed_envelope = Some(json!({})),
+                "snapshot" => changed.result_project_snapshot_hash = Some("c".repeat(64)),
+                "capture" => changed.result_workspace_output_capture_hash = Some("d".repeat(64)),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_external_direct_result(&changed, &output).is_err(),
+                "accepted {part}"
+            );
+        }
+        let mut changed = output.clone();
+        changed.termination.reason = ExternalCommandTerminationReason::Cancelled;
+        assert!(validate_external_direct_result(&exact, &changed).is_err());
+        changed = output.clone();
+        changed.termination.target_exit = ExternalTargetExit::Code(7);
+        assert!(validate_external_direct_result(&exact, &changed).is_err());
+    }
+
+    #[test]
+    fn direct_allocation_requires_authoritative_born_capsule_not_runtime_metadata() {
+        let store = test_store();
+        let reservation = direct_owner_test_reservation(&store);
+        let binding=crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        store
+            .seed_launch_metadata(
+                &reservation.placement_thread_id,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default().with_launch_driver(
+                    ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor,
+                ),
+            )
+            .unwrap();
+        let error = store
+            .reserve_external_allocation(&reservation, &binding)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("born thread has no admitted capsule")
+        );
+        assert!(
+            store
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        let mut absent = reservation.clone();
+        absent.placement_thread_id = "T-no-authoritative-birth".into();
+        let runtime_db::external_execution::ExternalAllocationOwner::DirectThread {
+            chain_root_id,
+            launch_owner,
+            ..
+        } = &mut absent.owner
+        else {
+            unreachable!()
+        };
+        *chain_root_id = absent.placement_thread_id.clone();
+        launch_owner.thread_id = absent.placement_thread_id.clone();
+        store
+            .lock()
+            .unwrap()
+            .runtime_db
+            .insert_thread_runtime(&absent.placement_thread_id, &absent.placement_thread_id)
+            .unwrap();
+        assert!(
+            store
+                .reserve_external_allocation(&absent, &binding)
+                .unwrap_err()
+                .to_string()
+                .contains("authoritative snapshot missing")
+        );
+        assert!(
+            store
+                .external_allocation(&absent.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn direct_owner_handoff_matches_only_its_exact_tuple() {
+        // Exercise tuple comparison only. This hand-built token cannot serve
+        // as positive admission evidence; real birth and compiler consumption
+        // belong to the public ordinary-execution fixture.
+        let store = test_store();
+        let reservation = direct_owner_test_reservation(&store);
+        let runtime_db::external_execution::ExternalAllocationOwner::DirectThread {
+            chain_root_id,
+            launch_owner,
+            program,
+        } = &reservation.owner
+        else {
+            unreachable!()
+        };
+        let proof = VerifiedExternalDirectOwner {
+            thread_id: reservation.placement_thread_id.clone(),
+            chain_root_id: chain_root_id.clone(),
+            capsule_hash: reservation.admitted_capsule_hash.clone(),
+            snapshot_hash: reservation.base_snapshot_hash.clone(),
+            endpoint_binding_hash: reservation.binding_hash.clone(),
+            program_digest: program.digest().unwrap(),
+            launch_owner: launch_owner.clone(),
+        };
+        assert!(proof.matches(&reservation));
+        for part in ["capsule", "snapshot", "binding", "thread", "chain", "owner"] {
+            let mut changed = reservation.clone();
+            let runtime_db::external_execution::ExternalAllocationOwner::DirectThread {
+                chain_root_id,
+                launch_owner,
+                ..
+            } = &mut changed.owner
+            else {
+                unreachable!()
+            };
+            match part {
+                "capsule" => changed.admitted_capsule_hash = "f".repeat(64),
+                "snapshot" => changed.base_snapshot_hash = "f".repeat(64),
+                "binding" => changed.binding_hash = "f".repeat(64),
+                "thread" => changed.placement_thread_id = "T-other".into(),
+                "chain" => *chain_root_id = "T-other".into(),
+                "owner" => launch_owner.monotonic_launch_epoch += 1,
+                _ => unreachable!(),
+            }
+            assert!(!proof.matches(&changed));
+        }
+    }
+
+    #[test]
+    fn direct_reservation_replay_preserves_original_owner_without_fresh_admission() {
+        use runtime_db::external_execution::{
+            ExternalAllocationContactClaim, ExternalAllocationPhase,
+        };
+        // Storage-only retained occurrence: a positive direct capsule launch
+        // remains a joined-test gate, not a claim made by this regression.
+        let store = test_store();
+        let reservation = direct_owner_test_reservation(&store);
+        let binding=crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        {
+            let inner = store.lock().unwrap();
+            runtime_db::external_execution::tests::retain_direct_owner_fixture(
+                &inner.runtime_db,
+                &reservation,
+                "contact_pending",
+            );
+        }
+        store
+            .release_thread_launch_claim(&reservation.placement_thread_id, "direct-proof-claim")
+            .unwrap();
+        store
+            .claim_thread_launch_active(
+                &reservation.placement_thread_id,
+                "replacement-claim",
+                "daemon:replacement",
+            )
+            .unwrap()
+            .unwrap();
+        let replay = store
+            .reserve_external_allocation(&reservation, &binding)
+            .unwrap();
+        assert_eq!(replay.reservation, reservation);
+        assert_eq!(replay.phase, ExternalAllocationPhase::ContactPending);
+        assert!(matches!(
+            store
+                .claim_external_allocation_contact(
+                    &reservation.placement_thread_id,
+                    &reservation.request_digest
+                )
+                .unwrap(),
+            ExternalAllocationContactClaim::Reconcile(_)
+        ));
+        let mut changed = reservation.clone();
+        changed.base_snapshot_hash = "f".repeat(64);
+        assert!(
+            store
+                .reserve_external_allocation(&changed, &binding)
+                .unwrap_err()
+                .to_string()
+                .contains("changed its exact reservation")
+        );
+        assert_eq!(
+            store
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .reservation,
+            reservation
+        );
+
+        let reserved_store = test_store();
+        let reserved = direct_owner_test_reservation(&reserved_store);
+        {
+            let inner = reserved_store.lock().unwrap();
+            runtime_db::external_execution::tests::retain_direct_owner_fixture(
+                &inner.runtime_db,
+                &reserved,
+                "reserved",
+            );
+        }
+        assert!(
+            reserved_store
+                .reserve_external_allocation(&reserved, &binding)
+                .unwrap_err()
+                .to_string()
+                .contains("born thread has no admitted capsule")
+        );
+        assert_eq!(
+            reserved_store
+                .external_allocation(&reserved.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Reserved
+        );
+    }
+
     fn workspace_binding_fixture() -> (StateStore, runtime_db::RuntimeWorkspaceBinding) {
         let store = test_store();
         let root = "T-workspace-root";
@@ -18624,6 +20187,207 @@ mod tests {
             )
             .unwrap();
         identity
+    }
+
+    #[test]
+    fn owned_completed_terminal_signs_only_its_exact_cleared_process_attempt() {
+        let store = test_store();
+        let thread_id = "T-signed-settlement";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread_id, "claim-settlement", "daemon:test")
+            .unwrap()
+            .unwrap();
+        let identity = crate::process::ExecutionProcessIdentity {
+            schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            process_scope: None,
+            boot_id: "test-boot".into(),
+            target_pid: 12347,
+            target_start_time_ticks: 11,
+            group_leader_pid: 12347,
+            group_leader_start_time_ticks: 11,
+            resource_selections: Vec::new(),
+            resource_operations: Vec::new(),
+            resource_allocation_limit: None,
+            resource_occupancy_start: None,
+            resource_occupancy_limit: None,
+            resource_cleanup_allowance_ms: None,
+        };
+        store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                Some(&claim.claimed_by),
+            )
+            .unwrap();
+        assert!(
+            store
+                .clear_thread_process_if_matches_owned(thread_id, &identity, &claim.claimed_by)
+                .unwrap()
+        );
+        let settlement = store
+            .latest_thread_process_settlement(thread_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settlement.launch_owner, claim.owner);
+        assert_eq!(settlement.process_identity, identity);
+        let (events, _) = store
+            .finalize_thread_effective_owned(
+                thread_id,
+                &claim.claimed_by,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_owned(),
+                    outcome_code: Some("completed".into()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == ryeos_state::event_types::THREAD_COMPLETED)
+            .unwrap();
+        assert_eq!(
+            terminal.payload["process_settlement_witness_digest"],
+            settlement.digest().unwrap()
+        );
+        assert!(terminal.event_hash.is_some());
+
+        for (thread_id, owned, status) in [
+            ("T-unowned-settlement", false, ThreadStatus::Completed),
+            ("T-failed-settlement", true, ThreadStatus::Failed),
+        ] {
+            store
+                .create_thread_for_test(&thread_record(thread_id, thread_id))
+                .unwrap();
+            let claim = store
+                .claim_thread_launch_active(thread_id, "claim-settlement", "daemon:test")
+                .unwrap()
+                .unwrap();
+            store
+                .attach_new_thread_process(
+                    thread_id,
+                    identity.target_pid,
+                    identity.group_leader_pid,
+                    &identity,
+                    &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                    Some(&claim.claimed_by),
+                )
+                .unwrap();
+            assert!(
+                store
+                    .clear_thread_process_if_matches_owned(thread_id, &identity, &claim.claimed_by)
+                    .unwrap()
+            );
+            let update = FinalizeThreadRecord {
+                status: status.as_str().to_owned(),
+                outcome_code: Some(status.as_str().to_owned()),
+                result_json: None,
+                error_json: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                managed_envelope: None,
+                result_project_snapshot_hash: None,
+                result_workspace_output_capture_hash: None,
+            };
+            let (events, _) = if owned {
+                store
+                    .finalize_thread_effective_owned(thread_id, &claim.claimed_by, &update)
+                    .unwrap()
+            } else {
+                store.finalize_thread_effective(thread_id, &update).unwrap()
+            };
+            let terminal = events
+                .iter()
+                .find(|event| event.event_type == terminal_event_type(status.as_str()).unwrap())
+                .unwrap();
+            assert!(
+                terminal
+                    .payload
+                    .get("process_settlement_witness_digest")
+                    .is_none(),
+                "{thread_id} must not inherit a completion settlement witness"
+            );
+        }
+
+        let thread_id = "T-replaced-settlement";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .unwrap();
+        let first_claim = store
+            .claim_thread_launch_active(thread_id, "claim-first", "daemon:test")
+            .unwrap()
+            .unwrap();
+        store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                Some(&first_claim.claimed_by),
+            )
+            .unwrap();
+        assert!(
+            store
+                .clear_thread_process_if_matches_owned(
+                    thread_id,
+                    &identity,
+                    &first_claim.claimed_by,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .release_active_thread_launch_claim(
+                    thread_id,
+                    "claim-first",
+                    &first_claim.claimed_by,
+                )
+                .unwrap()
+        );
+        let replacement = store
+            .claim_thread_launch_active(thread_id, "claim-second", "daemon:test")
+            .unwrap()
+            .unwrap();
+        assert_ne!(first_claim.owner, replacement.owner);
+        let (events, _) = store
+            .finalize_thread_effective_owned(
+                thread_id,
+                &replacement.claimed_by,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_owned(),
+                    outcome_code: Some("completed".into()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == ryeos_state::event_types::THREAD_COMPLETED)
+            .unwrap();
+        assert!(
+            terminal
+                .payload
+                .get("process_settlement_witness_digest")
+                .is_none()
+        );
     }
 
     #[test]

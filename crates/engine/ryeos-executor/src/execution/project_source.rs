@@ -775,15 +775,9 @@ fn resolve_pinned_snapshot_context_admitted(
     let (target_path, project_guard) = match realization {
         PinnedContextRealization::ReadOnly => (None, None),
         PinnedContextRealization::Cow => {
-            let execution_root = runtime_cache.join("executions");
-            std::fs::create_dir_all(&execution_root)
+            ryeos_engine::execution_workspace::validate_workspace_id(checkout_id)
                 .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            }
+            let execution_root = runtime_cache.join("executions");
             let workspace_root = execution_root.join(checkout_id);
             state
                 .state_store
@@ -797,9 +791,6 @@ fn resolve_pinned_snapshot_context_admitted(
                     })?,
                 )
                 .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            let workspace =
-                crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
             let reserved = state
                 .state_store
                 .execution_workspace(checkout_id)
@@ -809,30 +800,29 @@ fn resolve_pinned_snapshot_context_admitted(
                         "workspace reservation disappeared".to_string(),
                     )
                 })?;
-            if reserved.state == WorkspaceState::Reserved {
-                state
-                    .state_store
-                    .transition_execution_workspace(
-                        checkout_id,
-                        &[WorkspaceState::Reserved],
-                        WorkspaceState::Constructing,
-                        None,
-                    )
-                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            } else if reserved.state != WorkspaceState::Constructing {
+            if reserved.state != WorkspaceState::Reserved {
                 return Err(ProjectSourceError::CheckoutFailed(format!(
-                    "workspace {checkout_id} cannot be adopted from state {}",
+                    "workspace {checkout_id} cannot be freshly created from state {}",
                     reserved.state
                 )));
             }
-            let project = workspace.project;
-            (
-                Some(project.clone()),
-                Some(Arc::new(
-                    TempDirGuard::new_workspace(workspace.root, project)
-                        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?,
-                )),
-            )
+            // Fresh construction retains its original descriptor authority.
+            // An existing path or interrupted Constructing row is not an
+            // adoption proof; retained recovery has its own journal-backed path.
+            let (project, guard) =
+                ryeos_app::temp_dir_guard::create_runtime_workspace(&runtime_cache, checkout_id)
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            guard.preserve_for_explicit_cleanup();
+            state
+                .state_store
+                .transition_execution_workspace(
+                    checkout_id,
+                    &[WorkspaceState::Reserved],
+                    WorkspaceState::Constructing,
+                    None,
+                )
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            (Some(project), Some(guard))
         }
     };
     let project_materialization = match target_path.as_deref() {

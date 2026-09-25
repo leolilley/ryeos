@@ -337,6 +337,7 @@ pub(crate) enum IsolationReadOnlyMountScope {
     ExecutionRuntimeRealization,
     StateOverlay,
     RuntimeConfiguration,
+    RuntimeEndpoint,
 }
 
 impl IsolationReadOnlyMountAuthority {
@@ -347,16 +348,32 @@ impl IsolationReadOnlyMountAuthority {
         destination: PathBuf,
         source: lillux::InheritedDescriptorAuthority,
     ) -> anyhow::Result<Self> {
+        let (bytes, _) = source.read_regular_file_stable_bounded(
+            ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES as u64,
+        )?;
+        Self::new_runtime_configuration_bytes(source_path, destination, &bytes)
+    }
+
+    /// Configuration bytes produced by a protected runtime owner rather than
+    /// an authored source file. The immutable memfd is the only delivery
+    /// authority: `source_path` remains a non-authoritative diagnostic label.
+    /// This is used for occurrence-private configuration that cannot be
+    /// published into a source closure or written to persistent storage.
+    pub fn new_runtime_configuration_bytes(
+        source_path: PathBuf,
+        destination: PathBuf,
+        bytes: &[u8],
+    ) -> anyhow::Result<Self> {
         ryeos_state::objects::validate_session_runtime_configuration_destination(
             destination
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("runtime configuration path is not UTF-8"))?,
         )?;
-        let (bytes, _) = source.read_regular_file_stable_bounded(
-            ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES as u64,
-        )?;
         if bytes.is_empty() {
             anyhow::bail!("runtime configuration is empty");
+        }
+        if bytes.len() > ryeos_state::objects::MAX_SESSION_CONFIGURATION_FILE_BYTES {
+            anyhow::bail!("runtime configuration exceeds its byte bound");
         }
         Ok(Self {
             source_path,
@@ -404,6 +421,24 @@ impl IsolationReadOnlyMountAuthority {
             source,
             scope: IsolationReadOnlyMountScope::StateOverlay,
         }
+    }
+
+    /// Mount one daemon-created local endpoint at its derived short address in
+    /// this launch's private namespace. The opened socket descriptor is the
+    /// authority; callers cannot redirect it to an ambient host coordinate.
+    pub fn new_runtime_endpoint(
+        source_path: PathBuf,
+        endpoint_name: &str,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        let destination =
+            ryeos_state::objects::session_runtime_endpoint_destination(endpoint_name)?;
+        Ok(Self {
+            source_path,
+            destination,
+            source,
+            scope: IsolationReadOnlyMountScope::RuntimeEndpoint,
+        })
     }
 
     pub(crate) fn source_path(&self) -> &Path {
@@ -529,10 +564,11 @@ pub struct IsolationLaunchContext<'a> {
     /// definition/subject generation. Never reconstruct it from a cache path.
     pub immutable_project: Option<&'a ryeos_state::PinnedProjectMaterialization>,
     /// Exact retained view from the admitted workspace owner's bound slot.
-    /// Enforced RuntimeWorkspace launches require it. It is never rebuilt
-    /// from lower/backend-state paths; nonworkspace and disabled launches
-    /// must not carry one. The caller proves workspace/incarnation ownership
-    /// before retrieving this descriptor, not by parsing its path.
+    /// Enforced RuntimeWorkspace launches require it. An enforced
+    /// EphemeralScratch launch may also carry its exact pinned private root,
+    /// which isolation compares with the daemon-owned scratch child before
+    /// compiling the mount. Other and disabled launches must not carry one.
+    /// The caller proves ownership before retrieving this descriptor.
     pub workspace_view: Option<&'a lillux::InheritedDescriptorAuthority>,
     pub filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling,
     pub network_authority_ceiling: IsolationNetworkAuthorityCeiling,

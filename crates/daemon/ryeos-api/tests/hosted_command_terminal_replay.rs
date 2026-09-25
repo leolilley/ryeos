@@ -32,7 +32,7 @@ fn store_structured_session_capsule_with_schema(
         PersistentSessionWireContract,
     };
 
-    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null});
+    let contract = json!({"fixture":"terminal-replay", "auxiliary_configs":[], "runtime_configs":[], "external_candidate":null, "workload_client":null});
     let profile_hash = ryeos_state::objects::canonical_value_digest(&contract).unwrap();
     let schema_hashes =
         std::collections::BTreeMap::from([("request.json".to_owned(), "e".repeat(64))]);

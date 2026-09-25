@@ -1,8 +1,813 @@
 # External candidate execution qualification
 
-Status: source implementation in progress; **not a supported execution backend**.
-No external profile is enabled, no allocator is connected, and these tests must
-not be used as evidence that a remote worker can safely run.
+Status: source implementation in progress; **not yet an installed supported
+execution backend**. The signed synthetic lifecycle adapter is test-only and no
+production provider adapter/profile is enabled. Its results establish the native
+generic runtime boundary, not qualification of Render or another destination.
+
+## Current acceptance boundary (September 24)
+
+- Ordinary public external Tool execution and an equivalent recorded execution
+  after real daemon restart have passed. The latter preserves action/effect/record
+  identities and performs no new fixture lifecycle contact. Exact evidence is
+  recorded below; this is not a completed candidate/evaluation workflow.
+- Native evaluator public producer/capture/snapshot/import/bind has passed for
+  the exact four-file runtime. This does not yet prove evaluator invocation.
+  All 28 non-ignored focused checks pass; ten live acceptance tests remain
+  explicit opt-ins. The native input probe also passes four focused tests.
+- Public offline enrollment now passes the full public capture/import/bind,
+  login, two exact command observations, explicit termination and confirmation
+  path. The shared resource selector fix (b568018c5, six focused tests) removes
+  allocation limits only when no resource was selected; the process invariant
+  remains unchanged. Its fresh acceptance passed in 17.63 seconds after bundle
+  refresh. The earlier failed accepted login was not retried. This is a synthetic
+  account on an explicitly opted-in disposable trusted-session node, not real
+  Codex enrollment or external worker qualification.
+  The earlier capture mismatch was a fixture authoring error: a
+  two-entry small tree reused a four-entry large-product pin. That expectation
+  is now separately authored and exact capture checks remain mandatory.
+- The trusted Projectless input probe now passes public producer/capture/import/
+  bind and accepted execution. It observes the exact 9,688-byte runtime member
+  while preserving Projectless and signed BundleExecutor capsule authority.
+  Its first invocation exposed a missing private-input default cwd under disabled
+  isolation; the generic spawn-only correction is committed and this refreshed
+  public run verifies it. Input delivery is established, not runtime security
+  qualification or confinement.
+- The standalone native-mechanism probe passes three focused checks, direct
+  local execution and now public admitted execution using its exact five-file
+  runtime. The public test passed in 15.26 seconds: live descendant progress,
+  explicit namespace settlement, exact 17-byte capture, and refusal of a
+  16-byte limit, retaining Projectless and signed BundleExecutor authority.
+  This is native-mechanism evidence, not the complete routed-runtime verifier.
+- **The synthetic `candidate --qualification-probe` is a protocol fixture that
+  prints prescribed claims, not an independent security verifier.** It checks
+  digest syntax but does not inspect its subject or establish the five named
+  properties. Its result must not qualify the public worker acceptance path or
+  enable a production runtime. The Codex guest product activation gate remains
+  refused until an actual independent verifier earns those claims.
+- The signed public bounded-turn fixture now passes completion-fenced C import,
+  B-rooted evaluation, integration D, D evaluation, publication and idempotent
+  publication replay through the existing Worker services. It uses a scripted
+  provider, synthetic qualification testimony and an in-process AppState; its
+  same-process replay is not a real-daemon restart or independent runtime
+  qualification. Active-turn recovery, lost acknowledgements and installed
+  Render/Farm acceptance remain open.
+- The connector's inherited interactive pipes now use Lillux-owned interruption
+  and bounded I/O; terminal paths join the input task. Send and acknowledgement
+  share one deadline, and peer EOF waits for actual close bookkeeping. Six pipe
+  unit tests, the real-stdio executable harness, six connector state tests and
+  ten native connector cases pass. The seven pure notification checks also pass.
+  These verify prerequisites for the joined routed verifier, not runtime claims
+  or installed qualification. The notification checker must receive the actual
+  bounded app-server stream with experimental raw events enabled; a synthetic
+  model server's summary is not interchangeable evidence.
+
+The next joined fixture must use the existing public enrollment, original product
+capture, independent qualification and composition services. Neither direct test
+state writes nor the synthetic claim emitter can substitute for these boundaries.
+
+## Historical implementation and acceptance chronology
+
+The entries below retain their dated scope. Earlier statements that a boundary
+was still pending describe that point in the sequence, not the current summary.
+
+Direct evaluation is still an open endpoint gate. Channel schema 4 now names
+the execution mode explicitly and carries bounded direct-command output and
+target-termination observations. The existing transcript checks offsets,
+commitments and cancellation; target termination is not cleanup or evaluation
+acceptance. Native direct views are read-only, and existing worker/session
+owners refuse a direct-mode relabel. The ordinary direct-thread admission and
+result/effect-owner join are wired and component-tested. One real-daemon public
+ordinary launch now passes through the native guest and exact terminal evidence;
+joined independent evaluation, restart and recorded replay remain open.
+Runtime epoch 61 requires
+the typed session/direct allocation owner, channel schema 4, closed workload
+binding schema 9 and explicit ordinary endpoint authority in retained plans;
+allocation schema 5 retains the bounded compiled direct program inline;
+retained earlier test nodes are not rewritten. The new direct owner uses the
+existing authoritative thread snapshot and CAS capsule, not a fabricated
+session/workspace. Session bindings retain provider/connector/runtime identities;
+direct bindings cannot contain those fields or authorize candidate export. Direct
+contact requires real born-capsule/compiler authority and an exact live launch
+claim. The temporary unconditional allocation/launcher refusals are removed;
+native and signed qualification gates remain. Owner/storage tests do not qualify
+an external evaluator.
+
+Wait, Detached and recovery share one Lillux-hosted execution body retaining the
+existing launch claim and cleanup owners. Notification loss does not abandon
+execution. Recovery classifies the exact retained capsule before local project
+materialization; a committed normal settlement bypasses expired startup without
+releasing the guest again. Fresh complete output waits for the exact Applied
+Release receipt before normal teardown. Finalization and effect publication use
+the existing ordinary owners and revalidate current authority at commit.
+
+On September 24 the focused executor suite passed 36 tests, including five
+handoff/deadline checks. Admission and delayed-Release tests passed separately.
+The real-daemon `public_ordinary_external_tool_uses_captured_runtime_and_authenticated_channel`
+fixture now composes public production/capture and ordinary dispatch. Its first
+compile passed; execution has not yet passed. Its bounded test-only TLS relay forwards to
+actual daemon routes; it does not supply authentication or Ready/Release facts
+and does not qualify production listener mechanics. Stopped born roots,
+restart, lost acknowledgments and equivalent replay still need joined tests.
+
+The first public fixture attempts now establish real producer/capture,
+consumer snapshot, retained-product import and exact operator binding. They
+also exposed an external compiler mismatch: the ordinary builder emits
+`DispatchSubprocess -> Complete`, not a one-node plan. All projection sites
+now require that exact two-node shape and refuse malformed or additional work.
+The corrected app external suite passes 271 tests on the native host. The
+rebuilt public fixture passed the former topology boundary, then correctly
+refused Core's inherited 86,400-second timeout before thread birth or allocation.
+The fixture now authors a signed per-item 30-second execution policy before
+capturing the consumer snapshot; it does not widen the external endpoint limit.
+Native guest completion remains unproven. Keep retained test state on a device
+with sufficient CAS reserve and use a short temporary root for Unix sockets;
+neither a storage refusal nor a socket-path setup failure qualifies execution.
+
+The next public run exposed a fourth, missed singleton assumption in prebirth
+endpoint admission: it validated the two-node plan, then panicked while
+destructuring one node. That caller now uses the same checked accessor. A
+focused regression reaches the real missing-endpoint refusal instead of
+panicking; no guest launch is inferred from that negative component test.
+That stopped public run created no ordinary child, external allocation or
+channel. The corrected preflight passed in the next run, which created a born
+ordinary thread but refused its unbound source entry before allocation. Fixture
+authoring now puts `source_scope` on the signed runtime executor, as required
+by the ordinary source-policy resolver, rather than on the calling Tool.
+The public fixture also verifies exact capsule/allocation/channel joins,
+authenticated Applied output and Release, and independent occurrence termination
+through read-only evidence. Successful guest completion remains pending.
+
+The following public run reached source admission but refused the runtime
+product join: the retained command uses `/ryeos/admitted-project`, while the
+guest product is mounted below `/workspace`. The shared typed projection now
+maps Project executables into the guest namespace without changing the retained
+closure; ExecutionRuntime coordinates are unchanged. Serialized old guest
+coordinates are rejected rather than repaired. State tests passed 92/92, app
+external tests 273/273, and guest-runtime tests 47/47 on September 24. These
+component passes are not a successful public guest launch. The app late-result
+fixture now injects the adapter's explicit deadline-exceeded observation after
+contact instead of racing a 500 ms startup budget against database setup;
+separate tests check local deadline expiry and refusal before contact.
+
+The corrected public run then passed source/runtime admission and reached the
+allocation boundary, but its synthetic adapter exited 126. Its retained
+reservation remains quarantined with no occurrence or channel. Inspection found
+that the fixture provider root was mode `0755`; the adapter requires owner-only
+`0700` before allocation. Future fixture setup now creates and verifies that
+directory through Lillux before signing the binding. The failed directory and
+reservation remain untouched; this correction has compile evidence, not yet a
+successful public run. No Render or model contact occurred in these fixtures.
+
+With the private-root fixture correction, the next public run allocated its
+occurrence and started the supervisor. Attachment returned HTTP 401; the
+ordinary parent then reached its signed startup deadline. The reservation is
+retained quarantined, without a registered channel. Bootstrap authentication
+still had an unconditional structured-session runtime lookup. It now shares
+attachment's exact retained-capsule/program validation and compares the runtime
+through the existing workload enum. Independent app/guest reviews found no
+further session-only assumption in the inspected direct path, and 274 external
+app tests passed. The corrected public fixture subsequently authenticated and
+registered its channel, but native preparation failed before Ready or Release:
+the Project runtime mount target `/workspace/vendor/runtime` was absent. The
+launcher exited 126 without timing out. The waiting HTTP connection also closed
+without a terminal response; retained evidence does not establish why. The
+ordinary projection remains `created`, allocation `bound`, and channel
+`prepared`; do not treat that uncertain run as completed or relaunch it.
+
+The mount correction must preserve Lillux's refusal to create targets beneath
+source-backed mounts. Prepare only admitted, typed targets in the fresh private
+execution assembly after verifying its base. Session capture must exclude input
+shadows and restore the original hidden base files through the existing project
+capture helpers; namespace placeholders are not candidate content. Output
+partitions remain separate from those shadows. This correction is implemented
+and independently reviewed. Input targets and all ancestors retain inode
+lifelines; capture verifies those original descriptor-relative entries after
+writer death, before traversal or publication. A renamed ancestor, including
+one recreated at its original spelling, refuses export rather than allowing a
+relocated placeholder into the candidate. Six new target/capture regressions
+pass, and the full guest-runtime suite passes 53/53 on the native host. The public fixture now
+retains elapsed time, full bounded transport causes and daemon status before
+Drop on observation failure; both diagnostic tests pass.
+
+The corrected public native fixture passed on September 24 in 49.71 seconds:
+root `T-8fd99085-1bcc-83ef-1866-9586da58d855` returned HTTP 200, `completed`,
+and `exit:0`. Exact pinned snapshot, capsule/program/allocation/channel joins,
+unique authenticated Applied Ready and Release, contiguous committed output,
+actual target exit and independently retained occurrence termination all passed
+the read-only evidence verifier. No session, connector, export authority or
+controller process attachment remained. Channel projection is `stopping`, with
+one final acknowledgment pending, separately from the proved terminated
+occurrence. This live Tool executed once; it does not establish recorded replay,
+bounded-turn candidate capture or Render qualification. The earlier HTTP closure
+did not recur, but its cause is still unproven. Prior unresolved runs remain
+untouched. Full log is retained in feature `.tmp/public-ordinary-mount-20260924.log`.
+
+The signed Tool endpoint requirement is independent of daemon-to-daemon routing
+and OS/resource suitability. Its selected exact node-binding identity enters the
+ordinary execution-plan hash before effect lookup or thread birth. Recovery must
+not substitute a new binding or infer local execution from missing fields. Local
+dispatch explicitly refuses both unresolved and bound external requirements.
+
+The ordinary metadata admission path now also preflights external direct
+plans before birth: immutable project authority, supported one-shot protocol,
+portable target/authority restrictions, exact signed installed endpoint,
+execution/output budgets and offline lifecycle qualification. The compiler
+reuses those plan restrictions against retained authority. This preflight does
+not grant allocation or prove guest-native readiness. A shared retained
+channel/allocation join verifies both owner
+shapes; fresh direct activation, registration and Release check the exact current
+unstopped launch owner. Historical observations survive claim rotation without
+granting executable input. Connector and candidate import/export operations
+remain session-only. These component joins still need public-launch acceptance.
+
+The actual local native target-exit probe passed, including nonzero exit,
+signal, pre-exec failure, cleanup distinction and descendant-held stdout.
+This tests the existing Lillux owner, not Render or a completed evaluator.
+
+Direct launcher/supervisor components now carry one-shot stdin, both bounded
+output streams and exact terminal receipts. Input stays fenced until the exact
+durable release-finish acknowledgement, retains partial offsets and closes once.
+The launcher requires actual Lillux target status plus both stream EOFs; an
+incomplete stdin delivery cannot be a normal successful terminal observation.
+The journal commits contiguous stream bytes and the transport requires the
+exact terminal's authenticated `Applied` receipt. That receipt is distinct from
+successful evaluation, candidate export and cleanup. Quiet control channels and
+blocked control writes do not extend the execution deadline into the drain
+window. Existing structured capture retains its native termination proof for
+bounded post-capture acknowledgement without a second reap.
+
+Focused tests cover source redemption from retained B (not mutable C), original
+materialization-lease lifetime, simulated stdin backpressure, output framing,
+mode separation, cancellation and exact terminal replay after acknowledgement
+loss. These are component tests: the output fixture supplies an exit observation,
+and journal fixtures sign it. They do not establish a composed native direct
+launch, born-thread admission, real-daemon recovery or Render qualification.
+Positive direct-entry qualification remains open. Output overflow, broken input
+and launch faults currently fail closed; no authenticated `OutputLimit` result
+is claimed, and forced cleanup without actual target status remains uncertain.
+
+The direct input assembler now redeems the exact immutable project, products
+and B-owned source through the real sealed-invocation decoder and existing CAS
+owners. A positive component test substitutes contradictory live project files
+and verifies retained bytes, descriptor/record ordering and source lease lifetime.
+The compiler independently rejects a different project snapshot, writable or
+environment-bearing authority, and unadmitted output authority. The born-thread
+proof also joins the reservation to the endpoint selected in the sealed plan.
+These checks now feed ordinary direct allocation admission; successful public
+guest execution still requires the joined acceptance described above.
+
+First direct reservation requires a non-serializable compiler proof tied to the
+exact launch owner, epoch, daemon generation, thread, capsule and program. The
+retained program is operational allocation/channel identity, not a new effect
+coordinate or a second candidate journal. Exact reservation replay cannot change
+that program; retained bytes alone do not authorize fresh input reconstruction,
+activation or Release after restart. The existing lifecycle helpers now use the
+closed session/direct program enum while preserving session identity. The direct
+startup owner now compiles against the retained born capsule, reserves through
+the existing placement owner, retains input descriptors across allocation, and
+transfers them only into the first Bound activation. Retained recovery cannot
+replace those inputs or renew the original startup budget. Missing activation
+lifelines fail explicitly and leave contacted work subject to cleanup. The
+ordinary runner join is wired but remains unqualified through a real public
+guest launch.
+
+Cancellation and command completion are distinct. A first authenticated Ready
+may arrive after cancellation and must remain signed history without reopening
+Release. The controller commits incoming history and sticky cancellation before
+authoring acknowledgements. A complete zero exit is not success authority after
+revocation. Normal post-target occurrence cleanup now has a separate entry into
+the existing termination owner: the first intent requires current original
+ownership and complete Applied command evidence. An existing intent allows
+reconciliation, not fresh execution, after ownership changes. Automatic cleanup
+preserves that retained settlement; explicit cancellation still dominates.
+
+The ordinary StateStore terminal writer now independently checks the retained
+external capsule even when allocation state is absent. A successful result
+requires the exact program/base, authenticated output, occurrence-death proof
+and current settlement owner under writer exclusion through signed commit. It
+uses the shared ordinary result interpreter and refuses added cost, artifacts
+or project-output claims. Local NodePolicy endpoint classification does not
+require restart-recoverable executable bytes. Focused verification passed on
+September 24: 268 app, 222 state and 31 executor tests. The two member-proof
+tests also pass against a private test-signed copy of the exact current Tool
+schema. Their shared size limit now covers ordinary blobs, large-manifest blobs
+and chunked members before content access. These are component and signed-state
+persistence checks; no joined public execution or installed Render acceptance
+is claimed.
+
+Outbound executable backlog has a separate current-authority gate from retained
+history. Owner-to-supervisor Release/protocol bytes are withheld at the first
+unauthorized predecessor, including one behind a transport cursor. Database or
+validation errors propagate; withholding does not rewrite pending input as
+never delivered. Existing urgent cancellation remains independent, and exact
+late peer application evidence remains history. The guarantee is selection under
+the serialized owner transaction, not instantaneous revocation of bytes already
+in flight. Such uncertainty still requires cancellation and authoritative cleanup.
+The node's direct-owner predicate does not open direct channel admission or make
+a stale terminal observation eligible for successful effect publication.
+Protocol EOF is a supervisor-only observation, not executable owner input, and
+is not subject to this transport gate.
+
+Runtime epoch 61 and guest journal epoch 10 also make pending-input revocation
+direction-aware. Only owner Release/protocol bytes can be classified as revoked
+input. Retained supervisor output stays uncertain until exact peer application
+evidence arrives; cancellation cannot retroactively establish non-delivery.
+This retention rule does not authorize fresh connector delivery after cancel or
+widen the transcript's permitted arrival states. Predecessor journals are not
+rewritten; no installed upgrade or qualification is claimed here.
+
+Shared product delivery retains the existing realization leases and manifest
+verification; the session caller retains its own runtime/environment/output
+policy. File products use a readable Lillux descriptor acquired relative to the
+retained generation and checked against the exact original mount identity;
+mount-only descriptors cannot supply bytes to the guest verifier. Regression
+tests exercise the production verifier, replacement refusal and lease-protected
+eviction for ordinary and large-content manifests. Ordinary local and external
+results can share the pure terminal-output
+interpreter without fabricating a local PID or subprocess result. Native target
+status, authenticated output, cleanup and effect publication remain separate
+owners; the external caller is not wired yet.
+
+Admission has two distinct stages: exact signed artifacts, binding, lifecycle
+capabilities and budget authorize bounded provisioning; successful held native
+preparation in the guest must precede authenticated Ready and code release.
+Controller-local isolation and executable-product qualification do not attest
+the guest kernel. Neither stage alone qualifies the installed Render path.
+
+The authored, not-yet-run daemon test
+`recorded_managed_realization_replays_after_daemon_restart` targets the
+current-next realization-before-effect-admission correction. It reuses the
+small environment-products fixture under enforced isolation, then kills/reaps
+and restarts only its disposable daemon. Acceptance requires exact retained
+products and action/effect/record identities, `effect_record` with no publication,
+and no second managed child. The last assertion uses read-only exact-parent
+runtime launch links: a public continuation-chain listing is not a separately
+rooted child inventory. This is local managed-product replay qualification,
+not a Render worker run or a repeat of the completed Codex runtime production.
+
+The synthetic runtime's `--qualification-probe` emits fixed fixture claims after
+checking the subject-digest argument. It exercises signed verifier execution,
+testimony retention, selection and admission mechanics; it does **not** measure
+the five isolation/capture properties it names. Its attestation must not activate
+an installed guest runtime. Production qualification requires independent measured
+evidence for the exact runtime and execution environment, including the Render
+placement where those claims depend on destination capabilities.
+
+Current continuation (2026-09-23): the joined fixture now calls public product
+composition instead of manually advancing a binding head. It compares the
+returned per-slot identity against independent selection/admission and retains
+the original full qualification-proof assertions. Explicit bounded import policy
+is fixture-owned; no ambient import roots or managed activation are granted.
+Independent source review passed; this changed joined fixture has not yet run.
+The successful run below predates this change and the latest network capture work.
+
+The separate ignored daemon test
+`public_retained_runtime_capture_uses_real_pinned_producer` now authors a signed
+recorded producer over exact prebuilt fixture bytes, dispatches it pinned through
+authenticated HTTP, and calls public product capture using the returned root.
+It checks the exact producer/capsule/snapshot, operator, witness and manifest,
+mutates the live input to exclude live-path authority, and repeats only capture
+to check idempotence. Requests have observation deadlines; on failure the node,
+bundle/user inputs and project remain retained for diagnosis, without relaunch.
+It passed against a real disposable daemon in 13.29s (root
+`T-85a659e6-8354-f59b-22a7-d7d523ffbcc7`), including repeat-capture identity and
+live-source mutation assertions. It does not establish runtime
+qualification, a completed worker, actual worker restart, or Render acceptance.
+
+Once the single compiler slot and disk headroom are available:
+
+```sh
+cargo test --offline --locked -j1 -p ryeosd --test external_adapter_restart_e2e \
+  public_retained_runtime_capture_uses_real_pinned_producer \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+This uses disposable test nodes and current populated signed core/standard test
+artifacts, never the installed operator node. Do not treat an observation timeout
+as permission to dispatch the producer again.
+
+The separate ignored test
+`public_codex_runtime_production_captures_real_workspace_output` exercises the
+existing Codex production graph with the exact predownloaded large executable.
+It uses public import/bind, one durable accepted launch, exact root reads and
+public workspace-output capture. It checks the output tree against the input
+chunks, inspects authoritative receipts, and repeats capture without repeating
+production. It does not qualify the runtime or invoke a model/worker. Source
+review and compilation completed. After correcting the fixture bundle path and
+removing an invalid protected-PATH override from the signed producer definition,
+root `T-8d144a96-1eb3-2fd9-df6d-275ef2304862` and inline child
+`T-4e8ab8e9-75a0-354e-0b61-33c4d2bd4ede` completed. Exact tree/chunk verification,
+private-generation output and repeated capture assertions passed. The test then
+failed an incorrect two-receipt assertion: the action has one receipt, while
+the return node contributes the second graph step but no action receipt. Source
+now expects one; independent review and read-only retained-state checks confirm
+that contract. The full corrected test has not been rerun; completed production
+was not relaunched. Its retained witness is
+`a4022be908f32037c81d2607bf8012c99d094cc9434dd38a6db14c64a995caae`, manifest
+`82415171bc7d06d0410b8d8c007e78107030242507ffe9e3f0b1828dbb555c4b`.
+This proves production/capture, not runtime qualification or effect-record replay.
+Four bounded input-staging tests and all14 authoring-contract tests passed. Required
+inputs are `RYEOS_TEST_PINNED_CODEX`,
+`RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER`, and
+`RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER_SHA256`. The producer must be the exact
+static published payload; enforced isolation and existing resource floors are
+not weakened. Pre-boot input staging uses one bounded stable descriptor read,
+checks the authored hash before installation, and refuses an occupied target.
+
+Reconciliation with current `next` preserves two distinct identities: the
+historical product capture recipe and the later consumer's signed relationship.
+Compatible consumption does not recapture/relabel the witness and does not
+manufacture qualification. The later signed relationship is retained in the
+selection identity; exact producer invocation, product bounds, trusted source,
+manifest verification and required qualification remain mandatory. Capture and
+qualification creation retain their strict historical relationship checks.
+All12 state product-composition tests pass, including later compatible reuse,
+incompatible producer/product/bounds refusal and selection-identity movement
+without witness relabelling. Actual-daemon later-consumer composition remains
+an open joined gate.
+
+Latest public-route fixture (2026-09-23): session50048 passed in97.18s using the
+pinned Codex binary and a credential-free local scripted model server. Assertions
+covered public bounded-turn completion, the exact completion fence, imported C,
+closed writable membership, replay of the retained turn without another command
+reservation or controller exchange, independent fixture evaluation of C and D,
+integration and publication through the existing services. The fixture evaluator
+is not the pending installed external deterministic evaluator. This in-process
+AppState/public-dispatch test does not prove actual-daemon active restart,
+lost-ack recovery, Render qualification or a Farm solve. No paid model, Render
+or simulator contact occurred. Successful fixture node state was ephemeral;
+the passing run did not emit all root/C/D coordinates, so it is not a complete
+retained acceptance packet.
+
+Earlier public-route run: after the normal focused signed bridge
+refresh, root `T-2c093b6b-40fb-3f1b-53d6-3fd94094f560` failed with
+`root-owned external candidate cleanup remains unresolved`. Its synthetic
+occurrence remains quarantined with activation and termination intents but no
+terminal observation. The session is admitted, send boundary none, with no
+commands or controller HTTPS requests. The failure state is retained; no
+replacement was launched. This is not a passing turn or cleanup proof, and the
+returned cleanup error does not establish the original activation failure.
+No live Render, paid model or simulator contact occurred in that run.
+
+The subsequent diagnostic correction preserves the exact normal managed-runtime
+fallback error through the existing root failure guard when cleanup refuses.
+Its typed cleanup marker is non-retryable and carries no arbitrary cleanup
+error/source text. It preserves the same root audience as normal fallback; an
+open runtime payload is not a sanitized diagnostic. Existing terminal-content
+bounds remain in force. The fixture now retains its separate synthetic provider
+journal too. Three focused diagnostic regressions and all fourteen terminal
+module tests pass in the compiled executor test binary. These checks do not
+settle the previous quarantine. The joined fixture has since passed as described
+above, without retrying the old root or claiming that old occurrence is settled.
+
+Read-only startup review also found two unqualified boundaries. The signed
+readiness timeout is checked at polling-loop entry, but blocking lifecycle
+contact can consume a fresh full contact timeout and author Release afterward.
+Startup expiry must constrain both contact and the authoritative Release
+transition without renewing on recovery; the channel execution deadline is a
+different budget. A late Ready must not release the candidate. Separately, the
+synthetic adapter has no complete terminal-settlement path for staging or
+pre-supervisor failures. Pending safely retains uncertainty, but cannot establish
+cleanup liveness. These are source findings, not a diagnosis of the retained
+run: absent activation/terminal files or an exited server do not prove that no
+descendant was launched.
+
+Both corrections now have authored source, focused regressions and the joined
+fixture pass described above. Strict reservation schema 3 retains
+one capsule-derived startup anchor/expiry; startup advance must carry the
+original live monotonic cap through contact and first Release. Independent
+review required preserving the live cap between phases and refusing late child
+success after expiry. Six focused Lillux deadline checks and three lifecycle
+runner tests passed. Complete late adapter observations require retention
+without treating an expired contact as successful continuation. App settlement
+now commits late evidence and quarantine together, including duplicate/Pending
+observations. Strict adapter decoding
+uses closed diagnostics instead of retaining response-bearing error causes.
+The first app compilation found four test-only protected-frame Debug bounds;
+the assertions were corrected without adding Debug to those frames.
+
+Current focused app execution passes: 59 database/channel/connector tests,
+33 placement tests, 7 import/recovery tests and 2 adapter decoder tests. These
+cover atomic late evidence/quarantine, original startup caps, exact retained
+Release replay, lease ownership and authoritative import fixtures. The private
+Unix-socket fixture required host permission after the tool sandbox refused
+socket creation. Old fixture expectations were updated to use the readiness
+owner and exact applied acknowledgements, not weakened production admission.
+An unused test-only frame-application wrapper was then removed. Joined protocol
+compilation and the signed hosted-worker source preflight now pass. The public
+bounded-turn and actual-daemon execution remain separate gates; these are not
+installed proofs.
+
+The synthetic adapter's exact occurrence lock and schema-2 activation phases
+separate Staging, SpawnIntent, ServerBound and FencedBeforeSpawn. Only a positive
+Staging record can be fenced into no-spawn evidence. Missing state or uncertain
+SpawnIntent remains Pending. New executable fault cases reuse the real adapter
+over retained state in fresh processes; this is adapter-process recovery, not
+daemon restart or installed-provider qualification. The stale-record helper
+correction and executable cases passed source review. The first executable group
+passed normal activation/exact termination and the Staging fence. The SpawnIntent
+fault test instead hit the harness's five-second adapter limit before its expected
+failure; its phase was not retained, so no no-process conclusion is justified.
+The reviewed fixture correction retains failed journals and gives only debug
+artifact activation a bounded 30-second allowance, with a 90-second controller
+observation horizon. Production deadlines and exact fault assertions are unchanged.
+The corrected protocol binary compiled successfully, and all three activation
+cases passed (29.96 seconds). This proves the exact injected SpawnIntent fault
+remains Pending through fresh adapter processes; it does not settle the older
+public-run quarantine or qualify daemon restart. The signed admission group
+passed when rerun on the project filesystem: all three signed-worker admission
+cases, missing-runtime-claim refusal and hosted-worker signed-source preflight.
+Its first attempt ran out of space copying fixture artifacts on `/tmp`, before
+admission; that environment failure is not counted as a product refusal.
+
+## Lifecycle capability admission (2026-09-23)
+
+### Subsequent network-input capture source cut
+
+The public pass above predates the next finite source change. Its focused
+capture/journal/supervisor unit tests now pass; the joined public path still
+needs rebuilding and requalification. Controller transport schema2 requires
+explicit bounded target-local resolver/hosts selectors; bootstrap schema6 carries
+them. Fresh supervisor creation captures those inputs through shared Lillux
+regular-file mechanics. Journal epoch5/store identity2 retain their exact bytes
+and policy digest, and recovery/attachment use retained capture without reopening
+the source files. Engine capture retains its existing namespace/app-root checks.
+
+The entrypoint now preserves the original sealed bootstrap; fixed descriptor
+rebinding belongs to a separately identity-checked execution projection. Capture
+is never included in candidate authority. JSON recovery bounds are enforced
+before owned allocation, with fixed decode diagnostics. Independent source reviews
+found and resolved the two bounded/diagnostic issues. Current focused results:
+Lillux sealed capture2 and network10, state transport4 and supervisor journal12,
+and supervisor lib23 passed (one subprocess-only helper is ignored by default).
+The first supervisor checks caught a missing test-only base64 import and an
+invalid placeholder CA in the recovery fixture; the fixture now uses the shared
+valid test CA without weakening TLS validation. Executable-boundary6 and engine
+capture4 subsequently passed as well. Joined daemon tests remain a separate gate. Repository
+validation15tests and scoped source checks pass.
+
+This is occurrence-local protected capture, not controller attestation of target
+DNS bytes, complete network/streaming qualification or installed Render evidence.
+No new provider, candidate, evaluation or publication workflow is introduced.
+
+### Real-daemon recovery fixture preparation
+
+The existing signed-adapter daemon restart test only checks bundle retention;
+it does not launch an active worker. The in-process public-turn fixture also
+substitutes its config and vault in memory. Neither is a substitute for an
+active-command crash through actual daemon routes.
+
+A new test-support-only placement credential provisioner verifies an admitted
+binding's retained signature/body and current node identity before opening the
+installed persistent vault. It provisions through the existing opaque placement
+credential API; it does not expose a raw vault key, replace AppState, create an
+allocation or author channel readiness. Four unit tests cover vault reopen,
+immutable credential-generation refusal, wrong-node refusal and signed-body
+tamper refusal. All four now pass. The changed-secret assertion checks the exact
+inner immutable-generation cause beneath the store-lock context and verifies
+unchanged sealed store bytes. The helper is not a production operator
+provisioning service.
+
+Signed worker/profile/recipe and candidate-operation source generation is now
+shared in `support/candidate_authoring.rs`. Existing protocol fixtures pass an
+explicit repository source root and still own runtime production, qualification,
+dispatch and result assertions. All 17 extracted raw/byte-raw source literals
+match the retained pre-extraction helper bodies. This is source comparison,
+not compiled behavior or full-file equivalence; the old complete protocol file
+was not retained separately.
+
+Exact runtime binding authoring needs the semantic identity of the actual worker
+consumer's admitted product slot. The existing composition response now projects
+`selection_identity_digests` from its reverified resolved selection, using the
+same canonical digest method as external-program admission. It does not expose
+a bearer grant or accept caller-authored proof. The joined fixture must consume
+that response, not fabricate producer coordinates or reconstruct selection JSON.
+State identity/admission, application composition9 and pure response-shape tests
+pass. The real response-to-binding-to-launch path still requires execution.
+
+Actual-daemon recovery still needs persistent signed worker/runtime fixture
+setup using those sources, supervisor traffic through the daemon's real routes,
+and a bounded observable active-command cut. An interrupted command is cleanup-only unless the specific
+continuation boundary supports recovery. A complete retained export/import is
+a separate crash case and must preserve exact C without a replacement turn.
+
+### Lifecycle requirements
+
+External requirement schema 6 adds an explicit
+`required_lifecycle_capabilities` set using the existing lifecycle contract
+vocabulary. Missing fields, unknown capabilities and predecessor schema 5 are
+refused; there is no default or compatibility spelling. Requirements contribute
+to the admitted program/profile identity and are reloaded from retained capsule
+authority, not reconstructed from the current project configuration.
+
+Before fresh contact and during retained placement preparation, the backend
+registry checks the signed workload's requirements against the exact adapter's
+inspected capabilities. The current `provider_terminal_occurrence_v1` binding
+also requires `ExactTerminalObservation`, independently of optional workload
+requirements. An explicit empty workload set does not remove this cleanup floor.
+
+Reconciliation capabilities are not universally required: an uncertain create
+may remain quarantined with its reservation held. But an adapter cannot settle
+that uncertainty with an undeclared stronger observation. Reconciled allocation,
+authoritative no-occurrence, reconciled activation and terminal cleanup each
+require the corresponding capability before application-owned state settlement.
+`Pending` neither requires stronger claims nor releases capacity. Idempotent
+termination is not permission to repeat the existing unique termination mutation.
+
+Focused local evidence: five capability tests and the remaining placement tests
+passed (27 in the normal tool sandbox; the native connector peer test required
+Unix-socket access and passed separately). Eight state admission tests passed,
+including requirement/profile identity movement and strict schema rejection.
+Activation and termination cases repeat observations while checking the original
+intent, unproved cleanup, retained allocation and one mutation per operation.
+
+This does not prove a real daemon restart through `ExternalPlacementOwner::prepare`
+with a retained demanded capability missing from the reloaded registry. That
+requires the composed/public fixture with real born-thread/capsule authority.
+Normal bundle source/signature refresh, installed runtime qualification and the
+actual Render lifecycle remain open. The external profile demands exact terminal
+observation only; it does not assert automatic ambiguous-create recovery.
+
+## Native guest feasibility (2026-09-23)
+
+The current Lillux test harness builds with the installed GNU target and static
+CRT, without installing another toolchain. Its corrected executable SHA-256 is
+`d07e934b98e1421f41f0a86bea33e86d2ac65d94542cd72451de3bd55b5e0c01`.
+All three exact ignored `sandbox::imp::namespace_source_tests` cases pass
+locally: `pid_proc_supports_exact_realized_and_sealed_executable_after_exec`,
+`native_namespace_terminal_export_excludes_descendant_writers`, and
+`native_namespace_terminal_export_cancels_before_release`.
+
+The writer fixture initially tried `/probe` in its directory-executable variant,
+where that path is intentionally absent. It now uses the mandatory exact
+`LILLUX_PROBE_EXECUTABLE` supplied by its launch request. Independent review
+confirmed no change to product isolation, four-variant coverage or writer-proof
+requirements. These are local operation tests, not Render qualification.
+
+One operator-approved 900-second Starter sandbox in Oregon was created for
+feasibility. Read-only diagnostics observed Linux `6.1.155+`, x86_64 and the
+expected loader alias. The private test-binary upload required additional
+approval and was not performed. The exact sandbox
+`sbx-18p4gdaphoumk1f9s7393ih00` was stopped; Render subsequently reported it
+terminated at `2026-09-23T00:26:18.476147Z`. No model or simulator was contacted.
+Infrastructure charges were not measured. No target capability or installed
+worker product is qualified by these metadata observations.
+
+After explicit upload approval, the same corrected artifact was exercised in
+`sbx-18p4gdaphu2qjnfac73bq6u6g` (Starter/Oregon/900 seconds/deny-all). Render's
+default root launch correctly refused the nested variant. With the required
+fixed unprivileged UID/GID 65534 and zero inherited/permitted/effective/bounding/
+ambient capability sets, all three native tests passed serially (0.19s, 0.94s,
+0.52s). The artifact hash matched before and after execution. No package was
+installed and no product isolation requirement was weakened.
+
+The sandbox was terminated at `2026-09-23T00:39:23.920719Z`; both allocations
+above are now confirmed terminated. No model or simulator contact occurred;
+infrastructure charges were not measured. This proves the tested native guest
+operations on that occurrence, not the full-node controller requirements,
+protected production bootstrap, pinned guest runtime, authenticated export or
+Render lifecycle adapter. Test-host `setpriv` establishes this probe's identity;
+production host mechanics still belong to Lillux.
+
+## Current pinned-provider qualification boundary (2026-09-23)
+
+The provider baseline now describes code-mode-disabled as a default, not an
+effective-tool-mode prohibition: pinned model metadata takes precedence. Both
+native delegation versions are explicitly disabled in baseline and immutable
+profile arguments. Parsed feature/agent consistency tests pass for all three
+Codex profiles; signatures and full runtime tool-inventory qualification remain
+open.
+
+The existing credential-free scripted fixture now attempts a forbidden local
+environment write against a retained controller-only canary before remote shell,
+remote patch and completion. Both direct and public paths require exact refusal,
+unchanged canary and positive remote result evidence. Its evidence-checker
+regression and both authored-profile compilation tests pass.
+
+The real pinned-provider fixture did **not** reach those tool calls. It stopped
+at product selection, after initial local runtime qualification, because current
+verifier artifact reconstruction used the fixture's subsequently selected trusted
+controller isolation policy: `realization-member commands require enforced
+descriptor-mounted isolation`. No Codex turn, simulator, production lifecycle
+provider or paid model was contacted. The same guard/reconstruction exists on
+current `next`. Subsequent runs followed reviewed corrections, not blind retries.
+
+The reviewed correction separates current non-spawning executable-identity
+verification from admission of a new execution. A consuming projection returns
+only the reconstructed artifact identity; its private exact-member checks are
+shared with the execution binder, whose enforced-isolation guard remains intact.
+Two focused tests pass for child declaration/manifest/member authority, bounded
+large-object refusal and unsupported new execution. The joined fixture now also
+checks unchanged verified chain heads and retention of the original complete
+qualification testimony across product selection. The corrected joined run
+passed those assertions, then correctly refused an unbound exact command-runtime
+manifest for `config:test/external-candidate-environment` before session creation.
+The missing fixture binding now uses shared exact prepared-environment test
+provisioning. A subsequent born worker correctly refused the fixture's omitted
+`credential_read` effect class; adding that class aligns the fixture with shipped
+bounded-turn policy without granting credential write or relaxing admission.
+
+The next run passed those boundaries and stopped at `temporary guard has no
+owned scratch descriptor` during dedicated worker startup. The public CoW
+creator discarded its original descriptors when returning a pathname layout;
+the external transfer correctly requires the missing original authority. The
+direct fixture had used a descriptor-retaining creator, hiding this mismatch.
+The failed node's CAS/journal is retained and its exact session shows terminal,
+send boundary none, zero commands and zero external allocations. No completed
+remote turn is established. Preserve the original descriptor through creation
+and handoff; do not reopen a diagnostic path or weaken the guard's refusal.
+
+The fresh-creation correction now reuses the existing descriptor-owning creator,
+refuses existing/Constructing adoption and retains the original guard through the
+public path. All 19 guard tests pass, and the corrected joined run passed that
+handoff. It then reached an old signed bridge binary that rejects the new lifecycle
+capability field. Normal bundle-artifact refresh is required before proceeding.
+The synthetic local lifecycle occurrence was terminated; no session commands,
+paid model, Render or simulator contact occurred. Cold retained recovery has a
+separate descriptor/cleanup handoff and remains unqualified.
+
+## Historical generic runtime and native lifecycle fixture
+
+The preceding source cut used runtime operator epoch 56, guest-journal epoch 9,
+outer-supervisor epoch 4, external requirement schema 5, supervisor bootstrap
+schema 5, signed external-placement schema 9, retained placement schema 2,
+structured-session profile schema 10 and persistent-session capsule schema 16.
+The implementation is split
+across a pure provider-neutral lifecycle contract, the external execution
+runtime, existing state/app transaction owners, and thin supervisor/launcher
+executables. Guest binaries no longer pull the controller app or executor into
+their dependency closure. Provider configuration is bundle-owned; concrete
+destination vocabulary such as region and plan belongs only to an adapter's
+signed settings schema rather than the generic placement contract.
+
+Daemon readiness now waits for recoverable candidate imports to drain, fences
+predecessor external candidates, and advances exact cleanup once before normal
+thread reconciliation. An unresolved cleanup operation remains quarantined and
+periodically retryable; import/fencing failure or timeout fails startup closed.
+The terminal result owner selects the exact verified imported generation C for
+an external session and does not relabel the unchanged controller workspace B.
+
+`synthetic-lifecycle-adapter/` is an executable, test-only local occurrence
+adapter using the exact production lifecycle request/response and descriptor
+contract. Its native tests prove exact inspection, allocation and reconciliation;
+launch the real supervisor fixed-descriptor entry with the real launcher artifact;
+and prove terminal settlement only after the exact occurrence process has ended.
+The fixture also found a Lillux defect in repeated inherited sealed-input reads:
+descriptor duplication shares an open-file cursor, so Lillux now rewinds its
+duplicate before every bounded read and has a direct regression test.
+
+The fixture is published into a private signed test bundle during its E2E test
+and resolved through the production bundle/artifact loader. Substitution of the
+installed adapter bytes is rejected by the signed executor-manifest chain.
+Signed test settings also inject one-shot allocation and activation response
+loss; reconciliation observes the original occurrence and running supervisor
+without repeating either mutation.
+
+The native composed case now uses production TLS attachment/exchange handlers,
+the real supervisor and launcher executables, descriptor-rooted B transfer, the
+authenticated export/import path, durable revocation and terminal occurrence
+evidence. A guest-only edit produces exact C; the dedicated-session completion
+fence and ordinary terminal-result selector then select that retained C. The
+same composed case now owns a canonical runtime workspace, current sealed launch
+metadata and the actual disabled-isolation Create/Destroy evidence. Exact
+provider-terminal authority retires the remote root's view membership without
+inventing a local PID; the ordinary executor freeze owner binds C, closes and
+removes the B workspace, appends the authoritative capture fact, and advances
+the session to frozen with C. The local controller workspace is therefore never
+captured or modified as a substitute. Its source and placement are real born
+threads carrying the same pinned B authority. External allocation admission
+joins the workspace to the placement's exact durable launch claim; it no longer
+accepts a role-name string as launch authority, and missing or mismatched claims
+refuse before lifecycle-provider contact. All six protocol cases pass serially.
+The native composed case now continues from exact imported C through the
+ordinary closure validator, an independent evaluator rooted in B, accepted
+qualification, an isolated integration process, daemon-mediated signed item
+authoring, exact freeze of a direct C descendant D, independent D evaluation
+and qualification, and authenticated compare-and-swap publication. Repeating
+the exact publication returns the retained idempotent D result without
+advancing HEAD again.
+
+Enforced integration deliberately gives the authoring process only a
+disposable private input copy. Its signed author-item callback writes the
+separately owned retained COW root. Terminal freeze therefore rejects any
+process mutation of that retained root and captures its descriptor-pinned
+daemon-authored bytes after the hosted contact fence closes. Consuming only the
+isolation overlay's mutation list would silently collapse D back to C; the
+production-TLS test has a regression for the distinct snapshot, direct C
+parent, unchanged policy and authored item.
+
+The synthetic composed acceptance starts the external occurrence and settles
+provider completion through fixture composition. A later credential-free,
+scripted-model test also joins the ordinary `start_exclusive_capsule` route to
+the real pinned Codex app-server, signed connector, authenticated TLS guest,
+session/turn observation, and completion fence. It verifies a guest-only patch
+before exact C capture and proceeds through B-rooted evaluation and D
+publication. This still does not qualify a production lifecycle adapter or a
+full shell-enabled authoring environment. Production lifecycle adapter
+registration remains empty. Render remains ineligible for automatic allocation because its inspected
+API lacks an exact caller-authored create coordinate and authoritative
+ambiguous-create reconciliation.
 
 ## Protected connector capability provisioning checkpoint
 
@@ -373,9 +1178,10 @@ adapter, dispatch integration, or complete B -> C -> evaluation -> D proof.
 
 ## Current program admission slice
 
-Profile schema 9 requires `external_candidate`: either explicit `null` for local
+Profile schema 10 requires `external_candidate`: either explicit `null` for local
 execution or a closed `ryeos.external-candidate.stdio.v1` requirement naming one
-runtime product declaration. Capsule schema 14 retains the resolved program in
+runtime product declaration. Capsule schema 15 retains the resolved program and
+the provider-owned generated configuration destination in
 its authority projection and recomputes it from the signed profile and exact
 retained product selections. Omission cannot select local execution. The selected
 runtime requires an admitted qualification and the protocol's fixed claims in
@@ -1115,3 +1921,525 @@ The prior disk blocker is resolved: the latest filesystem read showed 62 GiB
 available on the project filesystem. Cargo remains permitted with one job and
 the feature-local target; no target relocation, installation or lifecycle action
 was performed. Recheck available space before resuming builds.
+
+### Current acceptance checkpoint — 2026-09-22
+
+This checkpoint supersedes the earlier continuation status above; earlier
+results retain only their stated scope. All seven tests in the synthetic
+lifecycle adapter's `protocol` suite pass with native isolation, run serially.
+The composed signed fixture traverses production TLS/controller services through
+exact B, authenticated remote C import, completion-fenced freeze and retained
+disposition, independent C evaluation, integration D, independent D evaluation,
+authenticated B→D CAS publication and idempotent publication replay. The suite
+also covers lost allocation response reconciliation against the original
+occurrence. It does not prove every controller/guest restart boundary or zero
+provider contact on worker-effect replay.
+
+Enforced connector launch mounts exact executable, sealed configuration and
+socket authorities. It reserves empty mount targets in the controller-owned
+private provider home; sandbox setup still refuses to create targets in retained
+source-backed mounts. Reservation settlement is explicit and fallible after
+process cleanup. Dropping its handles deliberately retains namespace entries,
+and stale targets are refused rather than adopted by name or empty contents.
+Exact durable reservation recovery remains an unfinished gate.
+
+Three retirement-settlement regressions, two mount-reservation tests and fifteen
+repository-validation tests pass. The credential-free
+`../authoring-environment/probe_pinned_codex_command_transport.py` additionally
+proves command-transport handshake using the authored pinned real Codex binary
+and its own exec-server, and refusal of the disabled local environment. It sends
+no model turn. That probe does **not** qualify RyeOS connector authentication,
+native mounted delivery to the real provider, or a complete hosted Codex turn.
+
+Remaining acceptance includes real-provider qualification, complete bounded
+process/diagnostic settlement, restart and ambiguous-response recovery,
+worker-effect replay without duplicate provider contact, refreshed signatures
+and manifests, and final independent reviews. No installed node or root `next`
+was changed by these tests.
+
+The subsequent bridge lifecycle migration passes 33 structured-session tests
+(one native fixture gated separately), 13 Lillux pipe/drain tests, and 15
+repository-validation checks. Entry-point ownership now retains the child,
+diagnostic reader, executable descriptors and broker outside the protocol mutex.
+Startup failure and caught panic use bounded cooperative exit observation; no
+SIGKILL or enclosing-process cleanup claim is added. Tests cover a noisy HTTP
+startup and an ignored-TERM child while the protocol mutex is held. Generic
+destructor behavior and other broker/protocol reader paths remain separate gates.
+After this migration, targeted hosted-workflow publication refreshed the signed
+static bridge and dependent bundle manifests. All seven composed TLS tests passed
+again (40.80s) with bridge SHA256
+`3db526bfcc18c2bc9a13e5f2d35fc94a0c184b140f84dcabd24c166edbf57f7a`.
+This remains synthetic-provider qualification, not real Codex model-turn or
+complete restart/replay acceptance.
+
+The connector-retirement correction adds a Lillux deadline join that retains its
+task owner on timeout. Explicit session settlement now retains both relay and
+mount reservations, observes durable connector closure, and only then removes
+the exact reservations. Closure failure/panic stays failed on a second call;
+Drop does not join or certify cleanup. Cancellation and late stream publication
+are synchronized so authentication cannot miss an earlier stop request.
+Five Lillux task tests, fourteen connector/vault tests with native socket access,
+eleven retirement-filtered regressions, and fifteen repository-validation tests
+pass. Independent review found no remaining blocker in this focused correction.
+The subsequent seven-test composed TLS rerun also passed (22.69s), including
+the signed-worker route and candidate integration/publication fixture. It is
+still synthetic-provider evidence. Exact reservation recovery after daemon
+restart remains unimplemented.
+
+### Real-provider probe: authenticated no-model command-environment handshake
+
+The explicit ignored test
+`pinned_codex_handshake_uses_authenticated_remote_tls_environment` selects an
+absolute `RYEOS_TEST_PINNED_CODEX` path and validates its bytes against the
+authored activation pin, including the copied runtime member. Its signed test
+profile admits initialization and environment inspection only, with no model
+turn route. This is not a completed-candidate test.
+
+The initial native attempt refused during content observation: pinned Codex is
+258,278,208 bytes, larger than the small-content manifest's 32 MiB file contract.
+The external guest path now carries exact typed small/large manifest descriptor
+authority and verifies the complete descriptor-bound realization, including
+large-file chunk hashes and file-shaped products. The pinned Codex test uses the
+production large-content capture/store instead of widening the small tier.
+Focused state, contract, supervisor and executor checks passed; the complete
+real-provider path remains unqualified.
+
+The ignored native test passes signed-worker admission, launches the pinned
+Codex app-server and accepts its schema-validated `configWarning` and
+`remoteControl/status/changed` notifications using rules from the signed Codex
+profile. Under the intended trusted-controller isolation policy, its
+experimental, no-model `environment/info` request reaches the authenticated
+external environment and returns `file:///workspace`. The `local` environment
+is refused. The test then cancels and reaps the occurrence, with no credential
+home, model turn, completion fence, or candidate. This is a real provider
+handshake, not real-provider B→C→evaluation→D→return/CAS acceptance. The
+synthetic provider still covers that full production-TLS fixture separately.
+
+The configured `program` is the signed RyeOS connector, despite Codex calling
+the child an exec-server in its error. Before the policy correction, the
+one-node enforced-isolation fixture returned `failed to spawn exec-server:
+Operation not permitted (os error 1)`. A live test process showed that exact
+connector at `/ryeos/realizations/external-connector/connector` with mode 0500,
+owned by Codex's effective UID, on a read-only mount without `noexec`; the
+app-server had `NoNewPrivs: 1` and one seccomp filter. Temporarily tagging the
+three Lillux seccomp refusal classes with distinct errno values left the Codex
+error at EPERM; those tags were reverted. A focused native Lillux test also
+launched the signed connector bytes as a child from the same namespace path
+with a new process group and piped stdio. It reached the connector's expected
+missing-endpoint validation rather than failing at spawn. These individual
+mechanics did not explain the composed controller refusal.
+The authored full Codex profile was tried as a diagnostic but exited during
+initialization in this minimal fixture, before environment inspection; it is
+not evidence that the connector path works. Only the generic process-group
+child assertion was retained in the native Lillux test.
+
+The original refusal is explained by the **controller** isolation contract,
+not the external guest recipe. The first composed fixture ran its controller
+with enforced linux-lillux isolation and `trusted_process_group_sessions: true`,
+without a retained process scope. The compiled strict-group plan sets
+`contain_process_group`, whose Lillux seccomp filter denies `setpgid` with
+EPERM. The pinned Codex command-backed stdio environment starts its child in
+a new process group. A focused native test proved the exact contrast: the
+same child request gets EPERM under strict-group isolation and succeeds under
+scope-backed nested isolation. The previous errno-tag diagnostic did not tag
+the strict-group `setpgid` rule, so its unchanged EPERM was consistent with
+this boundary. No Lillux denial should be relaxed to make this fixture pass.
+
+The intended Render controller profile is trusted, disposable, and has
+isolation disabled; the candidate and independent evaluator have separate
+isolation authorities. The one-node synthetic full-cycle fixture enabled
+enforced isolation to satisfy evaluator admission, accidentally giving
+controller Codex the strict-group policy when reused for the real-provider
+probe. The focused real-provider handshake now selects a separate trusted
+controller policy and passes. Full real-provider acceptance still needs a
+split-authority topology matching deployment (trusted controller plus
+independently isolated evaluation), or a controller with genuine retained
+Lillux process-scope authority. A strict-group controller must refuse this
+command-backed provider route before provider contact; it must not be treated
+as a supported intermediate topology.
+
+The signed provider declaration now states whether its connector starts in a
+new process group. The real Codex declaration requires that capability; the
+synthetic connector inherits its group. External-candidate admission checks
+the retained declaration against the controller's process-control readiness
+before reading the provider credential or contacting the provider. A node's
+mere ability to allocate process scopes does not make this route safe: the
+external-candidate provider has no retained *controller* scope today. A future
+scope-backed controller must actually bind that scope to this provider session
+before it can admit the route under enforced isolation.
+
+The reviewed large-content correction and test matrix are recorded in
+`.tmp/external-provider-integration-reassessment-20260922.md`. The real test
+remains ignored because it proves only a no-model handshake. Default synthetic
+tests must not be reported as real-provider candidate acceptance. The focused
+real Codex handshake passed after selecting the trusted-controller policy
+(14.60s); the native process-group contrast test passed. After the signed
+provider process-group declaration, the native synthetic production-TLS suite
+passes 8/8 when run serially (one real-provider test ignored), including the
+positive signed-worker admission and strict-group pre-contact refusal. The
+parallel run exceeded the existing five-second adapter deadline in one older
+fault-injection case; its isolated rerun passed in 1.18s. The exact pinned
+Codex no-model handshake also passed again (20.05s). Neither result proves a
+real model turn or real-provider candidate publication. The fifteen
+repository-validation tests also pass after these fixture edits.
+
+## Pinned Codex turn through the signed external route
+
+The next native fixture uses the exact activation-pinned Codex executable with
+a credential-free local scripted Responses endpoint. The trusted app-server
+starts from the controller's exact B workspace, but the structured-session
+bridge now injects the signed external recipe's guest cwd into session and
+recovery routes. Previously, `thread/start` received the controller's private
+materialization path; the remote `apply_patch` reported success at that path
+inside the guest namespace, outside `/workspace`, so C correctly contained no
+edit. The bridge correction leaves the physical controller cwd unchanged and
+routes the signed guest cwd only when `external_candidate` is admitted.
+
+With the refreshed hosted-workflow source bundles and static bridge SHA256
+`44b9eea78d35922727bb42b31eb0c3e73d7cfa6bee27fb26fbde85290585fa32`,
+the ignored focused test
+`pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base` passed
+(28.88s). It proves the model requested `apply_patch`, the authenticated
+remote tool returned success, the file existed in the guest's private candidate
+before capture and not in controller B, and the exact imported C retained its
+bytes. The ordinary completion fence and freeze owner then ran independent
+evaluation rooted in B, integrated an exact descendant D, evaluated D again,
+returned it, and completed authenticated B→D CAS publication. No credential,
+paid model, or production lifecycle provider was contacted; the signed local
+synthetic adapter supplied the external occurrence. The native protocol suite
+passed 10/10 serially after the new refusal regression; the two real-Codex
+fixtures remain explicitly ignored unless the activation-pinned binary is
+supplied. The pinned real-Codex B→C→D test separately passed again (33.72s).
+
+That earlier pass was patch-only. A later native turn now also executes
+`pwd; rg --version` through the remote exec-server using a temporary,
+independently measured authoring-tools tree. The turn then patches C, freezes
+it under its completion fence, independently evaluates C and integrated D,
+and completes authenticated B→D publication. The test uses a local scripted
+Responses endpoint and a signed synthetic lifecycle adapter: no credential,
+paid model or production provider was contacted. This proves the joined
+mechanism, not activation of the shipped external worker.
+
+The positive production-TLS fixture signs a temporary test worker. The four
+existing local Codex profiles and the OpenCode profile retain
+`external_candidate: null`; a distinct signed
+`worker:codex/external-hosted-authoring` now declares the connector-only route.
+Its guest-runtime product relationship intentionally has no qualification
+policy or required claims, so the shipped worker still refuses admission. An
+ordinary signed worker-execution dispatch and installed-provider qualification
+remain separate gates. The authored Codex development graph deliberately uses
+`effects: live`: a distinct new worker launch may produce a distinct candidate
+and must not be represented as an `effect_record` replay. The replay guarantee
+for this route is the same durable launch and command identity returning its
+retained answer without a second provider or model contact.
+
+Codex launch itself is not a new gate. The shipped
+`worker:codex/hosted-authoring` already runs the pinned App Server in a local
+RyeOS structured session, and `worker_execution:codex/bounded-turn` already
+drives a retained candidate through the authored development graph. Its
+explicitly trusted counterpart is a separate signed local profile, not an
+external-placement fallback. External candidate execution adds an exact
+provider-supplied guest lifetime and authenticated return to that existing
+session model. The bounded-turn definition selects its worker through the
+environment binding, so the distinct external environment can use the same
+one-turn public worker-execution contract; a Codex bundle test checks this
+authored relationship. The launch-preparer's bounded-turn test now also checks
+that an environment-selected worker with an empty workload-client delegation
+ceiling retains the same bounded policy; all 13 launch-preparer tests pass.
+The present TLS fixture starts its session with
+`start_exclusive_capsule` directly; it cannot establish that a second
+equivalent *new* graph dispatch should reuse the first candidate. The native
+test instead retries the exact completed turn command both before and after
+terminal settlement and checks the retained response digest and that no new
+provider-command reservation appears. Its scripted model accepts exactly three
+requests for the original turn. The first response contains ephemeral session
+data; an exact retry returns a root-verified redacted digest, not those
+ephemeral bytes. Background authenticated channel frames are not counted as
+duplicate model work. A full signed worker-execution
+retry/restart must additionally prove the same launch identity survives at its
+public entry point.
+
+The existing `config:codex/activation` pins individual controller-side files;
+it is not a qualified guest runtime product. Current build-product declarations
+accept retained-project or workspace-output sources, not an activation receipt
+as a product witness. The external profile therefore needs an authored producer
+graph that assembles a bounded guest tree from exact admitted inputs, retains
+that tree as a product, and obtains the five required external-candidate claims
+through an independent qualification policy. Its product relationship must
+name the distinct external worker and the same runtime declaration ID as the
+signed profile. Separately selected Python, command-tool and simulator products
+must remain separate admitted guest mounts with their own executable-search and
+environment identities; they should not be silently folded into a Codex
+archive. Merely mapping the pinned Codex executable into a new worker, or
+treating the temporary TLS fixture's pre-qualified selection as production
+evidence, would leave the guest closure unauthoritative.
+The verifier cannot establish the first qualification by dispatching the same
+external Worker: `ExternalCandidateRequirement::resolve` requires the retained
+runtime selection and all five claims *before* that Worker can start. Its
+bootstrap qualification must instead run a separately admitted, bounded
+adapter-level probe over the exact product and provider contract, retain
+negative/refusal and lifecycle evidence, and return a typed result through the
+ordinary independent product-qualification service. Only then can a public
+`worker_execution` request select that exact witness and qualification hash.
+The current controller implementation already projects distinct admitted
+realizations, typed process-environment values and executable-search entries
+into the authenticated guest input identity. This is implementation evidence,
+not yet the acceptance test that runs a separately selected Python/tool product
+against C. The wire validator now also refuses executable search through a
+private writable scratch mount; search must stay inside immutable admitted
+product or source inputs.
+The signed external runtime recipe also rejects a literal `PATH`; when an
+authoring environment supplies executable search, the controller derives PATH
+from the exact admitted realization destinations. Focused contract and state
+admission tests cover both refusals and show that a second immutable command
+product changes the authenticated guest-input identity. This does not yet
+prove a shell command executed in the TLS guest.
+The first command-tools experiment selected only upstream `zsh` and `rg`.
+Shell discovery reported zsh, but a real guest `exec_command` failed with
+`ENOENT`: the upstream zsh's `/lib64/ld-linux-x86-64.so.2` interpreter was
+absent from the private guest. This was an incomplete content closure, not a
+reason to expose host libraries. The external Codex environment now selects
+the already-authored `authoring-tools` identity at its fixed mount, which
+contains a relocated shell and exact loader/library closure. The native test
+uses the selected original zsh/rg bytes and the exact authored ELF input
+digests, applies the existing relocation policy, measures a distinct temporary
+manifest, and signs that fixture's environment. In that guest, `pwd` returned
+`/workspace` and the selected `rg` ran successfully.
+
+The historical authoring-environment selection records shell SHA256
+`9573fabf…`; the current exact relocation operation produced
+`d1aac73d…` in the temporary fixture. These are **not** treated as equivalent
+artifacts or bindings. The difference is reproducible from the exact selected
+inputs: the September 7 producer applied `--set-interpreter` before
+`--set-rpath` and reproduces the recorded `9573fabf…` shell; the September 9
+producer applies them in the opposite order and produces `d1aac73d…`.
+The latter order was introduced to protect the interpreter of another dynamic
+runtime. A regression in the native Codex fixture checks both identities.
+The old exact artifact remains a distinct possible selection if it is retained
+and imported under its own authority; the current producer cannot silently
+re-create that pin. Any newly produced selection, the signed consumer digest,
+and independent qualification must agree before the shipped external
+environment can be activated. The native fixture does not claim the historical
+pinned artifact has been mounted or qualified for external Codex. The earlier
+`ref_binding_resolution_authority_missing` fixture refusal was corrected by
+supplying B's verified pinned materialization to ordinary launch preparation.
+The oversized unoptimized synthetic provider now selects the existing
+large-content tier rather than widening ordinary content bounds.
+
+The Codex bundle now authors `config:codex/guest-runtime-activation`, a
+`tool:codex/guest-runtime/produce` operation, its recorded producer graph and
+large-content product recipe. Its static producer streams only the exact
+activation-pinned `bin/codex` bytes through Lillux's pinned input and atomic
+output authorities into a fresh private workspace tree. Unit tests prove exact
+copy, no replacement, wrong-digest and size refusal. A distinct signed
+`worker:codex/external-hosted-authoring` and environment now select that product
+relationship and compile the connector-only profile; the four existing local
+workers retain their original local execution routes. The relationship has no
+qualification policy or required claims, so admission must refuse it. The
+affected signed Codex source bundle passes isolated preflight, but there is no
+qualified product or completed installed producer run. Authored objects and
+source preflight alone do not establish an installed external Codex turn; the
+joined temporary signed fixture above is the current native execution evidence.
+The product recipe also decodes through the current state contract in the
+focused authored-recipe regression. The required external-candidate claims
+include candidate-only execution, native writer exclusion and no local
+fallback; a verifier that only checks `bin/codex` bytes cannot truthfully
+issue those claims. The qualification route must exercise the corresponding
+runtime behavior and retain its exact product/placement evidence before a
+signed external worker may select this product.
+
+Focused durability regression evidence on 2026-09-22: 58 state
+`external_execution` tests, 23 app `external_placement` tests, 49 app
+`runtime_db::external_execution` tests, and the executor's external-candidate
+capsule-authority test pass. The external-execution runtime suite passes 25/25
+with native permissions. The app placement and runtime suites each had one
+initial sandbox-only `EPERM` failure on local IPC; the same compiled suites
+passed with native permissions. Those tests establish individual journal,
+placement and transport invariants. The later credential-free joined test adds
+one complete shell-enabled Codex turn, but does not prove worker-effect replay,
+controller restart or installed-provider qualification. On September 23 the
+focused native joined test passed again with the exact historical shell pin
+reproduced under the old relocation order and the separately measured current
+closed shell executing `pwd` and `rg` inside `/workspace`. Its synthetic TLS
+listener now uses a bounded per-exchange idle deadline so a valid model turn
+does not close the controller before the completion request.
+
+The two new replacement-controller placement tests reopen the same retained
+state under a new controller lock. Before any provider I/O, startup fencing
+settles a reserved/uncontacted allocation as `no_contact`; an ambiguous
+contact instead remains `quarantined` and recoverable, including on repeated
+fencing. This proves the startup fence's classification across a state reopen,
+not resumption of a predecessor's live Codex process after a daemon restart.
+An additional retained-StateStore regression loses the first allocation
+response, replaces the controller state lock, applies the startup fence, and
+reconciles the original occurrence in quarantine. It then sends one exact
+termination request, loses that response too, and reconciles terminal proof.
+The fixture observes one create and one terminate mutation across the
+replacement, with no second create or release of the quarantined candidate.
+This tests the durable allocation/cleanup owners, not restart of the full
+Codex session, connector, TLS channel, or candidate freeze.
+The joined production-TLS fixture cannot model replacement by opening a
+second StateStore while the predecessor remains live: the retained filesystem
+lock correctly excludes that overlap. A process-level test must stop the
+predecessor daemon, preserve its provider occurrence and state directory, then
+start the replacement with the same identity before checking startup fencing,
+import recovery, cleanup, and no duplicate contact. The existing daemon E2E
+harness now registers a separately signed synthetic external-adapter bundle
+without replacing its manifest. Its focused ignored test builds the daemon
+from Cargo's exact `CARGO_BIN_EXE_ryeosd`, takes the five adapter executables
+from an explicitly selected built-artifact directory, kills the first daemon,
+and respawns the same node against retained state. This passed on September 23
+with the identical signed manifest before and after restart. It first exposed
+that the engine's closed source-bundle projection rejected the external
+declarations already accepted by the publisher; the projection now includes
+and validates those declarations. This proves signed-adapter admission across
+a real daemon process restart, not a live Codex session, provider occurrence,
+candidate freeze, or no-duplicate-contact recovery. A joined restart test must
+still place the provider and session before killing the predecessor. It must
+not select a daemon or provider binary from ambient `PATH`, duplicate
+`main.rs` under another package identity, or reopen the StateStore beside its
+live predecessor.
+
+The process-level adapter check is opt-in because the daemon test package does
+not build the synthetic package's five executables. Build those exact test
+artifacts first, then select their directory explicitly:
+
+```sh
+CARGO_INCREMENTAL=0 cargo build -p ryeos-synthetic-external-lifecycle-adapter --bins --jobs 1
+RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
+RYEOS_TEST_SYNTHETIC_BIN_DIR="$PWD/target/debug" \
+CARGO_INCREMENTAL=0 cargo test -p ryeosd --test external_adapter_restart_e2e \
+  --jobs 1 -- --ignored
+```
+
+The refresh opt-out applies only when the staged Core and Standard bundles are
+already current; it is not evidence that stale published bundle bytes are valid.
+On September 23, the four replacement-controller placement regressions passed
+after a real retained store reopen. The dedicated-session terminal replay suite
+also passed 10/10 after its synthetic profile was updated to declare the
+current required `workload_client` field. Those tests prove their respective
+recovery owners; they are not a joined daemon-restart production-TLS test.
+The signed-worker protocol fixture also admits an exact capsule, removes the
+connector capability before launch preflight, and proves refusal with no
+unsettled allocation. It does not claim that provider I/O began.
+The same fixture removes one required runtime qualification claim; the typed
+product-selection constructor refuses that incomplete testimony before worker
+admission and leaves no allocation. This is a pre-contact selection refusal,
+not evidence that an ordinary public request has supplied a qualified product.
+The real-supervisor activation fixture loses the first activation response,
+then reconciles the original operation twice and checks byte-identical
+supervisor-start testimony. It similarly retries exact termination after
+terminal proof and checks the retained observation is unchanged. This passes
+through separate adapter processes; it is ambiguous-response idempotency
+evidence, not a replacement-daemon session test.
+
+The production-TLS fixture also evaluates a complete B→C→D candidate and
+then advances project HEAD to a different descendant E before publication.
+The ordinary B→D publication service refuses the stale base and leaves E as
+HEAD. The stale-base and successful-publication cases pass consecutively in
+one process. On September 23, the native protocol suite passed all 14 runnable
+cases, including the checked-in-definition preflight; two
+explicit real-Codex fixtures remain ignored by default. The activation-pinned
+Codex scripted turn separately passed through B→C→D after the supervisor
+descriptor correction. None of these checks proves outer worker-effect replay
+or a production provider contact ceiling.
+
+The protocol suite also runs signed-source preflight over the checked-in
+Codex and OpenCode bundles with an isolated development-publisher trust root
+and explicit core/standard dependencies. Preflight initially refused all five
+local workers because the current worker kind requires an explicit
+`external_product_slots` declaration. Each now declares an empty list; their
+source digests and affected signatures were refreshed, and both bundles pass
+preflight. The newly authored external Codex worker also passes signed-source
+preflight with its nonempty product slot. On September 23 the hosted-workflow
+bundle set was rebuilt and published from this worktree with the development
+publisher; the focused checked-in Codex/OpenCode signed-source preflight then
+passed, as did all 40 bundle contract tests. This source evidence does not
+replace the missing product qualification or installed external-worker
+admission.
+The same signed-worker fixture now enters the ordinary root preflight and
+dispatch path with an empty caller selection. Root classification succeeds,
+then persistent-session dependency admission refuses with the exact inner
+cause `product slot has no admitted selection`; the external allocation count
+remains zero. The fixture engine retains an exact test bundle-generation
+lifeline so this exercises the daemon generation guard instead of bypassing
+it. This is public dispatch refusal evidence, not successful public selection
+or installed runtime qualification.
+
+The production supervisor now rebases provider-local guest input and product
+manifest descriptors to disjoint fixed supervisor slots. Activation has
+already consumed and verified the exact base snapshot transfer, so its stale
+provider-local descriptor is normalized to a reserved, non-inherited slot in
+the supervisor projection. This prevents a base or second product from
+colliding with a live manifest descriptor. The sealed activation bootstrap
+remains retained verbatim; recovery compares its semantic guest authority
+after deterministic descriptor normalization, while the executable still
+verifies every live inherited authority. A retained-state regression accepts
+changed provider-local descriptor numbers for the same input identity but
+refuses changed guest content at the exact sealed-bootstrap comparison. The
+two-product unit regression, six executable-boundary tests, 21 native
+supervisor library tests, and pinned
+Codex production-TLS B→C evaluation passed on September 23. The synthetic
+provider's staging and inherited-descriptor fixture is evidence for this
+boundary, not installed-provider qualification.
+The source-local host-capability ownership and dependency-layer validators
+also pass against the current worktree (6 and 48 checked files respectively);
+these are finite source sweeps, not an exhaustive OS-boundary review.
+After the source-bundle manifest update, the full `ryeos-engine` suite passed
+914/914 unit tests and all runnable integration groups. Its previously stale
+test fixtures now serialize the current typed isolation policy, declare the
+Worker's explicit empty product slots, and include the required raw-content
+digest. Those fixture corrections do not weaken production admission.
+
+That consecutive run exposed a generic authoritative-root-fact cache error:
+two independent retained state stores may legitimately use the same thread
+coordinate in local fixtures, but the process-global replay cache previously
+keyed only on that coordinate. The cache now reuses an index only while its
+weak owner upgrades to the exact current StateStore. The cross-store unit
+regression and the paired production-TLS test pass. This is an acceleration
+identity correction, not a change to authoritative root replay semantics.
+
+### Public recorded ordinary execution: receipt projection boundary
+
+The September 24 real-daemon recorded fixture completed one graph and its exact
+external child, with an independently terminated synthetic occurrence. It banked
+the result, but its first action receipt reported `effect_record` rather than
+`executed`. The fixture stopped before restarting the daemon or launching the
+equivalent second graph; this run does not prove restart/replay or zero contact.
+Its lifecycle witness records allocation, supervisor activation and termination.
+
+The traced cause is the outer execute envelope's
+`result_project_snapshot_hash: null`. Ordinary callback validation rejected that
+extra field after execution and banking, then recovered the same child through
+the newly published record. The correction shares the managed path's strict
+execute-to-callback projection, preserving original in-band dispatch evidence.
+It does not change record lookup, infer execution from a record's producer, or
+relax the callback wire contract. Focused and public verification of this
+correction remain separate gates.
+
+The replay fixture requires exact action/effect/record equality, no new child,
+and unchanged lifecycle-contact evidence after restart. `effect_record` by itself
+is not proof of no contact: same-operation recovery can retrieve a record after
+execution has already occurred. The contact witness excludes qualification
+inspection subprocesses and makes no provider-spend claim.
+
+The corrected September 24 public test subsequently passed after a fixture-only
+chain assertion correction: `threads/chain` exposes outbound `spawned` edges
+even when the child's chain is independent. The harness now verifies exact root
+membership, no successor, and the exact unique `spawned`/`dispatch` child edges;
+replay requires neither children nor edges. Its focused regression rejects
+wrong/missing/duplicate edges and extra continuation members.
+
+The passing run executed once (`executed`/`inserted`), restarted its disposable
+daemon, then replayed once (`effect_record`/`not_applicable`) with identical
+action/effect/record identities. No new child or lifecycle call occurred on
+restart/replay. The retained evidence is in the feature implementation ledger
+and `.tmp/public-recorded-external-replay-chain-20260924.log` (SHA-256
+`cc05cd31305223cf75409137c7fe52b30dc18d7cb166c3607b6da1e3600edbe1`).
+The dispatch projection correction is committed as `1a9dc807b`; the public
+fixture ran against the matching dirty source before that commit.
+
+This proves ordinary recorded external Tool execution and completed-work replay
+on the local synthetic lifecycle backend. It does not prove active-worker crash
+recovery, external B-owned candidate evaluation, installed Render qualification,
+or the Farm research loop. Those remain separate acceptance gates.

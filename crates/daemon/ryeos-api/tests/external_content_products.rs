@@ -9,7 +9,9 @@ mod test_state;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use ryeos_api::handlers::{external_content_import, external_content_products};
+use ryeos_api::handlers::{
+    external_content_import, external_content_products, product_qualification_launch,
+};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::identity::{AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy};
 use ryeos_app::node_policy::sections::external_content::{
@@ -92,6 +94,7 @@ fn fixture_with_remote_owner(
         "ryeos.execute.service.external-content/capture-product".to_owned(),
         "ryeos.execute.service.external-content/import".to_owned(),
         "ryeos.execute.service.external-content/product".to_owned(),
+        "ryeos.execute.service.external-content/launch-product-qualification".to_owned(),
     ];
     ryeos_app::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
@@ -444,6 +447,49 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
             .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn qualification_launch_reservation_is_one_shot_when_signed_relationship_refuses() {
+    let fixture = fixture(false, 4096, true);
+    let launch_id = format!("L-{}", "a".repeat(32));
+    let request = product_qualification_launch::Request {
+        launch_id: launch_id.clone(),
+        witness_hash: fixture.witness_hash.clone(),
+        witness_source:
+            ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+        relationship_name: "missing_qualification_relationship".to_owned(),
+    };
+    let first = product_qualification_launch::handle(
+        request.clone(),
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    assert!(first.is_err(), "unsigned relationship cannot launch a verifier");
+    let status = fixture
+        .state
+        .state_store
+        .launch_planning_status(&launch_id, &fixture.context.fingerprint)
+        .unwrap()
+        .expect("accepted launch id must remain owner-queryable after refusal");
+    assert_eq!(status.status, "failed");
+    assert!(status.thread_id.is_none());
+
+    let second = product_qualification_launch::handle(
+        request,
+        fixture.context.clone(),
+        Arc::clone(&fixture.state),
+    )
+    .await;
+    assert!(second.is_err(), "repeating an uncertain launch id must not relaunch");
+    let repeated = fixture
+        .state
+        .state_store
+        .launch_planning_status(&launch_id, &fixture.context.fingerprint)
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated, status);
 }
 
 #[tokio::test]

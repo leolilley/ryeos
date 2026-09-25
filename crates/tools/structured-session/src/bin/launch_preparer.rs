@@ -1531,6 +1531,16 @@ mod tests {
             WorkerSelection::Direct("worker:fixture/hosted".to_owned())
         );
 
+        let mut environment_selected = config.clone();
+        environment_selected["worker_ref"] = serde_json::Value::Null;
+        environment_selected["environment_binding"] = serde_json::json!(ENVIRONMENT_BINDING);
+        environment_selected["workload_client_delegation_caps"] = serde_json::json!([]);
+        assert_eq!(
+            validate_execution_config(&environment_selected).unwrap(),
+            WorkerSelection::Environment(ENVIRONMENT_BINDING.to_owned()),
+            "the same bounded-turn policy must admit an externally selected worker without a second execution kind"
+        );
+
         let mut recovery_qualified = config.clone();
         recovery_qualified["mode"]["require_post_completion_recovery"] = serde_json::json!(true);
         assert_eq!(

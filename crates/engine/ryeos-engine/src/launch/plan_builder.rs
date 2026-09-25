@@ -55,6 +55,11 @@ struct RuntimeSourceBundleManifest {
     shadows: Vec<String>,
     #[serde(default)]
     isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
+    #[serde(default)]
+    external_providers: Vec<ryeos_external_execution_contract::ExternalProviderDeclaration>,
+    #[serde(default)]
+    external_lifecycle_adapters:
+        Vec<ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration>,
 }
 
 #[allow(dead_code)]
@@ -329,6 +334,36 @@ pub fn verify_bundle_source_manifest_identity(
             return Err(EngineError::Internal(format!(
                 "runtime source-bundle manifest has duplicate isolation backend id {:?}",
                 backend.id
+            )));
+        }
+    }
+    let mut provider_ids = std::collections::BTreeSet::new();
+    for provider in &manifest.external_providers {
+        provider.validate().map_err(|error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest has invalid external provider {:?}: {error}",
+                provider.id
+            ))
+        })?;
+        if !provider_ids.insert(provider.id.as_str()) {
+            return Err(EngineError::Internal(format!(
+                "runtime source-bundle manifest has duplicate external provider id {:?}",
+                provider.id
+            )));
+        }
+    }
+    let mut adapter_ids = std::collections::BTreeSet::new();
+    for adapter in &manifest.external_lifecycle_adapters {
+        adapter.validate().map_err(|error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest has invalid external lifecycle adapter {:?}: {error}",
+                adapter.id
+            ))
+        })?;
+        if !adapter_ids.insert(adapter.id.as_str()) {
+            return Err(EngineError::Internal(format!(
+                "runtime source-bundle manifest has duplicate external lifecycle adapter id {:?}",
+                adapter.id
             )));
         }
     }
@@ -1220,6 +1255,7 @@ fn build_plan_with_execution_root(
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
     let target_requirement = execution.project_target_requirement(root_value)?;
+    let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
     resource_authority_ceiling
         .admits(target_requirement.as_ref())
@@ -1313,6 +1349,8 @@ fn build_plan_with_execution_root(
         network_authority_ceiling,
         filesystem_authority_ceiling,
         target_requirement,
+        endpoint_requirement,
+        external_endpoint_binding: None,
         resource_authority_ceiling,
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
@@ -1514,6 +1552,51 @@ mod tests {
             verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
                 .unwrap_err();
         assert!(error.to_string().contains("duplicate isolation backend id"));
+    }
+
+    #[test]
+    fn runtime_bundle_generation_accepts_closed_external_execution_declarations() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let target = lillux::platform::current_binary_target().unwrap();
+        let body = format!(
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nexternal_lifecycle_adapters:\n  - id: synthetic-local\n    protocol: ryeos.external-execution.lifecycle-adapter.v1\n    targets: [{target}]\n    adapter: adapter\n    supervisor: supervisor\n    launcher: launcher\n    settings_schema_digest: '{}'\n    capabilities: [exact_allocation_reconciliation, authoritative_no_occurrence, exact_activation_reconciliation, idempotent_termination, exact_terminal_observation]\nexternal_providers:\n  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n",
+            "9".repeat(64)
+        );
+        let signed = lillux::signature::sign_content(&body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts()).unwrap();
+    }
+
+    #[test]
+    fn runtime_bundle_generation_rejects_duplicate_external_provider_ids() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let target = lillux::platform::current_binary_target().unwrap();
+        let provider = format!(
+            "  - id: codex-hosted\n    protocol: ryeos.external-execution.provider-configuration.v1\n    targets: [{target}]\n    connector: connector\n    connector_process_group: new\n    configuration_adapter: configuration\n    configuration_destination: environments.toml\n"
+        );
+        let body = format!(
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nexternal_providers:\n{provider}{provider}"
+        );
+        let signed = lillux::signature::sign_content(&body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        let error =
+            verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
+        assert!(error.to_string().contains("duplicate external provider id"));
     }
 
     const AI_DIR: &str = crate::AI_DIR;
@@ -1753,6 +1836,105 @@ config:
     // ── Test: chain walks to terminal with executor_id null ─────────────
 
     #[test]
+    fn bundled_tool_endpoint_is_projected_without_resource_or_routing_hints() {
+        use crate::contracts::ExecutionEndpointRequirement;
+
+        let project = tempfile::tempdir().unwrap();
+        let schemas = tempfile::tempdir().unwrap();
+        let ts = test_ts();
+        let tool_schema = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml"
+        ));
+        let tool_schema = tool_schema
+            .lines()
+            .filter(|line| !line.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let schema_dir = schemas.path().join("tool");
+        fs::create_dir(&schema_dir).unwrap();
+        fs::write(
+            schema_dir.join("tool.kind-schema.yaml"),
+            sign_yaml(&tool_schema),
+        )
+        .unwrap();
+        let kinds = KindRegistry::load_base(&[schemas.path().to_path_buf()], &ts).unwrap();
+        let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        write_terminal(project.path(), "ryeos/core/subprocess/execute");
+        let tool_path = project.path().join(AI_DIR).join("tools/direct.yaml");
+        let ctx = test_plan_context(Some(project.path().to_path_buf()));
+        let roots = ResolutionRoots::from_flat(Some(project.path().join(AI_DIR)), vec![]);
+        for endpoint in [
+            None,
+            Some(ExecutionEndpointRequirement::Local {}),
+            Some(ExecutionEndpointRequirement::External {
+                binding_id: "farm-direct".into(),
+                stdout_max_bytes: 1024,
+                stderr_max_bytes: 2048,
+            }),
+        ] {
+            let mut tool = json!({"executor_id":"@subprocess",
+                "config":{"command":"/bin/echo","args":["fixture"]}});
+            if let Some(endpoint) = &endpoint {
+                tool["execution_endpoint"] = serde_json::to_value(endpoint).unwrap();
+            }
+            let shape = kinds
+                .get("tool")
+                .unwrap()
+                .composed_value_contract
+                .validate_instance(&tool);
+            assert!(shape.errors.is_empty(), "{shape:?}");
+            fs::write(&tool_path, serde_yaml::to_string(&tool).unwrap()).unwrap();
+            let mut item = make_verified_item(
+                "tool:direct",
+                "tool",
+                tool_path.clone(),
+                Some("@subprocess"),
+                Some(project.path().to_path_buf()),
+            );
+            item.resolved.source_format = ResolvedSourceFormat {
+                extension: ".yaml".into(),
+                parser: "parser:ryeos/core/yaml/yaml".into(),
+                signature: SignatureEnvelope {
+                    prefix: "#".into(),
+                    suffix: None,
+                    after_shebang: false,
+                },
+            };
+            let plan = build_plan(BuildPlanInput {
+                item: &item,
+                root_source: None,
+                parameters: &json!({}),
+                hints: &ExecutionHints::default(),
+                ctx: &ctx,
+                kinds: &kinds,
+                parsers: &parsers,
+                roots: &roots,
+                registry_fingerprint: "fp:test",
+                trust_store: &ts,
+                node_trust_store: &ts,
+                host_env: &HostEnvBindings::default(),
+                filesystem_authority_ceiling:
+                    crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                project_authority: None,
+                sealed_content: None,
+            })
+            .unwrap();
+            assert_eq!(
+                plan.endpoint_requirement,
+                endpoint.unwrap_or(ExecutionEndpointRequirement::Local {})
+            );
+            assert!(plan.external_endpoint_binding.is_none());
+            assert!(plan.target_requirement.is_none());
+            plan.validate_endpoint_for_planning().unwrap();
+            let retained: ExecutionPlan =
+                serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+            assert_eq!(retained.endpoint_requirement, plan.endpoint_requirement);
+            assert!(retained.external_endpoint_binding.is_none());
+        }
+    }
+
+    #[test]
     fn bundled_worker_filesystem_ceiling_survives_preparation_and_retention() {
         use crate::isolation::IsolationFilesystemAuthorityCeiling::{
             CapturedExecution, NodePolicy,
@@ -1801,6 +1983,7 @@ config:
                 "supported_target": {"os": "linux", "arch": "x86_64", "resources": []},
                 "source": {"root": "lib/session", "entry": "profile.json", "digest": "a".repeat(64)},
                 "external_content": [],
+                "external_product_slots": [],
                 "config": {"command": "/bin/sh", "args": ["--version"]}
             });
             if let Some(authored) = authored {

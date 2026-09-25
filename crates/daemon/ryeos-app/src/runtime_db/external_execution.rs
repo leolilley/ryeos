@@ -1,4 +1,4 @@
-//! Subordinate external allocation ownership, attached to a dedicated session.
+//! Subordinate external allocation ownership, attached to an admitted execution.
 //!
 //! This is not a second session scheduler. Its key is the existing placement
 //! thread. The local worker remains an ordinary local process. Persist contact
@@ -10,13 +10,19 @@ use super::*;
 use anyhow::ensure;
 
 mod channel;
+pub use channel::ExternalDirectOutput;
 pub(crate) mod connector;
 pub(crate) use channel::{
     ExternalCandidateImportClaim, ExternalCandidateImportTarget, ExternalProtocolOutputClaim,
-    ExternalSupervisorExchange,
+    ExternalSupervisorExchange, RetainedExternalCandidateImport,
 };
 
 pub(super) const FIRST_EPOCH: u32 = 40;
+pub const EXTERNAL_ALLOCATION_RESERVATION_SCHEMA: u32 = 5;
+// The bounded direct projection is operational authority retained inline, not
+// a new CAS root or caller-authored command. Metadata remains separately bounded.
+const MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES: usize =
+    ryeos_state::external_execution::admission::MAX_EXTERNAL_DIRECT_PROGRAM_BYTES + 8192;
 pub(super) const GUARD_SQL: &str = r#"CREATE TABLE external_execution_guard (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
@@ -56,6 +62,7 @@ CREATE INDEX idx_external_execution_capacity
 CREATE TABLE external_execution_import (
     binding_digest TEXT PRIMARY KEY,
     snapshot_hash TEXT NOT NULL,
+    output_capture_hash TEXT,
     evidence_blob_hash TEXT NOT NULL,
     completion_request_digest TEXT NOT NULL,
     export_frame_digest TEXT NOT NULL
@@ -372,19 +379,100 @@ AND (NEW.placement_thread_id IS NOT OLD.placement_thread_id
     OR NEW.state IN ('freezing','frozen','verifying','qualifying','publish_ready',
         'publishing','discarding','terminal'))
 BEGIN SELECT RAISE(ABORT, 'external execution blocks local completion and owner replacement'); END;
+CREATE TRIGGER external_execution_direct_thread_delete_guard
+BEFORE DELETE ON thread_runtime
+WHEN EXISTS(SELECT 1 FROM external_execution_allocation a
+    WHERE a.placement_thread_id=OLD.thread_id
+      AND json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
+      AND a.phase NOT IN ('no_contact','contacted_no_occurrence','terminated'))
+BEGIN SELECT RAISE(ABORT, 'external direct execution retains its thread owner'); END;
+CREATE TRIGGER external_execution_direct_thread_identity_guard
+BEFORE UPDATE ON thread_runtime
+WHEN (NEW.thread_id IS NOT OLD.thread_id OR NEW.chain_root_id IS NOT OLD.chain_root_id)
+ AND EXISTS(SELECT 1 FROM external_execution_allocation a
+    WHERE a.placement_thread_id=OLD.thread_id
+      AND json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
+      AND a.phase NOT IN ('no_contact','contacted_no_occurrence','terminated'))
+BEGIN SELECT RAISE(ABORT, 'external direct execution retains its exact chain owner'); END;
 "#;
 
-/// No secrets, URLs or arbitrary commands are accepted at this boundary.
-/// The protected adapter binding supplies them, not a project/worker request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalDedicatedSessionOwner {
+    pub workspace_id: String,
+    pub worker_instance_id: String,
+    pub worker_boot_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalAllocationOwner {
+    DedicatedSession(ExternalDedicatedSessionOwner),
+    DirectThread {
+        chain_root_id: String,
+        launch_owner: LaunchOwner,
+        program: ryeos_state::external_execution::admission::AdmittedExternalDirectProgram,
+    },
+}
+
+impl ExternalAllocationOwner {
+    pub fn dedicated_session(&self) -> Result<&ExternalDedicatedSessionOwner> {
+        match self {
+            Self::DedicatedSession(owner) => Ok(owner),
+            Self::DirectThread { .. } => {
+                bail!("external allocation has no dedicated-session owner")
+            }
+        }
+    }
+
+    fn validate(&self, placement: &str) -> Result<()> {
+        match self {
+            Self::DedicatedSession(owner) => {
+                validate_bounded_runtime_text("external workspace", &owner.workspace_id, 256)?;
+                validate_bounded_runtime_text("external worker", &owner.worker_instance_id, 256)?;
+                ensure!(
+                    (1..=i64::MAX as u64).contains(&owner.worker_boot_epoch),
+                    "external worker epoch is invalid"
+                );
+            }
+            Self::DirectThread {
+                chain_root_id,
+                launch_owner,
+                program,
+            } => {
+                program.validate()?;
+                validate_bounded_runtime_text("external direct chain", chain_root_id, 256)?;
+                validate_bounded_runtime_text(
+                    "external direct claim",
+                    &launch_owner.unpredictable_nonce,
+                    256,
+                )?;
+                validate_bounded_runtime_text(
+                    "external direct daemon",
+                    &launch_owner.daemon_generation_id,
+                    256,
+                )?;
+                ensure!(
+                    launch_owner.thread_id == placement
+                        && (1..=i64::MAX as u64).contains(&launch_owner.monotonic_launch_epoch),
+                    "external direct launch owner is invalid"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Initial direct programs arrive only through the opaque app compiler proof.
+/// The allocation adapter receives its bounded allocation-only projection, not
+/// these retained arguments/input or the controller's protected credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalAllocationReservation {
     pub schema: u32,
     pub placement_thread_id: String,
     pub admitted_capsule_hash: String,
-    pub workspace_id: String,
-    pub worker_instance_id: String,
-    pub worker_boot_epoch: u64,
+    pub owner: ExternalAllocationOwner,
     pub base_snapshot_hash: String,
     pub binding_hash: String,
     /// Stable protected capacity domain across binding/policy generations.
@@ -401,22 +489,82 @@ pub struct ExternalAllocationReservation {
     pub max_active: u16,
     pub timeout_seconds: u32,
     pub contact_deadline_ms: i64,
+    /// First allocation reservation, after local guest-input preparation.
+    pub startup_started_at_ms: i64,
+    /// Non-renewing readiness expiry derived from the exact admitted capsule.
+    pub startup_deadline_ms: i64,
+}
+
+/// Nonportable observation policy supplied by the existing lifecycle owner.
+/// This is not durable identity: its consequence is committed with the exact
+/// retained observation in the allocation's existing transaction.
+#[derive(Clone, Copy)]
+pub(crate) enum ExternalObservationTiming {
+    Startup {
+        deadline_exceeded: bool,
+        live_deadline: lillux::time::MonotonicDeadline,
+    },
+    Cleanup,
+}
+
+impl ExternalObservationTiming {
+    pub(crate) fn with_deadline_exceeded(self, observed: bool) -> Self {
+        match self {
+            Self::Startup {
+                deadline_exceeded,
+                live_deadline,
+            } => Self::Startup {
+                deadline_exceeded: deadline_exceeded || observed,
+                live_deadline,
+            },
+            Self::Cleanup => Self::Cleanup,
+        }
+    }
+}
+
+fn fence_external_observation_timing(
+    conn: &Connection,
+    record: &ExternalAllocationRecord,
+    timing: ExternalObservationTiming,
+) -> Result<()> {
+    let now = i64::try_from(lillux::time::timestamp_millis())?;
+    let quarantine = match timing {
+        ExternalObservationTiming::Cleanup => true,
+        ExternalObservationTiming::Startup {
+            deadline_exceeded,
+            live_deadline,
+        } => {
+            deadline_exceeded
+                || live_deadline.has_elapsed()
+                || record.reservation.require_startup_time(now).is_err()
+        }
+    };
+    if quarantine && !record.phase.is_settled() {
+        conn.execute(
+            "UPDATE external_execution_allocation SET phase='quarantined',updated_at_ms=?2
+             WHERE placement_thread_id=?1",
+            params![record.reservation.placement_thread_id, now],
+        )?;
+    }
+    Ok(())
 }
 
 impl ExternalAllocationReservation {
     pub fn validate(&self) -> Result<()> {
-        if self.schema != 2
+        if self.schema != EXTERNAL_ALLOCATION_RESERVATION_SCHEMA
             || !(1..=64).contains(&self.max_active)
             || !(1..=3600).contains(&self.timeout_seconds)
             || self.contact_deadline_ms <= 0
-            || self.worker_boot_epoch == 0
-            || self.worker_boot_epoch > i64::MAX as u64
+            || self.startup_started_at_ms <= 0
+            || !self
+                .startup_deadline_ms
+                .checked_sub(self.startup_started_at_ms)
+                .is_some_and(|duration| (1..=600_000).contains(&duration))
         {
             bail!("external allocation reservation is outside its versioned bounds");
         }
         validate_bounded_runtime_text("external placement", &self.placement_thread_id, 256)?;
-        validate_bounded_runtime_text("external workspace", &self.workspace_id, 256)?;
-        validate_bounded_runtime_text("external worker", &self.worker_instance_id, 256)?;
+        self.owner.validate(&self.placement_thread_id)?;
         for hash in [
             &self.admitted_capsule_hash,
             &self.base_snapshot_hash,
@@ -431,7 +579,42 @@ impl ExternalAllocationReservation {
         ryeos_state::external_execution::validate_channel_public_key(
             &self.channel_owner_public_key,
         )?;
+        ensure!(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.len()
+                <= MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES,
+            "external allocation reservation exceeds its serialized bound"
+        );
         Ok(())
+    }
+
+    pub(crate) fn validate_startup_budget(&self, ready_timeout_ms: u64) -> Result<()> {
+        self.validate()?;
+        if self
+            .startup_deadline_ms
+            .checked_sub(self.startup_started_at_ms)
+            != Some(i64::try_from(ready_timeout_ms)?)
+        {
+            bail!("external startup reservation changed its admitted readiness budget");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_startup_time(&self, now_ms: i64) -> Result<()> {
+        self.validate()?;
+        if now_ms < self.startup_started_at_ms || now_ms >= self.startup_deadline_ms {
+            bail!("external startup readiness deadline expired or clock preceded its anchor");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn startup_deadline(&self) -> Result<lillux::time::MonotonicDeadline> {
+        // Durable recovery follows the existing wall-clock convention. This
+        // projection does not claim monotonic continuity across a restart.
+        let now = i64::try_from(lillux::time::timestamp_millis())?;
+        self.require_startup_time(now)?;
+        Ok(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_millis(u64::try_from(self.startup_deadline_ms - now)?),
+        ))
     }
 }
 
@@ -483,6 +666,7 @@ pub(crate) struct ExternalSupervisorActivationIntent {
     pub request_digest: String,
     pub occurrence_id: String,
     pub supervisor_runtime_hash: String,
+    pub guest_input_identity: String,
     pub activation_request_digest: String,
     pub attachment_deadline_ms: i64,
     pub execution_timeout_seconds: u32,
@@ -496,7 +680,7 @@ impl ExternalSupervisorActivationIntent {
         reservation: &ExternalAllocationReservation,
         occurrence: &ExternalAllocationOccurrence,
     ) -> Result<()> {
-        if self.schema != 1
+        if self.schema != 2
             || self.binding_hash != reservation.binding_hash
             || self.request_digest != reservation.request_digest
             || self.occurrence_id != occurrence.occurrence_id
@@ -508,23 +692,25 @@ impl ExternalSupervisorActivationIntent {
             bail!("external supervisor activation intent contradicts its occurrence");
         }
         validate_sha256("external supervisor runtime", &self.supervisor_runtime_hash)?;
+        validate_sha256("external guest input identity", &self.guest_input_identity)?;
         validate_sha256(
             "external supervisor activation request",
             &self.activation_request_digest,
         )
     }
 
-    fn validate_contract(
+    pub(crate) fn validate_contract(
         &self,
         reservation: &ExternalAllocationReservation,
         occurrence: &ExternalAllocationOccurrence,
         contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
     ) -> Result<()> {
+        self.validate(reservation, occurrence)?;
         let exact_attachment_deadline = reservation
             .contact_deadline_ms
             .checked_add(i64::from(contract.observation_timeout_seconds) * 1_000)
             .context("external supervisor attachment deadline overflow")?;
-        if self.supervisor_runtime_hash != contract.runtime_manifest_hash
+        if self.supervisor_runtime_hash != reserved_runtime_manifest(reservation, contract)?
             || self.attachment_deadline_ms != exact_attachment_deadline
             || self.post_execution_timeout_seconds
                 != contract
@@ -544,10 +730,40 @@ impl ExternalSupervisorActivationIntent {
                     self.attachment_deadline_ms,
                     self.post_execution_timeout_seconds,
                     self.channel_max_bytes,
+                    &self.guest_input_identity,
                 )?,
             "external supervisor activation request identity changed"
         );
         Ok(())
+    }
+}
+
+/// The session runtime is selected by its protected binding. An ordinary
+/// command's runtime is selected by its retained compiler output, never by a
+/// worker field borrowed into a direct binding.
+fn reserved_runtime_manifest<'a>(
+    reservation: &'a ExternalAllocationReservation,
+    contract: &'a crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
+) -> Result<&'a str> {
+    use crate::node_config::sections::external_execution::ExternalWorkloadBinding;
+    match &reservation.owner {
+        ExternalAllocationOwner::DedicatedSession(_) => Ok(&contract
+            .workload
+            .structured_session()?
+            .runtime_manifest_hash),
+        ExternalAllocationOwner::DirectThread { program, .. } => {
+            program.validate()?;
+            ensure!(
+                matches!(contract.workload, ExternalWorkloadBinding::DirectCommand {})
+                    && contract.max_export_bytes == 0
+                    && program.projection().endpoint_binding_digest == reservation.binding_hash
+                    && program.projection().timeout_seconds
+                        == u64::from(reservation.timeout_seconds)
+                    && reservation.timeout_seconds <= contract.timeout_seconds,
+                "direct activation changed its retained workload, binding or execution budget"
+            );
+            program.runtime_manifest_hash()
+        }
     }
 }
 
@@ -561,7 +777,16 @@ pub(crate) fn external_supervisor_activation_request_digest(
     attachment_deadline_ms: i64,
     post_execution_timeout_seconds: u32,
     channel_max_bytes: u64,
+    guest_input_identity: &str,
 ) -> Result<String> {
+    validate_sha256("external guest input identity", guest_input_identity)?;
+    let runtime_manifest = reserved_runtime_manifest(reservation, contract)?;
+    if let ExternalAllocationOwner::DirectThread { program, .. } = &reservation.owner {
+        ensure!(
+            program.guest_input_identity() == guest_input_identity,
+            "direct activation changed its compiled guest input identity"
+        );
+    }
     ryeos_state::objects::canonical_value_digest(&serde_json::json!({
         "domain":"ryeos.external-supervisor-activation.v1",
         "controller":&contract.controller_transport,
@@ -572,7 +797,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
         "admitted_capsule_hash":&reservation.admitted_capsule_hash,
         "base_snapshot_hash":&reservation.base_snapshot_hash,
         "execution_binding_hash":&reservation.binding_hash,
-        "supervisor_runtime_hash":&contract.runtime_manifest_hash,
+        "supervisor_runtime_hash":runtime_manifest,
         "launcher_artifact_hash":&contract.launcher_artifact_hash,
         "owner_public_key":&reservation.channel_owner_public_key,
         "bootstrap_capability_hash":&reservation.channel_bootstrap_capability_hash,
@@ -580,6 +805,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
         "execution_timeout_seconds":reservation.timeout_seconds,
         "post_execution_timeout_seconds":post_execution_timeout_seconds,
         "channel_max_bytes":channel_max_bytes,
+        "guest_input_identity":guest_input_identity,
     }))
 }
 
@@ -774,7 +1000,7 @@ fn read(conn: &Connection, placement: &str) -> Result<Option<ExternalAllocationR
         )
         .optional()?;
     raw.map(|(capacity, reservation_json, phase, occurrence_json)| {
-        if reservation_json.len() > 8192
+        if reservation_json.len() > MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES
             || occurrence_json.as_ref().is_some_and(|raw| raw.len() > 8192)
         {
             bail!("external allocation record exceeds its bound");
@@ -1109,7 +1335,7 @@ pub(super) fn validate_current(conn: &Connection) -> Result<()> {
     for placement in placements {
         let record = read(conn, &placement)?.context("external allocation disappeared")?;
         if !record.phase.is_settled() {
-            require_session_owner(conn, &record.reservation)?;
+            require_retained_owner(conn, &record.reservation)?;
         }
         let retained = read_retained_binding(conn, &record.reservation.binding_hash)?
             .context("external allocation lost its exact retained binding generation")?;
@@ -1146,22 +1372,24 @@ fn require_session_owner(
     conn: &Connection,
     reservation: &ExternalAllocationReservation,
 ) -> Result<()> {
+    let owner = reservation.owner.dedicated_session()?;
     let matched: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM dedicated_session s JOIN credential_profile p
            ON p.profile_id=s.credential_profile_id
          JOIN execution_workspace w ON w.workspace_id=s.workspace_id
+         JOIN thread_launch_claim c ON c.thread_id=s.placement_thread_id
          WHERE s.placement_thread_id=?1 AND s.admitted_capsule_hash=?2 AND s.workspace_id=?3
            AND s.worker_instance_id=?4 AND s.worker_boot_epoch=?5
            AND w.thread_id=s.placement_thread_id AND w.base_snapshot=?6
-           AND w.launch_owner='dedicated_worker_session'
+           AND w.launch_owner=c.claimed_by
            AND p.credential_generation=s.credential_generation
            AND p.lock_owner=s.worker_instance_id)",
         params![
             reservation.placement_thread_id,
             reservation.admitted_capsule_hash,
-            reservation.workspace_id,
-            reservation.worker_instance_id,
-            i64::try_from(reservation.worker_boot_epoch)?,
+            owner.workspace_id,
+            owner.worker_instance_id,
+            i64::try_from(owner.worker_boot_epoch)?,
             reservation.base_snapshot_hash
         ],
         |row| row.get(0),
@@ -1172,25 +1400,166 @@ fn require_session_owner(
     Ok(())
 }
 
-fn require_launch_ready_session(conn: &Connection, placement: &str) -> Result<()> {
+fn require_retained_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<()> {
+    match &reservation.owner {
+        ExternalAllocationOwner::DedicatedSession(_) => require_session_owner(conn, reservation),
+        ExternalAllocationOwner::DirectThread { chain_root_id, .. } => {
+            // Original owner remains in the immutable reservation. Claim rotation
+            // or cancellation cannot erase an occurrence's cleanup obligation.
+            let matched: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM thread_runtime WHERE thread_id=?1 AND chain_root_id=?2)",
+                params![reservation.placement_thread_id, chain_root_id], |row| row.get(0))?;
+            ensure!(
+                matched,
+                "external direct allocation lost its retained thread owner"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn require_contactable_direct_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<()> {
+    ensure!(
+        direct_owner_is_contactable(conn, reservation)?,
+        "external direct allocation has no exact current unstopped launch owner"
+    );
+    Ok(())
+}
+
+/// A negative authority observation is distinct from a corrupt reservation or
+/// failed database read. Transport may suppress executable backlog on the former
+/// without discarding retained evidence or hiding the latter.
+fn direct_owner_is_contactable(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+) -> Result<bool> {
+    let ExternalAllocationOwner::DirectThread {
+        chain_root_id,
+        launch_owner,
+        ..
+    } = &reservation.owner
+    else {
+        bail!("external direct admission requires a direct thread owner");
+    };
+    reservation.validate()?;
+    let canonical_owner = lillux::canonical_json(&serde_json::to_value(launch_owner)?)?;
+    let matched: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_runtime r
+           JOIN thread_launch_claim c ON c.thread_id=r.thread_id
+           JOIN thread_launch_epoch e ON e.thread_id=r.thread_id
+         WHERE r.thread_id=?1 AND r.chain_root_id=?2 AND r.stop_requested_at_ms IS NULL
+           AND c.claimed_by=?3 AND c.claim_id=?4 AND e.last_epoch=?5)",
+        params![
+            reservation.placement_thread_id,
+            chain_root_id,
+            canonical_owner,
+            launch_owner.unpredictable_nonce,
+            i64::try_from(launch_owner.monotonic_launch_epoch)?
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(matched)
+}
+
+fn require_new_owner(
+    conn: &Connection,
+    reservation: &ExternalAllocationReservation,
+    proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+) -> Result<()> {
+    match &reservation.owner {
+        ExternalAllocationOwner::DedicatedSession(_) => {
+            ensure!(
+                proof.is_none(),
+                "session allocation cannot consume direct thread proof"
+            );
+            require_session_owner(conn, reservation)?;
+            require_contactable_session(conn, &reservation.placement_thread_id)
+        }
+        ExternalAllocationOwner::DirectThread { .. } => {
+            ensure!(
+                proof.is_some_and(|proof| proof.matches(reservation)),
+                "external direct allocation requires verified born capsule authority"
+            );
+            require_contactable_direct_owner(conn, reservation)
+        }
+    }
+}
+
+/// Require the exact still-admitted session and its current root workspace.
+///
+/// `ready` is the pre-process boundary used by direct recovery fixtures.
+/// `active` is the ordinary public WorkerExecution boundary: its managed
+/// runtime has attached before the dedicated structured-session worker asks
+/// the external provider for an occurrence. Both states retain the exact
+/// launch owner; freezing and every later state close new provider contact.
+fn require_contactable_session(conn: &Connection, placement: &str) -> Result<()> {
     let admitted: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM dedicated_session s
             JOIN execution_workspace w ON w.workspace_id=s.workspace_id
+            JOIN thread_launch_claim c ON c.thread_id=s.placement_thread_id
           WHERE s.placement_thread_id=?1 AND s.state='admitted' AND s.send_boundary='none'
             AND w.thread_id=s.placement_thread_id
-            AND w.launch_owner='dedicated_worker_session' AND w.state='ready')",
+            AND w.launch_owner=c.claimed_by AND w.state IN ('ready','active'))",
         [placement],
         |row| row.get(0),
     )?;
     if !admitted {
-        bail!("external allocation requires an unreleased admitted session");
+        bail!(
+            "external allocation requires an unreleased admitted session and contactable workspace"
+        );
     }
     Ok(())
 }
 
 impl RuntimeDb {
+    pub(super) fn unsettled_external_chain_count(&self, chain_root_id: &str) -> Result<u64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM external_execution_allocation a
+             LEFT JOIN dedicated_session s ON s.placement_thread_id=a.placement_thread_id
+             WHERE a.phase NOT IN ('no_contact','contacted_no_occurrence','terminated')
+               AND ((json_extract(a.reservation_json,'$.owner.kind')='direct_thread'
+                     AND json_extract(a.reservation_json,'$.owner.chain_root_id')=?1)
+                 OR (json_extract(a.reservation_json,'$.owner.kind')='dedicated_session'
+                     AND s.chain_root_id=?1))",
+            [chain_root_id],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count).context("negative external allocation retention count")
+    }
+
     pub fn external_allocation(&self, placement: &str) -> Result<Option<ExternalAllocationRecord>> {
         read(&self.conn, placement)
+    }
+
+    pub(crate) fn unsettled_external_allocation_placements(&self) -> Result<Vec<String>> {
+        validate_current(&self.conn)?;
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id FROM external_execution_allocation
+             WHERE phase NOT IN ('no_contact','contacted_no_occurrence','terminated')
+             ORDER BY placement_thread_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn recoverable_external_cleanup_placements(&self) -> Result<Vec<String>> {
+        validate_current(&self.conn)?;
+        let mut statement = self.conn.prepare(
+            "SELECT placement_thread_id FROM external_execution_allocation
+             WHERE phase='quarantined' ORDER BY placement_thread_id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub(crate) fn retained_external_binding(
@@ -1208,6 +1577,15 @@ impl RuntimeDb {
         &self,
         reservation: &ExternalAllocationReservation,
         retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+    ) -> Result<ExternalAllocationRecord> {
+        self.reserve_external_allocation_with_verified_owner(reservation, retained_binding, None)
+    }
+
+    pub(crate) fn reserve_external_allocation_with_verified_owner(
+        &self,
+        reservation: &ExternalAllocationReservation,
+        retained_binding: &crate::node_config::sections::external_execution::RetainedExternalExecutionBinding,
+        proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
     ) -> Result<ExternalAllocationRecord> {
         reservation.validate()?;
         retained_binding.validate()?;
@@ -1247,12 +1625,12 @@ impl RuntimeDb {
             tx.commit()?;
             return Ok(existing);
         }
-        require_session_owner(&tx, reservation)?;
-        require_launch_ready_session(&tx, &reservation.placement_thread_id)?;
+        require_new_owner(&tx, reservation, proof)?;
         if read_guard(&tx)? >= 256 {
             bail!("node external allocation ceiling reached");
         }
         let now = i64::try_from(lillux::time::timestamp_millis())?;
+        reservation.require_startup_time(now)?;
         if now >= reservation.contact_deadline_ms
             || reservation.contact_deadline_ms.saturating_sub(now) > 300_000
         {
@@ -1292,6 +1670,15 @@ impl RuntimeDb {
         placement: &str,
         request_digest: &str,
     ) -> Result<ExternalAllocationContactClaim> {
+        self.claim_external_allocation_contact_with_verified_owner(placement, request_digest, None)
+    }
+
+    pub(crate) fn claim_external_allocation_contact_with_verified_owner(
+        &self,
+        placement: &str,
+        request_digest: &str,
+        proof: Option<&crate::state_store::VerifiedExternalDirectOwner>,
+    ) -> Result<ExternalAllocationContactClaim> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation was not reserved")?;
         if record.reservation.request_digest != request_digest {
@@ -1306,7 +1693,7 @@ impl RuntimeDb {
             }
             _ => {}
         }
-        require_session_owner(&tx, &record.reservation)?;
+        require_retained_owner(&tx, &record.reservation)?;
         match record.phase {
             ExternalAllocationPhase::ContactPending
             | ExternalAllocationPhase::Bound
@@ -1317,8 +1704,9 @@ impl RuntimeDb {
             ExternalAllocationPhase::Reserved => {}
             _ => unreachable!("settled external phase returned before owner validation"),
         }
-        require_launch_ready_session(&tx, placement)?;
+        require_new_owner(&tx, &record.reservation, proof)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
+        record.reservation.require_startup_time(now)?;
         if now >= record.reservation.contact_deadline_ms {
             bail!("external allocation contact deadline expired");
         }
@@ -1345,6 +1733,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
         occurrence: &ExternalAllocationOccurrence,
+        timing: ExternalObservationTiming,
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation is absent")?;
@@ -1353,6 +1742,8 @@ impl RuntimeDb {
             if prior != occurrence {
                 bail!("external allocation occurrence changed");
             }
+            fence_external_observation_timing(&tx, &record, timing)?;
+            tx.commit()?;
             return Ok(());
         }
         if !matches!(
@@ -1384,6 +1775,29 @@ impl RuntimeDb {
             params![placement, lillux::canonical_json(&serde_json::to_value(occurrence)?)?,
                 i64::try_from(lillux::time::timestamp_millis())?],
         )?;
+        fence_external_observation_timing(&tx, &record, timing)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn observe_external_lifecycle_pending(
+        &self,
+        placement: &str,
+        timing: ExternalObservationTiming,
+    ) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let record =
+            read(&tx, placement)?.context("external pending observation lost its allocation")?;
+        ensure!(
+            matches!(
+                record.phase,
+                ExternalAllocationPhase::ContactPending
+                    | ExternalAllocationPhase::Bound
+                    | ExternalAllocationPhase::Quarantined
+            ),
+            "external pending observation arrived outside contacted lifecycle"
+        );
+        fence_external_observation_timing(&tx, &record, timing)?;
         tx.commit()?;
         Ok(())
     }
@@ -1479,9 +1893,9 @@ impl RuntimeDb {
             record.phase == ExternalAllocationPhase::Bound,
             "new external supervisor activation requires an executable bound occurrence"
         );
-        require_session_owner(&tx, &record.reservation)?;
-        require_launch_ready_session(&tx, placement)?;
+        channel::require_current_execution_owner(&tx, &record.reservation)?;
         let now = i64::try_from(lillux::time::timestamp_millis())?;
+        record.reservation.require_startup_time(now)?;
         ensure!(
             now < intent.attachment_deadline_ms,
             "external supervisor activation deadline expired before contact"
@@ -1542,6 +1956,7 @@ impl RuntimeDb {
         &self,
         placement: &str,
         observation: &ExternalSupervisorActivationObservation,
+        timing: ExternalObservationTiming,
     ) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let record = read(&tx, placement)?.context("external allocation is absent")?;
@@ -1582,6 +1997,7 @@ impl RuntimeDb {
                 prior == *observation,
                 "external supervisor activation observation changed"
             );
+            fence_external_observation_timing(&tx, &record, timing)?;
             tx.commit()?;
             return Ok(());
         }
@@ -1603,6 +2019,7 @@ impl RuntimeDb {
                 lillux::canonical_json(&serde_json::to_value(observation)?)?
             ],
         )?;
+        fence_external_observation_timing(&tx, &record, timing)?;
         tx.commit()?;
         Ok(())
     }
@@ -1661,10 +2078,24 @@ impl RuntimeDb {
                 [binding_digest],
                 |row| row.get(0),
             )?;
-            ensure!(
-                revoked,
-                "external termination requires durable channel revocation"
-            );
+            if !revoked {
+                ensure!(
+                    record.phase == ExternalAllocationPhase::Bound,
+                    "quarantined external execution cannot acquire a new normal settlement intent"
+                );
+                ensure!(
+                    matches!(
+                        record.reservation.owner,
+                        ExternalAllocationOwner::DirectThread { .. }
+                    ),
+                    "external termination requires durable channel revocation"
+                );
+                require_contactable_direct_owner(&tx, &record.reservation)?;
+                ensure!(
+                    channel::complete_applied_direct_output_tx(&tx, placement)?.is_some(),
+                    "normal external termination requires complete applied target observations"
+                );
+            }
         }
         tx.execute(
             "INSERT INTO external_execution_termination_intent VALUES(?1,?2)",
@@ -1682,29 +2113,6 @@ impl RuntimeDb {
         }
         tx.commit()?;
         Ok(true)
-    }
-
-    pub(crate) fn external_termination_intent(
-        &self,
-        placement: &str,
-    ) -> Result<Option<ExternalTerminationIntent>> {
-        let record = read(&self.conn, placement)?.context("external allocation is absent")?;
-        let intent: Option<ExternalTerminationIntent> = read_canonical_evidence(
-            &self.conn,
-            "external_execution_termination_intent",
-            "intent_json",
-            placement,
-        )?;
-        if let Some(intent) = &intent {
-            intent.validate(
-                &record.reservation,
-                record
-                    .occurrence
-                    .as_ref()
-                    .context("external termination intent has no occurrence")?,
-            )?;
-        }
-        Ok(intent)
     }
 
     /// Release external capacity only after exact terminal testimony joins the
@@ -1821,7 +2229,304 @@ impl RuntimeDb {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// Storage-owner fixture only: deliberately does not claim an admitted
+    /// program, authoritative birth, or permission to contact an adapter.
+    pub(crate) fn direct_owner_reservation(db: &RuntimeDb) -> ExternalAllocationReservation {
+        let placement = "T-direct-owner";
+        db.insert_thread_runtime(placement, placement).unwrap();
+        db.claim_thread_launch(placement, "direct-claim", "daemon:direct-owner")
+            .unwrap();
+        let launch_owner = db.get_launch_claim(placement).unwrap().unwrap().owner;
+        let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+        ExternalAllocationReservation {
+            schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+            placement_thread_id: placement.into(),
+            admitted_capsule_hash: "a".repeat(64),
+            owner: ExternalAllocationOwner::DirectThread {
+                chain_root_id: placement.into(),
+                launch_owner,
+                program: crate::thread_lifecycle::external_direct_program_test_fixture(),
+            },
+            base_snapshot_hash: "b".repeat(64),
+            binding_hash: binding.digest().into(),
+            capacity_owner: binding.capacity_owner().into(),
+            channel_authority_generation: "3".repeat(64),
+            channel_owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &lillux::crypto::SigningKey::from_bytes(&[19; 32]).verifying_key(),
+            )
+            .unwrap(),
+            channel_bootstrap_capability_hash: "4".repeat(64),
+            request_digest: "e".repeat(64),
+            max_active: 1,
+            timeout_seconds: 60,
+            contact_deadline_ms: now + 30_000,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
+        }
+    }
+
+    #[test]
+    fn direct_program_retention_is_bounded_and_exact_across_database_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let mut reservation = direct_owner_reservation(&db);
+        let ExternalAllocationOwner::DirectThread { program, .. } = &mut reservation.owner else {
+            unreachable!()
+        };
+        let mut wire = serde_json::to_value(&*program).unwrap();
+        wire["projection"]["arguments"] = serde_json::json!(["a".repeat(12_000)]);
+        *program = serde_json::from_value(wire).unwrap();
+        reservation.validate().unwrap();
+        let encoded = lillux::canonical_json(&serde_json::to_value(&reservation).unwrap()).unwrap();
+        assert!(encoded.len() > 8192 && encoded.len() < MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES);
+        // Storage-only fixture, deliberately not a born compiler admission.
+        retain_direct_owner_fixture(&db, &reservation, "contact_pending");
+        drop(db);
+        let reopened = RuntimeDb::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .reservation,
+            reservation
+        );
+        let mut predecessor = reservation.clone();
+        predecessor.schema = 4;
+        assert!(predecessor.validate().is_err());
+        let mut oversized = serde_json::to_value(&reservation).unwrap();
+        oversized["owner"]["program"]["projection"]["arguments"] =
+            serde_json::json!(["z".repeat(MAX_EXTERNAL_ALLOCATION_RESERVATION_BYTES)]);
+        assert!(
+            serde_json::from_value::<ExternalAllocationReservation>(oversized)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+
+    /// Model a retained storage boundary, not production admission. New direct
+    /// admission remains closed until an ordinary program binding is installed.
+    pub(crate) fn retain_direct_owner_fixture(
+        db: &RuntimeDb,
+        reservation: &ExternalAllocationReservation,
+        phase: &str,
+    ) {
+        let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        db.conn
+            .execute(
+                "INSERT INTO external_execution_binding_generation VALUES(?1,?2,?3,1)",
+                params![
+                    binding.digest(),
+                    binding.capacity_owner(),
+                    binding.canonical_json().unwrap()
+                ],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO external_execution_allocation VALUES(?1,?2,?3,?4,NULL,1,1)",
+                params![
+                    reservation.placement_thread_id,
+                    reservation.capacity_owner,
+                    lillux::canonical_json(&serde_json::to_value(reservation).unwrap()).unwrap(),
+                    phase
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn direct_owner_is_closed_and_not_a_synthetic_session() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = direct_owner_reservation(&db);
+        reservation.validate().unwrap();
+        require_contactable_direct_owner(&db.conn, &reservation).unwrap();
+        for table in [
+            "dedicated_session",
+            "execution_workspace",
+            "credential_profile",
+        ] {
+            let count: i64 = db
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        let value = serde_json::to_value(&reservation).unwrap();
+        for mutation in ["missing", "mixed", "legacy"] {
+            let mut changed = value.clone();
+            match mutation {
+                "missing" => {
+                    changed.as_object_mut().unwrap().remove("owner");
+                }
+                "mixed" => changed["owner"]["workspace_id"] = "W-fake".into(),
+                "legacy" => changed["worker_boot_epoch"] = 1.into(),
+                _ => unreachable!(),
+            }
+            assert!(serde_json::from_value::<ExternalAllocationReservation>(changed).is_err());
+        }
+        assert!(
+            reserve(&db, &reservation)
+                .unwrap_err()
+                .to_string()
+                .contains("verified born capsule")
+        );
+        assert!(
+            db.external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(read_guard(&db.conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn direct_contact_checks_exact_claim_chain_epoch_and_stop() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let original = direct_owner_reservation(&db);
+        assert!(direct_owner_is_contactable(&db.conn, &original).unwrap());
+        for mutation in ["chain", "nonce", "epoch", "daemon"] {
+            let mut changed = original.clone();
+            let ExternalAllocationOwner::DirectThread {
+                chain_root_id,
+                launch_owner,
+                ..
+            } = &mut changed.owner
+            else {
+                unreachable!()
+            };
+            match mutation {
+                "chain" => *chain_root_id = "T-other".into(),
+                "nonce" => launch_owner.unpredictable_nonce = "other".into(),
+                "epoch" => launch_owner.monotonic_launch_epoch += 1,
+                "daemon" => launch_owner.daemon_generation_id = "daemon:other".into(),
+                _ => unreachable!(),
+            }
+            assert!(require_contactable_direct_owner(&db.conn, &changed).is_err());
+            assert!(!direct_owner_is_contactable(&db.conn, &changed).unwrap());
+        }
+        db.request_thread_stop(&original.placement_thread_id, StopIntent::Cancel)
+            .unwrap();
+        assert!(require_contactable_direct_owner(&db.conn, &original).is_err());
+        assert!(!direct_owner_is_contactable(&db.conn, &original).unwrap());
+        // A failed authority query is not an ordinary closed transport gate.
+        let missing_schema = Connection::open_in_memory().unwrap();
+        assert!(direct_owner_is_contactable(&missing_schema, &original).is_err());
+    }
+
+    #[test]
+    fn retained_direct_occurrence_survives_claim_rotation_for_cleanup_only() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = direct_owner_reservation(&db);
+        retain_direct_owner_fixture(&db, &reservation, "contact_pending");
+        db.release_thread_launch_claim(&reservation.placement_thread_id, "direct-claim")
+            .unwrap();
+        db.claim_thread_launch(&reservation.placement_thread_id, "new-claim", "daemon:new")
+            .unwrap();
+        db.request_thread_stop(&reservation.placement_thread_id, StopIntent::Cancel)
+            .unwrap();
+        validate_current(&db.conn).unwrap();
+        assert!(require_contactable_direct_owner(&db.conn, &reservation).is_err());
+        let ExternalAllocationContactClaim::Reconcile(retained) = db
+            .claim_external_allocation_contact(
+                &reservation.placement_thread_id,
+                &reservation.request_digest,
+            )
+            .unwrap()
+        else {
+            panic!("retained contact was not reconcile-only")
+        };
+        assert_eq!(retained.reservation, reservation);
+        db.release_thread_launch_claim(&reservation.placement_thread_id, "new-claim")
+            .unwrap();
+        let pins = db
+            .inspect_chain_recovery_pins(
+                &reservation.placement_thread_id,
+                &[reservation.placement_thread_id.clone()],
+            )
+            .unwrap();
+        assert_eq!(pins.external_allocation_obligations, 1);
+        assert!(!pins.is_empty());
+        assert!(
+            db.conn
+                .execute(
+                    "DELETE FROM thread_runtime WHERE thread_id=?1",
+                    [&reservation.placement_thread_id]
+                )
+                .is_err()
+        );
+        assert!(
+            db.conn
+                .execute(
+                    "UPDATE thread_runtime SET chain_root_id='T-other' WHERE thread_id=?1",
+                    [&reservation.placement_thread_id]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            db.external_execution_cas_roots().unwrap(),
+            vec![
+                reservation.admitted_capsule_hash.clone(),
+                reservation.base_snapshot_hash.clone()
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_uncontacted_settlement_releases_retention_not_contact_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = direct_owner_reservation(&db);
+        retain_direct_owner_fixture(&db, &reservation, "reserved");
+        assert!(
+            db.claim_external_allocation_contact(
+                &reservation.placement_thread_id,
+                &reservation.request_digest
+            )
+            .is_err()
+        );
+        assert_eq!(
+            db.external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Reserved
+        );
+        db.cancel_external_allocation(&reservation.placement_thread_id)
+            .unwrap();
+        assert_eq!(
+            db.unsettled_external_chain_count(&reservation.placement_thread_id)
+                .unwrap(),
+            0
+        );
+        assert!(db.external_execution_cas_roots().unwrap().is_empty());
+        assert_eq!(
+            db.conn
+                .execute(
+                    "DELETE FROM thread_runtime WHERE thread_id=?1",
+                    [&reservation.placement_thread_id]
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    fn test_observation_timing() -> ExternalObservationTiming {
+        ExternalObservationTiming::Startup {
+            deadline_exceeded: false,
+            live_deadline: lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(60),
+            ),
+        }
+    }
     use super::*;
 
     pub(super) fn reservation(db: &RuntimeDb, suffix: &str) -> ExternalAllocationReservation {
@@ -1858,22 +2563,39 @@ mod tests {
             credential_lock_owner: &worker,
         })
         .unwrap();
+        assert_eq!(
+            db.claim_thread_launch(
+                &placement,
+                &format!("claim-{suffix}"),
+                "daemon:external-execution-test",
+            )
+            .unwrap(),
+            crate::runtime_db::LaunchClaimOutcome::Claimed,
+        );
+        let launch_owner = db
+            .get_launch_claim(&placement)
+            .unwrap()
+            .expect("external execution fixture launch claim")
+            .claimed_by;
         db.conn
             .execute(
                 "INSERT INTO execution_workspace(workspace_id,thread_id,launch_owner,backend_id,
              base_snapshot,root_path,state,created_at_ms,updated_at_ms)
-             VALUES(?1,?2,'dedicated_worker_session','fixture',?3,'/fixture','ready',1,1)",
-                params![workspace, placement, base_snapshot_hash],
+             VALUES(?1,?2,?3,'fixture',?4,'/fixture','ready',1,1)",
+                params![workspace, placement, launch_owner, base_snapshot_hash],
             )
             .unwrap();
         let binding = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         ExternalAllocationReservation {
-            schema: 2,
+            schema: EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
             placement_thread_id: placement,
             admitted_capsule_hash: "a".repeat(64),
-            workspace_id: workspace,
-            worker_instance_id: worker,
-            worker_boot_epoch: 1,
+            owner: ExternalAllocationOwner::DedicatedSession(ExternalDedicatedSessionOwner {
+                workspace_id: workspace,
+                worker_instance_id: worker,
+                worker_boot_epoch: 1,
+            }),
             base_snapshot_hash: base_snapshot_hash.to_owned(),
             binding_hash: binding.digest().to_owned(),
             capacity_owner: binding.capacity_owner().to_owned(),
@@ -1886,6 +2608,8 @@ mod tests {
             request_digest: "e".repeat(64),
             max_active: 1,
             timeout_seconds: 60,
+            startup_started_at_ms: now,
+            startup_deadline_ms: now + 60_000,
             contact_deadline_ms: i64::try_from(lillux::time::timestamp_millis()).unwrap() + 60_000,
         }
     }
@@ -1910,6 +2634,7 @@ mod tests {
         let post_execution_timeout_seconds =
             contract.observation_timeout_seconds + contract.cleanup_timeout_seconds;
         let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+        let guest_input_identity = "9".repeat(64);
         let activation_request_digest = external_supervisor_activation_request_digest(
             reservation,
             occurrence,
@@ -1917,20 +2642,319 @@ mod tests {
             attachment_deadline_ms,
             post_execution_timeout_seconds,
             channel_max_bytes,
+            &guest_input_identity,
         )
         .unwrap();
         ExternalSupervisorActivationIntent {
-            schema: 1,
+            schema: 2,
             binding_hash: reservation.binding_hash.clone(),
             request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
-            supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+            supervisor_runtime_hash: contract
+                .workload
+                .structured_session()
+                .unwrap()
+                .runtime_manifest_hash
+                .clone(),
+            guest_input_identity,
             activation_request_digest,
             attachment_deadline_ms,
             execution_timeout_seconds: reservation.timeout_seconds,
             post_execution_timeout_seconds,
             channel_max_bytes,
         }
+    }
+
+    #[test]
+    fn late_lifecycle_evidence_and_quarantine_commit_atomically_and_survive_reopen() {
+        for stage in [
+            "allocation",
+            "activation",
+            "pending_allocation",
+            "pending_activation",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("runtime.sqlite3");
+            let db = RuntimeDb::open(&path).unwrap();
+            let reservation = reservation(&db, "atomic-late");
+            let placement = &reservation.placement_thread_id;
+            reserve(&db, &reservation).unwrap();
+            db.claim_external_allocation_contact(placement, &reservation.request_digest)
+                .unwrap();
+            let occurrence = ExternalAllocationOccurrence {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: reservation.request_digest.clone(),
+                occurrence_id: "atomic-occurrence".into(),
+                provider_observation_digest: "f".repeat(64),
+            };
+            if stage.contains("activation") {
+                db.bind_external_allocation(placement, &occurrence, test_observation_timing())
+                    .unwrap();
+                db.begin_external_supervisor_activation(
+                    placement,
+                    &activation_intent(&reservation, &occurrence),
+                )
+                .unwrap();
+            }
+            let intent = activation_intent(&reservation, &occurrence);
+            let observation = ExternalSupervisorActivationObservation {
+                schema: 1,
+                binding_hash: reservation.binding_hash.clone(),
+                request_digest: reservation.request_digest.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                activation_request_digest: intent.activation_request_digest.clone(),
+                activation_state: "started".into(),
+                provider_observation_digest: "7".repeat(64),
+            };
+            let timing = test_observation_timing().with_deadline_exceeded(true);
+            let settle = |db: &RuntimeDb| match stage {
+                "allocation" => db.bind_external_allocation(placement, &occurrence, timing),
+                "activation" => {
+                    db.settle_external_supervisor_activation(placement, &observation, timing)
+                }
+                _ => db.observe_external_lifecycle_pending(placement, timing),
+            };
+            // Deliberately fail the quarantine write. Its observation insert
+            // must roll back too: there is no separately committed Bound or
+            // Started state to recover after this transaction failure.
+            db.conn.execute_batch("CREATE TRIGGER test_refuse_late_fence BEFORE UPDATE OF phase ON external_execution_allocation
+                WHEN NEW.phase='quarantined' BEGIN SELECT RAISE(ABORT,'fixture quarantine failure'); END;").unwrap();
+            assert!(settle(&db).is_err());
+            let record = db.external_allocation(placement).unwrap().unwrap();
+            assert_ne!(record.phase, ExternalAllocationPhase::Quarantined);
+            if stage == "allocation" {
+                assert!(record.occurrence.is_none());
+            }
+            if stage == "activation" {
+                assert!(
+                    db.external_supervisor_activation(placement)
+                        .unwrap()
+                        .unwrap()
+                        .observation
+                        .is_none()
+                );
+            }
+            db.conn
+                .execute_batch("DROP TRIGGER test_refuse_late_fence")
+                .unwrap();
+            reservation.startup_deadline().unwrap();
+            settle(&db).unwrap();
+            drop(db);
+            let db = RuntimeDb::open(&path).unwrap();
+            assert_eq!(
+                db.external_allocation(placement).unwrap().unwrap().phase,
+                ExternalAllocationPhase::Quarantined
+            );
+            if stage == "allocation" {
+                assert_eq!(
+                    db.external_allocation(placement)
+                        .unwrap()
+                        .unwrap()
+                        .occurrence
+                        .as_ref(),
+                    Some(&occurrence)
+                );
+                assert!(
+                    db.begin_external_supervisor_activation(placement, &intent)
+                        .is_err()
+                );
+            }
+            if stage == "activation" {
+                assert_eq!(
+                    db.external_supervisor_activation(placement)
+                        .unwrap()
+                        .unwrap()
+                        .observation
+                        .as_ref(),
+                    Some(&observation)
+                );
+            }
+            // Exact observation reentry cannot clear the committed fence.
+            settle(&db).unwrap();
+            assert_eq!(
+                db.external_allocation(placement).unwrap().unwrap().phase,
+                ExternalAllocationPhase::Quarantined
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_evidence_still_fences_an_expired_live_cap_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "duplicate-late");
+        let placement = &reservation.placement_thread_id;
+        reserve(&db, &reservation).unwrap();
+        db.claim_external_allocation_contact(placement, &reservation.request_digest)
+            .unwrap();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "duplicate-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        db.bind_external_allocation(placement, &occurrence, test_observation_timing())
+            .unwrap();
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Bound
+        );
+        reservation.startup_deadline().unwrap();
+        db.bind_external_allocation(
+            placement,
+            &occurrence,
+            ExternalObservationTiming::Startup {
+                deadline_exceeded: false,
+                live_deadline: lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.external_allocation(placement).unwrap().unwrap().phase,
+            ExternalAllocationPhase::Quarantined
+        );
+    }
+
+    #[test]
+    fn startup_reservation_is_strict_and_has_one_exact_capsule_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reserved = reservation(&db, "startup-shape");
+        reserved.validate_startup_budget(60_000).unwrap();
+        assert!(reserved.validate_startup_budget(60_001).is_err());
+        let value = serde_json::to_value(&reserved).unwrap();
+        for name in ["startup_started_at_ms", "startup_deadline_ms"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(name);
+            assert!(serde_json::from_value::<ExternalAllocationReservation>(missing).is_err());
+        }
+        let mut unknown = value.clone();
+        unknown["startup_timeout_ms"] = 60_000.into();
+        assert!(serde_json::from_value::<ExternalAllocationReservation>(unknown).is_err());
+        let mut predecessor = reserved.clone();
+        predecessor.schema = 2;
+        assert!(predecessor.validate().is_err());
+        for (start, end) in [
+            (0, 1),
+            (10, 10),
+            (10, 9),
+            (1, 600_002),
+            (i64::MAX, i64::MIN),
+        ] {
+            let mut invalid = reserved.clone();
+            invalid.startup_started_at_ms = start;
+            invalid.startup_deadline_ms = end;
+            assert!(invalid.validate().is_err());
+        }
+        assert!(
+            reserved
+                .require_startup_time(reserved.startup_started_at_ms - 1)
+                .is_err()
+        );
+        reserved
+            .require_startup_time(reserved.startup_deadline_ms - 1)
+            .unwrap();
+        assert!(
+            reserved
+                .require_startup_time(reserved.startup_deadline_ms)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_anchor_survives_reopen_and_refuses_budget_renewal() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let reserved = reservation(&db, "startup-retained");
+        reserve(&db, &reserved).unwrap();
+        drop(db);
+        let db = RuntimeDb::open(&path).unwrap();
+        assert_eq!(reserve(&db, &reserved).unwrap().reservation, reserved);
+        let mut renewed = reserved.clone();
+        renewed.startup_started_at_ms += 1;
+        renewed.startup_deadline_ms += 1;
+        assert!(reserve(&db, &renewed).is_err());
+        assert_eq!(
+            db.external_allocation(&reserved.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .reservation,
+            reserved
+        );
+    }
+
+    #[test]
+    fn expired_startup_refuses_new_contact_but_preserves_uncertain_cleanup() {
+        for contacted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let mut reserved = reservation(&db, "startup-expiry");
+            reserved.startup_deadline_ms = reserved.startup_started_at_ms + 250;
+            reserve(&db, &reserved).unwrap();
+            if contacted {
+                assert!(matches!(
+                    db.claim_external_allocation_contact(
+                        &reserved.placement_thread_id,
+                        &reserved.request_digest
+                    )
+                    .unwrap(),
+                    ExternalAllocationContactClaim::Contact(_)
+                ));
+            }
+            let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+            lillux::time::sleep(lillux::time::Duration::from_millis(
+                u64::try_from((reserved.startup_deadline_ms - now).max(0)).unwrap() + 1,
+            ));
+            let result = db.claim_external_allocation_contact(
+                &reserved.placement_thread_id,
+                &reserved.request_digest,
+            );
+            if contacted {
+                assert!(matches!(
+                    result.unwrap(),
+                    ExternalAllocationContactClaim::Reconcile(_)
+                ));
+            } else {
+                assert!(result.is_err());
+            }
+            // Exact retained reservation can be read/recovered after expiry;
+            // expiry never erases an uncertain allocator contact.
+            assert_eq!(reserve(&db, &reserved).unwrap().reservation, reserved);
+        }
+    }
+
+    #[test]
+    fn external_contact_accepts_the_live_public_workspace_and_refuses_freeze() {
+        let active_dir = tempfile::tempdir().unwrap();
+        let active_db = RuntimeDb::open(&active_dir.path().join("runtime.sqlite3")).unwrap();
+        let active = reservation(&active_db, "active");
+        active_db
+            .conn
+            .execute(
+                "UPDATE execution_workspace SET state='active' WHERE workspace_id=?1",
+                [&active.owner.dedicated_session().unwrap().workspace_id],
+            )
+            .unwrap();
+        assert_eq!(
+            reserve(&active_db, &active).unwrap().phase,
+            ExternalAllocationPhase::Reserved
+        );
+
+        let frozen_dir = tempfile::tempdir().unwrap();
+        let frozen_db = RuntimeDb::open(&frozen_dir.path().join("runtime.sqlite3")).unwrap();
+        let frozen = reservation(&frozen_db, "frozen");
+        frozen_db
+            .conn
+            .execute(
+                "UPDATE execution_workspace SET state='freezing' WHERE workspace_id=?1",
+                [&frozen.owner.dedicated_session().unwrap().workspace_id],
+            )
+            .unwrap();
+        assert!(reserve(&frozen_db, &frozen).is_err());
+        assert!(frozen_db.external_allocation("T-frozen").unwrap().is_none());
     }
 
     #[test]
@@ -1970,7 +2994,8 @@ mod tests {
             occurrence_id: "fixture-occurrence".into(),
             provider_observation_digest: "f".repeat(64),
         };
-        db.bind_external_allocation("T-one", &occurrence).unwrap();
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
         assert!(matches!(
             db.claim_external_allocation_contact("T-one", &reserved.request_digest)
                 .unwrap(),
@@ -2036,7 +3061,8 @@ mod tests {
         );
         db.claim_external_allocation_contact("T-one", &reservation.request_digest)
             .unwrap();
-        db.bind_external_allocation("T-one", &occurrence).unwrap();
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
 
         assert!(
             db.begin_external_supervisor_activation("T-one", &intent)
@@ -2068,9 +3094,9 @@ mod tests {
             activation_state: "started".into(),
             provider_observation_digest: "7".repeat(64),
         };
-        db.settle_external_supervisor_activation("T-one", &observation)
+        db.settle_external_supervisor_activation("T-one", &observation, test_observation_timing())
             .unwrap();
-        db.settle_external_supervisor_activation("T-one", &observation)
+        db.settle_external_supervisor_activation("T-one", &observation, test_observation_timing())
             .unwrap();
         let retained = db.external_supervisor_activation("T-one").unwrap().unwrap();
         assert_eq!(retained.intent, intent);
@@ -2078,7 +3104,7 @@ mod tests {
         let mut changed = observation;
         changed.activation_state = "not_started".into();
         assert!(
-            db.settle_external_supervisor_activation("T-one", &changed)
+            db.settle_external_supervisor_activation("T-one", &changed, test_observation_timing())
                 .is_err()
         );
     }
@@ -2101,12 +3127,16 @@ mod tests {
             occurrence_id: "fixture-orphaned".into(),
             provider_observation_digest: "f".repeat(64),
         };
-        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
-            .unwrap();
+        db.bind_external_allocation(
+            &reservation.placement_thread_id,
+            &occurrence,
+            test_observation_timing(),
+        )
+        .unwrap();
         db.conn
             .execute(
                 "UPDATE execution_workspace SET state='orphaned' WHERE workspace_id=?1",
-                [&reservation.workspace_id],
+                [&reservation.owner.dedicated_session().unwrap().workspace_id],
             )
             .unwrap();
         let intent = activation_intent(&reservation, &occurrence);
@@ -2144,8 +3174,12 @@ mod tests {
             occurrence_id: "fixture-activation-digest".into(),
             provider_observation_digest: "f".repeat(64),
         };
-        db.bind_external_allocation(&reservation.placement_thread_id, &occurrence)
-            .unwrap();
+        db.bind_external_allocation(
+            &reservation.placement_thread_id,
+            &occurrence,
+            test_observation_timing(),
+        )
+        .unwrap();
         let intent = activation_intent(&reservation, &occurrence);
         assert!(
             db.begin_external_supervisor_activation(&reservation.placement_thread_id, &intent)
@@ -2160,8 +3194,12 @@ mod tests {
             activation_state: "started".into(),
             provider_observation_digest: "7".repeat(64),
         };
-        db.settle_external_supervisor_activation(&reservation.placement_thread_id, &observation)
-            .unwrap();
+        db.settle_external_supervisor_activation(
+            &reservation.placement_thread_id,
+            &observation,
+            test_observation_timing(),
+        )
+        .unwrap();
         validate_current(&db.conn).unwrap();
         let mut replaced_intent = intent;
         replaced_intent.activation_request_digest = "6".repeat(64);
@@ -2254,7 +3292,8 @@ mod tests {
             occurrence_id: "fixture-occurrence".into(),
             provider_observation_digest: "f".repeat(64),
         };
-        db.bind_external_allocation("T-one", &occurrence).unwrap();
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
         let intent = ExternalTerminationIntent {
             schema: 1,
             binding_hash: reservation.binding_hash.clone(),
@@ -2344,54 +3383,113 @@ mod tests {
         );
         let exact = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
         let exact_value = serde_json::to_value(&exact).unwrap();
-        for (field, changed) in [
+        for (path, changed) in [
             (
-                "credential_generation",
+                "/document/credential_generation",
                 serde_json::Value::String("f".repeat(64)),
             ),
             (
-                "runtime_manifest_hash",
+                "/document/workload/provider_declaration_id",
+                serde_json::Value::String("other-provider".into()),
+            ),
+            (
+                "/document/workload/provider_configuration_destination",
+                serde_json::Value::String("other.toml".into()),
+            ),
+            (
+                "/document/workload/runtime_manifest_hash",
                 serde_json::Value::String("f".repeat(64)),
             ),
             (
-                "runtime_selection_identity",
+                "/document/workload/runtime_selection_identity",
                 serde_json::Value::String("f".repeat(64)),
             ),
             (
-                "backend_artifact_hash",
+                "/document/workload/configuration_adapter_artifact_hash",
                 serde_json::Value::String("f".repeat(64)),
             ),
             (
-                "connector_protocol",
+                "/document/workload/configuration_adapter_artifact_bytes",
+                serde_json::Value::from(8192),
+            ),
+            (
+                "/document/backend_artifact_hash",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "/document/backend_artifact_bytes",
+                serde_json::Value::from(8192),
+            ),
+            (
+                "/document/supervisor_artifact_hash",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "/document/supervisor_artifact_bytes",
+                serde_json::Value::from(8192),
+            ),
+            (
+                "/document/launcher_artifact_hash",
+                serde_json::Value::String("f".repeat(64)),
+            ),
+            (
+                "/document/launcher_artifact_bytes",
+                serde_json::Value::from(8192),
+            ),
+            (
+                "/document/workload/connector_protocol",
                 serde_json::Value::String("other".into()),
             ),
             (
-                "connector_artifact_hash",
+                "/document/workload/connector_artifact_hash",
                 serde_json::Value::String("0".repeat(64)),
             ),
-            ("connector_artifact_bytes", serde_json::Value::from(8192)),
-            ("region", serde_json::Value::String("other".into())),
-            ("network_policy", serde_json::Value::String("other".into())),
-            ("max_workspace_bytes", serde_json::Value::from(2048)),
-            ("max_active", serde_json::Value::from(2)),
-            ("timeout_seconds", serde_json::Value::from(61)),
+            (
+                "/document/workload/connector_artifact_bytes",
+                serde_json::Value::from(8192),
+            ),
+            (
+                "/document/network_policy",
+                serde_json::Value::String("other".into()),
+            ),
+            (
+                "/document/max_workspace_bytes",
+                serde_json::Value::from(2048),
+            ),
+            ("/document/max_active", serde_json::Value::from(2)),
+            ("/document/timeout_seconds", serde_json::Value::from(61)),
         ] {
             let mut value = exact_value.clone();
-            value["document"][field] = changed;
+            let field = value
+                .pointer_mut(path)
+                .expect("mutation must name an existing current-schema binding field");
+            assert_ne!(*field, changed, "binding mutation is unchanged: {path}");
+            *field = changed;
             let changed: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
                 serde_json::from_value(value).unwrap();
             assert!(
                 changed.validate().is_err(),
-                "retained field {field} escaped signed-source join"
+                "retained field {path} escaped signed-source join"
             );
         }
+        let mut value = exact_value.clone();
+        value["document"]["settings"]["region"] = serde_json::Value::String("other".into());
+        let changed: crate::node_config::sections::external_execution::RetainedExternalExecutionBinding =
+            serde_json::from_value(value).unwrap();
+        assert!(
+            changed.validate().is_err(),
+            "adapter-owned retained region escaped its signed settings join"
+        );
         let mut wider = reservation.clone();
         wider.max_active = 2;
         assert!(db.reserve_external_allocation(&wider, &exact).is_err());
         let mut missing_owner = reservation.clone();
         missing_owner.placement_thread_id = "T-missing".into();
-        missing_owner.workspace_id = "W-missing".into();
-        missing_owner.worker_instance_id = "worker-missing".into();
+        let ExternalAllocationOwner::DedicatedSession(owner) = &mut missing_owner.owner else {
+            unreachable!()
+        };
+        owner.workspace_id = "W-missing".into();
+        owner.worker_instance_id = "worker-missing".into();
         assert!(
             db.reserve_external_allocation(&missing_owner, &exact)
                 .is_err()
@@ -2513,14 +3611,19 @@ mod tests {
             occurrence_id: "exact-occurrence".into(),
             provider_observation_digest: "f".repeat(64),
         };
-        db.bind_external_allocation("T-one", &occurrence).unwrap();
-        db.bind_external_allocation("T-one", &occurrence).unwrap();
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
+        db.bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
         let record = db.external_allocation("T-one").unwrap().unwrap();
         assert_eq!(record.phase, ExternalAllocationPhase::Quarantined);
         assert_eq!(record.occurrence, Some(occurrence.clone()));
         let mut wrong = occurrence;
         wrong.occurrence_id = "another-occurrence".into();
-        assert!(db.bind_external_allocation("T-one", &wrong).is_err());
+        assert!(
+            db.bind_external_allocation("T-one", &wrong, test_observation_timing())
+                .is_err()
+        );
         assert_eq!(read_guard(&db.conn).unwrap(), 1);
     }
 
@@ -2550,6 +3653,35 @@ mod tests {
 
     #[test]
     fn external_reservation_rejects_changed_or_unowned_authority() {
+        let missing_claim = tempfile::tempdir().unwrap();
+        let missing_claim_db =
+            RuntimeDb::open(&missing_claim.path().join("runtime.sqlite3")).unwrap();
+        let missing_claim_reservation = reservation(&missing_claim_db, "missing-claim");
+        missing_claim_db
+            .conn
+            .execute(
+                "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                [&missing_claim_reservation.placement_thread_id],
+            )
+            .unwrap();
+        assert!(reserve(&missing_claim_db, &missing_claim_reservation).is_err());
+
+        let stale_owner = tempfile::tempdir().unwrap();
+        let stale_owner_db = RuntimeDb::open(&stale_owner.path().join("runtime.sqlite3")).unwrap();
+        let stale_owner_reservation = reservation(&stale_owner_db, "stale-owner");
+        stale_owner_db
+            .conn
+            .execute(
+                "UPDATE execution_workspace SET launch_owner='stale-owner' WHERE workspace_id=?1",
+                [&stale_owner_reservation
+                    .owner
+                    .dedicated_session()
+                    .unwrap()
+                    .workspace_id],
+            )
+            .unwrap();
+        assert!(reserve(&stale_owner_db, &stale_owner_reservation).is_err());
+
         let dir = tempfile::tempdir().unwrap();
         let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
         let reserved = reservation(&db, "one");
@@ -2560,7 +3692,10 @@ mod tests {
         wrong.base_snapshot_hash = "f".repeat(64);
         assert!(reserve(&db, &wrong).is_err());
         wrong = reserved.clone();
-        wrong.worker_boot_epoch += 1;
+        let ExternalAllocationOwner::DedicatedSession(owner) = &mut wrong.owner else {
+            unreachable!()
+        };
+        owner.worker_boot_epoch += 1;
         assert!(reserve(&db, &wrong).is_err());
         reserve(&db, &reserved).unwrap();
         wrong = reserved.clone();

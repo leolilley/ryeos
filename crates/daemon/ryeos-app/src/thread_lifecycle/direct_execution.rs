@@ -1,5 +1,14 @@
 use super::*;
 
+mod external_projection;
+#[cfg(test)]
+pub(crate) use external_projection::external_direct_program_test_fixture;
+pub(crate) use external_projection::{
+    CompiledExternalDirectProgram, compile_external_direct_program,
+    validate_retained_external_direct_program,
+};
+pub use external_projection::{capsule_requires_external_direct, external_direct_environment};
+
 fn persistent_session_spawn_error(error: ryeos_engine::error::EngineError) -> anyhow::Error {
     // Lillux's held-launch owner can prove group cleanup before reporting a
     // target identity. Preserve that typed testimony; absent proof remains
@@ -145,6 +154,31 @@ fn abort_spawned_with_resource_reservation(
     Ok(proof)
 }
 
+fn abort_spawned_item_with_reservations(
+    state: &crate::state::AppState,
+    resource: Option<&crate::runtime_db::ProcessResourceReservationRecord>,
+    thread_scope: Option<&crate::runtime_db::ThreadProcessScopeReservationRecord>,
+    spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
+) -> std::result::Result<lillux::AbortedProcess, ryeos_engine::error::EngineError> {
+    let proof = spawned.abort_and_reap()?;
+    let cleanup = match (resource, thread_scope) {
+        (Some(reservation), None) => {
+            crate::execution_resources::cleanup_process_resource_reservation(state, reservation)
+        }
+        (None, Some(reservation)) => {
+            crate::execution_resources::cleanup_thread_scope_only(state, reservation)
+        }
+        (None, None) => Ok(()),
+        (Some(_), Some(_)) => Err(anyhow!("item launch owns conflicting scope reservations")),
+    };
+    cleanup.map_err(|error| {
+        ryeos_engine::error::EngineError::Internal(format!(
+            "held process was reaped but scope reservation cleanup failed: {error:#}"
+        ))
+    })?;
+    Ok(proof)
+}
+
 /// Stable target-side root for project-relative paths retained in a direct
 /// execution plan. A daemon workspace is operational state selected after
 /// admission; its thread-specific host path must not fragment artifact,
@@ -225,6 +259,7 @@ pub struct SpawnedItemAwaitingAttachment {
     pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
     state: crate::state::AppState,
     resource_reservation: Option<crate::runtime_db::ProcessResourceReservationRecord>,
+    thread_scope_reservation: Option<crate::runtime_db::ThreadProcessScopeReservationRecord>,
     spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
@@ -278,6 +313,15 @@ impl SpawnedItemAwaitingAttachment {
                 &self.state,
                 &reservation,
             )?;
+        }
+        if let Some(reservation) = self.thread_scope_reservation
+            && self
+                .state
+                .state_store
+                .thread_process_scope_reservation(&reservation.thread_id)?
+                .is_some()
+        {
+            crate::execution_resources::cleanup_thread_scope_only(&self.state, &reservation)?;
         }
         Ok(())
     }
@@ -449,6 +493,97 @@ impl PreparedRealizationCommand {
 }
 
 impl PreparedItemPlan {
+    /// Borrow the exact descriptor-bound command selected for this already
+    /// finalized spawn. A qualification child may clone this authority while
+    /// the parent retains its process inputs; it must never reopen the Bundle
+    /// item or infer an executable from a path after admission.
+    pub fn descriptor_bound_command_for_scoped_producer(
+        &self,
+    ) -> Result<ryeos_engine::isolation::IsolationDescriptorBoundCommand> {
+        match self.admitted_command.as_ref() {
+            Some(ryeos_engine::isolation::IsolationAdmittedCommand::DescriptorBound(command)) => {
+                Ok(command.clone())
+            }
+            Some(ryeos_engine::isolation::IsolationAdmittedCommand::RealizationMember(_)) => {
+                bail!("scoped producer requires a descriptor-bound verifier executable")
+            }
+            None => bail!("scoped producer verifier executable is not bound"),
+        }
+    }
+
+    /// Select the exact node-owned endpoint from the finalized signed subject,
+    /// before sealing the ordinary plan/capsule/effect identity. This is content
+    /// selection only, not permission to allocate or to replace local isolation.
+    /// The placement owner still has to qualify the selected execution mechanism.
+    pub fn bind_finalized_execution_endpoint(
+        &mut self,
+        state: &crate::state::AppState,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+    ) -> Result<()> {
+        self.bind_execution_endpoint_from_bindings(
+            &state.node_config.external_execution,
+            engine,
+            resolution,
+        )
+    }
+
+    fn bind_execution_endpoint_from_bindings(
+        &mut self,
+        bindings: &[crate::node_config::sections::external_execution::InstalledExternalExecutionBinding],
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+    ) -> Result<()> {
+        if resolution.root.resolved_ref != self.plan.root_ref {
+            bail!("execution endpoint subject differs from the prepared direct plan");
+        }
+        let execution = engine
+            .kinds
+            .get(&self.plan.item_kind)
+            .and_then(|schema| schema.execution.as_ref())
+            .ok_or_else(|| anyhow!("direct endpoint subject has no execution schema"))?;
+        let requirement = execution.project_endpoint_requirement(&resolution.composed.composed)?;
+        if self.plan.external_endpoint_binding.is_some()
+            && self.plan.endpoint_requirement != requirement
+        {
+            bail!("sealed direct endpoint requirement cannot be reselected");
+        }
+        let binding_identity = match &requirement {
+            ryeos_engine::contracts::ExecutionEndpointRequirement::Local {} => None,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::External {
+                binding_id, ..
+            } => {
+                let binding = bindings
+                    .iter()
+                    .find(|binding| binding.id() == binding_id)
+                    .ok_or_else(|| anyhow!("signed direct execution endpoint is not installed"))?;
+                // Reverify the exact signed generation, not a path or an
+                // author-supplied digest. Worker recipes cannot authorize an
+                // ordinary command by supplying synthetic provider fields.
+                binding.retained_generation()?;
+                if !matches!(
+                    binding.backend_contract().workload,
+                    crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {}
+                ) {
+                    bail!("direct execution endpoint requires an ordinary-command binding");
+                }
+                Some(ryeos_engine::contracts::ExternalEndpointBindingIdentity {
+                    binding_id: binding.id().to_owned(),
+                    binding_digest: binding.digest().to_owned(),
+                })
+            }
+        };
+        if self.plan.external_endpoint_binding.is_some()
+            && self.plan.external_endpoint_binding != binding_identity
+        {
+            bail!("sealed direct endpoint binding cannot be replaced by a current generation");
+        }
+        self.plan.endpoint_requirement = requirement;
+        self.plan.external_endpoint_binding = binding_identity;
+        self.plan.validate_endpoint_for_sealing()?;
+        Ok(())
+    }
+
     pub fn target_requirement(
         &self,
     ) -> Option<&ryeos_engine::contracts::ExecutionTargetRequirement> {
@@ -457,6 +592,40 @@ impl PreparedItemPlan {
 
     pub fn execution_plan(&self) -> &ExecutionPlan {
         &self.plan
+    }
+
+    /// Check an external ordinary plan before thread birth, without fabricating
+    /// its eventual born-thread program or granting contact. The exact retained
+    /// capsule, current launch claim and guest-native readiness must still be
+    /// joined by the placement owner before execution can be released.
+    pub fn preflight_external_execution(
+        &self,
+        state: &crate::state::AppState,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+        project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        self.plan.validate_endpoint_for_sealing()?;
+        if matches!(
+            self.plan.endpoint_requirement,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::Local {}
+        ) {
+            return Ok(());
+        }
+        external_projection::validate_external_direct_project_authority(project_authority)?;
+        external_projection::validate_external_direct_plan(&self.plan, &protocol.descriptor)?;
+        let endpoint = self
+            .plan
+            .external_endpoint_binding
+            .as_ref()
+            .ok_or_else(|| anyhow!("external direct endpoint has not been sealed"))?;
+        let spec = external_projection::ordinary_direct_subprocess(&self.plan)?;
+        crate::external_placement::preflight_external_direct_endpoint(
+            state,
+            &self.plan.endpoint_requirement,
+            endpoint,
+            spec.timeout_secs,
+        )?;
+        Ok(())
     }
 
     /// Freeze independently admitted parent restrictions into the child's
@@ -572,22 +741,94 @@ impl PreparedItemPlan {
         isolation: &ryeos_engine::isolation::IsolationRuntime,
     ) -> Result<bool> {
         authority.ensure_guard(guard)?;
-        let selector = match self.plan.nodes.first() {
-            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
-                if spec.verified_command.is_some() {
-                    return Ok(false);
-                }
-                ryeos_engine::external_content::parse_realization_command_ref(&spec.cmd)?
-            }
-            Some(ryeos_engine::contracts::PlanNode::Complete { .. }) | None => None,
-        };
-        let Some(selector) = selector else {
+        let Some(selector) = self.realization_command_selector()? else {
             return Ok(false);
         };
         if !isolation.is_enforced() {
             bail!("realization-member commands require enforced descriptor-mounted isolation");
         }
+        self.realization_command = Some(Self::resolve_realization_command_identity_guarded(
+            authority,
+            guard,
+            engine,
+            resolution,
+            selector,
+            isolation.verified_command_file_bytes(),
+        )?);
+        Ok(true)
+    }
 
+    /// Capture only the exact member identity for a finalized External plan.
+    /// The explicit size limit is the existing node verified-command policy
+    /// (`IsolationRuntime::verified_command_file_bytes`), not guest readiness.
+    /// This neither redeems a controller executable nor admits dispatch; exact
+    /// closure admission and guest launch authority remain separate checks.
+    pub fn capture_external_realization_command_guarded(
+        &mut self,
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        maximum_command_file_bytes: u64,
+    ) -> Result<()> {
+        authority.ensure_guard(guard)?;
+        self.plan.validate_endpoint_for_sealing()?;
+        if !matches!(
+            self.plan.endpoint_requirement,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. }
+        ) {
+            bail!("external member capture requires a finalized external endpoint");
+        }
+        if self.plan.root_ref != resolution.root.resolved_ref {
+            bail!("external member capture changed its finalized subject");
+        }
+        if self.admitted_command.is_some() || self.realization_command.is_some() {
+            bail!("external member capture cannot replace existing command authority");
+        }
+        if maximum_command_file_bytes == 0 {
+            bail!("external member capture requires a positive verified-command policy bound");
+        }
+        let selector = self.realization_command_selector()?.ok_or_else(|| {
+            anyhow!("external member capture requires an unresolved realization command")
+        })?;
+        let identity = Self::resolve_realization_command_identity_guarded(
+            authority,
+            guard,
+            engine,
+            resolution,
+            selector,
+            maximum_command_file_bytes,
+        )?;
+        self.realization_command = Some(identity);
+        Ok(())
+    }
+
+    fn realization_command_selector(
+        &self,
+    ) -> Result<Option<ryeos_engine::external_content::ExternalRealizationCommandRef>> {
+        match self.plan.nodes.first() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
+                if spec.verified_command.is_some() {
+                    return Ok(None);
+                }
+                ryeos_engine::external_content::parse_realization_command_ref(&spec.cmd)
+            }
+            Some(ryeos_engine::contracts::PlanNode::Complete { .. }) | None => Ok(None),
+        }
+    }
+
+    /// Prove exact content coordinates, not permission to execute them.
+    /// Both current-artifact verification and new execution use this same
+    /// member proof. Only the execution-facing binder admits a runnable plan.
+    fn resolve_realization_command_identity_guarded(
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        selector: ryeos_engine::external_content::ExternalRealizationCommandRef,
+        maximum_command_file_bytes: u64,
+    ) -> Result<PreparedRealizationCommand> {
+        authority.ensure_guard(guard)?;
         // Inherited parent realizations permit sealed-byte reuse, not commands.
         // Require the child's own signed declaration or authenticated product
         // selection before consulting the merged operational realization set.
@@ -629,6 +870,17 @@ impl PreparedItemPlan {
             )
         })?;
 
+        let require_member_size = |size: u64| -> Result<()> {
+            if size > maximum_command_file_bytes {
+                bail!(
+                    "realization command member `{}` is {} bytes, exceeding the node verified-command limit {}",
+                    selector.relative_path,
+                    size,
+                    maximum_command_file_bytes,
+                );
+            }
+            Ok(())
+        };
         let blob_hash = match manifest_value
             .get("kind")
             .and_then(serde_json::Value::as_str)
@@ -656,6 +908,7 @@ impl PreparedItemPlan {
                         selector.relative_path
                     );
                 }
+                require_member_size(entry.size.expect("validated ordinary file has a size"))?;
                 let blob_hash = entry
                     .blob_hash
                     .as_deref()
@@ -693,6 +946,11 @@ impl PreparedItemPlan {
                         selector.relative_path
                     );
                 }
+                require_member_size(
+                    entry
+                        .size
+                        .expect("validated large-manifest file has a size"),
+                )?;
                 match (entry.blob_hash.as_deref(), entry.file_sha256.as_deref()) {
                     (Some(blob_hash), None) => {
                         let (_, observed_size) = cas.open_blob(blob_hash)?.ok_or_else(|| {
@@ -707,14 +965,6 @@ impl PreparedItemPlan {
                         let expected_size = entry
                             .size
                             .expect("validated large-manifest regular file has a size");
-                        let max_bytes = isolation.verified_command_file_bytes();
-                        if expected_size > max_bytes {
-                            bail!(
-                                "realization command member `{}` is {} bytes, exceeding the node verified-command limit {max_bytes}",
-                                selector.relative_path,
-                                expected_size,
-                            );
-                        }
                         let store = authority.large_object_store()?;
                         store.verify_manifest_commitment(entry)?;
                         let _lease = store.lease_object(file_hash, expected_size)?;
@@ -727,15 +977,51 @@ impl PreparedItemPlan {
             None => bail!("realization command manifest has no kind"),
         };
         authority.ensure_guard(guard)?;
-        self.realization_command = Some(PreparedRealizationCommand {
+        Ok(PreparedRealizationCommand {
             realization_id: selector.realization_id,
             manifest_hash: realization.manifest_hash.clone(),
             mount_root: realization.mount_root,
             mount: realization.mount.clone(),
             relative_path: selector.relative_path,
             executable_blob_hash: blob_hash,
-        });
-        Ok(true)
+        })
+    }
+
+    /// Reconstruct current identity without admitting another execution.
+    ///
+    /// This consumes the plan so the identity-only route cannot return a
+    /// runnable plan or executable authority. It shares the exact member proof
+    /// and canonical logical-path/artifact assembly with execution, but local
+    /// spawn prerequisites do not apply to consumption of retained testimony.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn into_current_artifact_identity_guarded(
+        mut self,
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+        engine: &ryeos_engine::engine::Engine,
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        endpoint_bindings: &[crate::node_config::sections::external_execution::InstalledExternalExecutionBinding],
+        maximum_command_file_bytes: u64,
+        logical_project_root: Option<&Path>,
+        resolved: &ResolvedExecutionRequest,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
+        authority.ensure_guard(guard)?;
+        self.bind_execution_endpoint_from_bindings(endpoint_bindings, engine, resolution)?;
+        if let Some(selector) = self.realization_command_selector()? {
+            self.realization_command = Some(Self::resolve_realization_command_identity_guarded(
+                authority,
+                guard,
+                engine,
+                resolution,
+                selector,
+                maximum_command_file_bytes,
+            )?);
+        }
+        self.bind_logical_project_root(logical_project_root)?;
+        let identity = self.admitted_artifact_identity(resolved, protocol)?;
+        authority.ensure_guard(guard)?;
+        Ok(identity)
     }
 
     /// Return the portable realization coordinate that the executor must bind
@@ -1049,9 +1335,31 @@ impl PreparedItemPlan {
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
         protocol_trust_store: &ryeos_engine::trust::TrustStore,
         admitted_project_root: Option<&Path>,
+        project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<ryeos_state::objects::AdmittedExecutionClosure> {
-        if self.plan.filesystem_authority_ceiling
-            == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        self.plan.validate_endpoint_for_sealing()?;
+        let external = matches!(
+            self.plan.endpoint_requirement,
+            ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. }
+        );
+        if external {
+            // Capture content, not controller-native execution authority. The
+            // current final plan is checked again rather than trusting an
+            // earlier preflight before argument/authority binding mutations.
+            external_projection::validate_external_direct_project_authority(
+                project_authority
+                    .ok_or_else(|| anyhow!("external closure requires exact project authority"))?,
+            )?;
+            external_projection::validate_external_direct_plan(&self.plan, &protocol.descriptor)?;
+            if self.realization_command.is_none() || self.admitted_command.is_some() {
+                bail!(
+                    "external closure requires an exact realization member without controller executable authority"
+                );
+            }
+        }
+        if !external
+            && self.plan.filesystem_authority_ceiling
+                == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
         {
             if !isolation.is_enforced() {
                 bail!("captured execution requires enforced isolation before admission");
@@ -1070,8 +1378,9 @@ impl PreparedItemPlan {
                 bail!("captured execution cannot receive daemon callback or thread-auth authority");
             }
         }
-        if self.plan.network_authority_ceiling
-            == ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated
+        if !external
+            && self.plan.network_authority_ceiling
+                == ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::Isolated
             && !isolation.is_enforced()
         {
             bail!("isolated network authority requires enforced isolation before admission");
@@ -1093,6 +1402,17 @@ impl PreparedItemPlan {
             &protocol.signer_fingerprint,
             protocol_trust_store,
         )?;
+        if external {
+            let retained_protocol: ryeos_engine::protocols::ProtocolDescriptor =
+                serde_yaml::from_str(&protocol_descriptor_document)
+                    .context("decode captured external direct protocol")?;
+            if serde_json::to_value(&retained_protocol)?
+                != serde_json::to_value(&protocol.descriptor)?
+            {
+                bail!("external closure protocol projection changed its signed descriptor");
+            }
+            external_projection::validate_external_direct_plan(&self.plan, &retained_protocol)?;
+        }
         let Some(command) = original_command else {
             if self.realization_command.is_some() {
                 bail!("realization-member command has no verified executable identity");
@@ -1287,43 +1607,21 @@ impl PreparedItemPlan {
         isolation: &ryeos_engine::isolation::IsolationRuntime,
         effective_project_root: Option<&Path>,
     ) -> Result<Self> {
+        let mut plan = decode_retained_direct_plan(execution_closure, artifact_identity)?;
         let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
-            execution_plan,
             command,
             admitted_project_root,
             ..
         } = execution_closure
         else {
-            bail!("direct recovery found a non-direct admitted execution closure");
+            unreachable!("direct closure checked by retained-plan decoder");
         };
         let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            executor_ref,
-            execution_plan_hash,
-            executable_identity,
-            runtime_identity,
             root_subject_source_identity,
             ..
         } = artifact_identity
         else {
-            bail!("direct recovery found a non-direct admitted artifact identity");
-        };
-        let canonical_plan = lillux::canonical_json(execution_plan)?;
-        let observed_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
-        if &observed_plan_hash != execution_plan_hash {
-            bail!(
-                "admitted direct execution plan hash mismatch: expected {execution_plan_hash}, observed {observed_plan_hash}"
-            );
-        }
-        let expected_command_hash = match executable_identity {
-            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
-                content_hash, ..
-            }
-            | ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash } => {
-                content_hash
-            }
-            ryeos_state::objects::DirectExecutableIdentity::NodePolicy => {
-                bail!("node-policy direct execution is not restart-recoverable")
-            }
+            unreachable!("direct artifact checked by retained-plan decoder");
         };
         let executable_blob_hash = match command {
             ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
@@ -1335,96 +1633,9 @@ impl PreparedItemPlan {
                 ..
             } => executable_blob_hash,
             ryeos_state::objects::AdmittedDirectCommandClosure::NodePolicy => {
-                bail!("node-policy direct execution is not restart-recoverable")
+                unreachable!("node-policy command refused by retained-plan decoder")
             }
         };
-        if expected_command_hash != executable_blob_hash {
-            bail!("admitted direct executable blob contradicts artifact identity");
-        }
-        let mut plan: ExecutionPlan = serde_json::from_value(execution_plan.clone())
-            .context("decode admitted direct execution plan")?;
-        validate_admitted_direct_executor_binding(&plan, executor_ref)?;
-        let plan_runtime = plan
-            .runtime_identity
-            .as_ref()
-            .ok_or_else(|| anyhow!("admitted direct execution plan has no runtime identity"))?;
-        let expected_runtime_space = match runtime_identity.runtime_source_space {
-            ryeos_state::objects::DirectRuntimeSourceSpace::Project => ItemSpace::Project,
-            ryeos_state::objects::DirectRuntimeSourceSpace::Bundle => ItemSpace::Bundle,
-        };
-        if plan_runtime.runtime_ref != runtime_identity.runtime_ref
-            || plan_runtime.runtime_source_space != expected_runtime_space
-            || plan_runtime.runtime_content_hash != runtime_identity.runtime_content_hash
-            || plan_runtime.runtime_signer_fingerprint.as_deref()
-                != Some(runtime_identity.runtime_signer_fingerprint.as_str())
-            || plan_runtime.runtime_bundle_manifest_hash
-                != runtime_identity.runtime_bundle_manifest_hash
-            || plan_runtime.runtime_bundle_signer_fingerprint
-                != runtime_identity.runtime_bundle_signer_fingerprint
-        {
-            bail!("admitted direct execution plan contradicts runtime identity");
-        }
-        let original_spec = match plan.nodes.first() {
-            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
-            Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
-                bail!("admitted direct execution plan entrypoint is complete")
-            }
-            None => bail!("admitted direct execution plan is empty"),
-        };
-        let original_command = original_spec
-            .verified_command
-            .as_ref()
-            .ok_or_else(|| anyhow!("admitted direct execution plan has no verified command"))?;
-        let command_identity_matches = match (executable_identity, original_command) {
-            (
-                ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
-                    content_hash,
-                    executor_manifest_hash,
-                    executor_manifest_signer_fingerprint,
-                },
-                ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
-                    code,
-                    provider: executor_bundle,
-                },
-            ) => {
-                &code.content_hash == content_hash
-                    && &executor_bundle.manifest_hash == executor_manifest_hash
-                    && &executor_bundle.signer_fingerprint == executor_manifest_signer_fingerprint
-            }
-            (
-                ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash },
-                ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code },
-            ) => &code.content_hash == content_hash,
-            _ => false,
-        };
-        if !command_identity_matches {
-            bail!("admitted direct execution plan contradicts command identity");
-        }
-        if let ryeos_state::objects::AdmittedDirectCommandClosure::RealizationMember {
-            executable_blob_hash,
-            realization_mount,
-            realization_mount_root,
-            relative_path,
-            execution_path,
-            ..
-        } = command
-        {
-            let expected_path = realization_mount_root
-                .destination(
-                    Some(Path::new(ADMITTED_DIRECT_PROJECT_ROOT)),
-                    realization_mount,
-                )?
-                .join(relative_path);
-            if execution_path != &expected_path
-                || original_spec.cmd != execution_path.display().to_string()
-                || original_command.code().source_path.as_path() != execution_path.as_path()
-                || original_command.code().content_hash != *executable_blob_hash
-            {
-                bail!(
-                    "admitted realization-member plan contradicts its retained command coordinate"
-                );
-            }
-        }
         relocate_admitted_direct_plan(
             &mut plan,
             admitted_project_root.as_deref(),
@@ -1530,6 +1741,7 @@ impl PreparedItemPlan {
         writable_runtime_view_mounts: Vec<
             ryeos_engine::isolation::IsolationWritableRuntimeViewMountAuthority,
         >,
+        inherited_fds: Vec<lillux::InheritedDescriptorAuthority>,
         target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
         lifecycle: &ryeos_state::objects::PersistentSessionLifecycleContract,
         workspace_authority: ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority,
@@ -1640,7 +1852,7 @@ impl PreparedItemPlan {
                 max_stdout_bytes: None,
                 max_stderr_bytes: None,
             }),
-            inherited_fds: Vec::new(),
+            inherited_fds,
             thread_id: session_identity.to_owned(),
             chain_root_id: session_identity.to_owned(),
             current_site_id: state.threads.site_id().to_owned(),
@@ -1733,7 +1945,7 @@ impl PreparedItemPlan {
                             return Err(match cleanup {
                             Some(cleanup) => error.context(format!(
                                 "persistent-session resource reservation cleanup failed: {cleanup}"
-                            )),
+                            )).context(crate::persistent_session::PersistentSessionCleanupUnproved),
                             None => error,
                         });
                         }
@@ -1764,9 +1976,11 @@ impl PreparedItemPlan {
                         )),
                     };
                     return Err(match cleanup {
-                        Some(cleanup) => error.context(format!(
-                            "held persistent-session resource binding cleanup failed: {cleanup}"
-                        )),
+                        Some(cleanup) => error
+                            .context(format!(
+                                "held persistent-session resource binding cleanup failed: {cleanup}"
+                            ))
+                            .context(crate::persistent_session::PersistentSessionCleanupUnproved),
                         None => error,
                     });
                 }
@@ -1881,6 +2095,7 @@ fn admitted_execution_plan_value_for_command(
     plan: &ExecutionPlan,
     preserve_realization_path: bool,
 ) -> Result<Value> {
+    plan.validate_endpoint_for_sealing()?;
     let mut admitted = plan.clone();
     if let Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) =
         admitted.nodes.first_mut()
@@ -1953,6 +2168,149 @@ fn ensure_runtime_view_delivery_matches(
     Ok(())
 }
 
+/// Decode the retained ordinary plan and rejoin its executor, runtime and
+/// command identities without consulting host execution capabilities. Both
+/// local recovery and external projection consume this same authority check.
+fn decode_retained_direct_plan(
+    execution_closure: &ryeos_state::objects::AdmittedExecutionClosure,
+    artifact_identity: &ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+) -> Result<ExecutionPlan> {
+    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+        execution_plan,
+        command,
+        ..
+    } = execution_closure
+    else {
+        bail!("direct recovery found a non-direct admitted execution closure");
+    };
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        executor_ref,
+        execution_plan_hash,
+        executable_identity,
+        runtime_identity,
+        ..
+    } = artifact_identity
+    else {
+        bail!("direct recovery found a non-direct admitted artifact identity");
+    };
+    let canonical_plan = lillux::canonical_json(execution_plan)?;
+    let observed_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+    if &observed_plan_hash != execution_plan_hash {
+        bail!(
+            "admitted direct execution plan hash mismatch: expected {execution_plan_hash}, observed {observed_plan_hash}"
+        );
+    }
+    let expected_command_hash = match executable_identity {
+        ryeos_state::objects::DirectExecutableIdentity::BundleExecutor { content_hash, .. }
+        | ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash } => {
+            content_hash
+        }
+        ryeos_state::objects::DirectExecutableIdentity::NodePolicy => {
+            bail!("node-policy direct execution is not restart-recoverable")
+        }
+    };
+    let executable_blob_hash = match command {
+        ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
+            executable_blob_hash,
+            ..
+        }
+        | ryeos_state::objects::AdmittedDirectCommandClosure::RealizationMember {
+            executable_blob_hash,
+            ..
+        } => executable_blob_hash,
+        ryeos_state::objects::AdmittedDirectCommandClosure::NodePolicy => {
+            bail!("node-policy direct execution is not restart-recoverable")
+        }
+    };
+    if expected_command_hash != executable_blob_hash {
+        bail!("admitted direct executable blob contradicts artifact identity");
+    }
+    let plan: ExecutionPlan = serde_json::from_value(execution_plan.clone())
+        .context("decode admitted direct execution plan")?;
+    plan.validate_endpoint_for_sealing()?;
+    validate_admitted_direct_executor_binding(&plan, executor_ref)?;
+    let plan_runtime = plan
+        .runtime_identity
+        .as_ref()
+        .ok_or_else(|| anyhow!("admitted direct execution plan has no runtime identity"))?;
+    let expected_runtime_space = match runtime_identity.runtime_source_space {
+        ryeos_state::objects::DirectRuntimeSourceSpace::Project => ItemSpace::Project,
+        ryeos_state::objects::DirectRuntimeSourceSpace::Bundle => ItemSpace::Bundle,
+    };
+    if plan_runtime.runtime_ref != runtime_identity.runtime_ref
+        || plan_runtime.runtime_source_space != expected_runtime_space
+        || plan_runtime.runtime_content_hash != runtime_identity.runtime_content_hash
+        || plan_runtime.runtime_signer_fingerprint.as_deref()
+            != Some(runtime_identity.runtime_signer_fingerprint.as_str())
+        || plan_runtime.runtime_bundle_manifest_hash
+            != runtime_identity.runtime_bundle_manifest_hash
+        || plan_runtime.runtime_bundle_signer_fingerprint
+            != runtime_identity.runtime_bundle_signer_fingerprint
+    {
+        bail!("admitted direct execution plan contradicts runtime identity");
+    }
+    let original_spec = match plan.nodes.first() {
+        Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
+        Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
+            bail!("admitted direct execution plan entrypoint is complete")
+        }
+        None => bail!("admitted direct execution plan is empty"),
+    };
+    let original_command = original_spec
+        .verified_command
+        .as_ref()
+        .ok_or_else(|| anyhow!("admitted direct execution plan has no verified command"))?;
+    let command_identity_matches = match (executable_identity, original_command) {
+        (
+            ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                content_hash,
+                executor_manifest_hash,
+                executor_manifest_signer_fingerprint,
+            },
+            ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
+                code,
+                provider: executor_bundle,
+            },
+        ) => {
+            &code.content_hash == content_hash
+                && &executor_bundle.manifest_hash == executor_manifest_hash
+                && &executor_bundle.signer_fingerprint == executor_manifest_signer_fingerprint
+        }
+        (
+            ryeos_state::objects::DirectExecutableIdentity::CapturedContent { content_hash },
+            ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent { code },
+        ) => &code.content_hash == content_hash,
+        _ => false,
+    };
+    if !command_identity_matches {
+        bail!("admitted direct execution plan contradicts command identity");
+    }
+    if let ryeos_state::objects::AdmittedDirectCommandClosure::RealizationMember {
+        executable_blob_hash,
+        realization_mount,
+        realization_mount_root,
+        relative_path,
+        execution_path,
+        ..
+    } = command
+    {
+        let expected_path = realization_mount_root
+            .destination(
+                Some(Path::new(ADMITTED_DIRECT_PROJECT_ROOT)),
+                realization_mount,
+            )?
+            .join(relative_path);
+        if execution_path != &expected_path
+            || original_spec.cmd != execution_path.display().to_string()
+            || original_command.code().source_path.as_path() != execution_path.as_path()
+            || original_command.code().content_hash != *executable_blob_hash
+        {
+            bail!("admitted realization-member plan contradicts its retained command coordinate");
+        }
+    }
+    Ok(plan)
+}
+
 fn first_subprocess_spec_mut(plan: &mut ExecutionPlan) -> Result<&mut PlanSubprocessSpec> {
     match plan.nodes.first_mut() {
         Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => Ok(spec),
@@ -1988,6 +2346,26 @@ fn bind_default_input_cwd_for_spawn(plan: &mut ExecutionPlan, input_root: &Path)
         spec.cwd = Some(input_root.to_path_buf());
     }
     Ok(())
+}
+
+/// Preserve the ordinary environment provenance rules for every endpoint.
+/// Missing provenance is descriptor-authored data, never engine authority.
+fn runtime_environment_bindings(spec: &PlanSubprocessSpec) -> Vec<crate::env_contract::EnvBinding> {
+    use crate::env_contract::{EnvBinding, EnvSourceDetail};
+    spec.env
+        .iter()
+        .map(|(key, value)| {
+            let source = match spec.env_sources.get(key).copied() {
+                Some(RuntimeEnvSource::EnginePlan) => EnvSourceDetail::EnginePlanEnv,
+                Some(RuntimeEnvSource::RuntimeInterpreter) => EnvSourceDetail::RuntimeInterpreter,
+                Some(RuntimeEnvSource::RuntimePathMutation) => EnvSourceDetail::RuntimePathMutation,
+                Some(RuntimeEnvSource::RuntimeDescriptor) | None => {
+                    EnvSourceDetail::RuntimeDescriptor
+                }
+            };
+            EnvBinding::new(key.clone(), value.clone(), source)
+        })
+        .collect()
 }
 
 fn validate_direct_plan_portability(
@@ -2035,7 +2413,14 @@ fn relocate_admitted_direct_plan(
             {
                 bail!("admitted direct plan path escapes its project root");
             }
-            *path = effective_root.join(relative);
+            // Joining an empty suffix appends a slash. Preserve the exact
+            // root spelling: the external execution contract hashes and
+            // validates canonical namespace coordinates, not Path equality.
+            *path = if relative.as_os_str().is_empty() {
+                effective_root.to_path_buf()
+            } else {
+                effective_root.join(relative)
+            };
         }
         Ok(())
     };
@@ -2320,6 +2705,9 @@ pub fn prepare_captured_item_plan(
             filesystem_ceiling,
         )?;
         plan.network_authority_ceiling = network_ceiling;
+        plan.endpoint_requirement =
+            execution.project_endpoint_requirement(&program.resolution().composed.composed)?;
+        plan.validate_endpoint_for_planning()?;
         plan.filesystem_authority_ceiling = plan
             .filesystem_authority_ceiling
             .intersect(filesystem_ceiling);
@@ -2426,6 +2814,10 @@ pub struct SpawnItemParams<'a> {
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
+    /// Protected launch channels derived from the admitted root purpose,
+    /// never from tool parameters or a live project path.
+    pub isolation_target_channels:
+        Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
     /// Exact node trust-store root supplied by daemon configuration. Never
     /// reconstructed from an application or bundle filesystem layout.
     pub isolation_node_trusted_keys_dir: std::path::PathBuf,
@@ -2456,6 +2848,10 @@ pub struct SpawnItemParams<'a> {
     /// Exact node-selected launch authority. Selection has already crossed
     /// replay/admission; this owner binds it to the held process before release.
     pub selected_resources: crate::execution_resources::SelectedExecutionResources,
+    /// The accepted root's signed product claim requires a naturally empty
+    /// whole-descendant scope. Device selection is not a substitute for this
+    /// requirement, and an unscoped launch must refuse before process contact.
+    pub require_process_scope: bool,
 }
 
 #[tracing::instrument(
@@ -2486,6 +2882,7 @@ pub fn spawn_item(
         thread_id,
         launch_owner,
         accounting_scope,
+        require_process_scope,
     ) = (|| -> Result<_> {
         let SpawnItemParams {
             state,
@@ -2505,6 +2902,7 @@ pub fn spawn_item(
             isolation_workspace_view,
             isolation_live_access_authority,
             isolation_external_read_only_mounts,
+            isolation_target_channels,
             isolation_node_trusted_keys_dir,
             isolation_workspace,
             inherited_fds,
@@ -2516,6 +2914,7 @@ pub fn spawn_item(
             original_snapshot_hash: _,
             state_root,
             selected_resources,
+            require_process_scope,
         } = params;
         let app_root = roots
             .app_root
@@ -2623,22 +3022,7 @@ pub fn spawn_item(
                     ),
                 ])?;
 
-                let runtime_bindings = spec.env.iter().map(|(key, value)| {
-                    let source = match spec.env_sources.get(key).copied() {
-                        Some(RuntimeEnvSource::EnginePlan) => EnvSourceDetail::EnginePlanEnv,
-                        Some(RuntimeEnvSource::RuntimeInterpreter) => {
-                            EnvSourceDetail::RuntimeInterpreter
-                        }
-                        Some(RuntimeEnvSource::RuntimePathMutation) => {
-                            EnvSourceDetail::RuntimePathMutation
-                        }
-                        Some(RuntimeEnvSource::RuntimeDescriptor) | None => {
-                            EnvSourceDetail::RuntimeDescriptor
-                        }
-                    };
-                    EnvBinding::new(key.clone(), value.clone(), source)
-                });
-                builder = builder.with_typed_bindings(runtime_bindings)?;
+                builder = builder.with_typed_bindings(runtime_environment_bindings(spec))?;
 
                 builder = builder.with_typed_bindings(protocol_env_bindings.iter().cloned())?;
 
@@ -2726,7 +3110,7 @@ pub fn spawn_item(
             isolation_verified_command: prepared_plan.admitted_command,
             isolation_external_read_only_mounts,
             isolation_writable_runtime_view_mounts: Vec::new(),
-            isolation_target_channels: Vec::new(),
+            isolation_target_channels,
             isolation_workspace,
             subprocess_limits: None,
             inherited_fds,
@@ -2775,9 +3159,18 @@ pub fn spawn_item(
             thread_id,
             launch_owner,
             accounting_scope,
+            require_process_scope,
         ))
     })()
     .map_err(SpawnItemFailure::before_contact)?;
+    let mut thread_scope = if require_process_scope && selected_resources.selections().is_empty() {
+        Some(
+            crate::execution_resources::prepare_thread_scope_only(state, thread_id, launch_owner)
+                .map_err(SpawnItemFailure::before_contact)?,
+        )
+    } else {
+        None
+    };
     let mut resource_scope = crate::execution_resources::prepare_process_resource_scope(
         state,
         &selected_resources,
@@ -2785,8 +3178,8 @@ pub fn spawn_item(
         thread_id,
     )
     .map_err(SpawnItemFailure::before_contact)?;
-    let spawned_result = match resource_scope.as_mut() {
-        Some(prepared) => engine.spawn_plan_in_scope_with_resources(
+    let spawned_result = match (resource_scope.as_mut(), thread_scope.as_mut()) {
+        (Some(prepared), None) => engine.spawn_plan_in_scope_with_resources(
             &engine_ctx,
             &plan,
             prepared
@@ -2795,22 +3188,39 @@ pub fn spawn_item(
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
-        None => engine.spawn_plan_with_resources(
+        (None, Some(prepared)) => engine.spawn_plan_in_scope_with_resources(
+            &engine_ctx,
+            &plan,
+            prepared
+                .take_scope()
+                .map_err(SpawnItemFailure::before_contact)?,
+            selected_resources.selections(),
+            selected_resources.devices().map(Arc::as_ref),
+        ),
+        (None, None) => engine.spawn_plan_with_resources(
             &engine_ctx,
             &plan,
             selected_resources.selections(),
             selected_resources.devices().map(Arc::as_ref),
         ),
+        (Some(_), Some(_)) => return Err(SpawnItemFailure::before_contact(anyhow!(
+            "item launch prepared conflicting process scopes"
+        ))),
     };
     let spawned = match spawned_result {
         Ok(spawned) => spawned,
         Err(error) => {
-            let cleanup = match resource_scope.as_ref() {
-                Some(prepared) => crate::execution_resources::cleanup_process_resource_reservation(
+            let cleanup = match (resource_scope.as_ref(), thread_scope.as_ref()) {
+                (Some(prepared), None) => crate::execution_resources::cleanup_process_resource_reservation(
                     state,
                     prepared.reservation(),
                 ),
-                None => return Err(SpawnItemFailure::engine(error)),
+                (None, Some(prepared)) => crate::execution_resources::cleanup_thread_scope_only(
+                    state,
+                    prepared.reservation(),
+                ),
+                (None, None) => return Err(SpawnItemFailure::engine(error)),
+                (Some(_), Some(_)) => Err(anyhow!("item launch owns conflicting scope reservations")),
             };
             return Err(SpawnItemFailure::after_scope_cleanup(error, cleanup));
         }
@@ -2840,11 +3250,12 @@ pub fn spawn_item(
                 Err(error) => {
                     return Err(SpawnItemFailure::after_identity_failure(
                         error,
-                        abort_spawned_with_resource_reservation(
+                        abort_spawned_item_with_reservations(
                             state,
                             resource_scope
                                 .as_ref()
                                 .map(|prepared| prepared.reservation()),
+                            thread_scope.as_ref().map(|prepared| prepared.reservation()),
                             spawned,
                         ),
                     ));
@@ -2871,11 +3282,12 @@ pub fn spawn_item(
                 };
                 return Err(SpawnItemFailure::after_identity_failure(
                     error,
-                    abort_spawned_with_resource_reservation(
+                    abort_spawned_item_with_reservations(
                         state,
                         resource_scope
                             .as_ref()
                             .map(|prepared| prepared.reservation()),
+                        thread_scope.as_ref().map(|prepared| prepared.reservation()),
                         spawned,
                     ),
                 ));
@@ -2885,11 +3297,12 @@ pub fn spawn_item(
         Err(error) => {
             return Err(SpawnItemFailure::after_identity_failure(
                 error,
-                abort_spawned_with_resource_reservation(
+                abort_spawned_item_with_reservations(
                     state,
                     resource_scope
                         .as_ref()
                         .map(|prepared| prepared.reservation()),
+                    thread_scope.as_ref().map(|prepared| prepared.reservation()),
                     spawned,
                 ),
             ));
@@ -2904,6 +3317,9 @@ pub fn spawn_item(
         launch_metadata,
         state: state.clone(),
         resource_reservation: resource_scope
+            .as_ref()
+            .map(|prepared| prepared.reservation().clone()),
+        thread_scope_reservation: thread_scope
             .as_ref()
             .map(|prepared| prepared.reservation().clone()),
         spawned,
@@ -3233,7 +3649,9 @@ mod tests {
         }
     }
 
-    fn portable_direct_plan(project_root: &Path) -> ExecutionPlan {
+    pub(super) fn portable_direct_plan(project_root: &Path) -> ExecutionPlan {
+        // Match launch::plan_builder's ordinary terminal topology and IDs.
+        // This remains a component fixture, not a public admission witness.
         let mut plan: ExecutionPlan = serde_json::from_value(serde_json::json!({
             "plan_id": "plan:test",
             "root_executor_id": "tool:test/runtime",
@@ -3241,7 +3659,7 @@ mod tests {
             "item_kind": "tool",
             "nodes": [{
                 "node_type": "dispatch_subprocess",
-                "id": "spawn",
+                "id": "entry:tool:test/run",
                 "spec": {
                     "cmd": "/usr/bin/python3",
                     "verified_command": {
@@ -3266,8 +3684,11 @@ mod tests {
                     }
                 },
                 "executor_chain": ["tool:test/run", "tool:test/runtime"]
+            }, {
+                "node_type": "complete",
+                "id": "complete:tool:test/run"
             }],
-            "entrypoint": "spawn",
+            "entrypoint": "entry:tool:test/run",
             "capabilities": {
                 "requires_model": false,
                 "requires_subprocess": true,
@@ -3278,6 +3699,8 @@ mod tests {
             "network_authority_ceiling": "node_policy",
             "filesystem_authority_ceiling": "node_policy",
             "target_requirement": null,
+            "endpoint_requirement": {"kind": "local"},
+            "external_endpoint_binding": null,
             "resource_authority_ceiling": "node_policy",
             "cache_key": "test",
             "thread_kind": "tool",
@@ -3303,6 +3726,411 @@ mod tests {
             root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity::Project,
             admitted_command: None,
             realization_command: None,
+        }
+    }
+
+    pub(super) fn realization_identity_fixture(
+        root: &Path,
+    ) -> (crate::state_store::StateStore, Engine) {
+        let state_dir = root.join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&root.join("node-key.pem")).unwrap();
+        let signer = Arc::new(crate::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(identity.fingerprint().to_owned(), *identity.verifying_key());
+        let store = crate::state_store::StateStore::new_with_head_trust(
+            root.to_owned(),
+            state_dir.clone(),
+            state_dir.join("runtime.sqlite3"),
+            signer,
+            crate::write_barrier::WriteBarrier::new(),
+            Arc::new(trust),
+        )
+        .unwrap();
+        // Qualify member verification against the exact current tool contract,
+        // independently of the publisher-signing state of a dirty source tree.
+        // This is not full live-registry or public-dispatch qualification.
+        let source = std::fs::read_to_string(
+            ryeos_engine::test_support::core_bundle_root()
+                .join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::KIND_SCHEMAS_DIR)
+                .join("tool/tool.kind-schema.yaml"),
+        )
+        .unwrap();
+        let (body, _) =
+            lillux::signature::strip_canonical_signature_with_envelope(&source, "#", None, false)
+                .unwrap();
+        let kind_root = root.join("member-fixture-kinds");
+        std::fs::create_dir_all(kind_root.join("tool")).unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[39; 32]);
+        std::fs::write(
+            kind_root.join("tool/tool.kind-schema.yaml"),
+            lillux::signature::sign_content_at(&body, &key, "#", None, "2026-09-23T00:00:00Z"),
+        )
+        .unwrap();
+        let kind_trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&key.verifying_key()),
+                verifying_key: key.verifying_key(),
+                label: Some("isolated current tool contract fixture".into()),
+            },
+        ]);
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(&[kind_root], &kind_trust)
+            .unwrap();
+        let engine = Engine::new(
+            kinds,
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        );
+        (store, engine)
+    }
+
+    fn realization_identity_resolution(
+        manifest_hash: &str,
+        total_bytes: u64,
+    ) -> ryeos_engine::resolution::ResolutionOutput {
+        let mut resolution = finalized_dependency_fixture(json!({})).resolution().clone();
+        resolution.root.requested_id = "tool:test/run".to_owned();
+        resolution.root.resolved_ref = "tool:test/run".to_owned();
+        resolution.composed.composed = json!({"external_content": [{
+            "id":"runtime", "kind":"tree", "mode":"pinned",
+            "digest":manifest_hash, "mount_root":"execution_runtime", "mount":"runtime"
+        }]});
+        resolution.composed.derived.insert(
+            ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
+            json!([{
+                "id":"runtime", "kind":"tree", "mode":"pinned",
+                "manifest_hash":manifest_hash, "entry_count":1, "total_bytes":total_bytes,
+                "mount_root":"execution_runtime", "mount":"runtime"
+            }]),
+        );
+        resolution
+    }
+
+    #[test]
+    fn realization_identity_checks_child_authority_and_exact_manifest_member() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, engine) = realization_identity_fixture(root.path());
+        let authority = store.pinned_state_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let bytes = b"exact executable fixture";
+        let blob_hash = cas.put_blob(bytes).unwrap().hash;
+        let resolve = |resolution: &ryeos_engine::resolution::ResolutionOutput| {
+            PreparedItemPlan::resolve_realization_command_identity_guarded(
+                &authority,
+                &guard,
+                &engine,
+                resolution,
+                ryeos_engine::external_content::parse_realization_command_ref(
+                    "realization:runtime/probe",
+                )
+                .unwrap()
+                .unwrap(),
+                1024,
+            )
+        };
+        // Both manifest tiers must prove the same CAS-backed member contract.
+        for (schema, kind) in [
+            (
+                "ryeos.external_content.tree.v2",
+                "external_content_manifest",
+            ),
+            (
+                "ryeos.external_content.large.v2",
+                "external_large_content_manifest",
+            ),
+        ] {
+            let manifest = json!({
+                "schema":schema, "kind":kind, "entry_count":1,
+                "total_bytes":bytes.len(), "entries":[{
+                    "path":"probe", "kind":"file", "mode":0o755,
+                    "blob_hash":blob_hash, "size":bytes.len()
+                }]
+            });
+            let manifest_hash = cas.put_object(&manifest).unwrap().hash;
+            let resolution = realization_identity_resolution(&manifest_hash, bytes.len() as u64);
+            let coordinate = resolve(&resolution).unwrap();
+            assert_eq!(coordinate.realization_id, "runtime");
+            assert_eq!(coordinate.manifest_hash, manifest_hash);
+            assert_eq!(
+                coordinate.mount_root,
+                ryeos_state::objects::ExternalContentMountRoot::ExecutionRuntime
+            );
+            assert_eq!(coordinate.mount, "runtime");
+            assert_eq!(coordinate.relative_path, "probe");
+            assert_eq!(coordinate.executable_blob_hash, blob_hash);
+
+            for (field, replacement, expected) in [
+                ("path", json!("other"), "is absent from"),
+                ("mode", json!(0o644), "not an executable regular file"),
+                ("blob_hash", json!("f".repeat(64)), "is unavailable"),
+                ("size", json!(bytes.len() + 1), "size contradicts"),
+            ] {
+                let mut changed = manifest.clone();
+                changed["entries"][0][field] = replacement;
+                changed["total_bytes"] = changed["entries"][0]["size"].clone();
+                let hash = cas.put_object(&changed).unwrap().hash;
+                let resolution = realization_identity_resolution(
+                    &hash,
+                    changed["total_bytes"].as_u64().unwrap(),
+                );
+                let error = resolve(&resolution).err().expect("member must be refused");
+                assert!(
+                    error.to_string().contains(expected),
+                    "{kind}/{field}: {error:#}"
+                );
+            }
+            let mut directory = manifest.clone();
+            directory["entries"][0] = json!({"path":"probe", "kind":"dir"});
+            directory["total_bytes"] = json!(0);
+            let hash = cas.put_object(&directory).unwrap().hash;
+            assert!(
+                resolve(&realization_identity_resolution(&hash, 0))
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("not an executable regular file")
+            );
+
+            let mut inherited_only = resolution.clone();
+            inherited_only.composed.composed = json!({});
+            assert!(
+                resolve(&inherited_only)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("requires a child-owned declaration")
+            );
+            let mut undeclared = resolution.clone();
+            undeclared.composed.composed["external_content"][0]["id"] = json!("other");
+            assert!(
+                resolve(&undeclared)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("undeclared child realization")
+            );
+            let mut missing = resolution.clone();
+            missing.composed.derived.clear();
+            assert!(
+                resolve(&missing)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("no admitted realization set")
+            );
+            let mut absent = resolution.clone();
+            absent.composed.derived.insert(
+                ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY.to_owned(),
+                json!([]),
+            );
+            assert!(
+                resolve(&absent)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("absent realization")
+            );
+            for (field, value) in [
+                ("manifest_hash", json!("e".repeat(64))),
+                ("mount", json!("other")),
+                ("mount_root", json!("project")),
+            ] {
+                let mut mismatch = resolution.clone();
+                mismatch
+                    .composed
+                    .derived
+                    .get_mut(ryeos_state::objects::EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                    .unwrap()[0][field] = value;
+                assert!(resolve(&mismatch).is_err(), "{kind}/{field}");
+            }
+
+            let mut plan = portable_direct_plan(root.path());
+            let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } =
+                &mut plan.nodes[0]
+            else {
+                unreachable!()
+            };
+            spec.cmd = "realization:runtime/probe".to_owned();
+            spec.verified_command = None;
+            let mut prepared = prepared_plan(plan);
+            let error = prepared
+                .bind_realization_command_guarded(
+                    &authority,
+                    &guard,
+                    &engine,
+                    &resolution,
+                    &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("require enforced descriptor-mounted isolation")
+            );
+            assert!(prepared.realization_command().is_none());
+            assert!(prepared.admitted_command.is_none());
+
+            // External capture shares this exact content proof but never
+            // turns it into controller-native executable authority.
+            let mut external_plan = prepared.plan.clone();
+            external_plan.endpoint_requirement =
+                ryeos_engine::contracts::ExecutionEndpointRequirement::External {
+                    binding_id: "direct-test".into(),
+                    stdout_max_bytes: 1024,
+                    stderr_max_bytes: 1024,
+                };
+            external_plan.external_endpoint_binding =
+                Some(ryeos_engine::contracts::ExternalEndpointBindingIdentity {
+                    binding_id: "direct-test".into(),
+                    binding_digest: "a".repeat(64),
+                });
+            let policy = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+            let mut external = prepared_plan(external_plan.clone());
+            external
+                .capture_external_realization_command_guarded(
+                    &authority,
+                    &guard,
+                    &engine,
+                    &resolution,
+                    policy.verified_command_file_bytes(),
+                )
+                .unwrap();
+            assert_eq!(
+                external.realization_command().unwrap().executable_blob_hash,
+                blob_hash
+            );
+            assert!(external.admitted_command.is_none());
+            assert!(external.plan.require_local_endpoint_for_dispatch().is_err());
+            assert!(
+                external
+                    .capture_external_realization_command_guarded(
+                        &authority,
+                        &guard,
+                        &engine,
+                        &resolution,
+                        policy.verified_command_file_bytes(),
+                    )
+                    .is_err()
+            );
+            let mut exact_bound = prepared_plan(external_plan.clone());
+            exact_bound
+                .capture_external_realization_command_guarded(
+                    &authority,
+                    &guard,
+                    &engine,
+                    &resolution,
+                    bytes.len() as u64,
+                )
+                .unwrap();
+            assert_eq!(
+                exact_bound
+                    .realization_command()
+                    .unwrap()
+                    .executable_blob_hash,
+                blob_hash
+            );
+            assert!(exact_bound.admitted_command.is_none());
+            let mut below_bound = prepared_plan(external_plan.clone());
+            let error = below_bound
+                .capture_external_realization_command_guarded(
+                    &authority,
+                    &guard,
+                    &engine,
+                    &resolution,
+                    bytes.len() as u64 - 1,
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("exceeding the node verified-command limit")
+            );
+            assert!(below_bound.realization_command().is_none());
+            assert!(below_bound.admitted_command.is_none());
+            for (invalid, bound) in [(&inherited_only, 1024), (&missing, 1024), (&resolution, 0)] {
+                let mut refused = prepared_plan(external_plan.clone());
+                assert!(
+                    refused
+                        .capture_external_realization_command_guarded(
+                            &authority, &guard, &engine, invalid, bound,
+                        )
+                        .is_err()
+                );
+                assert!(refused.realization_command().is_none());
+                assert!(refused.admitted_command.is_none());
+            }
+            assert!(
+                prepared
+                    .capture_external_realization_command_guarded(
+                        &authority,
+                        &guard,
+                        &engine,
+                        &resolution,
+                        policy.verified_command_file_bytes(),
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            resolve(&realization_identity_resolution(&"d".repeat(64), 1))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("is unavailable")
+        );
+    }
+
+    #[test]
+    fn realization_identity_large_object_checks_limit_before_missing_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, engine) = realization_identity_fixture(root.path());
+        let authority = store.pinned_state_authority().unwrap();
+        let guard = authority.acquire_shared_guard().unwrap();
+        let manifest = json!({
+            "schema":"ryeos.external_content.large.v2",
+            "kind":"external_large_content_manifest", "entry_count":1, "total_bytes":2,
+            "entries":[{"path":"probe", "kind":"file", "mode":0o755,
+                "file_sha256":"a".repeat(64), "size":2,
+                "chunk_size":1048576, "chunk_hashes":["a".repeat(64)]}]
+        });
+        ryeos_state::objects::ExternalLargeContentManifestObject::from_value(&manifest).unwrap();
+        let hash = authority
+            .cas_store()
+            .unwrap()
+            .put_object(&manifest)
+            .unwrap()
+            .hash;
+        let resolution = realization_identity_resolution(&hash, 2);
+        for limit in [1, 2] {
+            let error = PreparedItemPlan::resolve_realization_command_identity_guarded(
+                &authority,
+                &guard,
+                &engine,
+                &resolution,
+                ryeos_engine::external_content::parse_realization_command_ref(
+                    "realization:runtime/probe",
+                )
+                .unwrap()
+                .unwrap(),
+                limit,
+            )
+            .err()
+            .expect("unavailable large-object bytes must not become identity authority");
+            assert_eq!(
+                error
+                    .to_string()
+                    .contains("exceeding the node verified-command limit"),
+                limit == 1
+            );
+            if limit == 2 {
+                assert!(error.to_string().contains("is absent"), "{error:#}");
+            }
         }
     }
 
@@ -3430,6 +4258,250 @@ mod tests {
     }
 
     #[test]
+    fn finalized_endpoint_binding_uses_signed_generation_and_preserves_sealed_selection() {
+        use crate::node_config::sections::external_execution::InstalledExternalExecutionBinding;
+        use ryeos_engine::contracts::ExecutionEndpointRequirement;
+
+        // This unit fixture loads an actually signed schema rather than
+        // depending on the signing state of the source-local bundle tree.
+        let root = tempfile::tempdir().unwrap();
+        let kind_dir = root.path().join("fixture");
+        std::fs::create_dir(&kind_dir).unwrap();
+        let key = lillux::crypto::SigningKey::from_bytes(&[39; 32]);
+        let schema = "\
+location:
+  directory: tools
+resolution: []
+effective_trust:
+  include_references: false
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+execution:
+  delegate: {via: runtime_registry}
+  endpoint:
+    path: [execution_endpoint]
+    default: {kind: local}
+";
+        std::fs::write(
+            kind_dir.join("fixture.kind-schema.yaml"),
+            lillux::signature::sign_content_at(schema, &key, "#", None, "2026-09-23T00:00:00Z"),
+        )
+        .unwrap();
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&key.verifying_key()),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
+            &[root.path().to_path_buf()],
+            &trust,
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        );
+        let direct = InstalledExternalExecutionBinding::direct_test_fixture(60);
+        let rotated = InstalledExternalExecutionBinding::direct_test_fixture(61);
+        let session = InstalledExternalExecutionBinding::test_fixture();
+        for binding in [&direct, &rotated, &session] {
+            binding.retained_generation().unwrap();
+        }
+        assert_eq!(direct.id(), rotated.id());
+        assert_ne!(direct.digest(), rotated.digest());
+        assert_eq!(direct.capacity_owner(), rotated.capacity_owner());
+        let program = finalized_dependency_fixture(json!({"execution_endpoint": {
+            "kind":"external", "binding_id":direct.id(),
+            "stdout_max_bytes":1024, "stderr_max_bytes":1024
+        }}));
+        let resolution = program.resolution();
+        let fresh = || {
+            let mut plan = portable_direct_plan(Path::new("/ryeos/project"));
+            plan.root_ref = resolution.root.resolved_ref.clone();
+            plan.item_kind = "fixture".into();
+            prepared_plan(plan)
+        };
+
+        // Missing and wrong-workload bindings must leave the raw plan intact.
+        for (bindings, expected) in [
+            (Vec::new(), "not installed"),
+            (vec![session], "ordinary-command binding"),
+        ] {
+            let mut prepared = fresh();
+            let before = serde_json::to_value(prepared.execution_plan()).unwrap();
+            let error = prepared
+                .bind_execution_endpoint_from_bindings(&bindings, &engine, resolution)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(
+                serde_json::to_value(prepared.execution_plan()).unwrap(),
+                before
+            );
+        }
+
+        let mut prepared = fresh();
+        assert!(matches!(
+            prepared.plan.endpoint_requirement,
+            ExecutionEndpointRequirement::Local {}
+        ));
+        assert!(!resolution.root.raw_content.contains("execution_endpoint"));
+        prepared
+            .bind_execution_endpoint_from_bindings(
+                std::slice::from_ref(&direct),
+                &engine,
+                resolution,
+            )
+            .unwrap();
+        assert!(matches!(
+            prepared.plan.endpoint_requirement,
+            ExecutionEndpointRequirement::External { .. }
+        ));
+        let selected = prepared.plan.external_endpoint_binding.as_ref().unwrap();
+        assert_eq!(selected.binding_id, direct.id());
+        assert_eq!(selected.binding_digest, direct.digest());
+        let sealed = serde_json::to_value(prepared.execution_plan()).unwrap();
+        prepared
+            .bind_execution_endpoint_from_bindings(
+                std::slice::from_ref(&direct),
+                &engine,
+                resolution,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            sealed
+        );
+
+        let error = prepared
+            .bind_execution_endpoint_from_bindings(
+                std::slice::from_ref(&rotated),
+                &engine,
+                resolution,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot be replaced"));
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            sealed
+        );
+        assert!(
+            prepared
+                .bind_execution_endpoint_from_bindings(&[], &engine, resolution)
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            sealed
+        );
+
+        let local = finalized_dependency_fixture(json!({"execution_endpoint":{"kind":"local"}}));
+        assert!(
+            prepared
+                .bind_execution_endpoint_from_bindings(
+                    std::slice::from_ref(&direct),
+                    &engine,
+                    local.resolution()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be reselected")
+        );
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            sealed
+        );
+
+        // A fresh launch may select the new signed generation; an existing
+        // sealed launch may not silently replace its original endpoint.
+        let mut fresh_rotated = fresh();
+        fresh_rotated
+            .bind_execution_endpoint_from_bindings(
+                std::slice::from_ref(&rotated),
+                &engine,
+                resolution,
+            )
+            .unwrap();
+        assert_eq!(
+            fresh_rotated
+                .plan
+                .external_endpoint_binding
+                .as_ref()
+                .unwrap()
+                .binding_digest,
+            rotated.digest()
+        );
+        assert_ne!(
+            serde_json::to_value(fresh_rotated.execution_plan()).unwrap(),
+            sealed
+        );
+    }
+
+    #[test]
+    fn direct_endpoint_binding_changes_exact_admitted_plan_identity() {
+        use ryeos_engine::contracts::{
+            ExecutionEndpointRequirement, ExternalEndpointBindingIdentity,
+        };
+
+        let mut plan = portable_direct_plan(Path::new("/ryeos/project"));
+        let local = admitted_execution_plan_value(&plan).unwrap();
+        plan.endpoint_requirement = ExecutionEndpointRequirement::External {
+            binding_id: "evaluator".into(),
+            stdout_max_bytes: 4096,
+            stderr_max_bytes: 4096,
+        };
+        assert!(admitted_execution_plan_value(&plan).is_err());
+        plan.external_endpoint_binding = Some(ExternalEndpointBindingIdentity {
+            binding_id: "evaluator".into(),
+            binding_digest: "a".repeat(64),
+        });
+        let admitted = admitted_execution_plan_value(&plan).unwrap();
+        let digest =
+            |value: &Value| lillux::sha256_hex(lillux::canonical_json(value).unwrap().as_bytes());
+        assert_ne!(digest(&local), digest(&admitted));
+        assert_eq!(
+            digest(&admitted),
+            digest(&admitted_execution_plan_value(&plan.clone()).unwrap())
+        );
+
+        plan.external_endpoint_binding
+            .as_mut()
+            .unwrap()
+            .binding_digest = "b".repeat(64);
+        assert_ne!(
+            digest(&admitted),
+            digest(&admitted_execution_plan_value(&plan).unwrap())
+        );
+        plan.external_endpoint_binding.as_mut().unwrap().binding_id = "other".into();
+        assert!(admitted_execution_plan_value(&plan).is_err());
+        plan.endpoint_requirement = ExecutionEndpointRequirement::Local {};
+        assert!(admitted_execution_plan_value(&plan).is_err());
+    }
+
+    #[test]
+    fn retained_direct_plan_cannot_omit_endpoint_authority() {
+        let plan = portable_direct_plan(Path::new("/ryeos/project"));
+        let value = serde_json::to_value(&plan).unwrap();
+        for field in ["endpoint_requirement", "external_endpoint_binding"] {
+            let mut predecessor = value.clone();
+            predecessor.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ExecutionPlan>(predecessor).is_err());
+        }
+    }
+
+    #[test]
     fn direct_recovery_binds_declared_executor_hop_not_terminal_executor() {
         let mut plan = portable_direct_plan(Path::new("/tmp/admitted-project"));
         plan.root_executor_id = "tool:test/subprocess-terminal".to_string();
@@ -3440,6 +4512,111 @@ mod tests {
             .expect("the admitted executor is the first hop after the root");
         assert!(
             validate_admitted_direct_executor_binding(&plan, "tool:test/subprocess-terminal")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn private_input_spawn_defaults_only_absent_cwd() {
+        let input_root = Path::new("/private/input-current");
+        let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+        first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
+        let mut expected = serde_json::to_value(&plan).unwrap();
+        expected["nodes"][0]["spec"]["cwd"] = json!(input_root);
+        let mut prepared = prepared_plan(plan);
+        prepared
+            .bind_default_input_cwd_for_spawn(input_root)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(prepared.execution_plan()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            prepared.timeout_secs, 300,
+            "default cwd cannot change timeout"
+        );
+    }
+
+    #[test]
+    fn private_input_spawn_preserves_explicit_cwd_and_all_other_plan_fields() {
+        for cwd in [
+            Path::new("/explicit/workdir"),
+            Path::new("relative-authored"),
+        ] {
+            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+            first_subprocess_spec_mut(&mut plan).unwrap().cwd = Some(cwd.to_path_buf());
+            let retained = serde_json::to_value(&plan).unwrap();
+            let mut prepared = prepared_plan(plan);
+            prepared
+                .bind_default_input_cwd_for_spawn(Path::new("/private/input-current"))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(prepared.execution_plan()).unwrap(),
+                retained
+            );
+        }
+    }
+
+    #[test]
+    fn private_input_spawn_keeps_retained_plan_portable_across_recovery_roots() {
+        let mut retained = portable_direct_plan(Path::new("/admitted/base"));
+        first_subprocess_spec_mut(&mut retained).unwrap().cwd = None;
+        let retained_value = serde_json::to_value(&retained).unwrap();
+        let mut first = prepared_plan(retained.clone());
+        first
+            .bind_default_input_cwd_for_spawn(Path::new("/private/first-generation"))
+            .unwrap();
+        let mut recovered = prepared_plan(retained.clone());
+        recovered
+            .bind_default_input_cwd_for_spawn(Path::new("/private/recovered-generation"))
+            .unwrap();
+        let first_value = serde_json::to_value(first.execution_plan()).unwrap();
+        let recovered_value = serde_json::to_value(recovered.execution_plan()).unwrap();
+        assert_eq!(
+            first_value["nodes"][0]["spec"]["cwd"],
+            "/private/first-generation"
+        );
+        assert_eq!(
+            recovered_value["nodes"][0]["spec"]["cwd"],
+            "/private/recovered-generation"
+        );
+        assert_ne!(first_value, recovered_value);
+        assert_eq!(serde_json::to_value(&retained).unwrap(), retained_value);
+        assert!(retained_value["nodes"][0]["spec"]["cwd"].is_null());
+    }
+
+    #[test]
+    fn private_input_spawn_rejects_invalid_root_without_mutation() {
+        for invalid in [
+            "",
+            ".",
+            "relative",
+            "/",
+            "/private/../input",
+            "/private//input",
+            "/private/./input",
+            "/private/input/",
+            "/private/input\0bad",
+        ] {
+            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
+            first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
+            let retained = serde_json::to_value(&plan).unwrap();
+            let mut prepared = prepared_plan(plan);
+            assert!(
+                prepared
+                    .bind_default_input_cwd_for_spawn(Path::new(invalid))
+                    .is_err(),
+                "{invalid:?}"
+            );
+            assert_eq!(
+                serde_json::to_value(prepared.execution_plan()).unwrap(),
+                retained
+            );
+        }
+        let mut no_subprocess = portable_direct_plan(Path::new("/admitted/base"));
+        no_subprocess.nodes.remove(0);
+        assert!(
+            bind_default_input_cwd_for_spawn(&mut no_subprocess, Path::new("/private/input"))
                 .is_err()
         );
     }
@@ -3459,6 +4636,12 @@ mod tests {
             panic!("fixture must dispatch");
         };
         assert_eq!(spec.cwd.as_deref(), Some(effective));
+        // Path equality ignores a trailing separator; the retained guest
+        // coordinate and its digest must preserve canonical bytes as well.
+        assert_eq!(
+            spec.cwd.as_ref().unwrap().as_os_str(),
+            effective.as_os_str()
+        );
         assert_eq!(
             spec.args[0].literal_value(),
             Some(effective.join("tool.py").display().to_string().as_str())
@@ -3710,111 +4893,6 @@ mod tests {
         assert!(
             error.to_string().contains("escapes its project root"),
             "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn private_input_spawn_defaults_only_absent_cwd() {
-        let input_root = Path::new("/private/input-current");
-        let mut plan = portable_direct_plan(Path::new("/admitted/base"));
-        first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
-        let mut expected = serde_json::to_value(&plan).unwrap();
-        expected["nodes"][0]["spec"]["cwd"] = json!(input_root);
-        let mut prepared = prepared_plan(plan);
-        prepared
-            .bind_default_input_cwd_for_spawn(input_root)
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(prepared.execution_plan()).unwrap(),
-            expected
-        );
-        assert_eq!(
-            prepared.timeout_secs, 300,
-            "default cwd cannot change timeout"
-        );
-    }
-
-    #[test]
-    fn private_input_spawn_preserves_explicit_cwd_and_all_other_plan_fields() {
-        for cwd in [
-            Path::new("/explicit/workdir"),
-            Path::new("relative-authored"),
-        ] {
-            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
-            first_subprocess_spec_mut(&mut plan).unwrap().cwd = Some(cwd.to_path_buf());
-            let retained = serde_json::to_value(&plan).unwrap();
-            let mut prepared = prepared_plan(plan);
-            prepared
-                .bind_default_input_cwd_for_spawn(Path::new("/private/input-current"))
-                .unwrap();
-            assert_eq!(
-                serde_json::to_value(prepared.execution_plan()).unwrap(),
-                retained
-            );
-        }
-    }
-
-    #[test]
-    fn private_input_spawn_keeps_retained_plan_portable_across_recovery_roots() {
-        let mut retained = portable_direct_plan(Path::new("/admitted/base"));
-        first_subprocess_spec_mut(&mut retained).unwrap().cwd = None;
-        let retained_value = serde_json::to_value(&retained).unwrap();
-        let mut first = prepared_plan(retained.clone());
-        first
-            .bind_default_input_cwd_for_spawn(Path::new("/private/first-generation"))
-            .unwrap();
-        let mut recovered = prepared_plan(retained.clone());
-        recovered
-            .bind_default_input_cwd_for_spawn(Path::new("/private/recovered-generation"))
-            .unwrap();
-        let first_value = serde_json::to_value(first.execution_plan()).unwrap();
-        let recovered_value = serde_json::to_value(recovered.execution_plan()).unwrap();
-        assert_eq!(
-            first_value["nodes"][0]["spec"]["cwd"],
-            "/private/first-generation"
-        );
-        assert_eq!(
-            recovered_value["nodes"][0]["spec"]["cwd"],
-            "/private/recovered-generation"
-        );
-        assert_ne!(first_value, recovered_value);
-        assert_eq!(serde_json::to_value(&retained).unwrap(), retained_value);
-        assert!(retained_value["nodes"][0]["spec"]["cwd"].is_null());
-    }
-
-    #[test]
-    fn private_input_spawn_rejects_invalid_root_without_mutation() {
-        for invalid in [
-            "",
-            ".",
-            "relative",
-            "/",
-            "/private/../input",
-            "/private//input",
-            "/private/./input",
-            "/private/input/",
-            "/private/input\0bad",
-        ] {
-            let mut plan = portable_direct_plan(Path::new("/admitted/base"));
-            first_subprocess_spec_mut(&mut plan).unwrap().cwd = None;
-            let retained = serde_json::to_value(&plan).unwrap();
-            let mut prepared = prepared_plan(plan);
-            assert!(
-                prepared
-                    .bind_default_input_cwd_for_spawn(Path::new(invalid))
-                    .is_err(),
-                "{invalid:?}"
-            );
-            assert_eq!(
-                serde_json::to_value(prepared.execution_plan()).unwrap(),
-                retained
-            );
-        }
-        let mut no_subprocess = portable_direct_plan(Path::new("/admitted/base"));
-        no_subprocess.nodes.remove(0);
-        assert!(
-            bind_default_input_cwd_for_spawn(&mut no_subprocess, Path::new("/private/input"))
-                .is_err()
         );
     }
 

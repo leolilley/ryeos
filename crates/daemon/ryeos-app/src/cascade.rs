@@ -11,6 +11,7 @@
 //! its behalf.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -18,7 +19,6 @@ use ryeos_engine::contracts::CancellationMode;
 
 use crate::process::{signal_exact_group, signal_exact_target};
 use crate::state::AppState;
-use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadFinalizeParams;
 
 /// How hard to stop a thread.
@@ -65,7 +65,7 @@ fn signal_name(signal: i32) -> &'static str {
 /// single child's missing pgid or failed signal is recorded in the report, not
 /// raised — one unreachable child must not abort the cascade.
 pub fn cascade_descendants(
-    store: &StateStore,
+    state: &AppState,
     root_thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<Vec<Value>> {
@@ -73,25 +73,41 @@ pub fn cascade_descendants(
     let mut seen = BTreeSet::new();
     let mut report = Vec::new();
     for _ in 0..MAX_FIXED_POINT_PASSES {
-        let descendants = store.descendant_thread_ids(root_thread_id)?;
+        let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
         let new_children = descendants
             .into_iter()
             .filter(|child| seen.insert(child.clone()))
             .collect::<Vec<_>>();
         if new_children.is_empty() {
+            if report.iter().any(descendant_stop_unproven) {
+                anyhow::bail!("descendant stop or scoped-child settlement unproven: {report:?}");
+            }
             return Ok(report);
         }
         report.extend(
             new_children
                 .iter()
-                .map(|child| signal_thread(store, child, mode)),
+                .map(|child| signal_thread(state, child, mode)),
         );
     }
-    report.push(json!({
-        "thread_id": root_thread_id,
-        "warning": "descendant_fixed_point_pass_limit_reached",
-    }));
-    Ok(report)
+    anyhow::bail!(
+        "descendant stop did not reach a fixed point after {MAX_FIXED_POINT_PASSES} passes for {root_thread_id}: {report:?}"
+    )
+}
+
+fn scoped_child_settlement_failed(report: &Value) -> bool {
+    report
+        .get("scoped_child_settlement")
+        .and_then(Value::as_str)
+        == Some("failed")
+}
+
+fn descendant_stop_unproven(report: &Value) -> bool {
+    scoped_child_settlement_failed(report)
+        || matches!(
+            report.get("skipped").and_then(Value::as_str),
+            Some("stop_tombstone_failed" | "read_error" | "no_thread_row")
+        )
 }
 
 /// Cancel durable descendants that have not yet been admitted. Membership is
@@ -191,7 +207,8 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
 ///
 /// A terminal row is still signalled when it retains an attached identity: a
 /// managed runtime may self-finalize before the outer owned wrapper has exited.
-pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> Value {
+pub fn signal_thread(state: &AppState, thread_id: &str, mode: CascadeMode) -> Value {
+    let store = &state.state_store;
     let thread = match store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
@@ -213,39 +230,54 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
             });
         }
     };
-    if crate::state_store::is_terminal_status(&thread.status) && runtime.process_identity.is_none()
+    let mut report = if crate::state_store::is_terminal_status(&thread.status)
+        && runtime.process_identity.is_none()
     {
-        return json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status });
-    }
-    let pgid = match runtime.pgid {
-        Some(pgid) if pgid > 0 => pgid,
-        Some(_) => return json!({ "thread_id": thread_id, "skipped": "invalid_pgid" }),
-        None => return json!({ "thread_id": thread_id, "skipped": "no_pgid" }),
-    };
-    let Some(identity) = runtime.process_identity.as_ref() else {
-        return json!({ "thread_id": thread_id, "pgid": pgid, "skipped": "no_process_identity" });
-    };
-    let cancellation_mode = runtime
-        .launch_metadata
-        .as_ref()
-        .and_then(|lm| lm.cancellation_mode);
-    let effective_mode = match runtime.stop_intent {
-        Some(crate::state_store::StopIntent::Kill) => CascadeMode::Hard,
-        Some(crate::state_store::StopIntent::Cancel) => CascadeMode::Graceful,
-        None => mode,
-    };
-    let signal = cancel_signal(effective_mode, cancellation_mode);
-    let result = if signal == libc::SIGKILL {
-        signal_exact_group(identity, signal)
+        json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status })
+    } else if let Some(pgid) = runtime.pgid.filter(|pgid| *pgid > 0) {
+        if let Some(identity) = runtime.process_identity.as_ref() {
+            let cancellation_mode = runtime
+                .launch_metadata
+                .as_ref()
+                .and_then(|lm| lm.cancellation_mode);
+            let effective_mode = match runtime.stop_intent {
+                Some(crate::state_store::StopIntent::Kill) => CascadeMode::Hard,
+                Some(crate::state_store::StopIntent::Cancel) => CascadeMode::Graceful,
+                None => mode,
+            };
+            let signal = cancel_signal(effective_mode, cancellation_mode);
+            let result = if signal == libc::SIGKILL {
+                signal_exact_group(identity, signal)
+            } else {
+                signal_exact_target(identity, signal)
+            };
+            json!({
+                "thread_id": thread_id,
+                "pgid": pgid,
+                "signal": signal_name(signal),
+                "result": result.as_str(),
+            })
+        } else {
+            json!({ "thread_id": thread_id, "pgid": pgid, "skipped": "no_process_identity" })
+        }
     } else {
-        signal_exact_target(identity, signal)
+        json!({
+            "thread_id": thread_id,
+            "skipped": if runtime.pgid.is_some() { "invalid_pgid" } else { "no_pgid" },
+        })
     };
-    json!({
-        "thread_id": thread_id,
-        "pgid": pgid,
-        "signal": signal_name(signal),
-        "result": result.as_str(),
-    })
+    match crate::scoped_producer_stop::stop_scoped_producer_for_root(
+        state,
+        thread_id,
+        Duration::from_secs(60),
+    ) {
+        Ok(()) => report["scoped_child_settlement"] = json!("settled"),
+        Err(error) => {
+            report["scoped_child_settlement"] = json!("failed");
+            report["scoped_child_error"] = json!(format!("{error:#}"));
+        }
+    }
+    report
 }
 
 /// Stop a thread and its live descendants: signal the target per `mode`, then
@@ -260,8 +292,11 @@ pub fn stop_thread_and_descendants(
     mode: CascadeMode,
 ) -> anyhow::Result<(Value, Vec<String>)> {
     let queued = cancel_queued_descendants(state, thread_id)?;
-    let target = signal_thread(&state.state_store, thread_id, mode);
-    let descendants = cascade_descendants(&state.state_store, thread_id, mode)?;
+    let target = signal_thread(state, thread_id, mode);
+    let descendants = cascade_descendants(state, thread_id, mode)?;
+    if descendant_stop_unproven(&target) {
+        anyhow::bail!("target stop or scoped-child settlement unproven for {thread_id}: {target}");
+    }
     Ok((
         json!({ "target": target, "descendants": descendants, "queued": queued }),
         queued,
@@ -302,5 +337,20 @@ mod tests {
             cancel_signal(CascadeMode::Graceful, Some(CancellationMode::Hard)),
             libc::SIGKILL
         );
+    }
+
+    #[test]
+    fn descendant_failure_cannot_be_reported_as_a_clean_cascade() {
+        for skipped in ["stop_tombstone_failed", "read_error", "no_thread_row"] {
+            assert!(descendant_stop_unproven(&json!({ "skipped": skipped })));
+        }
+        assert!(descendant_stop_unproven(
+            &json!({ "scoped_child_settlement": "failed" })
+        ));
+        assert!(!descendant_stop_unproven(&json!({
+            "signal": "SIGTERM",
+            "result": "sent",
+            "scoped_child_settlement": "settled"
+        })));
     }
 }

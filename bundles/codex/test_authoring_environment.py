@@ -1,3 +1,4 @@
+# ryeos:signed:2026-09-23T07:33:59Z:8eb82404032de67e1a299dad5ba58d62df850fde32d7a0dc28d9c0e0efec6c4d:dxtnbas7SvtrytrYCjESVaAcUmmkNBw8+oiH6VEr1LKE3YHR6BtmByJZ+t1p28uDM3YruReneZrs2GarbJiRBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
 """Data contracts for the explicit authoring worker/environment composition."""
 
@@ -36,6 +37,16 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         cls.worker = load(".ai/workers/codex/hosted-authoring.yaml")
         cls.default_worker = load(".ai/workers/codex/hosted.yaml")
         cls.selection = json.loads((AUTHORING_E2E / "selection.json").read_text())
+
+    def test_guest_runtime_producer_uses_exact_command_without_protected_env_override(self):
+        producer = load(".ai/tools/codex/guest-runtime/produce.yaml")
+        self.assertEqual(producer["config"]["command"],
+                         "bin:codex/ryeos-codex-guest-runtime-producer")
+        self.assertEqual(producer["filesystem_authority"], "captured_execution")
+        self.assertEqual(producer["network_authority"], "isolated")
+        # RuntimeDescriptor cannot set protected PATH. This static producer
+        # needs neither a PATH mutation nor any ambient application env.
+        self.assertEqual(producer["config"].get("env", {}), {})
 
     def test_default_and_login_remain_minimal(self):
         self.assertEqual([item["id"] for item in self.default["external_content"]], ["command-tools"])
@@ -151,8 +162,8 @@ class AuthoringEnvironmentTests(unittest.TestCase):
                     "equals": "never",
                 }, route["response_predicates"])
                 self.assertIn({
-                    "pointer": "/response/result/sandbox/networkAccess",
-                    "equals": True,
+                    "pointer": "/response/result/sandbox/type",
+                    "equals": "dangerFullAccess",
                 }, route["response_predicates"])
                 route["response_predicates"] = original_routes[route["id"]][
                     "response_predicates"

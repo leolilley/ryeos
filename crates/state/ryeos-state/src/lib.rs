@@ -37,6 +37,7 @@ pub mod rebuild;
 pub mod recovery;
 pub mod refs;
 pub mod signer;
+pub mod source_verification;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;

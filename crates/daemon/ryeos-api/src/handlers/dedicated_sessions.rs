@@ -5989,11 +5989,6 @@ async fn command(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let session = owned_session(&state, &ctx, &req.chain_root_id)?;
-    if session.state == "recovering" {
-        return Err(HandlerError::BadRequest(
-            "recovering worker executions accept only the runtime-owned reattach route".into(),
-        ));
-    }
     if req.route_id.is_empty()
         || req.route_id.len() > 256
         || req.route_id.chars().any(char::is_control)
@@ -6001,6 +5996,33 @@ async fn command(
         return Err(HandlerError::BadRequest(
             "worker execution route id is not canonical and bounded".into(),
         ));
+    }
+    if session.state == "recovering" {
+        // A lost HTTP acknowledgement may leave a command fully settled
+        // before the daemon dies. Recovery forbids new public contact, but an
+        // exact settled retry is a read of retained root testimony. The
+        // service below independently verifies that testimony before reply.
+        let payload = json!({"route_id":req.route_id.clone(),"payload":req.payload.clone()});
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "command_kind":"route","payload":payload.clone(),
+        }))
+        .map_err(internal)?;
+        if state
+            .state_store
+            .settled_dedicated_session_command_replay(
+                &session.placement_thread_id,
+                &req.idempotency_key,
+                "route",
+                &request_digest,
+                &payload,
+            )
+            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .is_none()
+        {
+            return Err(HandlerError::BadRequest(
+                "recovering worker executions accept only an exact settled replay or the runtime-owned reattach route".into(),
+            ));
+        }
     }
     let mut result = ryeos_app::dedicated_session_service::execute_command(
         &state,

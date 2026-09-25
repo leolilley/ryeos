@@ -400,6 +400,8 @@ pub fn load_audit_manifest(path: &Path) -> Result<BundleManifest> {
         smoke: src.smoke,
         shadows: src.shadows,
         isolation_backends: src.isolation_backends,
+        external_providers: src.external_providers,
+        external_lifecycle_adapters: src.external_lifecycle_adapters,
     })
 }
 
@@ -435,6 +437,8 @@ mod tests {
             smoke: vec![],
             shadows: vec![],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         }
     }
 

@@ -771,22 +771,41 @@ mod tests {
             &base64::engine::general_purpose::STANDARD,
             b"fixture controller TLS root",
         )];
-        let mut body = serde_json::json!({"kind":"node", "schema":6,
+        let settings_schema_digest = "3".repeat(64);
+        let settings = serde_json::json!({"region":"singapore", "plan":"standard"});
+        let settings_digest =
+            super::super::sections::external_execution::adapter_settings_digest(&settings).unwrap();
+        let mut body = serde_json::json!({"kind":"node", "schema":9,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
+            "workload": {
+                "kind":"structured_session",
+                "provider_declaration_id":"codex-hosted",
+                "provider_configuration_destination":"environments.toml",
+                "runtime_manifest_hash":"b".repeat(64),
+                "runtime_selection_identity":"c".repeat(64),
+                "configuration_adapter_artifact_hash":"2".repeat(64),
+                "configuration_adapter_artifact_bytes":4096,
+                "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
+                "connector_artifact_hash":"f".repeat(64),
+                "connector_artifact_bytes":4096
+            },
             "backend":"qualified-backend", "account":"account-1",
-            "capacity_group":"candidate-workers", "region":"singapore", "plan":"standard",
+            "capacity_group":"candidate-workers",
             "credential_generation":"a".repeat(64),
-            "runtime_manifest_hash":"b".repeat(64), "runtime_selection_identity":"c".repeat(64),
+            "settings_schema_digest":settings_schema_digest,
+            "settings_digest":settings_digest,
+            "settings":settings,
             "backend_artifact_hash":"d".repeat(64),
+            "backend_artifact_bytes":4096,
+            "supervisor_artifact_hash":"1".repeat(64),
+            "supervisor_artifact_bytes":4096,
             "launcher_artifact_hash":"e".repeat(64),
-            "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
-            "connector_artifact_hash":"f".repeat(64),
-            "connector_artifact_bytes":4096,
+            "launcher_artifact_bytes":4096,
             "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
             "storage_policy":"ephemeral_private_candidate_v1",
             "cleanup_proof":"provider_terminal_occurrence_v1",
             "controller_transport": {
-                "schema":1,
+                "schema":2,
                 "https_origin":"https://controller.example:7443",
                 "route_contract":ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_ROUTE_CONTRACT,
                 "tls_root_bundle_digest":
@@ -795,7 +814,11 @@ mod tests {
                     ).unwrap(),
                 "connect_timeout_ms":5000,
                 "request_timeout_ms":10000,
-                "maximum_response_bytes":1048576
+                "maximum_response_bytes":1048576,
+                "network_inputs": {
+                    "resolver":{"source":"/etc/resolv.conf", "max_bytes":65536},
+                    "hosts":{"source":"/etc/hosts", "max_bytes":65536}
+                }
             },
             "controller_tls_root_certificates_der_base64":controller_tls_roots,
             "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
@@ -829,7 +852,7 @@ mod tests {
         assert!(binding.credential_access().is_ok());
         let runtime_recipe =
             ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
-                schema: 1,
+                schema: 2,
                 runtime_mount_destination: "/runtime".into(),
                 executable_relative_path: "bin/codex".into(),
                 argv0: "codex".into(),
@@ -840,22 +863,33 @@ mod tests {
                 max_stderr_bytes: 1024 * 1024,
                 proc_filesystem:
                     ryeos_state::external_execution::admission::ExternalCandidateProcFilesystem::PidNamespaceNested,
-                contain_process_group: true,
+                contain_process_group: false,
                 nested_sandbox: true,
             };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        let requirement =
+            ryeos_state::external_execution::admission::ExternalCandidateRequirement {
+                schema: 6,
+                required_lifecycle_capabilities: Default::default(),
+                protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
+                connector_protocol:
+                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+                provider_declaration_id: "codex-hosted".into(),
+                provider_configuration_destination: "environments.toml".into(),
+                runtime_product_declaration_id: "runtime".into(),
+                runtime_recipe,
+            };
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
         let program =
             ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
-                requirement:
-                    ryeos_state::external_execution::admission::ExternalCandidateRequirement {
-                        schema: 3,
-                        protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
-                        connector_protocol:
-                            ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                        execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
-                        runtime_product_declaration_id: "runtime".into(),
-                        runtime_recipe,
-                    },
+                requirement,
+                qualification_use,
+                runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "b".repeat(64),
                 runtime_witness_hash: "1".repeat(64),
                 qualification_attestation_hash: "2".repeat(64),
@@ -868,6 +902,7 @@ mod tests {
             "selection",
             "protocol",
             "connector_protocol",
+            "provider_configuration_destination",
             "requirement_schema",
             "malformed",
         ] {
@@ -877,6 +912,9 @@ mod tests {
                 "selection" => changed.selection_identity_digest = "f".repeat(64),
                 "protocol" => changed.requirement.protocol = "other".into(),
                 "connector_protocol" => changed.requirement.connector_protocol = "other".into(),
+                "provider_configuration_destination" => {
+                    changed.requirement.provider_configuration_destination = "other.toml".into()
+                }
                 "requirement_schema" => changed.requirement.schema = 2,
                 _ => changed.runtime_witness_hash = "not-a-hash".into(),
             }
@@ -913,12 +951,12 @@ mod tests {
                 "/controller_transport/maximum_response_bytes",
                 serde_json::json!(4_095),
             ),
-            ("/connector_protocol", serde_json::json!("other")),
+            ("/workload/connector_protocol", serde_json::json!("other")),
             (
-                "/connector_artifact_hash",
+                "/workload/connector_artifact_hash",
                 serde_json::json!("not-a-digest"),
             ),
-            ("/connector_artifact_bytes", serde_json::json!(0)),
+            ("/workload/connector_artifact_bytes", serde_json::json!(0)),
         ] {
             let mut invalid = body.clone();
             *invalid.pointer_mut(field).unwrap() = value;
@@ -928,6 +966,35 @@ mod tests {
                 "invalid controller transport field {field}"
             );
         }
+        write(&body);
+
+        // A valid direct workload has no provider/runtime-selection fields and
+        // grants no candidate export. Loading its signed shape is not direct
+        // execution admission: the existing session check must refuse it.
+        let mut direct = body.clone();
+        direct["workload"] = serde_json::json!({"kind":"direct_command"});
+        direct["max_export_bytes"] = serde_json::json!(0);
+        write(&direct);
+        let direct_loaded = load().unwrap();
+        let error = direct_loaded.external_execution[0]
+            .check_program(&program)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot authorize a structured session")
+        );
+        assert_ne!(
+            binding.digest(),
+            direct_loaded.external_execution[0].digest()
+        );
+        assert_eq!(
+            binding.capacity_owner(),
+            direct_loaded.external_execution[0].capacity_owner()
+        );
+        direct["workload"]["provider_declaration_id"] = serde_json::json!("codex-hosted");
+        write(&direct);
+        assert!(load().is_err());
         write(&body);
 
         let rotated_tls_roots = vec![base64::Engine::encode(

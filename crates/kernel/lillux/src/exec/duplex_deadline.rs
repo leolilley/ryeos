@@ -16,6 +16,22 @@ pub struct DeadlineDuplexStream<'a> {
     deadline: MonotonicDeadline,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplexReadiness {
+    channel_readable: bool,
+    auxiliary_readable: bool,
+}
+
+impl DuplexReadiness {
+    pub fn channel_readable(self) -> bool {
+        self.channel_readable
+    }
+
+    pub fn auxiliary_readable(self) -> bool {
+        self.auxiliary_readable
+    }
+}
+
 impl<'a> DeadlineDuplexStream<'a> {
     #[cfg(unix)]
     pub(crate) fn new(descriptor: BorrowedFd<'a>, deadline: MonotonicDeadline) -> Self {
@@ -29,6 +45,42 @@ impl<'a> DeadlineDuplexStream<'a> {
         Self {
             lifetime: std::marker::PhantomData,
             deadline,
+        }
+    }
+
+    /// Wait for channel input without exposing its platform descriptor.
+    pub fn wait_readable(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            wait_ready(self.descriptor.as_raw_fd(), libc::POLLIN, self.deadline)
+        }
+        #[cfg(not(unix))]
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "deadline duplex readiness is unavailable",
+        ))
+    }
+
+    /// Wait for input from either this protected channel or one caller-owned
+    /// auxiliary file. This keeps poll descriptors and timeout conversion in
+    /// Lillux while allowing a single-threaded namespace launcher to
+    /// multiplex application protocol and bounded output policy.
+    pub fn wait_readable_with(&self, auxiliary: &std::fs::File) -> io::Result<DuplexReadiness> {
+        #[cfg(unix)]
+        {
+            wait_pair_ready(
+                self.descriptor.as_raw_fd(),
+                auxiliary.as_raw_fd(),
+                self.deadline,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = auxiliary;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "deadline duplex readiness multiplexing is unavailable",
+            ))
         }
     }
 }
@@ -75,6 +127,78 @@ pub(crate) fn wait_ready(fd: RawFd, events: i16, deadline: MonotonicDeadline) ->
                 ));
             }
             return Ok(());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_pair_ready(
+    channel_fd: RawFd,
+    auxiliary_fd: RawFd,
+    deadline: MonotonicDeadline,
+) -> io::Result<DuplexReadiness> {
+    if channel_fd == auxiliary_fd {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "duplex and auxiliary readiness descriptors alias",
+        ));
+    }
+    loop {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "duplex I/O deadline elapsed",
+            ));
+        }
+        let timeout_ms = remaining
+            .as_millis()
+            .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+            .min(i32::MAX as u128) as i32;
+        let mut descriptors = [
+            libc::pollfd {
+                fd: channel_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: auxiliary_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: poll receives exactly two live borrowed descriptors.
+        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout_ms) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if descriptors
+            .iter()
+            .any(|descriptor| descriptor.revents & libc::POLLNVAL != 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "multiplexed I/O endpoint is not live",
+            ));
+        }
+        if ready != 0 {
+            if deadline.has_elapsed() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "duplex I/O deadline elapsed",
+                ));
+            }
+            let observed = |descriptor: &libc::pollfd| {
+                descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+            };
+            return Ok(DuplexReadiness {
+                channel_readable: observed(&descriptors[0]),
+                auxiliary_readable: observed(&descriptors[1]),
+            });
         }
     }
 }

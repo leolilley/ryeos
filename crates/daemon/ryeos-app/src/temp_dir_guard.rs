@@ -153,6 +153,45 @@ impl TempDirGuard {
             .ok_or_else(|| anyhow::anyhow!("temporary guard has no owned scratch descriptor"))
     }
 
+    /// Borrow the exact effective directory below this guard's retained
+    /// descriptor-owned root. This is distinct from an isolation workspace
+    /// view: disabled/trusted execution has no backend view, but an external
+    /// transfer still requires descriptor authority for the exact retained
+    /// project bytes. The diagnostic pathname is validated only for the
+    /// guard's own layout; traversal remains descriptor-relative.
+    pub fn borrow_owned_effective_directory(
+        &self,
+    ) -> anyhow::Result<lillux::InheritedDescriptorAuthority> {
+        // Exact launch/view authorization belongs to the journal-backed caller.
+        // This local borrow still refuses a closing, disarmed, or wrong-kind
+        // owner. Directory access is not isolation or physical-close evidence.
+        let view = self.workspace_view.lock().unwrap();
+        if !matches!(
+            view.as_ref(),
+            Some(WorkspaceViewSlot::Available(OwnedWorkspaceView {
+                authority: ryeos_engine::isolation::CreatedWorkspaceView::Disabled,
+                ..
+            }))
+        ) {
+            anyhow::bail!("owned directory transfer requires an available disabled workspace view");
+        }
+        let path = self.inner.lock().unwrap();
+        if path.is_none() {
+            anyhow::bail!("workspace is disarmed");
+        }
+        let root = self.owned_scratch_root()?;
+        if self.effective_path.parent() != Some(root.path()) {
+            anyhow::bail!("temporary guard effective directory is outside its owned root");
+        }
+        let name = self
+            .effective_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("temporary guard effective directory has no name"))?;
+        root.open_child_directory(name)?
+            .ok_or_else(|| anyhow::anyhow!("temporary guard effective directory is missing"))?
+            .inherited_descriptor_authority()
+    }
+
     /// Install the accepted Create result before publishing Ready. A later
     /// journal-bind failure must keep this very slot for explicit closure.
     pub fn install_workspace_view(
@@ -447,10 +486,12 @@ pub fn create_projectless_workspace(
     execution_root.set_mode(0o700)?;
     let name = std::ffi::OsString::from(workspace_name);
     let workspace = execution_root.create_child(&name, 0o700)?;
-    workspace.create_child(std::ffi::OsStr::new(ryeos_engine::AI_DIR), 0o700)?;
     let path = workspace.path().to_path_buf();
-    let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
-    Ok((path, guard))
+    let guard = TempDirGuard::new_pinned(execution_root, name, workspace);
+    guard
+        .owned_scratch_root()?
+        .create_child(std::ffi::OsStr::new(ryeos_engine::AI_DIR), 0o700)?;
+    Ok((path, Arc::new(guard)))
 }
 
 const ADMITTED_INPUT_WORKSPACE_PREFIX: &str = "admitted-input-";
@@ -537,11 +578,16 @@ pub fn create_runtime_workspace(
     runtime_cache_root: &std::path::Path,
     workspace_name: &str,
 ) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    ryeos_engine::execution_workspace::validate_workspace_id(workspace_name)?;
     let execution_root =
         lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
     execution_root.set_mode(0o700)?;
     let name = std::ffi::OsString::from(workspace_name);
     let workspace = execution_root.create_child(&name, 0o700)?;
+    // Own rollback before any fallible initialization below the new root.
+    // The caller transfers successful construction to its durable journal.
+    let mut guard = TempDirGuard::new_pinned(execution_root, name, workspace);
+    let workspace = guard.owned_scratch_root()?;
     workspace.create_child(
         std::ffi::OsStr::new(ryeos_engine::execution_workspace::PROJECT_DIR),
         0o700,
@@ -550,7 +596,6 @@ pub fn create_runtime_workspace(
     let project = workspace
         .path()
         .join(ryeos_engine::execution_workspace::PROJECT_DIR);
-    let mut guard = TempDirGuard::new_pinned(execution_root, name, workspace);
     guard.effective_path = project.clone();
     guard.workspace_view = Mutex::new(Some(WorkspaceViewSlot::Uncreated));
     let guard = Arc::new(guard);
@@ -606,6 +651,82 @@ mod tests {
     }
 
     #[test]
+    fn runtime_workspace_creator_refuses_existing_directory_without_adoption() {
+        let cache = tempfile::tempdir().unwrap();
+        let existing = cache.path().join("executions/already-owned");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("owner.txt"), b"prior owner").unwrap();
+        let identity = test_view_authority(&existing);
+
+        assert!(create_runtime_workspace(cache.path(), "already-owned").is_err());
+        assert_eq!(
+            std::fs::read(existing.join("owner.txt")).unwrap(),
+            b"prior owner"
+        );
+        assert!(!existing.join("project").exists());
+        assert_eq!(std::fs::read_dir(&existing).unwrap().count(), 1);
+        assert!(
+            identity
+                .same_file_identity(&test_view_authority(&existing))
+                .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_workspace_creator_refuses_existing_symlink_without_following() {
+        let cache = tempfile::tempdir().unwrap();
+        let execution_root = cache.path().join("executions");
+        let target = cache.path().join("other-owner");
+        std::fs::create_dir(&execution_root).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("owner.txt"), b"other owner").unwrap();
+        let link = execution_root.join("already-linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(create_runtime_workspace(cache.path(), "already-linked").is_err());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            std::fs::read(target.join("owner.txt")).unwrap(),
+            b"other owner"
+        );
+        assert!(!target.join("project").exists());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn runtime_workspace_creator_rejects_malformed_ids_before_filesystem_creation() {
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("not-created");
+        let too_long = "w".repeat(161);
+        for id in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "a/b",
+            "/absolute",
+            "a b",
+            "é",
+            "a\0b",
+            &too_long,
+        ] {
+            assert!(
+                create_runtime_workspace(&cache, id).is_err(),
+                "accepted {id:?}"
+            );
+            assert!(!cache.exists(), "malformed {id:?} created runtime state");
+            assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
     fn durable_reservation_transfers_drop_to_explicit_reconciliation() {
         let tmp = tempfile::tempdir().unwrap();
         let (project, guard) = create_runtime_workspace(tmp.path(), "runtime-durable").unwrap();
@@ -652,6 +773,64 @@ mod tests {
 
     fn close_deadline() -> lillux::time::MonotonicDeadline {
         lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(1))
+    }
+
+    #[test]
+    fn effective_directory_transfer_requires_original_armed_available_disabled_owner() {
+        let cache = tempfile::tempdir().unwrap();
+        for id in ["transfer-closed", "transfer-disarmed"] {
+            let (project, guard) = create_runtime_workspace(cache.path(), id).unwrap();
+            assert!(guard.borrow_owned_effective_directory().is_err());
+            guard
+                .install_workspace_view(
+                    &created_view_evidence(id),
+                    ryeos_engine::isolation::CreatedWorkspaceView::Disabled,
+                )
+                .unwrap();
+            let borrowed = guard.borrow_owned_effective_directory().unwrap();
+            assert!(
+                borrowed
+                    .same_file_identity(&test_view_authority(&project))
+                    .unwrap()
+            );
+            // This only proves exact directory authority, not isolation or
+            // process death. It neither disarms nor closes the original owner.
+            assert!(guard.path().is_some());
+            assert_eq!(
+                guard.workspace_view_identity().unwrap(),
+                Some((id.into(), "a".repeat(64)))
+            );
+            drop(borrowed);
+
+            let reopened =
+                TempDirGuard::new_workspace(guard.path().unwrap(), project.clone()).unwrap();
+            reopened
+                .install_workspace_view(
+                    &created_view_evidence(id),
+                    ryeos_engine::isolation::CreatedWorkspaceView::Disabled,
+                )
+                .unwrap();
+            assert!(reopened.borrow_owned_effective_directory().is_err());
+            reopened.disarm();
+            let cache_borrower = TempDirGuard::new_borrowed_cache(project.clone());
+            assert!(cache_borrower.borrow_owned_effective_directory().is_err());
+            let path_only = TempDirGuard::new(project.clone());
+            assert!(path_only.borrow_owned_effective_directory().is_err());
+            path_only.disarm();
+
+            if id == "transfer-closed" {
+                guard
+                    .close_workspace_view(id, &"a".repeat(64), close_deadline())
+                    .unwrap();
+                assert!(guard.borrow_owned_effective_directory().is_err());
+                assert!(project.exists());
+                guard.remove_now().unwrap();
+            } else {
+                guard.disarm();
+                assert!(guard.borrow_owned_effective_directory().is_err());
+                assert!(project.exists());
+            }
+        }
     }
 
     #[test]
@@ -726,6 +905,7 @@ mod tests {
                 )),
             )
             .unwrap();
+        assert!(guard.borrow_owned_effective_directory().is_err());
         let borrower = guard
             .borrow_workspace_view("view-alias", &"a".repeat(64))
             .unwrap()
@@ -736,6 +916,7 @@ mod tests {
                 .is_err()
         );
         assert!(guard.workspace_view_identity().is_err());
+        assert!(guard.borrow_owned_effective_directory().is_err());
         assert!(
             guard
                 .borrow_workspace_view("view-alias", &"a".repeat(64))
@@ -747,6 +928,7 @@ mod tests {
         guard
             .close_workspace_view("view-alias", &"a".repeat(64), close_deadline())
             .unwrap();
+        assert!(guard.borrow_owned_effective_directory().is_err());
         // Exact close replay is idempotent; closed slots never reopen borrowing.
         guard
             .close_workspace_view("view-alias", &"a".repeat(64), close_deadline())

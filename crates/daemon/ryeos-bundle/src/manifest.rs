@@ -196,6 +196,16 @@ pub struct BundleManifestSource {
     /// Presence never activates a backend; immutable node policy selects one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
+    /// Controller-side provider contracts shipped by this feature bundle.
+    /// Presence declares exact roles; activation remains a separate signed
+    /// node/profile decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_providers: Vec<ryeos_external_execution_contract::ExternalProviderDeclaration>,
+    /// External occurrence lifecycle implementations shipped by this bundle.
+    /// Provider-specific settings and credentials remain protected node inputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_lifecycle_adapters:
+        Vec<ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -223,6 +233,39 @@ pub struct BundleManifest {
     /// Signed privileged isolation declarations, carried verbatim from source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_providers: Vec<ryeos_external_execution_contract::ExternalProviderDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_lifecycle_adapters:
+        Vec<ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration>,
+}
+
+fn validate_external_execution_declarations(
+    providers: &[ryeos_external_execution_contract::ExternalProviderDeclaration],
+    lifecycle_adapters: &[ryeos_external_execution_contract::ExternalLifecycleAdapterDeclaration],
+) -> Result<()> {
+    let mut provider_ids = std::collections::BTreeSet::new();
+    for provider in providers {
+        provider.validate().map_err(|error| {
+            anyhow::anyhow!("invalid external provider `{}`: {error}", provider.id)
+        })?;
+        if !provider_ids.insert(provider.id.as_str()) {
+            bail!("duplicate external provider id `{}`", provider.id);
+        }
+    }
+    let mut adapter_ids = std::collections::BTreeSet::new();
+    for adapter in lifecycle_adapters {
+        adapter.validate().map_err(|error| {
+            anyhow::anyhow!(
+                "invalid external lifecycle adapter `{}`: {error}",
+                adapter.id
+            )
+        })?;
+        if !adapter_ids.insert(adapter.id.as_str()) {
+            bail!("duplicate external lifecycle adapter id `{}`", adapter.id);
+        }
+    }
+    Ok(())
 }
 
 fn validate_isolation_backends(
@@ -319,6 +362,11 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
     validate_isolation_backends(&source.isolation_backends)
         .map_err(|e| anyhow::anyhow!("invalid `isolation_backends` declaration: {e}"))?;
+    validate_external_execution_declarations(
+        &source.external_providers,
+        &source.external_lifecycle_adapters,
+    )
+    .map_err(|e| anyhow::anyhow!("invalid external execution declaration: {e}"))?;
     let provides_kinds = derive_provides_kinds(ai_dir)?;
     Ok(BundleManifest {
         name: source.name,
@@ -331,6 +379,8 @@ pub fn materialize_manifest(
         smoke: source.smoke,
         shadows: source.shadows,
         isolation_backends: source.isolation_backends,
+        external_providers: source.external_providers,
+        external_lifecycle_adapters: source.external_lifecycle_adapters,
     })
 }
 
@@ -402,6 +452,16 @@ pub fn load_verified_manifest(
             manifest_path.display()
         )
     })?;
+    validate_external_execution_declarations(
+        &manifest.external_providers,
+        &manifest.external_lifecycle_adapters,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "invalid external execution declaration in {}: {error}",
+            manifest_path.display()
+        )
+    })?;
     if manifest.name != expected_name {
         bail!(
             "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}'",
@@ -465,6 +525,16 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    validate_external_execution_declarations(
+        &manifest.external_providers,
+        &manifest.external_lifecycle_adapters,
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "invalid external execution declaration in {}: {error}",
             manifest_path.display()
         )
     })?;
@@ -686,6 +756,10 @@ fn parse_all_manifests(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, Bun
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_external_execution_contract::{
+        ExternalLifecycleAdapterDeclaration, ExternalProviderDeclaration,
+        LIFECYCLE_ADAPTER_PROTOCOL, LifecycleCapability, PROVIDER_CONFIGURATION_PROTOCOL,
+    };
 
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -693,6 +767,100 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
             .to_path_buf()
+    }
+
+    fn external_provider(id: &str) -> ExternalProviderDeclaration {
+        ExternalProviderDeclaration {
+            id: id.to_string(),
+            protocol: PROVIDER_CONFIGURATION_PROTOCOL.to_string(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            connector: "provider-connector".to_string(),
+            connector_process_group:
+                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+            configuration_adapter: "provider-configuration".to_string(),
+            configuration_destination: "provider.json".to_string(),
+        }
+    }
+
+    fn external_lifecycle_adapter(id: &str) -> ExternalLifecycleAdapterDeclaration {
+        ExternalLifecycleAdapterDeclaration {
+            id: id.to_string(),
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.to_string(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            adapter: "lifecycle-adapter".to_string(),
+            supervisor: "candidate-supervisor".to_string(),
+            launcher: "candidate-launcher".to_string(),
+            settings_schema_digest: "a".repeat(64),
+            capabilities: [LifecycleCapability::ExactAllocationReconciliation]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn external_execution_declarations_accept_closed_unique_contracts() {
+        validate_external_execution_declarations(
+            &[external_provider("provider-test")],
+            &[external_lifecycle_adapter("lifecycle-test")],
+        )
+        .expect("closed external execution declarations should validate");
+    }
+
+    #[test]
+    fn external_execution_declarations_reject_duplicate_identities() {
+        let provider = external_provider("provider-test");
+        let error = validate_external_execution_declarations(
+            &[provider.clone(), provider],
+            &[external_lifecycle_adapter("lifecycle-test")],
+        )
+        .expect_err("duplicate provider identity must fail before signing");
+        assert!(
+            error.to_string().contains("duplicate external provider id"),
+            "unexpected error: {error:#}"
+        );
+
+        let adapter = external_lifecycle_adapter("lifecycle-test");
+        let error = validate_external_execution_declarations(
+            &[external_provider("provider-test")],
+            &[adapter.clone(), adapter],
+        )
+        .expect_err("duplicate lifecycle identity must fail before signing");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate external lifecycle adapter id"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn external_execution_declarations_reject_open_or_malformed_contracts() {
+        let mut provider = external_provider("provider-test");
+        provider.protocol = "provider-protocol:any".to_string();
+        let error = validate_external_execution_declarations(&[provider], &[])
+            .expect_err("an unsupported provider protocol must fail before signing");
+        assert!(
+            error.to_string().contains("unsupported protocol"),
+            "unexpected error: {error:#}"
+        );
+
+        let mut adapter = external_lifecycle_adapter("lifecycle-test");
+        adapter.adapter = "../lifecycle-adapter".to_string();
+        let error = validate_external_execution_declarations(&[], &[adapter])
+            .expect_err("a path-selectable adapter must fail before signing");
+        assert!(
+            error.to_string().contains("lifecycle adapter"),
+            "unexpected error: {error:#}"
+        );
+
+        let mut adapter = external_lifecycle_adapter("lifecycle-test");
+        adapter.capabilities.clear();
+        let error = validate_external_execution_declarations(&[], &[adapter])
+            .expect_err("an adapter without declared semantics must fail before signing");
+        assert!(
+            error.to_string().contains("declares no capabilities"),
+            "unexpected error: {error:#}"
+        );
     }
 
     fn materialize_test_manifest(bundle: &Path, name: &str) {
@@ -1076,6 +1244,8 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
@@ -1105,6 +1275,8 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
         assert!(err.to_string().contains("runtime_authority"), "got: {err}");
@@ -1273,6 +1445,8 @@ smoke:
             }],
             shadows: vec![],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source.clone(), &ai_dir, "probe").unwrap();
         assert_eq!(manifest.smoke, source.smoke);
@@ -1345,6 +1519,8 @@ shadows:
             smoke: vec![],
             shadows: vec!["no-colon".to_string()],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "downstream").unwrap_err();
         assert!(err.to_string().contains("shadows"), "{err}");
@@ -1394,7 +1570,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v11
+    protocol: ryeos.isolation-adapter/v12
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: {}
@@ -1420,6 +1596,8 @@ isolation_backends:
             smoke: vec![],
             shadows: vec![],
             isolation_backends: vec![backend.clone()],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "isolation").unwrap();
         assert_eq!(manifest.isolation_backends, vec![backend]);

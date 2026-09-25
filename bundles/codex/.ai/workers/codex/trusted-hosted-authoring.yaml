@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-20T07:51:50Z:a9974b94bcf0bc1d30f71ce67023d68c2619bf3bb2aa4d7c682f0a0a886a6790:cvgqO74mHhNE6+cDu6zNn/QrxHYwTPIfG2vmFw1xRpCANXlMmHAdFafHMA2LC8I3zWl5MxpmEDMKR1itYyNvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T03:48:42Z:3e50c9f11b8bd737311d212ec4280b9e83032dfe9a13b24e8d9341e3c076fbc4:hpvBdC79CwdL/S7gFQSTk5josWczS0vw371fbYgN+RwfRRALI178RdNR6yGMqDSLaKY96XRij+jQDn6afqO5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Trusted disposable Codex authoring profile for explicitly opted-in hosted nodes."
 execution_protocol: protocol:ryeos/core/trusted_structured_session
+external_product_slots: []
 filesystem_authority: captured_execution
 supported_target:
   os: linux
@@ -13,7 +14,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "authoring.profile.json"
-  digest: "ae3130ec566a27c15d0106bc912b26e442464440b71ff2fea7c3357718c416ef"
+  digest: "19f769419b262ab765ee85a6e6ac425433c68103435f9ee46dac4b73186966e5"
 external_content:
   - id: codex
     kind: file

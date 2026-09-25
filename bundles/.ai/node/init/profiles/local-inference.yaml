@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T07:24:52Z:165921bbfcff903764ae74e9b309af8d2dc06f08e6cc7f855975cb4eeece32c1:Bl/OLI172TA1K+QYR4sSCf5D/rgy4gxgEtTGxrP8meh5UFUDHZ0889upMj6Cjk5vzDShDOpNJQtAMnVHJwzaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T10:24:07Z:2689aa9c630e9261daa12f6baf4eec912c688884efb6beaf03ed220e32fc7534:TLLDHHpTWK0RM5JZLVyXb7iLKQfHp6H/1Ef7SEiVCOKGNB+8ixlKyYgD4SqATa4aG/eNud8vZgFacrK+M2qhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -90,11 +90,12 @@ policies:
       standard:
         - ryeos.register.command.dispatch.direct_execute_item_ref
   execution:
-    schema: 3
+    schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
+    producer_resource_ceiling: null
     resource_authority:
       cleanup_allowance_ms: 30000
       admission:

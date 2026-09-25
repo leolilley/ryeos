@@ -47,6 +47,7 @@ skill_mcp_dependency_install = false
 remote_plugin = false
 hooks = false
 multi_agent = false
+multi_agent_v2 = false
 memories = false
 network_proxy = false
 # The authoring worker needs Codex's exact pinned host for its ordinary
@@ -55,7 +56,9 @@ network_proxy = false
 code_mode_host = true
 
 [features.code_mode]
-# Model-authored JavaScript execution is a separate feature and remains off.
+# This is the default, not an effective-tool-mode prohibition: pinned Codex
+# model metadata can select code mode first. Qualification must cover that
+# mode's host and nested tool routing as well as direct tools.
 enabled = false
 
 [orchestrator.skills]

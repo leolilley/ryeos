@@ -5,8 +5,10 @@
 //! that witness's signed relationship, projects facts from an already
 //! completed admitted verifier, and can publish that immutable testimony.
 
+pub mod launch;
 pub(super) mod runtime_identity;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
@@ -28,8 +30,9 @@ use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, load_product_attestation_value,
 };
 use ryeos_state::external_content::products::qualification::{
-    PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, ProductQualificationEvidence,
-    ProductQualificationPolicySource, ProductQualificationResult, ProductQualificationVerifier,
+    PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, ProductProducerRecipeSourceIdentity,
+    ProductQualificationEvidence, ProductQualificationPolicySource, ProductQualificationResult,
+    ProductQualificationVerifier,
 };
 use ryeos_state::external_content::products::qualification_publication::{
     QualificationCoordinate, QualificationWitnessLookup, VerifiedQualificationWitness,
@@ -43,14 +46,19 @@ use ryeos_state::objects::{
 use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
+use crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 use crate::node_policy::sections::object_closure::NodeObjectClosurePolicy;
 use crate::state::AppState;
 
 const QUALIFICATION_POLICY_FIELD: &str = "product_qualification_policy";
+const PRODUCER_RECIPE_FIELD: &str = "product_producer_recipe";
 
 /// Exact current identity reconstructed without publishing or launching a
 /// verifier. Execution mechanics come from its signed schema, not its kind name.
 pub(super) struct CurrentBundleVerifierIdentity {
+    /// Pre-realization identity of the exact signed Bundle verifier admitted
+    /// while resolving the current policy/product relationship.
+    pub admitted_definition_digest: String,
     pub effective_definition_digest: String,
     pub artifact_identity: ryeos_state::objects::AdmittedLaunchArtifactIdentity,
     resolution: ResolutionOutput,
@@ -264,6 +272,31 @@ fn prove_with_guard(
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
+    // A completed Tool is not, by itself, a product-qualification verifier.
+    // Only the dedicated operator launch may attach this retained purpose;
+    // the planning row binds its caller-retained launch coordinate to the
+    // exact root that produced the terminal being considered here.
+    let purpose = sealed
+        .product_qualification_purpose()
+        .context("qualification verifier has no admitted launch purpose")?;
+    let planning = state
+        .state_store
+        .launch_planning_record_for_owner(&purpose.launch_id, &context.fingerprint)?
+        .context("qualification verifier has no owner-bound launch reservation")?;
+    if planning.state != "bound"
+        || planning.reserved_thread_id != root.thread_id
+        || planning.bound_thread_id.as_deref() != Some(root.thread_id.as_str())
+        || purpose.owner_fingerprint != context.fingerprint
+        || purpose.product_witness_hash != product.attestation_hash
+        || purpose.witness_source != request.witness_source
+        || purpose.relationship_name != request.relationship_name
+        || purpose.policy_source != policy_source
+        || purpose.subject_declaration_id != policy_source.policy.subject_declaration_id
+        || purpose.subject_manifest_hash != product.evidence.manifest_hash
+        || purpose.required_claims != relationship.qualification.required_claims
+    {
+        bail!("qualification verifier purpose differs from its accepted product launch");
+    }
     let admitted_resolution = sealed.admitted_effective_resolution()?;
     require_reproducible_current_verifier_lane(&admitted_resolution.composed.derived, true)?;
     let (root_selectors, verifier_root_selections) = retained_verifier_root_selections(
@@ -328,6 +361,10 @@ fn prove_with_guard(
         effective_definition_digest == current_verifier.effective_definition_digest,
     )?;
     require_verifier_consistency(
+        "launch_purpose.realized_definition_digest",
+        purpose.verifier_realized_definition_digest == current_verifier.effective_definition_digest,
+    )?;
+    require_verifier_consistency(
         "policy.admitted_parameters_digest",
         admitted_parameters_digest == policy_source.policy.admitted_parameters_digest()?,
     )?;
@@ -368,7 +405,7 @@ fn prove_with_guard(
         product.evidence.total_bytes,
     )?;
 
-    let (projected_result, execution_proof) = execution_evidence::prove(
+    let (projected_result, execution_proof, process_settlement) = execution_evidence::prove(
         state,
         authority,
         guard,
@@ -419,6 +456,10 @@ fn prove_with_guard(
             terminal_snapshot_hash: ryeos_state::objects::thread_snapshot::hash_snapshot(
                 &terminal,
             )?,
+            process_settlement_witness_digest: process_settlement
+                .as_ref()
+                .map(|(digest, _)| digest.clone()),
+            process_settlement_authority: process_settlement.map(|(_, authority)| authority),
             result_digest,
         },
         result,
@@ -489,6 +530,7 @@ fn match_retained_verifier_root_selections(
         match &input.target {
             ProductSelectionTarget::Root {} => selectors.push(input.selection.clone()),
             ProductSelectionTarget::ContentDependency { .. }
+            | ProductSelectionTarget::ExecutionDependency { .. }
             | ProductSelectionTarget::WorkloadExecution { .. } => bail!(
                 "qualification verifier uses a prepared content-dependency product selection, whose current authority is unsupported"
             ),
@@ -595,6 +637,160 @@ pub(super) fn resolve_current_bundle_qualification_policy(
     };
     source.validate()?;
     Ok(source)
+}
+
+/// Re-resolve a finite producer scenario from the exact current signed Bundle
+/// generation. The callback supplies only `scenario_id`; the sealed purpose
+/// selects the policy and that policy selects the Config recipe. This is a
+/// preflight identity, not a process-launch grant. Callers must retain its
+/// identity in the attempt journal and recheck it at the irreversible release.
+pub fn resolve_current_bundle_producer_recipe_for_purpose(
+    state: &AppState,
+    purpose: &ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose,
+    scenario_id: &str,
+) -> anyhow::Result<CurrentBundleProducerRecipe> {
+    purpose.validate()?;
+    state.engine.with_checked_bundle_generation(|generation| {
+        let current_policy = resolve_current_bundle_qualification_policy(
+            state,
+            &purpose.policy_source.canonical_ref,
+        )?;
+        if current_policy != purpose.policy_source {
+            bail!("qualification producer policy changed after root admission");
+        }
+        let scenario = current_policy
+            .policy
+            .producer_scenarios
+            .get(scenario_id)
+            .context("qualification producer scenario is not signed in the admitted policy")?;
+        let current = resolve_bundle_producer_recipe_in_generation(
+            state,
+            generation.request_engine_generation_identity(),
+            &scenario.recipe_ref,
+        )?;
+        state
+            .node_policy
+            .require::<NodeExecutionAdmissionPolicy>()?
+            .admit_producer_bounds(&current.recipe.bounds)?;
+        let admitted = purpose
+            .producer_recipe_sources
+            .get(scenario_id)
+            .context("qualification purpose did not admit the selected producer scenario")?;
+        if current.source_identity()? != *admitted {
+            bail!("qualification producer recipe changed after root admission");
+        }
+        Ok(current)
+    })
+}
+
+/// Borrow the producer's input exclusively from the accepted verifier root.
+/// Operational SQLite coordinates locate the CAS capsule, but neither caller
+/// text nor a fresh policy resolution can supply or modify these bytes.
+pub fn admitted_root_producer_stdin(
+    state: &AppState,
+    root_thread_id: &str,
+    purpose: &ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose,
+) -> anyhow::Result<String> {
+    let (chain_root_id, _, capsule) = state
+        .state_store
+        .admitted_launch_capsule_with_coordinates(root_thread_id)?
+        .context("qualification root has no admitted launch capsule")?;
+    if chain_root_id != root_thread_id {
+        bail!("producer input requires the exact accepted verifier root");
+    }
+    let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+        &capsule,
+    )?;
+    sealed.admitted_qualification_producer_stdin(purpose)
+}
+
+/// Called at the accepted-root cut, before purpose sealing or verifier spawn.
+/// Resolve every finite scenario under one checked Bundle generation because
+/// the verifier chooses its scenario only after root admission.
+pub fn resolve_current_bundle_producer_recipes_for_policy(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+) -> anyhow::Result<BTreeMap<String, ProductProducerRecipeSourceIdentity>> {
+    policy_source.validate()?;
+    state.engine.with_checked_bundle_generation(|generation| {
+        let current =
+            resolve_current_bundle_qualification_policy(state, &policy_source.canonical_ref)?;
+        if current != *policy_source {
+            bail!("qualification producer policy changed before root admission");
+        }
+        let mut sources = BTreeMap::new();
+        for (scenario_id, scenario) in &current.policy.producer_scenarios {
+            let recipe = resolve_bundle_producer_recipe_in_generation(
+                state,
+                generation.request_engine_generation_identity(),
+                &scenario.recipe_ref,
+            )?;
+            state
+                .node_policy
+                .require::<NodeExecutionAdmissionPolicy>()?
+                .admit_producer_bounds(&recipe.recipe.bounds)?;
+            sources.insert(scenario_id.clone(), recipe.source_identity()?);
+        }
+        Ok(sources)
+    })
+}
+
+fn resolve_bundle_producer_recipe_in_generation(
+    state: &AppState,
+    generation_identity: &str,
+    recipe_ref: &str,
+) -> anyhow::Result<CurrentBundleProducerRecipe> {
+    let resolution = resolve_current_trusted_bundle(state, recipe_ref, Some("config"))?;
+    let recipe = ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
+        resolution
+            .composed
+            .composed
+            .get(PRODUCER_RECIPE_FIELD)
+            .context("producer Config has no product_producer_recipe")?
+            .clone(),
+    )?;
+    Ok(CurrentBundleProducerRecipe {
+        bundle_generation_identity: generation_identity.to_owned(),
+        canonical_ref: resolution.root.resolved_ref.clone(),
+        raw_content_digest: resolution.root.raw_content_digest.clone(),
+        effective_definition_digest: resolution
+            .effective_definition_digest()?
+            .as_str()
+            .to_owned(),
+        publisher_fingerprint: resolution
+            .root
+            .signer_fingerprint
+            .clone()
+            .context("trusted producer recipe has no publisher")?,
+        recipe,
+    })
+}
+
+/// The full signed source coordinate accompanies the parsed launch contract;
+/// a recipe digest alone cannot distinguish source or bundle-generation drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentBundleProducerRecipe {
+    pub bundle_generation_identity: String,
+    pub canonical_ref: String,
+    pub raw_content_digest: String,
+    pub effective_definition_digest: String,
+    pub publisher_fingerprint: String,
+    pub recipe: ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe,
+}
+
+impl CurrentBundleProducerRecipe {
+    pub fn source_identity(&self) -> anyhow::Result<ProductProducerRecipeSourceIdentity> {
+        let source = ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: self.bundle_generation_identity.clone(),
+            canonical_ref: self.canonical_ref.clone(),
+            raw_content_digest: self.raw_content_digest.clone(),
+            effective_definition_digest: self.effective_definition_digest.clone(),
+            publisher_fingerprint: self.publisher_fingerprint.clone(),
+            recipe_digest: self.recipe.digest()?,
+        };
+        source.validate()?;
+        Ok(source)
+    }
 }
 
 /// Re-resolve the exact current verifier from its signed Bundle source.
@@ -784,6 +980,11 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     )
     .context("admit current qualification verifier root")?;
     let admission = &preflight.root_admission;
+    let admitted_definition_digest = admission
+        .resolution_output()
+        .effective_definition_digest()?
+        .as_str()
+        .to_owned();
     let verified = admission.verified_subject();
     let mut resolution = admission.resolution_output().clone();
     require_reproducible_current_verifier_lane(&resolution.composed.derived, false)?;
@@ -1042,6 +1243,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
     drop(preselection_snapshots);
     authority.ensure_guard(guard)?;
     Ok(CurrentBundleVerifierIdentity {
+        admitted_definition_digest,
         effective_definition_digest,
         artifact_identity,
         resolution: finalized.resolution().clone(),
@@ -1805,6 +2007,54 @@ mod tests {
         qualified.selection.qualification_hash = Some("f".repeat(64));
         assert!(
             match_retained_verifier_root_selections(&[qualified], Some(retained), subject).is_err()
+        );
+    }
+
+    #[test]
+    fn verifier_preserves_auxiliary_root_product_selections() {
+        let subject = root_selection();
+        let mut auxiliary = root_selection();
+        auxiliary.declaration_id = "tools".to_owned();
+        auxiliary.relationship_name = "tools_to_verifier".to_owned();
+        auxiliary.relationship.name = auxiliary.relationship_name.clone();
+        auxiliary.relationship.consumer.declaration_id = auxiliary.declaration_id.clone();
+        auxiliary.witness_hash = "b".repeat(64);
+        auxiliary.declaration.id = auxiliary.declaration_id.clone();
+        auxiliary.declaration.mount = "qualification/tools".to_owned();
+        subject.validate().unwrap();
+        auxiliary.validate().unwrap();
+        let retained = ResolvedExternalProductSelections::new(BTreeMap::from([
+            (subject.declaration_id.clone(), subject.clone()),
+            (auxiliary.declaration_id.clone(), auxiliary.clone()),
+        ]))
+        .unwrap();
+        let selector = |selected: &ResolvedExternalProductSelection| ProductSelectionInput {
+            target: ProductSelectionTarget::Root {},
+            selection: ProductSelection {
+                declaration_id: selected.declaration_id.clone(),
+                witness_hash: selected.witness_hash.clone(),
+                witness_source: selected.witness_source.clone(),
+                qualification_hash: None,
+            },
+        };
+        let inputs = [selector(&subject), selector(&auxiliary)];
+        let (selectors, recovered) =
+            match_retained_verifier_root_selections(&inputs, Some(retained.clone()), "subject")
+                .unwrap();
+        assert_eq!(
+            selectors,
+            inputs
+                .iter()
+                .map(|input| input.selection.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(recovered, Some(retained.clone()));
+
+        let mut mismatched = inputs;
+        mismatched[1].selection.witness_hash = "c".repeat(64);
+        assert!(
+            match_retained_verifier_root_selections(&mismatched, Some(retained), "subject")
+                .is_err()
         );
     }
 }

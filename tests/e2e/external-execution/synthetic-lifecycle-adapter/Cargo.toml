@@ -1,0 +1,82 @@
+[package]
+name = "ryeos-synthetic-external-lifecycle-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+lillux = { workspace = true }
+ryeos-external-candidate-supervisor = { path = "../../../../crates/tools/external-candidate-supervisor", features = ["test-support"] }
+ryeos-external-candidate-launcher = { path = "../../../../crates/tools/external-candidate-launcher" }
+ryeos-external-execution = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
+ryeos-independent-runtime-verifier = { path = "../../../../crates/tools/independent-runtime-verifier" }
+ryeos-project-capture = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+ryeos-app = { workspace = true, features = ["test-support"] }
+ryeos-api = { workspace = true }
+ryeos-bundle = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-executor = { workspace = true, features = ["test-support"] }
+ryeos-isolation-protocol = { workspace = true }
+ryeosd = { path = "../../../../crates/bin/daemon" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[bin]]
+name = "ryeos-synthetic-external-lifecycle-adapter"
+path = "src/main.rs"
+
+[[bin]]
+name = "ryeos-synthetic-external-candidate-supervisor"
+path = "src/bin/supervisor.rs"
+
+[[bin]]
+name = "ryeos-synthetic-external-candidate-launcher"
+path = "src/bin/launcher.rs"
+
+[[bin]]
+name = "ryeos-synthetic-external-candidate-runtime"
+path = "src/bin/candidate.rs"
+
+[[bin]]
+name = "ryeos-synthetic-external-provider-runtime"
+path = "src/bin/provider.rs"
+
+[[bin]]
+name = "ryeos-synthetic-external-evaluator"
+path = "src/bin/evaluator.rs"
+
+[[bin]]
+name = "ryeos-synthetic-runtime-input-probe"
+path = "src/bin/runtime_input_probe.rs"
+
+[[bin]]
+name = "ryeos-synthetic-native-mechanism-probe"
+path = "src/bin/native_mechanism_probe.rs"
+
+[[bin]]
+name = "ryeos-synthetic-routed-guest"
+path = "src/bin/routed_guest.rs"
+
+# Compile the exact production connector/configuration sources into the
+# private signed fixture bundle. Their test-specific executable names are part
+# of that bundle's independently admitted artifact identity.
+[[bin]]
+name = "ryeos-synthetic-external-candidate-connector"
+path = "../../../../crates/tools/external-candidate-connector/src/main.rs"
+
+[[bin]]
+name = "ryeos-synthetic-codex-external-configuration"
+path = "../../../../crates/tools/codex-external-configuration/src/main.rs"

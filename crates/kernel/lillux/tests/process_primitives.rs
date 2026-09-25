@@ -14,8 +14,8 @@ use std::io::{Read as _, Write as _};
 use lillux::{
     CooperativeChildTermination, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
     configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
-    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
-    validate_subprocess_limits,
+    sealed_memfd, spawn, spawn_detached, spawn_detached_from_executable,
+    supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -104,6 +104,134 @@ fn typed_duplex_channel_can_replace_child_standard_input_as_full_duplex() {
     let mut message = String::new();
     parent.read_to_string(&mut message).unwrap();
     assert_eq!(message, "mapped-zero");
+}
+
+#[test]
+fn direct_child_input_eof_preserves_final_stdout_capture() {
+    let (mut parent, child) = lillux::inherited_duplex_channel_pair().unwrap();
+    let mut request = sh(&["-c", "/bin/cat"]);
+    request.timeout = 5.0;
+    child.bind_as_subprocess_stdin(&mut request).unwrap();
+    drop(child);
+    let running = spawn(request).unwrap();
+    let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2));
+    parent.with_deadline(deadline).write_all(b"final output\n").unwrap();
+    parent.shutdown_write().unwrap();
+    let result = running.wait();
+    assert!(result.success, "{}", result.stderr);
+    assert_eq!(result.stdout, "final output\n");
+}
+
+#[test]
+fn interactive_standard_input_refuses_buffered_input() {
+    let (_parent, child) = lillux::inherited_duplex_channel_pair().unwrap();
+    let mut request = sh(&["-c", "read value"]);
+    request.stdin_data = Some("buffered".into());
+    assert!(child.bind_as_subprocess_stdin(&mut request).is_err());
+    assert!(request.inherited_fd_mappings.is_empty());
+}
+
+#[test]
+fn final_spawn_refuses_buffered_input_with_any_fd_zero_mapping() {
+    for buffer_after_bind in [false, true] {
+        let (_parent, child) = lillux::inherited_duplex_channel_pair().unwrap();
+        let mut request = sh(&["-c", "read value"]);
+        if buffer_after_bind {
+            child.bind_as_subprocess_stdin(&mut request).unwrap();
+            request.stdin_data = Some("late buffered input".into());
+        } else {
+            request.stdin_data = Some("early buffered input".into());
+            child
+                .bind_to_subprocess_request(&mut request, "RYEOS_TEST_CHANNEL_FD", 0)
+                .unwrap();
+        }
+        let failure = lillux::spawn(request)
+            .err()
+            .expect("conflicting spawn refused");
+        assert!(
+            failure
+                .stderr
+                .contains("buffered stdin conflicts with an inherited fd-0 mapping"),
+            "{failure:?}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn held_launch_can_exchange_duplex_input_and_observed_stdout_after_release() {
+    use std::ffi::OsStr;
+
+    let temp = tempfile::tempdir().unwrap();
+    let selected = temp.path().join("selected");
+    let moved = temp.path().join("moved");
+    std::fs::create_dir(&selected).unwrap();
+    std::fs::copy("/bin/sh", selected.join("guest")).unwrap();
+    let cwd = lillux::PinnedDirectory::open(&selected).unwrap().unwrap();
+    let executable = cwd
+        .open_pinned_regular(OsStr::new("guest"), false)
+        .unwrap()
+        .unwrap()
+        .into_inherited_descriptor_path()
+        .unwrap();
+    let cwd_authority = cwd.into_inherited_descriptor_path().unwrap();
+    let (mut parent, child) = lillux::inherited_duplex_channel_pair().unwrap();
+    let mut request = sh(&[
+        "-c",
+        "IFS= read -r value; printf '%s\\n' \"$value\"; pwd -P",
+    ]);
+    request.timeout = 5.0;
+    request.cwd = Some(cwd_authority.path().to_str().unwrap().to_owned());
+    request.inherited_fds.push(cwd_authority);
+    child.bind_as_subprocess_stdin(&mut request).unwrap();
+    assert!(request.envs.is_empty());
+    drop(child);
+
+    executable
+        .bind_as_subprocess_executable_at_source(&mut request)
+        .unwrap();
+
+    let pending = lillux::spawn_awaiting_attachment(request).expect("held child");
+    assert!(pending.exact_process_identity().is_ok());
+    std::fs::rename(&selected, &moved).unwrap();
+    std::fs::create_dir(&selected).unwrap();
+    std::fs::copy("/bin/false", selected.join("guest")).unwrap();
+    let mut running = pending.release_after_attachment().expect("release child");
+    let mut stdout = running.take_stdout_reader().expect("capture reader");
+    let observer = std::thread::spawn(move || -> std::io::Result<String> {
+        let deadline = lillux::time::MonotonicDeadline::after(std::time::Duration::from_secs(2));
+        parent
+            .with_deadline(deadline)
+            .write_all(b"held-interactive\n")
+            .map_err(|error| std::io::Error::new(error.kind(), format!("write: {error}")))?;
+        let mut response = Vec::new();
+        let mut chunk = [0; 128];
+        loop {
+            let count = stdout
+                .read_until(&mut chunk, deadline)
+                .map_err(|error| std::io::Error::new(error.kind(), format!("read: {error}")))?;
+            if count == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..count]);
+        }
+        String::from_utf8(response).map_err(std::io::Error::other)
+    });
+
+    let completion = match running.wait_for_natural_exit(std::time::Duration::from_secs(5)) {
+        Ok(completion) => completion,
+        Err(running) => {
+            running.abort();
+            panic!("held interactive child did not finish naturally");
+        }
+    };
+    let observed = observer
+        .join()
+        .expect("observer task")
+        .expect("observe stdout");
+
+    assert!(completion.success, "{}", completion.stderr);
+    assert_eq!(observed, format!("held-interactive\n{}\n", moved.display()));
 }
 
 #[test]
@@ -779,6 +907,76 @@ fn spawn_detached_writes_to_log_file() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(content, "detached-ok");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn descriptor_rooted_executable_launch_does_not_claim_an_ambient_fixed_descriptor() {
+    use std::os::fd::AsRawFd as _;
+
+    // Reproduce the long-lived daemon condition that invalidated the former
+    // fixed-fd lifecycle launch. Only descriptors opened by this test are
+    // retained; an already-live fd 48 is left untouched.
+    let mut occupied = Vec::new();
+    while unsafe { libc::fcntl(48, libc::F_GETFD) } < 0 {
+        occupied.push(std::fs::File::open("/dev/null").unwrap());
+        assert!(
+            occupied.len() < 128,
+            "could not occupy the regression descriptor"
+        );
+    }
+    assert!(unsafe { libc::fcntl(48, libc::F_GETFD) } >= 0);
+
+    let shell = std::fs::read("/bin/sh").unwrap();
+    let executable =
+        sealed_executable_memfd(c"lillux-source-executable-test", &shell).expect("memfd");
+    assert_ne!(executable.inherited_descriptor().unwrap(), 48);
+
+    let mut request = SubprocessRequest {
+        cmd: String::new(),
+        argv0: Some("source-bound-sh".into()),
+        args: vec!["-c".into(), "printf source-bound".into()],
+        cwd: None,
+        envs: Vec::new(),
+        stdin_data: None,
+        timeout: 30.0,
+        limits: None,
+        inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
+        supervised_status: None,
+    };
+    let coordinate = executable
+        .bind_as_subprocess_executable_at_source(&mut request)
+        .unwrap();
+    assert_eq!(coordinate, executable.inherited_descriptor().unwrap());
+
+    let result = run(request);
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.stdout, "source-bound");
+
+    let log_root = tempfile::tempdir().unwrap();
+    let log = log_root.path().join("detached.log");
+    spawn_detached_from_executable(
+        &executable,
+        &["-c".into(), "printf detached-source-bound".into()],
+        Some(log.to_str().unwrap()),
+        &[],
+    )
+    .unwrap();
+    let mut output = String::new();
+    for _ in 0..50 {
+        if let Ok(value) = std::fs::read_to_string(&log)
+            && !value.is_empty()
+        {
+            output = value;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(output, "detached-source-bound");
+
+    // Keep the test-owned occupancy handles live through both launches.
+    assert!(occupied.iter().all(|file| file.as_raw_fd() >= 0));
 }
 
 // ── liveness / termination on unused PIDs ──────────────────────────────

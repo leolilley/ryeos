@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Access granted to one exact descriptor-backed mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +170,16 @@ pub struct LinuxSandboxRequest {
     pub aggregate_limits: Option<LinuxSandboxAggregateLimits>,
 }
 
+/// Whether a guest mount would overlap namespace structure owned by Lillux.
+/// Higher layers may reserve their own authored destinations, but must never
+/// reproduce the host backend's proc/device/system/private-tmp layout.
+pub fn linux_sandbox_mount_overlaps_managed_namespace(destination: &Path) -> bool {
+    ["/proc", "/dev", "/sys", "/tmp"]
+        .into_iter()
+        .map(Path::new)
+        .any(|managed| destination.starts_with(managed) || managed.starts_with(destination))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinuxSandboxInspection {
     pub descriptor_mounts: bool,
@@ -228,6 +238,128 @@ pub struct LinuxSandboxProcess {
     /// never for helper/probe children. Kept private and non-serializable.
     #[cfg(target_os = "linux")]
     namespace_lifetime: Option<std::os::fd::OwnedFd>,
+    /// Lillux-private, close-on-exec evidence channel. A record proves setup
+    /// or exec failed before the workload existed. EOF alone does not prove
+    /// execution: killing a pre-exec child also closes its descriptor. It is
+    /// never workload stderr or inherited by a successfully executed target.
+    #[cfg(target_os = "linux")]
+    launch_failure: Option<std::fs::File>,
+    /// Private child-to-owner channel for one bounded post-chdir, pre-exec
+    /// observation. This is never a proof that execve succeeded.
+    #[cfg(target_os = "linux")]
+    applied_launch: Option<std::fs::File>,
+    #[cfg(target_os = "linux")]
+    observed_applied_launch: Option<LinuxSandboxAppliedLaunchReceipt>,
+    /// Once cleanup has been requested, its observed status can never be
+    /// presented as an independently observed target completion.
+    #[cfg(target_os = "linux")]
+    termination_requested: bool,
+}
+
+/// Native testimony from the exact owned PID-namespace init immediately
+/// before its execve attempt. The four SHA-256 commitments cover the actual
+/// executable, constructed argv/envp, and getcwd result; no argument or
+/// environment bytes are retained. A low-entropy value can still be guessed
+/// from its digest, so this is not a secrecy boundary or a public log record.
+/// Readiness, this receipt, and failure-pipe EOF do not prove exec success.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxSandboxAppliedLaunchReceipt {
+    /// Host PID of the still-owned, unreaped child whose private pipe delivered
+    /// this record; attached by the owner, never trusted from child bytes.
+    pub owned_child_pid: u32,
+    pub namespace_pid: u32,
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+    pub no_new_privs: bool,
+    pub seccomp_mode: u32,
+    pub executable_sha256: [u8; 32],
+    pub argv_sha256: [u8; 32],
+    pub environment_sha256: [u8; 32],
+    pub cwd_sha256: [u8; 32],
+}
+
+/// Borrowed expected target fields for an independent receipt comparison.
+/// Filesystem mounts and lifecycle controls are deliberately not inferred
+/// from these fields; their admission and application need separate evidence.
+pub struct LinuxSandboxAppliedLaunchTarget<'a> {
+    pub executable: &'a Path,
+    pub argv0: &'a std::ffi::OsStr,
+    pub arguments: &'a [OsString],
+    pub cwd: &'a Path,
+    pub environment: &'a BTreeMap<OsString, OsString>,
+}
+
+/// Secret-bearing-in-practice commitments to the exact requested pre-exec
+/// target. Retain only in protected launch/evaluation state: low-entropy
+/// environment values can be guessed from their hashes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinuxSandboxAppliedLaunchCommitments {
+    pub executable_sha256: [u8; 32],
+    pub argv_sha256: [u8; 32],
+    pub environment_sha256: [u8; 32],
+    pub cwd_sha256: [u8; 32],
+}
+
+impl LinuxSandboxAppliedLaunchCommitments {
+    /// Derive only from an independently admitted target, never from a child
+    /// receipt or a later observation object.
+    pub fn from_target(target: LinuxSandboxAppliedLaunchTarget<'_>) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            imp::applied_launch_commitments_from_target(target)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = target;
+            Err("native applied-launch commitments are unavailable on this platform".into())
+        }
+    }
+}
+
+impl LinuxSandboxAppliedLaunchReceipt {
+    /// Compare actual pre-exec C-string commitments with one complete request.
+    /// A mismatch refuses; this does not prove the subsequent execve succeeded.
+    pub fn matches_request(&self, request: &LinuxSandboxRequest) -> Result<bool, String> {
+        self.matches_target(LinuxSandboxAppliedLaunchTarget {
+            executable: &request.executable,
+            argv0: &request.argv0,
+            arguments: &request.arguments,
+            cwd: &request.cwd,
+            environment: &request.environment,
+        })
+    }
+
+    /// Compare only the actual pre-exec target fields with independently
+    /// authored expected values. No request or mount authority is minted.
+    pub fn matches_target(
+        &self,
+        target: LinuxSandboxAppliedLaunchTarget<'_>,
+    ) -> Result<bool, String> {
+        #[cfg(target_os = "linux")]
+        {
+            imp::applied_launch_matches_target(self, target)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = target;
+            Err("native applied-launch comparison is unavailable on this platform".into())
+        }
+    }
+
+    pub fn matches_commitments(&self, expected: &LinuxSandboxAppliedLaunchCommitments) -> bool {
+        self.owned_child_pid > 0
+            && self.namespace_pid == 1
+            && self.effective_uid == 1
+            && self.effective_gid == 1
+            && self.no_new_privs
+            && self.seccomp_mode == 2
+            && self.executable_sha256 == expected.executable_sha256
+            && self.argv_sha256 == expected.argv_sha256
+            && self.environment_sha256 == expected.environment_sha256
+            && self.cwd_sha256 == expected.cwd_sha256
+    }
 }
 
 /// Terminal writer exclusion from an owned native sandbox namespace.
@@ -239,11 +371,57 @@ pub struct LinuxSandboxProcess {
 #[derive(Debug)]
 pub struct LinuxSandboxTermination {
     exit: LinuxSandboxExit,
+    launch_failure: Option<LinuxSandboxLaunchFailure>,
+}
+
+/// Terminal status observed for the exact released target without requesting
+/// termination. The native target itself is namespace PID 1, not a wait shim.
+/// A launch failure is distinct from a workload exit, even for code 125.
+/// Namespace death excludes descendant writers; protocol/output draining is
+/// still a separate obligation and is not performed by this observation.
+#[derive(Debug)]
+pub struct LinuxSandboxTargetExit {
+    termination: LinuxSandboxTermination,
+}
+
+impl LinuxSandboxTargetExit {
+    pub fn exit(&self) -> LinuxSandboxExit {
+        self.termination.exit()
+    }
+
+    pub fn launch_failure(&self) -> Option<&LinuxSandboxLaunchFailure> {
+        self.termination.launch_failure()
+    }
+
+    /// Transfer the already-established namespace writer-exclusion proof;
+    /// there is no second signal or reap after natural target completion.
+    pub fn into_termination(self) -> LinuxSandboxTermination {
+        self.termination
+    }
+}
+
+/// Trusted evidence that Lillux failed before the requested workload existed.
+///
+/// This must not be inferred from an exit code: a real workload may itself
+/// return any code, including Lillux's private child-failure sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxSandboxLaunchFailure {
+    diagnostic: String,
 }
 
 impl LinuxSandboxTermination {
     pub fn exit(&self) -> LinuxSandboxExit {
         self.exit
+    }
+
+    pub fn launch_failure(&self) -> Option<&LinuxSandboxLaunchFailure> {
+        self.launch_failure.as_ref()
+    }
+}
+
+impl LinuxSandboxLaunchFailure {
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
     }
 }
 
@@ -255,6 +433,8 @@ pub struct HeldLinuxSandboxProcess {
     process: LinuxSandboxProcess,
     #[cfg(target_os = "linux")]
     release: Option<std::fs::File>,
+    #[cfg(target_os = "linux")]
+    release_succeeded: bool,
 }
 
 /// Protected supervisor ends of candidate-only protocol pipes. They carry no
@@ -331,6 +511,18 @@ pub fn prepare_linux_sandbox_piped(
 }
 
 impl HeldLinuxSandboxProcess {
+    /// Poll the exact child-only applied-launch channel. `None` means the
+    /// child has not reached the pre-exec boundary. EOF without a complete
+    /// record is refusal, including a child killed before reaching it.
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxAppliedLaunchReceipt>, String> {
+        if !self.release_succeeded {
+            return Err("native target has not been successfully released".into());
+        }
+        self.process.try_observe_applied_launch()
+    }
+
     pub fn release_once(&mut self) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
@@ -343,10 +535,60 @@ impl HeldLinuxSandboxProcess {
                 .ok_or("native target release was already consumed")?;
             release
                 .write_all(&[1])
-                .map_err(|error| format!("release held native target: {error}"))
+                .map_err(|error| format!("release held native target: {error}"))?;
+            self.release_succeeded = true;
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         Err("held native sandbox is unavailable on this platform".into())
+    }
+
+    /// Nonblocking observation of the actual target's terminal status. Pending
+    /// returns `None` without changing ownership or signalling. A successful
+    /// observation exclusively reaps once and consumes the live process handle.
+    /// Refuses before successful release and after any termination request,
+    /// including one whose settlement timed out.
+    pub fn try_observe_target_exit(&mut self) -> Result<Option<LinuxSandboxTargetExit>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            if !self.release_succeeded {
+                return Err("native target has not been successfully released".into());
+            }
+            if self.process.termination_requested {
+                return Err("native target completion cannot follow a termination request".into());
+            }
+            let lifetime = self
+                .process
+                .namespace_lifetime
+                .as_ref()
+                .filter(|_| self.process.pid > 0)
+                .ok_or("sandbox handle is not a live owned namespace-init authority")?;
+            let mut descriptor = libc::pollfd {
+                fd: lifetime.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+            if ready == 0 {
+                return Ok(None);
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    return Ok(None);
+                }
+                return Err(format!("observe native target exit: {error}"));
+            }
+            if descriptor.revents & libc::POLLIN == 0 {
+                return Err("sandbox namespace did not provide exact exit readiness".into());
+            }
+            self.process.reap_ready_namespace().map(|termination| {
+                termination.map(|termination| LinuxSandboxTargetExit { termination })
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native target observation is unavailable on this platform".into())
     }
 
     pub fn terminate_namespace_for_export(
@@ -361,6 +603,20 @@ impl HeldLinuxSandboxProcess {
             self.release = None;
         }
         self.process.terminate_namespace_for_export(timeout)
+    }
+
+    /// Terminate beneath one caller-owned absolute deadline while keeping the
+    /// native settlement-probe ceiling inside Lillux. Callers select lifecycle
+    /// policy; they do not duplicate host wait limits or clock arithmetic.
+    pub fn terminate_namespace_for_export_until(
+        &mut self,
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxTermination, String> {
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err("sandbox termination deadline already elapsed".into());
+        }
+        self.terminate_namespace_for_export(remaining.min(std::time::Duration::from_secs(60)))
     }
 }
 
@@ -430,6 +686,7 @@ fn prepare_linux_sandbox_inner(
         Ok(HeldLinuxSandboxProcess {
             process,
             release: Some(writer),
+            release_succeeded: false,
         })
     }
     #[cfg(not(target_os = "linux"))]
@@ -440,6 +697,57 @@ fn prepare_linux_sandbox_inner(
 }
 
 impl LinuxSandboxProcess {
+    /// Poll a bounded post-chdir, pre-exec observation from this exact owned
+    /// native target. Ordinary launch needs no separate release; held launch
+    /// must be polled through the held wrapper after release.
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<LinuxSandboxAppliedLaunchReceipt>, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            if let Some(receipt) = &self.observed_applied_launch {
+                return Ok(Some(receipt.clone()));
+            }
+            if self.termination_requested {
+                return Err("sandbox applied-launch cannot follow a termination request".into());
+            }
+            let channel = self
+                .applied_launch
+                .as_ref()
+                .ok_or("sandbox applied-launch channel was already consumed")?;
+            if self.pid <= 0 {
+                return Err("sandbox applied-launch requires its exact unreaped child".into());
+            }
+            let mut descriptor = libc::pollfd {
+                fd: channel.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+            if ready == 0 {
+                return Ok(None);
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    return Ok(None);
+                }
+                return Err(format!("poll sandbox applied-launch channel: {error}"));
+            }
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+                return Err("sandbox applied-launch channel has invalid readiness".into());
+            }
+            let mut receipt = imp::read_applied_launch(channel.as_raw_fd())?;
+            receipt.owned_child_pid = self.pid as u32;
+            self.applied_launch = None;
+            self.observed_applied_launch = Some(receipt.clone());
+            Ok(Some(receipt))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err("native applied-launch observation is unavailable on this platform".into())
+    }
+
     /// End the complete namespace writer domain before terminal export.
     ///
     /// Native launch itself proved this child was namespace PID 1. Linux tears
@@ -466,6 +774,7 @@ impl LinuxSandboxProcess {
             let deadline = std::time::Instant::now()
                 .checked_add(timeout)
                 .ok_or("sandbox termination deadline overflow")?;
+            self.termination_requested = true;
             let signalled = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
@@ -507,29 +816,46 @@ impl LinuxSandboxProcess {
                 if descriptor.revents & libc::POLLIN == 0 {
                     return Err("sandbox namespace did not provide exact exit readiness".into());
                 }
-                let mut status = 0;
-                let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
-                if reaped < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
-                {
-                    continue;
+                if let Some(termination) = self.reap_ready_namespace()? {
+                    return Ok(termination);
                 }
-                if reaped != self.pid {
-                    return Err("sandbox namespace exit lacks exclusive child-reap evidence".into());
-                }
-                self.pid = 0;
-                self.namespace_lifetime = None;
-                let exit = if libc::WIFEXITED(status) {
-                    LinuxSandboxExit::Code(libc::WEXITSTATUS(status))
-                } else if libc::WIFSIGNALED(status) {
-                    LinuxSandboxExit::Signal(libc::WTERMSIG(status))
-                } else {
-                    return Err("sandbox namespace has an unsupported terminal status".into());
-                };
-                return Ok(LinuxSandboxTermination { exit });
             }
         }
         #[cfg(not(target_os = "linux"))]
         Err("native sandbox namespace termination is unavailable on this platform".into())
+    }
+
+    /// Only called after pidfd readiness for this exact owned PID-1 child.
+    /// After its reap the kernel has also ended descendants, so the private
+    /// launch-failure pipe has no surviving writer and its bounded read cannot
+    /// wait for workload output. EINTR retains authority for a later attempt.
+    #[cfg(target_os = "linux")]
+    fn reap_ready_namespace(&mut self) -> Result<Option<LinuxSandboxTermination>, String> {
+        if self.pid <= 0 || self.namespace_lifetime.is_none() {
+            return Err("sandbox handle is not a live owned namespace-init authority".into());
+        }
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        if reaped < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            return Ok(None);
+        }
+        if reaped != self.pid {
+            return Err("sandbox namespace exit lacks exclusive child-reap evidence".into());
+        }
+        self.pid = 0;
+        self.namespace_lifetime = None;
+        let exit = if libc::WIFEXITED(status) {
+            LinuxSandboxExit::Code(libc::WEXITSTATUS(status))
+        } else if libc::WIFSIGNALED(status) {
+            LinuxSandboxExit::Signal(libc::WTERMSIG(status))
+        } else {
+            return Err("sandbox namespace has an unsupported terminal status".into());
+        };
+        let launch_failure = imp::read_launch_failure(self.launch_failure.take())?;
+        Ok(Some(LinuxSandboxTermination {
+            exit,
+            launch_failure,
+        }))
     }
 
     pub fn child_pid(&self) -> u32 {
@@ -555,10 +881,26 @@ impl LinuxSandboxProcess {
                 if waited == self.pid {
                     self.pid = 0;
                     if libc::WIFEXITED(status) {
-                        return Ok(LinuxSandboxExit::Code(libc::WEXITSTATUS(status)));
+                        let exit = LinuxSandboxExit::Code(libc::WEXITSTATUS(status));
+                        if let Some(failure) = imp::read_launch_failure(self.launch_failure.take())?
+                        {
+                            return Err(format!(
+                                "sandbox target was not executed: {}",
+                                failure.diagnostic()
+                            ));
+                        }
+                        return Ok(exit);
                     }
                     if libc::WIFSIGNALED(status) {
-                        return Ok(LinuxSandboxExit::Signal(libc::WTERMSIG(status)));
+                        let exit = LinuxSandboxExit::Signal(libc::WTERMSIG(status));
+                        if let Some(failure) = imp::read_launch_failure(self.launch_failure.take())?
+                        {
+                            return Err(format!(
+                                "sandbox target was not executed: {}",
+                                failure.diagnostic()
+                            ));
+                        }
+                        return Ok(exit);
                     }
                     return Err("sandbox target returned an unsupported wait status".to_string());
                 }
@@ -582,7 +924,14 @@ impl Drop for LinuxSandboxProcess {
         if self.pid > 0 {
             unsafe {
                 libc::kill(self.pid, libc::SIGKILL);
-                libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                loop {
+                    let result = libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                    if result >= 0
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                    {
+                        break;
+                    }
+                }
             }
             self.pid = 0;
         }
@@ -648,6 +997,32 @@ pub fn launch_linux_sandbox(request: LinuxSandboxRequest) -> Result<LinuxSandbox
     imp::launch(request)
 }
 
+/// Launch a held isolated target with one exact namespace-local listener.
+/// Transfer the registered socket to the trusted controller before the target
+/// can be released. A failed transfer drops and kills the owned target.
+pub fn launch_linux_sandbox_with_loopback_ingress(
+    request: LinuxSandboxRequest,
+    address: std::net::SocketAddr,
+    transfer_fd: u32,
+    payload: &[u8],
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<LinuxSandboxProcess, String> {
+    if request.network != LinuxSandboxNetwork::Isolated
+        || !matches!(
+            request.lifecycle,
+            LinuxSandboxLifecycle::AwaitRelease { .. }
+        )
+        || !matches!(address, std::net::SocketAddr::V4(v4) if v4.ip().is_loopback() && v4.port() != 0)
+        || payload.is_empty()
+    {
+        return Err(
+            "isolated loopback ingress requires a held isolated target and exact IPv4 endpoint"
+                .into(),
+        );
+    }
+    imp::launch_with_loopback_ingress(request, address, transfer_fd, payload, deadline)
+}
+
 /// Operate on exact inherited overlay-workspace descriptors without reopening
 /// an ambient path.
 pub fn operate_linux_overlay_workspace(
@@ -688,6 +1063,25 @@ pub fn write_inherited_descriptor(fd: u32, bytes: &[u8]) -> Result<(), String> {
 /// Read one exact sealed inherited memfd with an explicit byte ceiling.
 pub fn read_sealed_inherited_descriptor(fd: u32, max_bytes: usize) -> Result<Vec<u8>, String> {
     imp::read_sealed_descriptor(fd, max_bytes)
+}
+
+/// Consume, own and read one sealed inherited descriptor named by process-
+/// environment transport. Descriptor parsing, environment mutation, sealing
+/// validation and close-on-drop all remain inside Lillux.
+///
+/// # Safety
+/// The trusted parent must have installed the named descriptor exactly once
+/// for this process, with no pre-existing Rust owner in the child.
+/// Call during single-threaded startup before concurrent environment access,
+/// including access by foreign library threads; this consumes the named slot.
+pub unsafe fn read_sealed_inherited_descriptor_from_env(
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    // SAFETY: forwarded from this function's unique child-ownership contract.
+    let authority = unsafe { crate::take_inherited_descriptor_authority_from_env(name) }?;
+    let descriptor = authority.inherited_descriptor()?;
+    read_sealed_inherited_descriptor(descriptor, max_bytes)
 }
 
 /// Prove an inherited descriptor identifies the executable image currently
@@ -736,6 +1130,16 @@ mod imp {
         Err("native Linux sandboxing is unavailable on this platform".to_string())
     }
 
+    pub fn launch_with_loopback_ingress(
+        _request: LinuxSandboxRequest,
+        _address: std::net::SocketAddr,
+        _transfer_fd: u32,
+        _payload: &[u8],
+        _deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxProcess, String> {
+        Err("isolated loopback ingress is unavailable on this platform".to_string())
+    }
+
     pub fn workspace(
         _project_fd: u32,
         _state_fd: u32,
@@ -772,7 +1176,7 @@ mod imp {
     use sha2::{Digest as _, Sha256};
     use std::ffi::{CStr, CString, OsStr};
     use std::fs::File;
-    use std::io::{Read as _, Write as _};
+    use std::io::{Read as _, Seek as _, Write as _};
     use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -787,8 +1191,15 @@ mod imp {
     const OLD_ROOT: &str = "/tmp/.lillux-old-root";
     const SEALED_STAGING_NAME: &str = ".lillux-sealed-staging";
     const CHILD_READY: u8 = 0;
-    const CHILD_ERROR: u8 = 1;
-    const MAX_CHILD_ERROR_BYTES: usize = 64 * 1024;
+    const APPLIED_LAUNCH_RECORD: u8 = 0xA7;
+    const APPLIED_LAUNCH_RECORD_BYTES: usize = 1 + 4 * 5 + 32 * 4;
+    pub(super) const CHILD_ERROR: u8 = 1;
+    pub(super) const MAX_CHILD_ERROR_BYTES: usize = 64 * 1024;
+    // The private failure channel is drained only after the exact child exits.
+    // Its sole record must fit in an otherwise empty Linux pipe without a
+    // concurrent reader, including the kind and length prefix. The readiness
+    // error uses the same bound because it is written after this record.
+    pub(super) const MAX_LAUNCH_FAILURE_BYTES: usize = libc::PIPE_BUF - 5;
     const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
     const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
     const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
@@ -915,10 +1326,46 @@ mod imp {
         launch_with_stdio(request, None)
     }
 
+    pub fn launch_with_loopback_ingress(
+        request: LinuxSandboxRequest,
+        address: std::net::SocketAddr,
+        transfer_fd: u32,
+        payload: &[u8],
+        deadline: crate::time::MonotonicDeadline,
+    ) -> Result<LinuxSandboxProcess, String> {
+        if deadline.has_elapsed() {
+            return Err("isolated loopback transfer deadline elapsed before launch".into());
+        }
+        // SAFETY: the dedicated adapter owns the inherited transfer endpoint
+        // uniquely. The signed launch request supplies its exact coordinate.
+        let sender = unsafe { crate::take_inherited_descriptor_transfer_sender(transfer_fd) }
+            .map_err(|error| format!("adopt loopback transfer endpoint: {error}"))?;
+        let (process, source) = launch_with_stdio_and_loopback(request, None, Some(address))?;
+        let source = source.ok_or("isolated loopback listener was not created")?;
+        source
+            .transfer(sender, payload, deadline)
+            .map_err(|error| format!("transfer isolated loopback listener: {error}"))?;
+        Ok(process)
+    }
+
     pub(super) fn launch_with_stdio(
-        mut request: LinuxSandboxRequest,
+        request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
     ) -> Result<LinuxSandboxProcess, String> {
+        launch_with_stdio_and_loopback(request, stdio, None).map(|(process, _)| process)
+    }
+
+    fn launch_with_stdio_and_loopback(
+        mut request: LinuxSandboxRequest,
+        stdio: Option<&[std::fs::File; 3]>,
+        ingress: Option<std::net::SocketAddr>,
+    ) -> Result<
+        (
+            LinuxSandboxProcess,
+            Option<crate::loopback::LoopbackListenerTransferSource>,
+        ),
+        String,
+    > {
         validate_request(&request)?;
         if request.aggregate_limits.is_some() {
             return Err(
@@ -926,6 +1373,19 @@ mod imp {
             );
         }
         enter_namespaces(request.network)?;
+        let loopback_source = if let Some(address) = ingress {
+            if request.network != LinuxSandboxNetwork::Isolated {
+                return Err("loopback ingress requires a new isolated network namespace".into());
+            }
+            crate::loopback::activate_loopback_in_current_namespace()
+                .map_err(|error| format!("activate isolated loopback: {error}"))?;
+            Some(
+                crate::loopback::LoopbackListenerTransferSource::bind_exact(address)
+                    .map_err(|error| format!("bind isolated loopback listener: {error}"))?,
+            )
+        } else {
+            None
+        };
         // Re-prove the same inherited filesystem objects in the cloned
         // namespace before the private root hides /tmp. The retained original
         // descriptors remain the identity authority, never a caller pathname.
@@ -1018,7 +1478,7 @@ mod imp {
         ensure_regular_path(&executable, "sandbox executable")?;
         let cwd = rooted(&request.cwd)?;
         ensure_directory_path(&cwd, "sandbox cwd")?;
-        spawn_target(request, stdio)
+        spawn_target(request, stdio).map(|process| (process, loopback_source))
     }
 
     fn validate_request(request: &LinuxSandboxRequest) -> Result<(), String> {
@@ -2504,6 +2964,25 @@ mod imp {
             unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
             "create sandbox readiness pipe",
         )?;
+        let mut launch_failure = [0; 2];
+        if let Err(error) = syscall_zero(
+            unsafe { libc::pipe2(launch_failure.as_mut_ptr(), libc::O_CLOEXEC) },
+            "create sandbox launch-failure pipe",
+        ) {
+            close_fd(ready[0]);
+            close_fd(ready[1]);
+            return Err(error);
+        }
+        let mut applied_launch = [0; 2];
+        if let Err(error) = syscall_zero(
+            unsafe { libc::pipe2(applied_launch.as_mut_ptr(), libc::O_CLOEXEC) },
+            "create sandbox applied-launch pipe",
+        ) {
+            for descriptor in ready.into_iter().chain(launch_failure) {
+                close_fd(descriptor);
+            }
+            return Err(error);
+        }
         let mut reserved_target_descriptors = request
             .target_channels
             .iter()
@@ -2512,19 +2991,35 @@ mod imp {
         if stdio.is_some() {
             reserved_target_descriptors.extend([0, 1, 2]);
         }
+        let mut private_descriptors = [
+            ready[0],
+            ready[1],
+            launch_failure[0],
+            launch_failure[1],
+            applied_launch[0],
+            applied_launch[1],
+        ];
         if let Err(error) = relocate_internal_descriptors(
-            &mut ready,
+            &mut private_descriptors,
             &reserved_target_descriptors,
-            "sandbox readiness pipe",
+            "sandbox control pipes",
         ) {
-            close_fd(ready[0]);
-            close_fd(ready[1]);
+            for descriptor in private_descriptors {
+                close_fd(descriptor);
+            }
             return Err(error);
         }
+        ready.copy_from_slice(&private_descriptors[..2]);
+        launch_failure.copy_from_slice(&private_descriptors[2..4]);
+        applied_launch.copy_from_slice(&private_descriptors[4..]);
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             close_fd(ready[0]);
             close_fd(ready[1]);
+            close_fd(launch_failure[0]);
+            close_fd(launch_failure[1]);
+            close_fd(applied_launch[0]);
+            close_fd(applied_launch[1]);
             return Err(format!(
                 "fork sandbox target: {}",
                 std::io::Error::last_os_error()
@@ -2532,13 +3027,24 @@ mod imp {
         }
         if pid == 0 {
             close_fd(ready[0]);
-            let outcome = child_target_main(&request, ready[1], stdio);
+            close_fd(launch_failure[0]);
+            close_fd(applied_launch[0]);
+            let outcome = child_target_main(
+                &request,
+                ready[1],
+                launch_failure[1],
+                applied_launch[1],
+                stdio,
+            );
             if let Err(error) = outcome {
+                let _ = write_child_error(launch_failure[1], &error);
                 let _ = write_child_error(ready[1], &error);
             }
             unsafe { libc::_exit(125) };
         }
         close_fd(ready[1]);
+        close_fd(launch_failure[1]);
+        close_fd(applied_launch[1]);
         let result = read_child_ready(ready[0]);
         close_fd(ready[0]);
         if let Err(error) = result {
@@ -2546,17 +3052,27 @@ mod imp {
                 libc::kill(pid, libc::SIGKILL);
                 libc::waitpid(pid, std::ptr::null_mut(), 0);
             }
+            close_fd(launch_failure[0]);
+            close_fd(applied_launch[0]);
             return Err(error);
         }
         Ok(LinuxSandboxProcess {
             pid,
             namespace_lifetime: None,
+            // SAFETY: the parent exclusively owns this surviving pipe end.
+            launch_failure: Some(unsafe { File::from_raw_fd(launch_failure[0]) }),
+            // SAFETY: the parent exclusively owns this surviving pipe end.
+            applied_launch: Some(unsafe { File::from_raw_fd(applied_launch[0]) }),
+            observed_applied_launch: None,
+            termination_requested: false,
         })
     }
 
     fn child_target_main(
         request: &LinuxSandboxRequest,
         ready_fd: RawFd,
+        launch_failure_fd: RawFd,
+        applied_launch_fd: RawFd,
         stdio: Option<&[std::fs::File; 3]>,
     ) -> Result<(), String> {
         if unsafe { libc::getpid() } != 1 {
@@ -2590,7 +3106,7 @@ mod imp {
             place_target_channel(source, target)?;
             mapped_channels.push(target);
         }
-        let mut keep = vec![ready_fd];
+        let mut keep = vec![ready_fd, launch_failure_fd, applied_launch_fd];
         keep.extend(
             mapped_channels
                 .into_iter()
@@ -2634,17 +3150,23 @@ mod imp {
                 }
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::EINTR) {
-                    return Err(format!("read sandbox release boundary: {error}"));
+                    return Err(format!(
+                        "stage=release errno={} read sandbox release boundary: {error}",
+                        error.raw_os_error().unwrap_or(0)
+                    ));
                 }
             };
             if count != 1 || release[0] != 1 {
-                return Err("sandbox release boundary closed or carried invalid data".to_string());
+                return Err(
+                    "stage=release errno=0 sandbox release boundary closed or carried invalid data"
+                        .to_string(),
+                );
             }
             close_fd(raw_fd(release_fd)?);
             close_fd(raw_fd(release_keepalive_fd)?);
         }
         close_fd(ready_fd);
-        exec_target(request)
+        exec_target_with_receipt(request, Some(applied_launch_fd))
     }
 
     /// Called only in the actual PID-namespace child before pivot_root. A
@@ -2680,7 +3202,15 @@ mod imp {
         )
     }
 
+    #[cfg(test)]
     fn exec_target(request: &LinuxSandboxRequest) -> Result<(), String> {
+        exec_target_with_receipt(request, None)
+    }
+
+    fn exec_target_with_receipt(
+        request: &LinuxSandboxRequest,
+        applied_launch_fd: Option<RawFd>,
+    ) -> Result<(), String> {
         let executable = c_string(request.executable.as_os_str(), "sandbox executable")?;
         let argv0 = c_string(&request.argv0, "sandbox argv0")?;
         let mut arguments = Vec::with_capacity(request.arguments.len() + 1);
@@ -2710,14 +3240,209 @@ mod imp {
             unsafe { libc::chdir(cwd.as_ptr()) },
             "enter sandbox target cwd",
         )?;
+        if let Some(fd) = applied_launch_fd {
+            write_applied_launch(fd, &executable, &arguments, &environment)?;
+        }
         unsafe {
             libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
         }
+        let error = std::io::Error::last_os_error();
         Err(format!(
-            "exec sandbox target {}: {}",
+            "stage=exec errno={} target={}: {error}",
+            error.raw_os_error().unwrap_or(0),
             request.executable.display(),
-            std::io::Error::last_os_error()
         ))
+    }
+
+    fn hash_c_strings(values: &[CString]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update((values.len() as u64).to_le_bytes());
+        for value in values {
+            let bytes = value.as_bytes_with_nul();
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        hasher.finalize().into()
+    }
+
+    fn hash_c_string(value: &CStr) -> [u8; 32] {
+        Sha256::digest(value.to_bytes_with_nul()).into()
+    }
+
+    pub(super) fn applied_launch_matches_target(
+        receipt: &LinuxSandboxAppliedLaunchReceipt,
+        target: LinuxSandboxAppliedLaunchTarget<'_>,
+    ) -> Result<bool, String> {
+        Ok(receipt.matches_commitments(&applied_launch_commitments_from_target(target)?))
+    }
+
+    pub(super) fn applied_launch_commitments_from_target(
+        target: LinuxSandboxAppliedLaunchTarget<'_>,
+    ) -> Result<LinuxSandboxAppliedLaunchCommitments, String> {
+        let executable = c_string(target.executable.as_os_str(), "sandbox executable")?;
+        let cwd = c_string(target.cwd.as_os_str(), "sandbox cwd")?;
+        let mut arguments = Vec::with_capacity(target.arguments.len() + 1);
+        arguments.push(c_string(target.argv0, "sandbox argv0")?);
+        for argument in target.arguments {
+            arguments.push(c_string(argument, "sandbox argument")?);
+        }
+        let mut environment = Vec::with_capacity(target.environment.len());
+        for (name, value) in target.environment {
+            let mut entry = OsString::from(name);
+            entry.push("=");
+            entry.push(value);
+            environment.push(c_string(&entry, "sandbox environment")?);
+        }
+        Ok(LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: hash_c_string(&executable),
+            argv_sha256: hash_c_strings(&arguments),
+            environment_sha256: hash_c_strings(&environment),
+            cwd_sha256: hash_c_string(&cwd),
+        })
+    }
+
+    #[cfg(test)]
+    mod applied_launch_tests {
+        use super::*;
+
+        #[test]
+        fn commitments_match_only_the_exact_exec_vector() {
+            let mut request = super::super::tests::minimal_request();
+            request
+                .environment
+                .insert("TOKEN".into(), "test-secret".into());
+            let argv = [CString::new("tool").unwrap()];
+            let env = [CString::new("TOKEN=test-secret").unwrap()];
+            let receipt = LinuxSandboxAppliedLaunchReceipt {
+                owned_child_pid: 123,
+                namespace_pid: 1,
+                effective_uid: NAMESPACE_USER_ID,
+                effective_gid: NAMESPACE_GROUP_ID,
+                no_new_privs: true,
+                seccomp_mode: libc::SECCOMP_MODE_FILTER,
+                executable_sha256: hash_c_string(c"/bin/tool"),
+                argv_sha256: hash_c_strings(&argv),
+                environment_sha256: hash_c_strings(&env),
+                cwd_sha256: hash_c_string(c"/workspace"),
+            };
+            assert!(receipt.matches_request(&request).unwrap());
+            request
+                .environment
+                .insert("TOKEN".into(), "other-secret".into());
+            assert!(!receipt.matches_request(&request).unwrap());
+            request
+                .environment
+                .insert("TOKEN".into(), "test-secret".into());
+            request.cwd = "/other".into();
+            assert!(!receipt.matches_request(&request).unwrap());
+        }
+    }
+
+    fn write_applied_launch(
+        fd: RawFd,
+        executable: &CStr,
+        arguments: &[CString],
+        environment: &[CString],
+    ) -> Result<(), String> {
+        // Bounded native observation of the final cwd, not the caller's
+        // requested spelling. Refuse a cwd that cannot be represented here.
+        let mut cwd = [0_u8; 8192];
+        if unsafe { libc::getcwd(cwd.as_mut_ptr().cast(), cwd.len()) }.is_null() {
+            return Err(format!(
+                "observe sandbox target cwd: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let cwd =
+            CStr::from_bytes_until_nul(&cwd).map_err(|_| "sandbox target cwd lacks termination")?;
+        let no_new_privs = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        if no_new_privs != 1 {
+            return Err("sandbox target lost no_new_privs before exec".into());
+        }
+        let seccomp_mode = unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) };
+        if seccomp_mode != libc::SECCOMP_MODE_FILTER as i32 {
+            return Err("sandbox target lacks seccomp filter before exec".into());
+        }
+        let mut record = [0_u8; APPLIED_LAUNCH_RECORD_BYTES];
+        record[0] = APPLIED_LAUNCH_RECORD;
+        let mut offset = 1;
+        for value in [
+            unsafe { libc::getpid() as u32 },
+            unsafe { libc::geteuid() },
+            unsafe { libc::getegid() },
+            no_new_privs as u32,
+            seccomp_mode as u32,
+        ] {
+            record[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            offset += 4;
+        }
+        for digest in [
+            hash_c_string(executable),
+            hash_c_strings(arguments),
+            hash_c_strings(environment),
+            hash_c_string(cwd),
+        ] {
+            record[offset..offset + 32].copy_from_slice(&digest);
+            offset += 32;
+        }
+        // PIPE_BUF-sized atomic write: a pollable record is always complete.
+        let written = unsafe { libc::write(fd, record.as_ptr().cast(), record.len()) };
+        if written != record.len() as isize {
+            return Err(format!(
+                "write sandbox applied-launch record: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        close_fd(fd);
+        Ok(())
+    }
+
+    pub(super) fn read_applied_launch(
+        fd: RawFd,
+    ) -> Result<LinuxSandboxAppliedLaunchReceipt, String> {
+        let mut record = [0_u8; APPLIED_LAUNCH_RECORD_BYTES];
+        // The child emits a single atomic PIPE_BUF-sized record. EOF, including
+        // death before this boundary, is never promoted to applied evidence.
+        read_exact_fd(fd, &mut record).map_err(|error| {
+            format!("sandbox applied-launch record missing or incomplete: {error}")
+        })?;
+        if record[0] != APPLIED_LAUNCH_RECORD {
+            return Err("sandbox applied-launch record has invalid kind".into());
+        }
+        let mut offset = 1;
+        let mut read_u32 = || {
+            let value = u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+            value
+        };
+        let namespace_pid = read_u32();
+        let effective_uid = read_u32();
+        let effective_gid = read_u32();
+        let no_new_privs = read_u32();
+        let seccomp_mode = read_u32();
+        if namespace_pid != 1
+            || no_new_privs != 1
+            || seccomp_mode != libc::SECCOMP_MODE_FILTER as u32
+        {
+            return Err("sandbox applied-launch record has invalid native controls".into());
+        }
+        let mut digest = || {
+            let value = record[offset..offset + 32].try_into().unwrap();
+            offset += 32;
+            value
+        };
+        Ok(LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 0,
+            namespace_pid,
+            effective_uid,
+            effective_gid,
+            no_new_privs: true,
+            seccomp_mode,
+            executable_sha256: digest(),
+            argv_sha256: digest(),
+            environment_sha256: digest(),
+            cwd_sha256: digest(),
+        })
     }
 
     // Linux capability ABI v3, from <linux/capability.h>. libc exposes the
@@ -3609,6 +4334,8 @@ mod imp {
         }
         let duplicate = duplicate_fd(fd)?;
         let mut file = unsafe { File::from_raw_fd(duplicate) };
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|error| format!("rewind sealed input: {error}"))?;
         let length = file
             .metadata()
             .map_err(|error| format!("inspect sealed input: {error}"))?
@@ -3710,12 +4437,64 @@ mod imp {
         }
     }
 
-    fn write_child_error(fd: RawFd, error: &str) -> Result<(), String> {
+    pub(super) fn write_child_error(fd: RawFd, error: &str) -> Result<(), String> {
         let bytes = error.as_bytes();
-        let bytes = &bytes[..bytes.len().min(MAX_CHILD_ERROR_BYTES)];
+        let bytes = &bytes[..bytes.len().min(MAX_LAUNCH_FAILURE_BYTES)];
         write_all_fd(fd, &[CHILD_ERROR])?;
         write_all_fd(fd, &(bytes.len() as u32).to_ne_bytes())?;
         write_all_fd(fd, bytes)
+    }
+
+    pub(super) fn read_launch_failure(
+        channel: Option<std::fs::File>,
+    ) -> Result<Option<LinuxSandboxLaunchFailure>, String> {
+        use std::os::fd::AsRawFd as _;
+        let Some(channel) = channel else {
+            return Ok(None);
+        };
+        let fd = channel.as_raw_fd();
+        let mut kind = [0_u8; 1];
+        let count = loop {
+            let count = unsafe { libc::read(fd, kind.as_mut_ptr().cast(), kind.len()) };
+            if count >= 0 {
+                break count;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("read sandbox launch-failure boundary: {error}"));
+            }
+        };
+        if count == 0 {
+            return Ok(None);
+        }
+        if count != 1 || kind[0] != CHILD_ERROR {
+            return Err("sandbox child emitted an invalid launch-failure record".to_string());
+        }
+        let mut length = [0_u8; 4];
+        read_exact_fd(fd, &mut length)?;
+        let length = u32::from_ne_bytes(length) as usize;
+        if length > MAX_LAUNCH_FAILURE_BYTES {
+            return Err("sandbox launch failure exceeds Lillux bound".to_string());
+        }
+        let mut bytes = vec![0_u8; length];
+        read_exact_fd(fd, &mut bytes)?;
+        let mut trailing = [0_u8; 1];
+        let trailing_count = loop {
+            let count = unsafe { libc::read(fd, trailing.as_mut_ptr().cast(), trailing.len()) };
+            if count >= 0 {
+                break count;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(format!("finish sandbox launch-failure boundary: {error}"));
+            }
+        };
+        if trailing_count != 0 {
+            return Err("sandbox child emitted multiple launch-failure records".to_string());
+        }
+        Ok(Some(LinuxSandboxLaunchFailure {
+            diagnostic: String::from_utf8_lossy(&bytes).into_owned(),
+        }))
     }
 
     fn read_exact_fd(fd: RawFd, bytes: &mut [u8]) -> Result<(), String> {
@@ -4072,6 +4851,85 @@ mod imp {
     #[cfg(test)]
     mod namespace_source_tests {
         use super::*;
+
+        #[test]
+        #[cfg(target_arch = "x86_64")]
+        fn launch_failure_distinguishes_missing_elf_loader_from_workload_exit_125() {
+            use std::os::fd::FromRawFd as _;
+            use std::os::unix::fs::PermissionsExt as _;
+
+            fn spawn(request: LinuxSandboxRequest) -> LinuxSandboxProcess {
+                let mut pipe = [0; 2];
+                assert_eq!(
+                    unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+                    0
+                );
+                let pid = unsafe { libc::fork() };
+                assert!(pid >= 0);
+                if pid == 0 {
+                    close_fd(pipe[0]);
+                    // Bound a broken launcher fixture independently of the
+                    // diagnostic reader, which deliberately waits for exit.
+                    unsafe {
+                        libc::signal(libc::SIGALRM, libc::SIG_DFL);
+                        libc::alarm(5);
+                    }
+                    let error = exec_target(&request).unwrap_err();
+                    let recorded = write_child_error(pipe[1], &error).is_ok();
+                    unsafe { libc::_exit(if recorded { 125 } else { 126 }) };
+                }
+                close_fd(pipe[1]);
+                LinuxSandboxProcess {
+                    pid,
+                    namespace_lifetime: None,
+                    launch_failure: Some(unsafe { File::from_raw_fd(pipe[0]) }),
+                    applied_launch: None,
+                    observed_applied_launch: None,
+                    termination_requested: false,
+                }
+            }
+
+            let mut request = super::super::tests::minimal_request();
+            request.cwd = PathBuf::from("/");
+            request.executable = PathBuf::from("/bin/sh");
+            request.argv0 = OsString::from("sh");
+            request.arguments = vec!["-c".into(), "exit 125".into()];
+            // This genuinely execs a workload returning 125. EOF is only the
+            // absence of a failure record, not independent execution proof.
+            assert_eq!(
+                spawn(request.clone()).wait().unwrap(),
+                LinuxSandboxExit::Code(125)
+            );
+
+            // Preserve the existing executable's ELF load segments, changing
+            // only PT_INTERP. The kernel must report the missing loader rather
+            // than misclassifying the launcher's private exit code as workload
+            // completion. This fixture requires the GNU x86_64 test host.
+            let mut executable = std::fs::read("/bin/true").unwrap();
+            let interpreter = b"/lib64/ld-linux-x86-64.so.2\0";
+            let offset = executable
+                .windows(interpreter.len())
+                .position(|window| window == interpreter)
+                .expect("missing-loader regression requires GNU x86_64 /bin/true");
+            let directory = tempfile::tempdir_in("/tmp").unwrap();
+            let missing_loader = directory.path().join("ld");
+            assert!(!missing_loader.exists());
+            let missing = CString::new(missing_loader.as_os_str().as_encoded_bytes()).unwrap();
+            let missing = missing.as_bytes_with_nul();
+            assert!(missing.len() <= interpreter.len());
+            executable[offset..offset + interpreter.len()].fill(0);
+            executable[offset..offset + missing.len()].copy_from_slice(missing);
+            let path = directory.path().join("missing-loader");
+            std::fs::write(&path, executable).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            request.executable = path;
+            request.argv0 = OsString::from("missing-loader");
+            request.arguments.clear();
+            let error = spawn(request).wait().unwrap_err();
+            assert!(error.contains("target was not executed"), "{error}");
+            assert!(error.contains("stage=exec errno=2"), "{error}");
+        }
 
         #[test]
         fn source_backed_mount_targets_never_create_absent_overlay_children() {
@@ -4490,6 +5348,39 @@ mod imp {
             let Ok(stage) = std::env::var("LILLUX_PROC_EXEC_PROBE") else {
                 return;
             };
+            if let Some(code) = stage.strip_prefix("observe-code-") {
+                assert_eq!(unsafe { libc::getpid() }, 1);
+                unsafe { libc::_exit(code.parse::<i32>().unwrap()) };
+            }
+            if stage == "observe-pending" {
+                std::fs::write("/work/writer-ready", b"ready").unwrap();
+                loop {
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            if stage == "observe-descendant" {
+                assert_eq!(unsafe { libc::getpid() }, 1);
+                let pid = unsafe { libc::fork() };
+                assert!(pid >= 0);
+                if pid == 0 {
+                    // Deliberately retain inherited stdout/stderr while writing.
+                    // Parent target exit must end this namespace writer too.
+                    for counter in 0_u64.. {
+                        std::fs::write("/work/writer", counter.to_le_bytes()).unwrap();
+                        std::fs::write("/work/writer-ready", b"ready").unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    unreachable!();
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !std::path::Path::new("/work/writer-ready").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                unsafe { libc::_exit(0) };
+            }
             if stage == "terminal-writer" {
                 use std::io::{Read as _, Write as _};
                 let mut input = [0_u8; 15];
@@ -4497,7 +5388,12 @@ mod imp {
                 assert_eq!(&input, b"candidate-input");
                 std::io::stdout().write_all(b"candidate-output\n").unwrap();
                 std::io::stdout().flush().unwrap();
-                let mut descendant = std::process::Command::new("/probe")
+                // The directory-realization case deliberately does not mount
+                // /probe. Re-execute the exact path selected by this fixture,
+                // including the read-only runtime-directory variant.
+                let executable = std::env::var_os("LILLUX_PROBE_EXECUTABLE")
+                    .expect("explicit qualification executable");
+                let mut descendant = std::process::Command::new(executable)
                     .args([
                         "--exact",
                         "sandbox::imp::namespace_source_tests::pid_proc_after_exec_target",
@@ -4608,7 +5504,11 @@ mod imp {
                 Some(libc::EPERM)
             );
             let executable = std::env::current_exe().unwrap();
-            assert_eq!(executable, PathBuf::from("/probe"));
+            let expected_executable = PathBuf::from(
+                std::env::var_os("LILLUX_PROBE_EXECUTABLE")
+                    .expect("sandbox fixture supplies its exact executable path"),
+            );
+            assert_eq!(executable, expected_executable);
             assert!(std::fs::File::open(&executable).is_ok());
             assert!(!std::path::Path::new(&format!("/{SEALED_STAGING_NAME}")).exists());
             let write = std::fs::OpenOptions::new()
@@ -4628,7 +5528,14 @@ mod imp {
             );
             let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
             assert_eq!(
-                unsafe { libc::statvfs(c"/probe".as_ptr(), filesystem.as_mut_ptr()) },
+                unsafe {
+                    libc::statvfs(
+                        std::ffi::CString::new(executable.as_os_str().as_bytes())
+                            .unwrap()
+                            .as_ptr(),
+                        filesystem.as_mut_ptr(),
+                    )
+                },
                 0
             );
             assert_ne!(
@@ -4826,6 +5733,13 @@ mod imp {
                 channel.take(64).read_to_string(&mut bytes).unwrap();
                 assert_eq!(bytes, "native-target-channel");
                 use std::os::unix::process::CommandExt as _;
+                if std::env::var_os("LILLUX_PROBE_NESTED").is_none() {
+                    let error = std::process::Command::new(&executable)
+                        .process_group(0)
+                        .spawn()
+                        .unwrap_err();
+                    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+                }
                 let directory = File::open("/work").unwrap();
                 let fd = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD, 300) };
                 assert!(fd >= 300);
@@ -4842,9 +5756,19 @@ mod imp {
                             "sandbox::imp::namespace_source_tests::pid_proc_after_exec_target",
                             "--nocapture",
                         ])
-                        .env("PATH", "/")
+                        .env(
+                            "PATH",
+                            expected_executable
+                                .parent()
+                                .expect("absolute sandbox executable has a parent"),
+                        )
                         .env("LILLUX_PROC_EXEC_PROBE", "child")
                         .env("LILLUX_DESCENDANT_CLOSED_FD", fd.to_string());
+                    if std::env::var_os("LILLUX_PROBE_NESTED").is_some() {
+                        // A nested worker may launch a child in its own
+                        // process group without crossing the outer scope.
+                        child.process_group(0);
+                    }
                     unsafe {
                         child.pre_exec(|| {
                             // Linux CLOSE_RANGE_CLOEXEC: preserve Command's
@@ -4925,9 +5849,12 @@ mod imp {
             assert!(!std::path::Path::new("/sys/fs/cgroup").exists());
             verify_nested_host_controls_unavailable().unwrap();
             assert!(!std::path::Path::new("/.lillux-old-root").exists());
+            let executable = std::env::var("LILLUX_PROBE_EXECUTABLE")
+                .expect("sandbox fixture supplies its exact executable path");
+            let executable = std::ffi::CString::new(executable).unwrap();
             let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
             assert_eq!(
-                unsafe { libc::statvfs(c"/probe".as_ptr(), filesystem.as_mut_ptr()) },
+                unsafe { libc::statvfs(executable.as_ptr(), filesystem.as_mut_ptr()) },
                 0
             );
             assert_ne!(
@@ -4951,12 +5878,20 @@ mod imp {
                 Some(libc::EPERM)
             );
             assert!(!std::path::Path::new("/sys/fs/cgroup").exists());
+            let readonly_mount = std::env::var("LILLUX_PROBE_READONLY_MOUNT")
+                .expect("sandbox fixture supplies its exact read-only mount path");
             // The new namespace has its own capabilities, but inherited
             // read-only mounts cannot be promoted to writable aliases.
             assert_eq!(
-                mount_raw(None, "/probe", None, libc::MS_REMOUNT | libc::MS_BIND, None)
-                    .unwrap_err()
-                    .raw_os_error(),
+                mount_raw(
+                    None,
+                    &readonly_mount,
+                    None,
+                    libc::MS_REMOUNT | libc::MS_BIND,
+                    None,
+                )
+                .unwrap_err()
+                .raw_os_error(),
                 Some(libc::EPERM)
             );
             // The absolute-path and PATH-search descendants share private
@@ -5017,7 +5952,40 @@ mod imp {
             exercise_native_proc(true, false);
         }
 
+        #[derive(Clone, Copy, Debug)]
+        enum TargetObservationCase {
+            Code(i32),
+            Signal,
+            ExecFailure,
+            PendingThenCleanup,
+            Descendant,
+        }
+
+        #[test]
+        #[ignore = "requires real native sandbox namespaces and pidfd support; capability refusal is not a pass"]
+        fn native_held_target_exit_observation_is_distinct_from_cleanup() {
+            for case in [
+                TargetObservationCase::Code(0),
+                TargetObservationCase::Code(7),
+                TargetObservationCase::Code(125),
+                TargetObservationCase::Signal,
+                TargetObservationCase::ExecFailure,
+                TargetObservationCase::PendingThenCleanup,
+                TargetObservationCase::Descendant,
+            ] {
+                exercise_native_proc_with_observation(true, true, Some(case));
+            }
+        }
+
         fn exercise_native_proc(terminal_export: bool, release_target: bool) {
+            exercise_native_proc_with_observation(terminal_export, release_target, None);
+        }
+
+        fn exercise_native_proc_with_observation(
+            terminal_export: bool,
+            release_target: bool,
+            observation: Option<TargetObservationCase>,
+        ) {
             let executable = std::env::current_exe().unwrap();
             // Test-only inventory of this harness's exact loader/library
             // mappings. No host directory or PATH is exposed to the target.
@@ -5041,12 +6009,28 @@ mod imp {
             libraries.insert(PathBuf::from("/lib64/ld-linux-x86-64.so.2"));
             #[cfg(target_arch = "aarch64")]
             libraries.insert(PathBuf::from("/lib/ld-linux-aarch64.so.1"));
-            for (sealed, nested) in [(false, false), (true, false), (false, true)] {
+            for (sealed, nested, directory_executable) in [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, true, true),
+            ] {
+                if observation.is_some() && (sealed || nested || directory_executable) {
+                    continue;
+                }
                 let runtime_fixture = tempfile::tempdir().unwrap();
                 std::os::unix::fs::symlink("/work", runtime_fixture.path().join("alias")).unwrap();
                 std::fs::write(
                     runtime_fixture.path().join("member"),
                     b"exact runtime member",
+                )
+                .unwrap();
+                std::fs::create_dir(runtime_fixture.path().join("bin")).unwrap();
+                let directory_probe = runtime_fixture.path().join("bin/probe");
+                std::fs::copy(&executable, &directory_probe).unwrap();
+                std::fs::set_permissions(
+                    &directory_probe,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
                 )
                 .unwrap();
                 let runtime_source =
@@ -5103,7 +6087,11 @@ mod imp {
                 } else {
                     None
                 };
-                request.executable = PathBuf::from("/probe");
+                request.executable = if directory_executable {
+                    PathBuf::from("/ryeos/realizations/runtime/bin/probe")
+                } else {
+                    PathBuf::from("/probe")
+                };
                 request.argv0 = OsString::from("probe");
                 request.cwd = PathBuf::from("/");
                 request.proc_filesystem = if nested {
@@ -5135,6 +6123,18 @@ mod imp {
                         OsString::from("LILLUX_PROBE_CHANNEL_FD"),
                         OsString::from(channel_target.to_string()),
                     ),
+                    (
+                        OsString::from("LILLUX_PROBE_EXECUTABLE"),
+                        request.executable.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from("LILLUX_PROBE_READONLY_MOUNT"),
+                        OsString::from(if directory_executable {
+                            "/ryeos/realizations/runtime"
+                        } else {
+                            "/probe"
+                        }),
+                    ),
                 ]
                 .into();
                 if nested {
@@ -5154,12 +6154,14 @@ mod imp {
                         layer: 0,
                     })
                     .collect();
-                request.mounts.push(LinuxSandboxMount {
-                    source_fd: entry.inherited_descriptor().unwrap(),
-                    destination: PathBuf::from("/probe"),
-                    access: LinuxSandboxMountAccess::ReadOnly,
-                    layer: 0,
-                });
+                if !directory_executable {
+                    request.mounts.push(LinuxSandboxMount {
+                        source_fd: entry.inherited_descriptor().unwrap(),
+                        destination: PathBuf::from("/probe"),
+                        access: LinuxSandboxMountAccess::ReadOnly,
+                        layer: 0,
+                    });
+                }
                 if let Some(guest) = &guest {
                     request.mounts.push(LinuxSandboxMount {
                         source_fd: guest.inherited_descriptor().unwrap(),
@@ -5208,7 +6210,24 @@ mod imp {
                 let pid = unsafe { libc::fork() };
                 assert!(pid >= 0);
                 if pid == 0 {
-                    if terminal_export {
+                    if let Some(case) = observation {
+                        let stage = match case {
+                            TargetObservationCase::Code(code) => format!("observe-code-{code}"),
+                            TargetObservationCase::Signal => "observe-pending".into(),
+                            TargetObservationCase::ExecFailure => {
+                                // A present regular non-executable file passes
+                                // setup path checks, then fails actual exec.
+                                request.executable =
+                                    PathBuf::from("/ryeos/realizations/runtime/member");
+                                "observe-code-0".into()
+                            }
+                            TargetObservationCase::PendingThenCleanup => "observe-pending".into(),
+                            TargetObservationCase::Descendant => "observe-descendant".into(),
+                        };
+                        request
+                            .environment
+                            .insert(OsString::from("LILLUX_PROC_EXEC_PROBE"), stage.into());
+                    } else if terminal_export {
                         request.environment.insert(
                             OsString::from("LILLUX_PROC_EXEC_PROBE"),
                             OsString::from("terminal-writer"),
@@ -5216,7 +6235,31 @@ mod imp {
                     }
                     let result = (|| {
                         if !terminal_export {
-                            return launch(request).and_then(LinuxSandboxProcess::wait);
+                            let expected_launch = request.clone();
+                            let mut process = launch(request)?;
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            loop {
+                                if let Some(applied) = process.try_observe_applied_launch()? {
+                                    if applied.owned_child_pid != process.child_pid()
+                                        || !applied.matches_request(&expected_launch)?
+                                    {
+                                        return Err(
+                                            "native applied launch differs from exact request"
+                                                .into(),
+                                        );
+                                    }
+                                    break;
+                                }
+                                if std::time::Instant::now() >= deadline {
+                                    return Err(
+                                        "native target did not reach applied-launch boundary"
+                                            .into(),
+                                    );
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                            }
+                            return process.wait();
                         }
                         // Missing ambient stdio must not let internal release
                         // or readiness authority be allocated at fds 0..2.
@@ -5228,7 +6271,11 @@ mod imp {
                             }
                         }
                         request.target_channels.clear();
+                        let expected_launch = request.clone();
                         let (mut process, mut pipes) = prepare_linux_sandbox_piped(request)?;
+                        if process.try_observe_target_exit().is_ok() {
+                            return Err("unreleased target yielded an execution observation".into());
+                        }
                         use std::io::{Read as _, Write as _};
                         pipes
                             .stdin
@@ -5295,6 +6342,160 @@ mod imp {
                         if process.release_once().is_ok() {
                             return Err("native release was not single use".into());
                         }
+                        let applied_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        let applied = loop {
+                            if let Some(receipt) = process.try_observe_applied_launch()? {
+                                break receipt;
+                            }
+                            if std::time::Instant::now() >= applied_deadline {
+                                return Err(
+                                    "native target did not reach applied-launch boundary".into()
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        };
+                        if applied.owned_child_pid != process.process.child_pid()
+                            || !applied.matches_request(&expected_launch)?
+                        {
+                            return Err("native applied launch differs from exact request".into());
+                        }
+                        if let Some(case) = observation {
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(5);
+                            if matches!(case, TargetObservationCase::Signal) {
+                                while !writer_ready()? {
+                                    if process.try_observe_target_exit()?.is_some()
+                                        || std::time::Instant::now() >= deadline
+                                    {
+                                        return Err(
+                                            "signal fixture target did not become ready".into()
+                                        );
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                }
+                                // Test-only external signal to the exact target;
+                                // do not route this through the cleanup operation.
+                                let fd = process
+                                    .process
+                                    .namespace_lifetime
+                                    .as_ref()
+                                    .unwrap()
+                                    .as_raw_fd();
+                                if unsafe {
+                                    libc::syscall(
+                                        libc::SYS_pidfd_send_signal,
+                                        fd,
+                                        libc::SIGKILL,
+                                        std::ptr::null::<libc::siginfo_t>(),
+                                        0u32,
+                                    )
+                                } != 0
+                                {
+                                    return Err(
+                                        "signal fixture could not signal its exact target".into()
+                                    );
+                                }
+                            }
+                            if matches!(case, TargetObservationCase::PendingThenCleanup) {
+                                while !writer_ready()? {
+                                    if process.try_observe_target_exit()?.is_some()
+                                        || std::time::Instant::now() >= deadline
+                                    {
+                                        return Err(
+                                            "pending target did not remain live through readiness"
+                                                .into(),
+                                        );
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                }
+                                if process.try_observe_target_exit()?.is_some() {
+                                    return Err("live target yielded terminal completion".into());
+                                }
+                                let error = process
+                                    .terminate_namespace_for_export(
+                                        std::time::Duration::from_nanos(1),
+                                    )
+                                    .err()
+                                    .ok_or("exhausted cleanup budget returned proof")?;
+                                if !error.contains("unproved at deadline")
+                                    || !process
+                                        .try_observe_target_exit()
+                                        .unwrap_err()
+                                        .contains("termination request")
+                                {
+                                    return Err("cleanup timeout became target completion".into());
+                                }
+                                let cleanup = process.terminate_namespace_for_export(
+                                    std::time::Duration::from_secs(5),
+                                )?;
+                                if cleanup.exit() != LinuxSandboxExit::Signal(libc::SIGKILL)
+                                    || process.try_observe_target_exit().is_ok()
+                                {
+                                    return Err("cleanup status became target completion".into());
+                                }
+                                return Ok(LinuxSandboxExit::Code(0));
+                            }
+                            let observed = loop {
+                                if let Some(observed) = process.try_observe_target_exit()? {
+                                    break observed;
+                                }
+                                if std::time::Instant::now() >= deadline {
+                                    return Err(format!("target observation deadline: {case:?}"));
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                            };
+                            let expected = match case {
+                                TargetObservationCase::Code(code) => LinuxSandboxExit::Code(code),
+                                TargetObservationCase::Signal => {
+                                    LinuxSandboxExit::Signal(libc::SIGKILL)
+                                }
+                                TargetObservationCase::ExecFailure => LinuxSandboxExit::Code(125),
+                                TargetObservationCase::Descendant => LinuxSandboxExit::Code(0),
+                                TargetObservationCase::PendingThenCleanup => unreachable!(),
+                            };
+                            if observed.exit() != expected
+                                || observed.launch_failure().is_some()
+                                    != matches!(case, TargetObservationCase::ExecFailure)
+                            {
+                                return Err(format!(
+                                    "wrong actual target observation for {case:?}: {observed:?}"
+                                ));
+                            }
+                            let proof = observed.into_termination();
+                            if proof.exit() != expected
+                                || process.try_observe_target_exit().is_ok()
+                                || process
+                                    .terminate_namespace_for_export(std::time::Duration::from_secs(
+                                        1,
+                                    ))
+                                    .is_ok()
+                            {
+                                return Err("natural target reap was not single-use".into());
+                            }
+                            // Draining protocol bytes is explicit and independent
+                            // of target exit; descendant-held ends must now be EOF.
+                            let mut stdout = Vec::new();
+                            pipes
+                                .stdout
+                                .read_to_end(&mut stdout)
+                                .map_err(|error| error.to_string())?;
+                            let mut stderr = Vec::new();
+                            pipes
+                                .stderr
+                                .read_to_end(&mut stderr)
+                                .map_err(|error| error.to_string())?;
+                            if matches!(case, TargetObservationCase::Descendant) {
+                                let before = writer_bytes()?;
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                                if before != writer_bytes()? {
+                                    return Err(
+                                        "natural PID-1 exit left a descendant writer".into()
+                                    );
+                                }
+                            }
+                            return Ok(LinuxSandboxExit::Code(0));
+                        }
                         let deadline =
                             std::time::Instant::now() + std::time::Duration::from_secs(5);
                         while !writer_ready()? {
@@ -5356,7 +6557,7 @@ mod imp {
                 assert_eq!(
                     libc::WEXITSTATUS(status),
                     0,
-                    "sealed={sealed}, nested={nested}"
+                    "sealed={sealed}, nested={nested}, directory_executable={directory_executable}"
                 );
             }
         }
@@ -5515,10 +6716,132 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn sealed_descriptor_reads_are_independent_of_shared_cursor_state() {
+        let sealed = crate::sealed_memfd(c"repeatable-sealed-read", b"exact bytes").unwrap();
+        let descriptor = sealed.inherited_descriptor().unwrap();
+        assert_eq!(
+            read_sealed_inherited_descriptor(descriptor, 64).unwrap(),
+            b"exact bytes"
+        );
+        assert_eq!(
+            read_sealed_inherited_descriptor(descriptor, 64).unwrap(),
+            b"exact bytes"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn target_observation_requires_release_owned_lifetime_and_no_cleanup() {
+        let mut held = HeldLinuxSandboxProcess {
+            process: LinuxSandboxProcess {
+                pid: 0,
+                namespace_lifetime: None,
+                launch_failure: None,
+                applied_launch: None,
+                observed_applied_launch: None,
+                termination_requested: false,
+            },
+            release: None,
+            release_succeeded: false,
+        };
+        assert!(
+            held.try_observe_target_exit()
+                .unwrap_err()
+                .contains("not been successfully released")
+        );
+        assert!(
+            held.try_observe_applied_launch()
+                .unwrap_err()
+                .contains("not been successfully released")
+        );
+        held.release_succeeded = true;
+        assert!(
+            held.try_observe_target_exit()
+                .unwrap_err()
+                .contains("namespace-init authority")
+        );
+        held.process.termination_requested = true;
+        assert!(
+            held.try_observe_target_exit()
+                .unwrap_err()
+                .contains("termination request")
+        );
+        assert!(
+            held.process
+                .reap_ready_namespace()
+                .unwrap_err()
+                .contains("namespace-init authority")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn applied_launch_channel_rejects_missing_partial_and_invalid_records() {
+        use std::os::fd::FromRawFd as _;
+        for record in [Vec::new(), vec![0xA7], vec![0xFF; 149]] {
+            let mut descriptors = [0; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+            let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+            if !record.is_empty() {
+                assert_eq!(
+                    unsafe {
+                        libc::write(writer.as_raw_fd(), record.as_ptr().cast(), record.len())
+                    },
+                    record.len() as isize
+                );
+            }
+            drop(writer);
+            assert!(imp::read_applied_launch(reader.as_raw_fd()).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn failed_release_never_authorizes_target_observation_or_retry() {
+        let mut held = HeldLinuxSandboxProcess {
+            process: LinuxSandboxProcess {
+                pid: 0,
+                namespace_lifetime: None,
+                launch_failure: None,
+                applied_launch: None,
+                observed_applied_launch: None,
+                termination_requested: false,
+            },
+            // Deliberately wrong access mode: a failed private release write.
+            release: Some(std::fs::File::open("/dev/null").unwrap()),
+            release_succeeded: false,
+        };
+        assert!(
+            held.release_once()
+                .unwrap_err()
+                .contains("release held native target")
+        );
+        assert!(
+            held.try_observe_target_exit()
+                .unwrap_err()
+                .contains("not been successfully released")
+        );
+        assert!(
+            held.release_once()
+                .unwrap_err()
+                .contains("already consumed")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn terminal_export_rejects_unowned_handles_and_invalid_deadlines() {
         let mut process = LinuxSandboxProcess {
             pid: 0,
             namespace_lifetime: None,
+            launch_failure: None,
+            applied_launch: None,
+            observed_applied_launch: None,
+            termination_requested: false,
         };
         for timeout in [
             std::time::Duration::ZERO,
@@ -5539,6 +6862,115 @@ mod tests {
         );
         // waitpid(0, ...) would wait for unrelated process-group children.
         assert!(process.wait().unwrap_err().contains("already been reaped"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn launch_failure_channel_is_exact_bounded_and_single_record() {
+        use std::io::Write as _;
+        use std::os::fd::FromRawFd as _;
+
+        fn channel(bytes: &[u8]) -> std::fs::File {
+            let mut descriptors = [0; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+            let mut writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+            writer.write_all(bytes).unwrap();
+            drop(writer);
+            reader
+        }
+
+        assert!(
+            imp::read_launch_failure(Some(channel(&[])))
+                .unwrap()
+                .is_none()
+        );
+
+        let mut exact = vec![imp::CHILD_ERROR];
+        exact.extend_from_slice(&5_u32.to_ne_bytes());
+        exact.extend_from_slice(b"exact");
+        assert_eq!(
+            imp::read_launch_failure(Some(channel(&exact)))
+                .unwrap()
+                .unwrap()
+                .diagnostic(),
+            "exact"
+        );
+
+        assert!(imp::read_launch_failure(Some(channel(&[0xff]))).is_err());
+
+        let mut oversized = vec![imp::CHILD_ERROR];
+        oversized.extend_from_slice(&((imp::MAX_LAUNCH_FAILURE_BYTES + 1) as u32).to_ne_bytes());
+        assert!(imp::read_launch_failure(Some(channel(&oversized))).is_err());
+
+        let mut repeated = exact.clone();
+        repeated.extend_from_slice(&exact);
+        assert!(imp::read_launch_failure(Some(channel(&repeated))).is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn launch_failure_record_fits_without_a_reader_before_child_exit() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        fn small_pipe() -> (std::fs::File, std::fs::File) {
+            let mut descriptors = [0; 2];
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0
+            );
+            let reader = unsafe { std::fs::File::from_raw_fd(descriptors[0]) };
+            let writer = unsafe { std::fs::File::from_raw_fd(descriptors[1]) };
+            assert!(
+                unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETPIPE_SZ, libc::PIPE_BUF) }
+                    >= libc::PIPE_BUF as i32
+            );
+            (reader, writer)
+        }
+
+        let (failure_reader, failure_writer) = small_pipe();
+        let (ready_reader, ready_writer) = small_pipe();
+        let diagnostic = "x".repeat(imp::MAX_CHILD_ERROR_BYTES * 2);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // Bound a regression: an oversized record would otherwise block
+            // before _exit while the parent intentionally waits without reading.
+            unsafe {
+                libc::signal(libc::SIGALRM, libc::SIG_DFL);
+                libc::alarm(5);
+                libc::close(failure_reader.as_raw_fd());
+                libc::close(ready_reader.as_raw_fd());
+            }
+            let result = imp::write_child_error(failure_writer.as_raw_fd(), &diagnostic)
+                .and_then(|()| imp::write_child_error(ready_writer.as_raw_fd(), &diagnostic));
+            unsafe { libc::_exit(if result.is_ok() { 0 } else { 1 }) };
+        }
+        drop(failure_writer);
+        drop(ready_writer);
+        let mut status = 0;
+        loop {
+            if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR)
+            );
+        }
+        assert!(
+            libc::WIFEXITED(status),
+            "failure writer did not finish: {status}"
+        );
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+        for reader in [failure_reader, ready_reader] {
+            let failure = imp::read_launch_failure(Some(reader)).unwrap().unwrap();
+            assert_eq!(failure.diagnostic().len(), imp::MAX_LAUNCH_FAILURE_BYTES);
+            assert!(failure.diagnostic().bytes().all(|byte| byte == b'x'));
+        }
     }
 
     pub(super) fn minimal_request() -> LinuxSandboxRequest {
@@ -5562,6 +6994,31 @@ mod tests {
             nested_sandbox: false,
             aggregate_limits: None,
         }
+    }
+
+    #[test]
+    fn isolated_loopback_launch_refuses_unheld_or_host_network_targets_before_contact() {
+        let deadline = crate::time::MonotonicDeadline::after(crate::time::Duration::from_secs(1));
+        let address = "127.0.0.1:7411".parse().unwrap();
+        let error = launch_linux_sandbox_with_loopback_ingress(
+            minimal_request(),
+            address,
+            9,
+            b"attempt",
+            deadline,
+        )
+        .unwrap_err();
+        assert!(error.contains("held isolated target"));
+        let mut request = minimal_request();
+        request.network = LinuxSandboxNetwork::Host;
+        request.lifecycle = LinuxSandboxLifecycle::AwaitRelease {
+            release_fd: 10,
+            release_keepalive_fd: 11,
+        };
+        let error =
+            launch_linux_sandbox_with_loopback_ingress(request, address, 9, b"attempt", deadline)
+                .unwrap_err();
+        assert!(error.contains("held isolated target"));
     }
 
     #[test]

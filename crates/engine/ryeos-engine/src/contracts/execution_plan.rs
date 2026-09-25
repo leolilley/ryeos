@@ -509,6 +509,13 @@ pub struct ExecutionPlan {
     /// plan that predates the current execution contract.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub target_requirement: Option<super::ExecutionTargetRequirement>,
+    /// Signed placement intent, separate from platform/resource suitability.
+    /// Required even for local plans; predecessor plans are not reinterpreted.
+    pub endpoint_requirement: super::ExecutionEndpointRequirement,
+    /// Exact node binding selected before sealing. Planning may leave an
+    /// external endpoint unresolved; sealing and execution must not.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub external_endpoint_binding: Option<super::ExternalEndpointBindingIdentity>,
     pub resource_authority_ceiling: super::ExecutionResourceAuthorityCeiling,
     pub cache_key: String,
     /// Daemon supervision profile hint, derived from the root item's kind.
@@ -530,6 +537,55 @@ pub struct ExecutionPlan {
     /// the normal execution path is unaffected.
     #[serde(default)]
     pub debug_raw: bool,
+}
+
+impl ExecutionPlan {
+    pub fn validate_endpoint_for_planning(&self) -> anyhow::Result<()> {
+        self.endpoint_requirement.validate()?;
+        match (&self.endpoint_requirement, &self.external_endpoint_binding) {
+            (super::ExecutionEndpointRequirement::Local {}, None)
+            | (super::ExecutionEndpointRequirement::External { .. }, None) => Ok(()),
+            (super::ExecutionEndpointRequirement::Local {}, Some(_)) => {
+                anyhow::bail!("local execution plan cannot carry an external endpoint binding")
+            }
+            (super::ExecutionEndpointRequirement::External { binding_id, .. }, Some(binding)) => {
+                binding.validate()?;
+                anyhow::ensure!(
+                    binding_id == &binding.binding_id,
+                    "external endpoint binding changed its signed selector"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Structural sealed identity only; the app must independently retain and
+    /// revalidate the installed signed generation before any provider contact.
+    pub fn validate_endpoint_for_sealing(&self) -> anyhow::Result<()> {
+        self.validate_endpoint_for_planning()?;
+        anyhow::ensure!(
+            matches!(
+                self.endpoint_requirement,
+                super::ExecutionEndpointRequirement::Local {}
+            ) || self.external_endpoint_binding.is_some(),
+            "external execution plan has no exact admitted endpoint binding"
+        );
+        Ok(())
+    }
+
+    /// This dispatcher owns local subprocesses only. Even a sealed external
+    /// selection cannot silently fall through to a local spawn.
+    pub fn require_local_endpoint_for_dispatch(&self) -> anyhow::Result<()> {
+        self.validate_endpoint_for_sealing()?;
+        anyhow::ensure!(
+            matches!(
+                self.endpoint_requirement,
+                super::ExecutionEndpointRequirement::Local {}
+            ),
+            "external execution endpoint requires its admitted external launch owner"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +647,7 @@ mod tests {
             "trust_class": "unsigned",
             "signer_fingerprint": null,
             "content_hash": "a".repeat(64),
+            "raw_content_digest": "b".repeat(64),
         });
         serde_json::from_value::<PlanTrustAuthority>(wire.clone()).unwrap();
         wire.as_object_mut().unwrap().remove("signer_fingerprint");

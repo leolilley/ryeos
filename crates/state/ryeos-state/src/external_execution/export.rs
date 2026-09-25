@@ -27,18 +27,13 @@ fn verify_closure_blobs(
 ) -> Result<()> {
     use sha2::{Digest as _, Sha256};
     use std::io::Read as _;
-    use std::time::{Duration, Instant};
-
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
     let mut verified = BTreeSet::new();
     let mut buffer = [0_u8; 64 * 1024];
     for closure in closures {
         let mut total = 0_u64;
         for entry in closure.tree().files().values() {
-            ensure!(
-                Instant::now() < deadline,
-                "import blob verification expired"
-            );
+            ensure!(!deadline.has_elapsed(), "import blob verification expired");
             total = total
                 .checked_add(entry.size)
                 .context("import tree size overflow")?;
@@ -56,10 +51,7 @@ fn verify_closure_blobs(
             let mut consumed = 0_u64;
             let mut digest = Sha256::new();
             loop {
-                ensure!(
-                    Instant::now() < deadline,
-                    "import blob verification expired"
-                );
+                ensure!(!deadline.has_elapsed(), "import blob verification expired");
                 let count = file.read(&mut buffer)?;
                 if count == 0 {
                     break;
@@ -71,7 +63,7 @@ fn verify_closure_blobs(
                 digest.update(&buffer[..count]);
             }
             ensure!(
-                Instant::now() < deadline
+                !deadline.has_elapsed()
                     && consumed == size
                     && format!("{:x}", digest.finalize()) == entry.blob_hash,
                 "import blob content failed verification"
@@ -160,7 +152,7 @@ mod tests {
         let (base_hash, mut candidate) = base(&cas);
         let (mut binding, owner, supervisor) = super::super::tests::binding();
         binding.base_snapshot_hash = base_hash.clone();
-        candidate.parent_hashes = vec![base_hash];
+        candidate.parent_hashes = vec![base_hash.clone()];
         let large_blob = vec![0x5a; MAX_CHUNK_BYTES + 17];
         let large_blob_hash = cas.store_blob(&large_blob).unwrap();
         let empty_blob_hash = cas.store_blob(&[]).unwrap();
@@ -191,6 +183,83 @@ mod tests {
         candidate.project_tree_hash = cas.store_object(&candidate_tree.to_value()).unwrap();
         let candidate_bytes = lillux::canonical_json(&candidate.to_value()).unwrap();
         let candidate_hash = lillux::sha256_hex(candidate_bytes.as_bytes());
+        let output_blob = b"remote-only-output";
+        let output_blob_hash = cas.store_blob(output_blob).unwrap();
+        let output_manifest = crate::objects::ExternalContentManifestObject {
+            schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.into(),
+            kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            entries: vec![crate::objects::ExternalContentManifestEntry {
+                path: "artifact.txt".into(),
+                kind: crate::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(ProjectFile::REGULAR_MODE),
+                blob_hash: Some(output_blob_hash.clone()),
+                size: Some(output_blob.len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: output_blob.len() as u64,
+        };
+        output_manifest.validate().unwrap();
+        let output_manifest_hash = cas
+            .store_object(&serde_json::to_value(&output_manifest).unwrap())
+            .unwrap();
+        let policy = ProjectSnapshotPolicy::from_value(
+            &cas.get_object(&candidate.effective_policy_hash)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let bounds = crate::external_content::products::ProductBounds {
+            maximum_entries: 8,
+            maximum_depth: 4,
+            maximum_file_bytes: 1024,
+            maximum_total_bytes: 4096,
+        };
+        let mut output_partition = crate::objects::WorkspaceOutputPartition {
+            schema: crate::objects::WORKSPACE_OUTPUT_PARTITION_SCHEMA.into(),
+            recipe_binding: "remote_products".into(),
+            recipe_ref: "config:fixtures/remote-products".into(),
+            recipe_raw_content_digest: "d".repeat(64),
+            declarations_hash: "e".repeat(64),
+            project_snapshot_policy_hash: candidate.effective_policy_hash.clone(),
+            roots: vec![crate::objects::WorkspaceOutputRoot {
+                name: "artifact".into(),
+                path: "products/artifact".into(),
+                storage: crate::external_content::products::ProductStorage::Content,
+                declared_bounds: bounds.clone(),
+                effective_bounds: bounds,
+            }],
+            products: Vec::new(),
+            partition_identity: String::new(),
+            capture_policy_digest: String::new(),
+        };
+        output_partition.capture_policy_digest = output_partition
+            .derived_capture_policy_digest(&policy)
+            .unwrap();
+        output_partition.partition_identity =
+            output_partition.derived_partition_identity().unwrap();
+        output_partition.validate().unwrap();
+        let output_capture = crate::objects::WorkspaceOutputCapture {
+            schema: crate::objects::WORKSPACE_OUTPUT_CAPTURE_SCHEMA.into(),
+            kind: crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND.into(),
+            producer_chain_root_id: "T-root".into(),
+            producer_thread_id: "T-remote".into(),
+            admitted_launch_capsule_hash: "f".repeat(64),
+            base_project_snapshot_hash: base_hash.clone(),
+            result_project_snapshot_hash: candidate_hash.clone(),
+            partition: output_partition,
+            outputs: std::collections::BTreeMap::from([(
+                "artifact".into(),
+                crate::objects::WorkspaceOutputCaptureState::Captured {
+                    manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+                    manifest_hash: output_manifest_hash.clone(),
+                },
+            )]),
+        };
+        output_capture.validate().unwrap();
+        let output_capture_hash = cas
+            .store_object(&output_capture.to_value().unwrap())
+            .unwrap();
         let completion = "9".repeat(64);
         let quiesce = authenticated(
             &binding,
@@ -245,12 +314,17 @@ mod tests {
             ChannelDirection::SupervisorToOwner,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: candidate_hash.clone(),
+                candidate_output_capture_hash: Some(output_capture_hash.clone()),
                 completion_request_digest: completion.clone(),
                 writer_exclusion_evidence_hash: evidence_hash,
             },
         );
         let imported = assembler.accept(&sealed).unwrap().unwrap();
         assert_eq!(imported.snapshot_hash(), candidate_hash);
+        assert_eq!(
+            imported.output_capture_hash(),
+            Some(output_capture_hash.as_str())
+        );
         assert!(assembler.accept(&sealed).is_err());
 
         // A real external supervisor and controller do not share a CAS. Seed
@@ -262,6 +336,7 @@ mod tests {
             &guard,
             binding.clone(),
             imported.snapshot_hash(),
+            imported.output_capture_hash(),
             imported.completion_request_digest(),
             imported.claimed_writer_exclusion_evidence_hash(),
         )
@@ -333,6 +408,7 @@ mod tests {
             &guard,
             limited_binding,
             imported.snapshot_hash(),
+            imported.output_capture_hash(),
             &completion,
             &limited_evidence_hash,
         )
@@ -375,6 +451,14 @@ mod tests {
         }
         let remote_imported = remote.accept(&sealed).unwrap().unwrap();
         assert_eq!(remote_imported.snapshot_hash(), imported.snapshot_hash());
+        assert_eq!(
+            remote_imported.output_capture_hash(),
+            imported.output_capture_hash()
+        );
+        assert_eq!(
+            foreign_cas.get_blob(&output_blob_hash).unwrap().unwrap(),
+            output_blob
+        );
         remote_imported
             .validate_retention(&foreign_authority, &foreign_guard, &binding)
             .unwrap();
@@ -580,6 +664,9 @@ pub struct CandidateExportAssembler<'a> {
 
 pub struct ImportedCandidateContent {
     closure: VerifiedProjectSnapshotClosure,
+    output_capture_hash: Option<String>,
+    output_objects: BTreeSet<String>,
+    output_blobs: BTreeSet<String>,
     channel_binding_digest: String,
     completion_request_digest: String,
     /// Authenticated supervisor claim; not yet independently qualified.
@@ -608,6 +695,7 @@ impl<'a> CandidateExportSource<'a> {
         guard: &'a CasMutationGuard,
         binding: ExecutionChannelBinding,
         snapshot_hash: &str,
+        output_capture_hash: Option<&str>,
         completion_request_digest: &str,
         writer_exclusion_evidence_hash: &str,
     ) -> Result<Self> {
@@ -617,6 +705,7 @@ impl<'a> CandidateExportSource<'a> {
             guard,
             &binding,
             snapshot_hash,
+            output_capture_hash,
             completion_request_digest,
             writer_exclusion_evidence_hash,
         )?;
@@ -786,6 +875,8 @@ fn candidate_retention_roots(
         objects.insert(imported.closure.tree().tree().files[path].clone());
         blobs.insert(file.blob_hash.clone());
     }
+    objects.extend(imported.output_objects.iter().cloned());
+    blobs.extend(imported.output_blobs.iter().cloned());
     (objects, blobs)
 }
 
@@ -801,6 +892,9 @@ impl ImportedCandidateContent {
     }
     pub fn claimed_writer_exclusion_evidence_hash(&self) -> &str {
         &self.claimed_writer_exclusion_evidence_hash
+    }
+    pub fn output_capture_hash(&self) -> Option<&str> {
+        self.output_capture_hash.as_deref()
     }
 
     /// Revalidate under the receiving store's still-held CAS guard before
@@ -822,6 +916,7 @@ impl ImportedCandidateContent {
             guard,
             binding,
             self.snapshot_hash(),
+            self.output_capture_hash(),
             self.completion_request_digest(),
             self.claimed_writer_exclusion_evidence_hash(),
         )?;
@@ -839,6 +934,7 @@ pub fn validate_retained_candidate_coordinates(
     guard: &CasMutationGuard,
     binding: &ExecutionChannelBinding,
     snapshot_hash: &str,
+    output_capture_hash: Option<&str>,
     completion_request_digest: &str,
     writer_exclusion_evidence_hash: &str,
 ) -> Result<()> {
@@ -847,6 +943,7 @@ pub fn validate_retained_candidate_coordinates(
         guard,
         binding,
         snapshot_hash,
+        output_capture_hash,
         completion_request_digest,
         writer_exclusion_evidence_hash,
     )?;
@@ -858,6 +955,7 @@ pub(super) fn validated_retained_candidate_root_sets(
     guard: &CasMutationGuard,
     binding: &ExecutionChannelBinding,
     snapshot_hash: &str,
+    output_capture_hash: Option<&str>,
     completion_request_digest: &str,
     writer_exclusion_evidence_hash: &str,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
@@ -866,6 +964,7 @@ pub(super) fn validated_retained_candidate_root_sets(
         guard,
         binding,
         snapshot_hash,
+        output_capture_hash,
         completion_request_digest,
         writer_exclusion_evidence_hash,
     )?;
@@ -877,6 +976,7 @@ fn load_validated_candidate_coordinates(
     guard: &CasMutationGuard,
     binding: &ExecutionChannelBinding,
     snapshot_hash: &str,
+    output_capture_hash: Option<&str>,
     completion_request_digest: &str,
     writer_exclusion_evidence_hash: &str,
 ) -> Result<(ImportedCandidateContent, BTreeSet<String>, BTreeSet<String>)> {
@@ -890,6 +990,42 @@ fn load_validated_candidate_coordinates(
             && candidate.snapshot().effective_policy_hash == base.snapshot().effective_policy_hash,
         "import changed base policy"
     );
+    let (output_objects, output_blobs) =
+        if let Some(output_capture_hash) = output_capture_hash {
+            let value = crate::object_closure::load_exact_cas_object_with_cas(
+                &cas,
+                output_capture_hash,
+                crate::objects::MAX_WORKSPACE_OUTPUT_CAPTURE_BYTES as u64,
+            )?;
+            let capture = crate::objects::WorkspaceOutputCapture::from_value(&value)?;
+            ensure!(
+                capture.base_project_snapshot_hash == binding.base_snapshot_hash
+                    && capture.result_project_snapshot_hash == snapshot_hash,
+                "imported workspace output capture changed its source generation"
+            );
+            capture.partition.validate_source_output_pair(
+                base.snapshot(),
+                candidate.snapshot(),
+                base.tree().policy(),
+            )?;
+            ensure!(
+                capture.partition.roots.iter().all(|root| root.storage
+                    == crate::external_content::products::ProductStorage::Content),
+                "external candidate output capture contains a non-transferable storage tier"
+            );
+            let closure = crate::object_closure::collect_object_closure_with_cas_and_limits(
+                &cas,
+                [output_capture_hash.to_owned()],
+                crate::object_closure::ObjectClosureLimits::default(),
+            )?;
+            ensure!(
+                closure.is_complete() && closure.large_object_hashes.is_empty(),
+                "external candidate output capture closure is incomplete or non-transferable"
+            );
+            (closure.object_hashes, closure.blob_hashes)
+        } else {
+            (BTreeSet::new(), BTreeSet::new())
+        };
     let (file, size) = cas
         .open_blob(writer_exclusion_evidence_hash)?
         .context("import lost writer observation")?;
@@ -908,6 +1044,9 @@ fn load_validated_candidate_coordinates(
     );
     let imported = ImportedCandidateContent {
         closure: candidate,
+        output_capture_hash: output_capture_hash.map(str::to_owned),
+        output_objects,
+        output_blobs,
         channel_binding_digest: binding.digest()?,
         completion_request_digest: completion_request_digest.to_owned(),
         claimed_writer_exclusion_evidence_hash: writer_exclusion_evidence_hash.to_owned(),
@@ -1056,6 +1195,14 @@ impl<'a> CandidateExportAssembler<'a> {
                                 Some("project_snapshot") => {
                                     ProjectSnapshot::from_value(&value)?;
                                 }
+                                Some(crate::objects::WORKSPACE_OUTPUT_CAPTURE_KIND) => {
+                                    crate::objects::WorkspaceOutputCapture::from_value(&value)?;
+                                }
+                                Some(crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+                                    crate::objects::ExternalContentManifestObject::from_value(
+                                        &value,
+                                    )?;
+                                }
                                 _ => bail!(
                                     "candidate export cannot import non-project authority objects"
                                 ),
@@ -1073,6 +1220,7 @@ impl<'a> CandidateExportAssembler<'a> {
             }
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash,
+                candidate_output_capture_hash,
                 completion_request_digest,
                 writer_exclusion_evidence_hash,
             } => {
@@ -1110,50 +1258,34 @@ impl<'a> CandidateExportAssembler<'a> {
                         == evidence_bytes,
                     "writer-exclusion observation is not canonical"
                 );
-                let base =
-                    VerifiedProjectSnapshotClosure::load(&cas, &self.binding.base_snapshot_hash)?;
-                let candidate =
-                    VerifiedProjectSnapshotClosure::load(&cas, candidate_snapshot_hash)?;
-                verify_closure_blobs(&cas, &[&base, &candidate])?;
-                ensure!(
-                    candidate.snapshot().parent_hashes == [self.binding.base_snapshot_hash.clone()]
-                        && candidate.snapshot().effective_policy_hash
-                            == base.snapshot().effective_policy_hash,
-                    "candidate export changed its base or qualification policy"
-                );
-                let mut allowed = BTreeSet::from([
-                    (
-                        ExportContentKind::Blob,
-                        writer_exclusion_evidence_hash.clone(),
-                    ),
-                    (ExportContentKind::Object, candidate_snapshot_hash.clone()),
-                    (
-                        ExportContentKind::Object,
-                        candidate.snapshot().project_tree_hash.clone(),
-                    ),
-                    (
-                        ExportContentKind::Object,
-                        candidate.snapshot().effective_policy_hash.clone(),
-                    ),
-                ]);
-                for (path, file) in candidate.tree().files() {
-                    allowed.insert((
-                        ExportContentKind::Object,
-                        candidate.tree().tree().files[path].clone(),
-                    ));
-                    allowed.insert((ExportContentKind::Blob, file.blob_hash.clone()));
-                }
+                let (imported, objects, blobs) = load_validated_candidate_coordinates(
+                    self.authority,
+                    self.guard,
+                    &self.binding,
+                    candidate_snapshot_hash,
+                    candidate_output_capture_hash.as_deref(),
+                    completion_request_digest,
+                    writer_exclusion_evidence_hash,
+                )?;
+                let mut allowed = objects
+                    .into_iter()
+                    .map(|hash| (ExportContentKind::Object, hash))
+                    .chain(
+                        blobs
+                            .into_iter()
+                            .map(|hash| (ExportContentKind::Blob, hash)),
+                    )
+                    .collect::<BTreeSet<_>>();
+                allowed.insert((
+                    ExportContentKind::Blob,
+                    writer_exclusion_evidence_hash.clone(),
+                ));
                 ensure!(
                     self.received.is_subset(&allowed),
                     "candidate export includes content outside its declared closure"
                 );
                 self.sealed = true;
-                Ok(Some(ImportedCandidateContent {
-                    closure: candidate,
-                    channel_binding_digest: self.binding.digest()?,
-                    completion_request_digest: completion_request_digest.clone(),
-                    claimed_writer_exclusion_evidence_hash: writer_exclusion_evidence_hash.clone(),
-                }))
+                Ok(Some(imported))
             }
             _ => bail!("candidate content assembler received a non-export frame"),
         }

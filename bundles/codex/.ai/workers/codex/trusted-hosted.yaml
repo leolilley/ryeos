@@ -1,9 +1,10 @@
-# ryeos:signed:2026-09-20T07:51:50Z:10a05533d582ec957fe29d3548b1d86ccb24bd58d314d112de0072cf1c765ef1:E+PFP9PfFvqt92eSJvMjpWLZIFCcZJsJYU5gSAhpeF9rwXhlNfEq3QXgaHd7ZZgvl4OK2vTsjrTFcUFL4QK3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-24T03:48:42Z:d0c40790774a598f4f2a4dd634ef99305e33afd560a22f3330cb1bb80eef504c:ithQn47dEJw5I8Bl9U17WtDkPMWZTUCoVUOh/zRhq/YhL1p+xvmYGUrnqzZUoBovRAt3Qls+ulAlgRHQQ25dDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "codex"
 version: "1.0.0"
 executor_id: "@subprocess"
 description: "Trusted disposable Codex App Server profile for credential enrollment on explicitly opted-in hosted nodes."
 execution_protocol: protocol:ryeos/core/trusted_structured_session
+external_product_slots: []
 supported_target:
   os: linux
   arch: x86_64
@@ -18,7 +19,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "ae3130ec566a27c15d0106bc912b26e442464440b71ff2fea7c3357718c416ef"
+  digest: "19f769419b262ab765ee85a6e6ac425433c68103435f9ee46dac4b73186966e5"
 
 external_content:
   - id: codex

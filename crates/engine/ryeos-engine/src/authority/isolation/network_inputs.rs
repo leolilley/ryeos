@@ -81,16 +81,13 @@ pub(super) fn capture(
             let observation = pinned
                 .observation()
                 .map_err(|error| refused(format!("observe network runtime input: {error}")))?;
-            let bytes = pinned
-                .read_stable_bounded(&observation, file.max_bytes)
-                .map_err(|error| refused(format!("read network runtime input: {error}")))?;
-            let digest = lillux::sha256_hex(&bytes);
-            let authority = lillux::sealed_memfd(c"ryeos-network-input", &bytes)
-                .map_err(|error| refused(format!("seal network runtime input: {error}")))?;
+            let capture = pinned
+                .capture_sealed_bounded(&observation, file.max_bytes)
+                .map_err(|error| refused(format!("capture network runtime input: {error}")))?;
             Ok(CapturedNetworkFile {
                 destination: file.destination.clone(),
-                digest,
-                authority,
+                digest: capture.digest().to_owned(),
+                authority: capture.authority().clone(),
             })
         })
         .collect()
@@ -145,6 +142,28 @@ mod tests {
         assert!(capture(&policy(&source), None).is_err());
         std::fs::write(&source, b"small").unwrap();
         assert!(capture(&policy(&source), Some(directory.path())).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_resolves_selected_symlink_once_and_preserves_app_root_exclusion() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let source = private.join("input");
+        let selected = directory.path().join("selected");
+        std::fs::write(&source, b"selected bytes").unwrap();
+        std::os::unix::fs::symlink(&source, &selected).unwrap();
+        assert!(capture(&policy(&selected), Some(&private)).is_err());
+        let captured = capture(&policy(&selected), None).unwrap();
+        std::fs::remove_file(&selected).unwrap();
+        std::fs::write(&selected, b"replaced selection").unwrap();
+        assert_eq!(captured[0].digest, lillux::sha256_hex(b"selected bytes"));
+        let (bytes, _) = captured[0]
+            .authority
+            .read_regular_file_stable_bounded(32)
+            .unwrap();
+        assert_eq!(bytes, b"selected bytes");
     }
 
     #[test]

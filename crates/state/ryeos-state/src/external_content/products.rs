@@ -23,6 +23,12 @@ pub mod composition;
 
 pub mod publication;
 
+pub mod producer_recipe;
+pub use producer_recipe::{
+    ProducerCwdSource, ProducerEnvironmentSource, ProducerExecutableSource,
+    ProducerLoopbackIngress, ProducerResourceBounds, ProducerStdinSource, ProductProducerRecipe,
+};
+
 pub mod qualification;
 
 pub mod qualification_publication;

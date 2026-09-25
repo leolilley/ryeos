@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-09T18:38:44Z:54eff35eab5f4a7ce5a36593579481fa3495335644aedfeb1b25582d704d52fe:DNhKLny9hwo+OCqUmAD3UpgS7lYRlQC/KfhSAC/Au9tGMx+oAmGdycjpmu+RiDfTC4tfVveZhWlddG+/84OqAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-24T17:47:26Z:d41bbbb457891e1b6643c6ddca114a888fdbafe9b3e4d42a815b0ed05cf08d19:unq27PWE1iPFA1i1f5pEgdFW5gP4zL4ClNl8uniZR0xblM+kYiPMFXjzjFCuWA9lByERDwBx4GDrUWn9wwWODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -76,3 +76,15 @@ Product qualification establishes the claims required by its signed relationship
 It does not qualify future worker edits. Worker command completion, frozen
 candidate capture, independent candidate evaluation and explicit publication
 remain separate authorities and qualification gates.
+
+For an external candidate runtime, the qualification policy's sealed verifier
+parameters must also contain the typed external-candidate use context. That
+context commits the full validated consumer execution requirement, including
+its runtime command, environment, containment and resource bounds. Admission
+compares the context with the current requirement before accepting the selected
+product. A changed requirement needs a qualification for that exact new use;
+changing the selected execution identity alone is not a qualification test.
+The generic product qualification service retains these parameters as signed
+opaque input and does not interpret the external execution protocol.
+The controller provider profile, executable and configuration source identities
+require their own exact comparison with the tested tuple before activation.

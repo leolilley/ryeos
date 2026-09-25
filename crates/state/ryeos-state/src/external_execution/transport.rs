@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use super::admission::AdmittedExternalCandidateProgram;
+use super::admission::AdmittedExternalExecutionProgram;
 use super::{
     ExecutionChannelBinding, MAX_CHUNK_BYTES, MAX_FRAME_BYTES, hash, validate_channel_public_key,
 };
@@ -23,6 +23,150 @@ pub const EXTERNAL_CHANNEL_EXCHANGE_PATH: &str = "/external-execution/channel/ex
 pub const MAX_TLS_ROOT_CERTIFICATES: usize = 8;
 pub const MAX_TLS_ROOT_CERTIFICATE_BYTES: usize = 64 * 1024;
 pub const MAX_TLS_ROOT_BUNDLE_BYTES: usize = 256 * 1024;
+pub const MAX_EXTERNAL_NETWORK_INPUT_BYTES: u64 = 64 * 1024;
+/// Two maximally sized base64 inputs plus fixed schema/digest keys and values.
+/// The 1024-byte metadata allowance exceeds the canonical fixed overhead.
+pub const MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES: usize =
+    2 * (MAX_EXTERNAL_NETWORK_INPUT_BYTES as usize).div_ceil(3) * 4 + 1024;
+
+/// Explicit target-local source selection; never ambient discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNetworkInputSelection {
+    pub source: String,
+    pub max_bytes: u64,
+}
+
+impl ExternalNetworkInputSelection {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.source.starts_with('/')
+                && self.source.len() <= 4096
+                && !self.source.contains('\0')
+                && self.source[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "external network input source is not a lexical absolute file path"
+        );
+        ensure!(
+            (1..=MAX_EXTERNAL_NETWORK_INPUT_BYTES).contains(&self.max_bytes),
+            "external network input byte bound is invalid"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNetworkInputPolicy {
+    pub resolver: ExternalNetworkInputSelection,
+    pub hosts: ExternalNetworkInputSelection,
+}
+
+impl ExternalNetworkInputPolicy {
+    pub fn validate(&self) -> Result<()> {
+        self.resolver.validate()?;
+        self.hosts.validate()
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        crate::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.external-network-input-policy.v1",
+            "policy": self,
+        }))
+    }
+}
+
+/// Protected occurrence-local bytes. State validates but never reads host files.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalCapturedNetworkInputs {
+    pub schema: u32,
+    pub policy_digest: String,
+    pub resolver_base64: String,
+    pub hosts_base64: String,
+    pub resolver_digest: String,
+    pub hosts_digest: String,
+}
+
+impl ExternalCapturedNetworkInputs {
+    pub fn from_bytes(
+        policy: &ExternalNetworkInputPolicy,
+        resolver: &[u8],
+        hosts: &[u8],
+    ) -> Result<Self> {
+        policy.validate()?;
+        ensure!(
+            resolver.len() as u64 <= policy.resolver.max_bytes
+                && hosts.len() as u64 <= policy.hosts.max_bytes,
+            "external captured network inputs exceed policy bounds"
+        );
+        let capture = Self {
+            schema: 1,
+            policy_digest: policy.digest()?,
+            resolver_base64: STANDARD.encode(resolver),
+            hosts_base64: STANDARD.encode(hosts),
+            resolver_digest: lillux::sha256_hex(resolver),
+            hosts_digest: lillux::sha256_hex(hosts),
+        };
+        capture.validate_for(policy)?;
+        Ok(capture)
+    }
+
+    pub fn validate_for(&self, policy: &ExternalNetworkInputPolicy) -> Result<()> {
+        ensure!(
+            self.policy_digest == policy.digest()?,
+            "external network capture changed its policy"
+        );
+        ensure!(
+            self.resolver_bytes()?.len() as u64 <= policy.resolver.max_bytes
+                && self.hosts_bytes()?.len() as u64 <= policy.hosts.max_bytes,
+            "external captured network inputs exceed policy bounds"
+        );
+        Ok(())
+    }
+
+    fn decode(&self, encoded: &str, digest: &str) -> Result<Vec<u8>> {
+        ensure!(
+            self.schema == 1,
+            "unsupported external network capture schema"
+        );
+        hash(&self.policy_digest)?;
+        hash(digest)?;
+        ensure!(
+            encoded.len() <= (MAX_EXTERNAL_NETWORK_INPUT_BYTES as usize).div_ceil(3) * 4,
+            "external network capture encoding exceeds bounds"
+        );
+        let bytes = STANDARD
+            .decode(encoded)
+            .context("external network capture is invalid base64")?;
+        ensure!(
+            bytes.len() as u64 <= MAX_EXTERNAL_NETWORK_INPUT_BYTES
+                && STANDARD.encode(&bytes) == encoded
+                && lillux::sha256_hex(&bytes) == digest,
+            "external network capture changed its canonical bytes"
+        );
+        Ok(bytes)
+    }
+
+    pub fn resolver_bytes(&self) -> Result<Vec<u8>> {
+        self.decode(&self.resolver_base64, &self.resolver_digest)
+    }
+
+    pub fn hosts_bytes(&self) -> Result<Vec<u8>> {
+        self.decode(&self.hosts_base64, &self.hosts_digest)
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.resolver_bytes()?;
+        self.hosts_bytes()?;
+        crate::objects::canonical_value_digest(&serde_json::json!({
+            "domain": "ryeos.external-captured-network-inputs.v1",
+            "capture": self,
+        }))
+    }
+}
 /// Complete secret bootstrap ceiling at the protected supervisor boundary.
 /// This includes the base64-expanded TLS roots and the admitted runtime recipe,
 /// so a bootstrap accepted by the controller is representable by the fixed
@@ -36,6 +180,7 @@ pub const MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES: usize = 512 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct ExternalControllerTransportContract {
     pub schema: u32,
+    pub network_inputs: ExternalNetworkInputPolicy,
     pub https_origin: String,
     pub route_contract: String,
     pub tls_root_bundle_digest: String,
@@ -47,9 +192,10 @@ pub struct ExternalControllerTransportContract {
 impl ExternalControllerTransportContract {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1,
+            self.schema == 2,
             "unsupported external controller transport schema"
         );
+        self.network_inputs.validate()?;
         let origin =
             Url::parse(&self.https_origin).context("external controller origin is not a URL")?;
         ensure!(
@@ -155,7 +301,9 @@ pub struct ExternalSupervisorBootstrap {
     /// Exact installed launcher executable selected by the signed placement
     /// generation. Observing a launcher digest after launch is not admission.
     pub launcher_artifact_hash: String,
-    pub candidate_program: AdmittedExternalCandidateProgram,
+    pub candidate_program: AdmittedExternalExecutionProgram,
+    pub guest_input_identity: String,
+    pub guest_inputs: ryeos_external_execution_contract::ExternalGuestInputProjection,
     pub owner_public_key: String,
     pub bootstrap_capability: String,
     pub attachment_deadline_ms: i64,
@@ -170,7 +318,7 @@ pub struct ExternalSupervisorBootstrap {
 impl ExternalSupervisorBootstrap {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 4,
+            self.schema == 7,
             "unsupported external supervisor bootstrap schema"
         );
         self.controller.validate()?;
@@ -196,13 +344,28 @@ impl ExternalSupervisorBootstrap {
             &self.execution_binding_hash,
             &self.supervisor_runtime_hash,
             &self.launcher_artifact_hash,
+            &self.guest_input_identity,
         ] {
             hash(digest)?;
         }
-        self.candidate_program.validate()?;
+        self.candidate_program
+            .validate_guest_inputs(&self.guest_inputs)?;
         ensure!(
-            self.candidate_program.runtime_manifest_hash == self.supervisor_runtime_hash,
+            self.candidate_program.runtime_manifest_hash()? == self.supervisor_runtime_hash,
             "external supervisor program changed its runtime manifest"
+        );
+        if let AdmittedExternalExecutionProgram::DirectCommand(program) = &self.candidate_program {
+            ensure!(
+                program.projection().endpoint_binding_digest == self.execution_binding_hash
+                    && u64::from(self.execution_timeout_seconds)
+                        <= program.projection().timeout_seconds,
+                "external supervisor changed its direct endpoint or widened its tool timeout"
+            );
+        }
+        ensure!(
+            self.guest_inputs.base_snapshot.snapshot_hash == self.base_snapshot_hash
+                && self.guest_inputs.identity_digest()? == self.guest_input_identity,
+            "external supervisor guest inputs changed their retained identity"
         );
         validate_channel_public_key(&self.owner_public_key)?;
         let capability = STANDARD
@@ -219,10 +382,23 @@ impl ExternalSupervisorBootstrap {
             "external supervisor lifecycle deadlines exceed bounds"
         );
         ensure!(
-            (1..=self.channel_max_bytes).contains(&self.candidate_export_max_bytes)
-                && self.channel_max_bytes <= 64 * 1024 * 1024,
+            (1..=64 * 1024 * 1024).contains(&self.channel_max_bytes),
             "external supervisor channel byte bound is invalid"
         );
+        match self.candidate_program.execution_mode() {
+            ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} => {
+                ensure!(
+                    (1..=self.channel_max_bytes).contains(&self.candidate_export_max_bytes),
+                    "external session supervisor export bound is invalid"
+                );
+            }
+            ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } => {
+                ensure!(
+                    self.candidate_export_max_bytes == 0,
+                    "external direct supervisor has no candidate export authority"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -293,6 +469,7 @@ impl ExternalSupervisorBootstrap {
                 && binding.execution_binding_hash == self.execution_binding_hash
                 && binding.supervisor_runtime_hash == self.supervisor_runtime_hash
                 && binding.candidate_program_digest == self.candidate_program.digest()?
+                && binding.execution_mode == self.candidate_program.execution_mode()
                 && binding.owner_public_key == self.owner_public_key
                 && binding.supervisor_public_key == supervisor_public_key,
             "external attachment response changed its precommitted identity"
@@ -599,13 +776,14 @@ mod tests {
 
     use super::*;
     use crate::external_execution::admission::{
-        ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
-        ExternalCandidateRuntimeRecipe, PROTOCOL,
+        AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+        ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
     };
 
     fn controller(roots: &[String]) -> ExternalControllerTransportContract {
         ExternalControllerTransportContract {
-            schema: 1,
+            schema: 2,
+            network_inputs: network_policy(),
             https_origin: "https://controller.example:7443".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
             tls_root_bundle_digest: external_tls_root_bundle_digest(roots).unwrap(),
@@ -618,7 +796,7 @@ mod tests {
     fn bootstrap() -> ExternalSupervisorBootstrap {
         let roots = vec![STANDARD.encode(b"fixture DER root")];
         let runtime_recipe = ExternalCandidateRuntimeRecipe {
-            schema: 1,
+            schema: 2,
             runtime_mount_destination: "/runtime".into(),
             executable_relative_path: "bin/codex".into(),
             argv0: "codex".into(),
@@ -628,12 +806,62 @@ mod tests {
             max_stdout_bytes: 1024 * 1024,
             max_stderr_bytes: 1024 * 1024,
             proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
-            contain_process_group: true,
+            contain_process_group: false,
             nested_sandbox: true,
         };
         let runtime_recipe_digest = runtime_recipe.digest().unwrap();
+        let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+            schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
+                descriptor: 55,
+                snapshot_hash: "c".repeat(64),
+                closure_digest: "5".repeat(64),
+                object_count: 3,
+                blob_count: 1,
+                total_bytes: 1,
+            },
+            workspace_outputs: None,
+            inputs: vec![ryeos_external_execution_contract::GuestMountInput {
+                role: ryeos_external_execution_contract::GuestMountRole::Product,
+                authority_id: "runtime".into(),
+                descriptor: 64,
+                destination: "/runtime".into(),
+                kind: ryeos_external_execution_contract::GuestMountKind::Directory,
+                access: ryeos_external_execution_contract::GuestMountAccess::ReadOnly,
+                normalized_mode: None,
+                content_authority:
+                    ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
+                        manifest_kind:
+                            ryeos_external_execution_contract::GuestProductManifestKind::Content,
+                        manifest_hash: "e".repeat(64),
+                        manifest_descriptor: 65,
+                        manifest_bytes: 256,
+                    },
+                bytes: 1,
+            }],
+            executable_search: vec!["/runtime/bin".into()],
+            environment: BTreeMap::new(),
+        };
+        let guest_input_identity = guest_inputs.identity_digest().unwrap();
+        let requirement = ExternalCandidateRequirement {
+            schema: 6,
+            protocol: PROTOCOL.into(),
+            connector_protocol: crate::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+            execution_route:
+                crate::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+            required_lifecycle_capabilities: std::collections::BTreeSet::new(),
+            provider_declaration_id: "codex-hosted".into(),
+            provider_configuration_destination: "environments.toml".into(),
+            runtime_product_declaration_id: "runtime".into(),
+            runtime_recipe,
+        };
+        let qualification_use =
+            crate::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
         ExternalSupervisorBootstrap {
-            schema: 4,
+            schema: 7,
             controller: controller(&roots),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-placement".into(),
@@ -645,22 +873,17 @@ mod tests {
             supervisor_runtime_hash: "e".repeat(64),
             launcher_artifact_hash: "4".repeat(64),
             candidate_program: AdmittedExternalCandidateProgram {
-                requirement: ExternalCandidateRequirement {
-                    schema: 3,
-                    protocol: PROTOCOL.into(),
-                    connector_protocol:
-                        crate::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                    execution_route:
-                        crate::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
-                    runtime_product_declaration_id: "runtime".into(),
-                    runtime_recipe,
-                },
+                requirement,
+                qualification_use,
+                runtime_manifest_kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
                 runtime_manifest_hash: "e".repeat(64),
                 runtime_witness_hash: "1".repeat(64),
                 qualification_attestation_hash: "2".repeat(64),
                 selection_identity_digest: "3".repeat(64),
-                runtime_recipe_digest,
-            },
+           runtime_recipe_digest,
+            }.into(),
+           guest_input_identity,
+            guest_inputs,
             owner_public_key: super::super::encode_channel_public_key(
                 &lillux::crypto::SigningKey::from_bytes(&[41; 32]).verifying_key(),
             )
@@ -672,6 +895,121 @@ mod tests {
             candidate_export_max_bytes: 512 * 1024,
             channel_max_bytes: 1024 * 1024,
         }
+    }
+
+    fn network_policy() -> ExternalNetworkInputPolicy {
+        ExternalNetworkInputPolicy {
+            resolver: ExternalNetworkInputSelection {
+                source: "/etc/resolv.conf".into(),
+                max_bytes: 65536,
+            },
+            hosts: ExternalNetworkInputSelection {
+                source: "/etc/hosts".into(),
+                max_bytes: 65536,
+            },
+        }
+    }
+
+    #[test]
+    fn network_policy_is_required_closed_and_bounded() {
+        let controller = controller(&[STANDARD.encode(b"fixture root")]);
+        let mut value = serde_json::to_value(&controller).unwrap();
+        value.as_object_mut().unwrap().remove("network_inputs");
+        assert!(serde_json::from_value::<ExternalControllerTransportContract>(value).is_err());
+        let mut value = serde_json::to_value(network_policy()).unwrap();
+        value["ambient"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ExternalNetworkInputPolicy>(value).is_err());
+        for field in ["resolver", "hosts"] {
+            let mut value = serde_json::to_value(network_policy()).unwrap();
+            value.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ExternalNetworkInputPolicy>(value).is_err());
+            let mut value = serde_json::to_value(network_policy()).unwrap();
+            value[field]["ambient"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<ExternalNetworkInputPolicy>(value).is_err());
+        }
+        for path in [
+            "",
+            "/",
+            "etc/hosts",
+            "/etc/../hosts",
+            "/etc/./hosts",
+            "/etc//hosts",
+            "/etc/hosts/",
+            "/etc/hosts\0",
+        ] {
+            let mut policy = network_policy();
+            policy.resolver.source = path.into();
+            assert!(policy.validate().is_err(), "accepted {path:?}");
+        }
+        for max_bytes in [0, 65537, u64::MAX] {
+            let mut policy = network_policy();
+            policy.hosts.max_bytes = max_bytes;
+            assert!(policy.validate().is_err());
+        }
+        let mut predecessor = controller;
+        predecessor.schema = 1;
+        assert!(predecessor.validate().is_err());
+        let mut predecessor = bootstrap();
+        predecessor.schema = 5;
+        assert!(predecessor.validate().is_err());
+    }
+
+    #[test]
+    fn network_capture_binds_exact_policy_and_canonical_bounded_bytes() {
+        let policy = network_policy();
+        let maximum =
+            ExternalCapturedNetworkInputs::from_bytes(&policy, &vec![0; 65536], &vec![0; 65536])
+                .unwrap();
+        assert!(
+            lillux::canonical_json(&serde_json::to_value(maximum).unwrap())
+                .unwrap()
+                .len()
+                <= MAX_EXTERNAL_NETWORK_CAPTURE_JSON_BYTES
+        );
+        let capture = ExternalCapturedNetworkInputs::from_bytes(
+            &policy,
+            b"nameserver 127.0.0.1\n",
+            b"127.0.0.1 localhost\n",
+        )
+        .unwrap();
+        capture.validate_for(&policy).unwrap();
+        assert_eq!(capture.resolver_bytes().unwrap(), b"nameserver 127.0.0.1\n");
+        assert_eq!(capture.hosts_bytes().unwrap(), b"127.0.0.1 localhost\n");
+        let mut changed_policy = policy.clone();
+        changed_policy.resolver.source = "/selected/resolv.conf".into();
+        assert!(capture.validate_for(&changed_policy).is_err());
+        changed_policy = policy.clone();
+        changed_policy.hosts.max_bytes -= 1;
+        assert!(capture.validate_for(&changed_policy).is_err());
+        let mut changed = capture.clone();
+        changed.schema = 2;
+        assert!(changed.digest().is_err());
+        for encoded in [
+            "eA".to_owned(),
+            "eB==".to_owned(),
+            "!".repeat(100_000),
+            STANDARD.encode(b"changed"),
+        ] {
+            let mut changed = capture.clone();
+            changed.resolver_base64 = encoded;
+            assert!(changed.validate_for(&policy).is_err());
+        }
+        let mut value = serde_json::to_value(&capture).unwrap();
+        value["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ExternalCapturedNetworkInputs>(value).is_err());
+        assert!(ExternalCapturedNetworkInputs::from_bytes(&policy, &vec![0; 65537], b"").is_err());
+        assert!(ExternalCapturedNetworkInputs::from_bytes(&policy, b"", &vec![0; 65537]).is_err());
+        ExternalCapturedNetworkInputs::from_bytes(&policy, &vec![0; 65536], b"").unwrap();
+        let mut small = policy.clone();
+        small.hosts.max_bytes = 1;
+        assert!(ExternalCapturedNetworkInputs::from_bytes(&small, b"", b"ab").is_err());
+        assert_ne!(
+            capture.digest().unwrap(),
+            ExternalCapturedNetworkInputs::from_bytes(&policy, b"other", b"")
+                .unwrap()
+                .digest()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -702,6 +1040,131 @@ mod tests {
     }
 
     #[test]
+    fn direct_bootstrap_requires_zero_export_and_exact_mode_endpoint_and_timeout() {
+        use crate::external_execution::admission::ExternalDirectSealedInput;
+        use ryeos_external_execution_contract::ExternalExecutionMode;
+
+        let mut direct = bootstrap();
+        direct.candidate_export_max_bytes = 0;
+        direct.guest_inputs.inputs[0].destination = "/ryeos/realizations/runtime".into();
+        direct.guest_inputs.executable_search.clear();
+        direct.guest_input_identity = direct.guest_inputs.identity_digest().unwrap();
+        // This is a transport-wire fixture, not evidence of app compilation or
+        // allocation admission. Identity joins are all this test claims.
+        direct.candidate_program = serde_json::from_value(serde_json::json!({
+            "kind":"direct_command", "program": {
+                "execution_plan_hash":"1".repeat(64), "execution_closure_digest":"2".repeat(64),
+                "command":{"authority":"realization_member","executable_blob_hash":"3".repeat(64),
+                    "realization_id":"runtime","realization_manifest_hash":direct.supervisor_runtime_hash,
+                    "realization_mount_root":"execution_runtime","realization_mount":"runtime","relative_path":"bin/evaluate",
+                    "execution_path":"/ryeos/realizations/runtime/bin/evaluate"},
+                "projection":{"argv0":"/ryeos/realizations/runtime/bin/evaluate","arguments":[],"cwd":"/workspace",
+                    "environment":direct.guest_inputs.environment,"stdin":ExternalDirectSealedInput::from_bytes(b"").unwrap(),
+                    "endpoint_binding_id":"farm-direct","endpoint_binding_digest":direct.execution_binding_hash,
+                    "execution_mode":{"kind":"direct_command","stdout_max_bytes":1024,"stderr_max_bytes":2048},
+                    "timeout_seconds":60,"native":{"kind":"linux_isolated_read_only","required_arch":"x86_64"}},
+                "guest_input_identity":direct.guest_input_identity
+            }
+        })).unwrap();
+        direct.validate().unwrap();
+        let supervisor_key = super::super::encode_channel_public_key(
+            &lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key(),
+        )
+        .unwrap();
+        let binding = ExecutionChannelBinding {
+            schema: crate::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode: direct.candidate_program.execution_mode(),
+            placement_thread_id: direct.placement_thread_id.clone(),
+            allocation_request_digest: direct.allocation_request_digest.clone(),
+            occurrence_id: direct.occurrence_id.clone(),
+            admitted_capsule_hash: direct.admitted_capsule_hash.clone(),
+            base_snapshot_hash: direct.base_snapshot_hash.clone(),
+            execution_binding_hash: direct.execution_binding_hash.clone(),
+            supervisor_runtime_hash: direct.supervisor_runtime_hash.clone(),
+            candidate_program_digest: direct.candidate_program.digest().unwrap(),
+            channel_nonce: "f".repeat(64),
+            owner_public_key: direct.owner_public_key.clone(),
+            supervisor_public_key: supervisor_key.clone(),
+            issued_at_ms: 1_000_000,
+            execution_deadline_ms: 1_060_000,
+            expires_at_ms: 1_180_000,
+            candidate_export_max_bytes: 0,
+            max_frames: direct.binding_max_frames().unwrap(),
+            max_bytes: direct.channel_max_bytes,
+        };
+        direct
+            .validate_attached_binding(&binding, &supervisor_key)
+            .unwrap();
+        for mutation in ["mode", "stdout", "stderr", "endpoint", "timeout", "export"] {
+            let mut changed = binding.clone();
+            match mutation {
+                "mode" => {
+                    changed.execution_mode = ExternalExecutionMode::StructuredSession {};
+                    changed.candidate_export_max_bytes = 1;
+                }
+                "stdout" => {
+                    changed.execution_mode = ExternalExecutionMode::DirectCommand {
+                        stdout_max_bytes: 1025,
+                        stderr_max_bytes: 2048,
+                    }
+                }
+                "stderr" => {
+                    changed.execution_mode = ExternalExecutionMode::DirectCommand {
+                        stdout_max_bytes: 1024,
+                        stderr_max_bytes: 2049,
+                    }
+                }
+                "endpoint" => changed.execution_binding_hash = "0".repeat(64),
+                "timeout" => changed.execution_deadline_ms += 1,
+                "export" => changed.candidate_export_max_bytes = 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                direct
+                    .validate_attached_binding(&changed, &supervisor_key)
+                    .is_err(),
+                "accepted binding {mutation}"
+            );
+        }
+        let wire = serde_json::to_value(&direct).unwrap();
+        for mutation in ["export", "channel", "endpoint", "timeout", "predecessor"] {
+            let mut changed: ExternalSupervisorBootstrap =
+                serde_json::from_value(wire.clone()).unwrap();
+            match mutation {
+                "export" => changed.candidate_export_max_bytes = 1,
+                "channel" => changed.channel_max_bytes = 0,
+                "endpoint" => changed.execution_binding_hash = "0".repeat(64),
+                "timeout" => changed.execution_timeout_seconds = 61,
+                "predecessor" => changed.schema = 6,
+                _ => unreachable!(),
+            }
+            assert!(changed.validate().is_err(), "accepted bootstrap {mutation}");
+        }
+        let mut shorter: ExternalSupervisorBootstrap =
+            serde_json::from_value(wire.clone()).unwrap();
+        shorter.execution_timeout_seconds = 59;
+        shorter.validate().unwrap();
+        assert!(
+            shorter
+                .validate_attached_binding(&binding, &supervisor_key)
+                .is_err()
+        );
+        let mut missing_tag = wire.clone();
+        missing_tag["candidate_program"]
+            .as_object_mut()
+            .unwrap()
+            .remove("kind");
+        assert!(serde_json::from_value::<ExternalSupervisorBootstrap>(missing_tag).is_err());
+        let mut untagged = wire;
+        untagged["candidate_program"] = untagged["candidate_program"]["program"].clone();
+        assert!(serde_json::from_value::<ExternalSupervisorBootstrap>(untagged).is_err());
+        let mut session = bootstrap();
+        session.validate().unwrap();
+        session.candidate_export_max_bytes = 0;
+        assert!(session.validate().is_err());
+    }
+
+    #[test]
     fn controller_transport_is_canonical_and_bootstrap_pins_every_binding_coordinate() {
         let bootstrap = bootstrap();
         bootstrap.validate_at(1_000_000).unwrap();
@@ -718,7 +1181,9 @@ mod tests {
         )
         .unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 3,
+            schema: crate::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
             placement_thread_id: bootstrap.placement_thread_id.clone(),
             allocation_request_digest: bootstrap.allocation_request_digest.clone(),
             occurrence_id: bootstrap.occurrence_id.clone(),
@@ -758,6 +1223,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&bootstrap).unwrap()).unwrap();
         changed
             .candidate_program
+            .worker_mut()
+            .unwrap()
             .requirement
             .runtime_recipe
             .arguments

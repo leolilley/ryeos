@@ -55,6 +55,12 @@ pub(crate) struct ExternalConnectorRecord {
     pub close_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalConnectorPreparation {
+    Fresh(ExternalConnectorRecord),
+    Prior(ExternalConnectorRecord),
+}
+
 impl ExternalConnectorRecord {
     fn validate(&self) -> Result<()> {
         validate_bounded_runtime_text(
@@ -241,9 +247,9 @@ fn derive_capability_generation(
         "placement_thread_id": placement,
         "channel_binding_digest": channel.digest()?,
         "execution_binding_hash": channel.execution_binding_hash,
-        "connector_protocol": contract.connector_protocol,
-        "connector_artifact_hash": contract.connector_artifact_hash,
-        "connector_artifact_bytes": contract.connector_artifact_bytes,
+        "connector_protocol": contract.workload.structured_session()?.connector_protocol,
+        "connector_artifact_hash": contract.workload.structured_session()?.connector_artifact_hash,
+        "connector_artifact_bytes": contract.workload.structured_session()?.connector_artifact_bytes,
     }))
 }
 
@@ -284,6 +290,39 @@ fn require_live_released_channel(
     Ok(())
 }
 
+/// Connection occurs while the admitted provider handles a dispatched
+/// command, after worker binding. It is not another pre-launch allocation.
+fn require_connecting_session(conn: &Connection, placement: &str) -> Result<()> {
+    let live: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dedicated_session s
+           JOIN worker_process p ON p.worker_instance_id=s.worker_instance_id
+             AND p.boot_epoch=s.worker_boot_epoch
+             AND p.placement_thread_id=s.placement_thread_id
+             AND p.session_capsule_hash=s.admitted_capsule_hash
+           JOIN execution_workspace w ON w.workspace_id=s.workspace_id
+           JOIN credential_profile c ON c.profile_id=s.credential_profile_id
+           WHERE s.placement_thread_id=?1 AND s.state='idle'
+             AND s.send_boundary='contacted' AND s.scope_retirement IS NULL
+             AND s.bounded_outcome_json IS NULL
+             AND p.state='live' AND p.cleanup_state='owned'
+             AND w.state='active' AND w.process_identity=p.process_identity
+             AND c.credential_generation=s.credential_generation
+             AND c.lock_owner=s.worker_instance_id
+             AND c.state IN ('unauthenticated','enrolling','confirming','active')
+             AND EXISTS(SELECT 1 FROM dedicated_session_command d
+               WHERE d.placement_thread_id=s.placement_thread_id
+                 AND d.worker_boot_epoch=s.worker_boot_epoch
+                 AND d.state='dispatched'))",
+        [placement],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        live,
+        "external connector requires its live contacting session"
+    );
+    Ok(())
+}
+
 fn expected_connector(
     conn: &Connection,
     placement: &str,
@@ -295,7 +334,7 @@ fn expected_connector(
         "external connector requires a live bound occurrence"
     );
     require_session_owner(conn, &allocation.reservation)?;
-    require_launch_ready_session(conn, placement)?;
+    require_contactable_session(conn, placement)?;
     let channel = load_binding(conn, placement)?;
     let channel_binding_digest = channel.digest()?;
     ensure!(
@@ -307,7 +346,7 @@ fn expected_connector(
         .context("external connector lost its retained placement binding")?;
     let contract = retained.backend_contract();
     ensure!(
-        contract.connector_protocol == EXTERNAL_CONNECTOR_PROTOCOL,
+        contract.workload.structured_session()?.connector_protocol == EXTERNAL_CONNECTOR_PROTOCOL,
         "external connector protocol is unsupported"
     );
     let generation = derive_capability_generation(placement, &channel, &contract)?;
@@ -315,9 +354,20 @@ fn expected_connector(
         placement_thread_id: placement.to_owned(),
         channel_binding_digest,
         execution_binding_hash: channel.execution_binding_hash,
-        connector_protocol: contract.connector_protocol,
-        connector_artifact_hash: contract.connector_artifact_hash,
-        connector_artifact_bytes: contract.connector_artifact_bytes,
+        connector_protocol: contract
+            .workload
+            .structured_session()?
+            .connector_protocol
+            .clone(),
+        connector_artifact_hash: contract
+            .workload
+            .structured_session()?
+            .connector_artifact_hash
+            .clone(),
+        connector_artifact_bytes: contract
+            .workload
+            .structured_session()?
+            .connector_artifact_bytes,
         capability_generation: generation,
         capability_hash: capability_hash.unwrap_or(&"0".repeat(64)).to_owned(),
         phase: ExternalConnectorPhase::Prepared,
@@ -352,9 +402,18 @@ pub(super) fn validate_connectors(conn: &Connection) -> Result<()> {
             record.channel_binding_digest == channel.digest()?
                 && record.execution_binding_hash == channel.execution_binding_hash
                 && record.execution_binding_hash == allocation.reservation.binding_hash
-                && record.connector_protocol == contract.connector_protocol
-                && record.connector_artifact_hash == contract.connector_artifact_hash
-                && record.connector_artifact_bytes == contract.connector_artifact_bytes,
+                && record.connector_protocol
+                    == contract.workload.structured_session()?.connector_protocol
+                && record.connector_artifact_hash
+                    == contract
+                        .workload
+                        .structured_session()?
+                        .connector_artifact_hash
+                && record.connector_artifact_bytes
+                    == contract
+                        .workload
+                        .structured_session()?
+                        .connector_artifact_bytes,
             "external connector changed its retained execution authority"
         );
         ensure!(
@@ -392,7 +451,7 @@ impl RuntimeDb {
         placement: &str,
         capability_generation: &str,
         capability_hash: &str,
-    ) -> Result<ExternalConnectorRecord> {
+    ) -> Result<ExternalConnectorPreparation> {
         validate_sha256(
             "external connector capability generation",
             capability_generation,
@@ -417,7 +476,7 @@ impl RuntimeDb {
                 "external connector preparation replay changed authority"
             );
             tx.commit()?;
-            return Ok(prior);
+            return Ok(ExternalConnectorPreparation::Prior(prior));
         }
         expected.prepared_at_ms = i64::try_from(lillux::time::timestamp_millis())?;
         tx.execute(
@@ -437,7 +496,7 @@ impl RuntimeDb {
             ],
         )?;
         tx.commit()?;
-        Ok(expected)
+        Ok(ExternalConnectorPreparation::Fresh(expected))
     }
 
     /// Returns `true` only to the transaction that acquired the one allowed
@@ -468,7 +527,7 @@ impl RuntimeDb {
                     "external connector cannot attach after cleanup begins"
                 );
                 require_session_owner(&tx, &allocation.reservation)?;
-                require_launch_ready_session(&tx, placement)?;
+                require_connecting_session(&tx, placement)?;
                 let channel = load_binding(&tx, placement)?;
                 require_live_released_channel(&tx, placement, &channel)?;
                 let retained = read_retained_binding(&tx, &allocation.reservation.binding_hash)?
@@ -563,11 +622,17 @@ mod tests {
             100,
             1024 * 1024,
         );
+        let startup_deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
         db.register_external_execution_channel(&binding).unwrap();
         super::super::channel::tests::ready(db, &binding, &supervisor);
-        db.admit_external_ready_and_author_release(&binding.placement_thread_id, &owner)
-            .unwrap()
-            .unwrap();
+        db.admit_external_ready_and_author_release(
+            &binding.placement_thread_id,
+            &owner,
+            startup_deadline,
+        )
+        .unwrap()
+        .unwrap();
         (binding, owner)
     }
 
@@ -579,6 +644,56 @@ mod tests {
             group_leader_pid: pid,
             group_leader_start_time_ticks: ticks,
         }
+    }
+
+    fn contact_provider(db: &RuntimeDb, placement: &str) {
+        let session = db.dedicated_session(placement).unwrap().unwrap();
+        let worker = session.worker_instance_id.unwrap();
+        let epoch = session.worker_boot_epoch.unwrap();
+        db.attach_worker_process(&WorkerProcessRecord {
+            worker_instance_id: worker.clone(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: session.admitted_capsule_hash,
+            boot_epoch: epoch,
+            lifecycle_generation: 1,
+            process_identity: ExecutionProcessIdentity {
+                schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                process_scope: None,
+                boot_id: "test-boot".into(),
+                target_pid: 5000,
+                target_start_time_ticks: 10,
+                group_leader_pid: 5000,
+                group_leader_start_time_ticks: 10,
+                resource_selections: Vec::new(),
+                resource_operations: Vec::new(),
+                resource_allocation_limit: None,
+                resource_occupancy_start: None,
+                resource_occupancy_limit: None,
+                resource_cleanup_allowance_ms: None,
+            },
+            control_channel_identity: "fd:connector-test".into(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: "connector-test-daemon".into(),
+            placement_thread_id: placement.into(),
+            cleanup_state: "owned".into(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        })
+        .unwrap();
+        db.complete_worker_binding(&worker, placement, epoch)
+            .unwrap();
+        let command = db
+            .reserve_dedicated_session_command(NewDedicatedSessionCommand {
+                placement_thread_id: placement,
+                idempotency_key: "connector-start",
+                worker_boot_epoch: epoch,
+                command_kind: "route",
+                request_digest: &"d".repeat(64),
+                payload: &serde_json::json!({}),
+            })
+            .unwrap();
+        db.mark_dedicated_command_contacted(placement, command.command_sequence, epoch)
+            .unwrap();
     }
 
     #[test]
@@ -612,12 +727,17 @@ mod tests {
         let prepared = db
             .prepare_external_connector(&placement, &generation, &"a".repeat(64))
             .unwrap();
+        let ExternalConnectorPreparation::Fresh(prepared) = prepared else {
+            panic!("first connector preparation was not fresh")
+        };
         assert_eq!(prepared.phase, ExternalConnectorPhase::Prepared);
         assert_eq!(prepared.channel_binding_digest, channel_digest);
+        let replay = db
+            .prepare_external_connector(&placement, &generation, &"a".repeat(64))
+            .unwrap();
         assert_eq!(
-            db.prepare_external_connector(&placement, &generation, &"a".repeat(64))
-                .unwrap(),
-            prepared
+            replay,
+            ExternalConnectorPreparation::Prior(prepared.clone())
         );
         assert!(
             db.prepare_external_connector(&placement, &generation, &"b".repeat(64))
@@ -649,6 +769,12 @@ mod tests {
         db.prepare_external_connector(&placement, &generation, &capability_hash)
             .unwrap();
         let first_peer = peer(3210, 99);
+        // Preparing the connector does not authorize a pre-launch connection.
+        assert!(
+            db.connect_external_connector(&placement, &generation, &capability_hash, &first_peer)
+                .is_err()
+        );
+        contact_provider(&db, &placement);
         assert!(
             db.connect_external_connector(&placement, &generation, &capability_hash, &first_peer,)
                 .unwrap()
@@ -698,6 +824,58 @@ mod tests {
     }
 
     #[test]
+    fn connection_refuses_lost_worker_workspace_and_command_authority() {
+        for mutation in [
+            "UPDATE worker_process SET cleanup_state='unproved'",
+            "UPDATE worker_process SET state='draining'",
+            "UPDATE worker_process SET boot_epoch=2",
+            "UPDATE execution_workspace SET process_identity=NULL",
+            "UPDATE dedicated_session SET state='recovering'",
+            "UPDATE dedicated_session SET state='outcome_unknown', send_boundary='outcome_unknown'",
+            "UPDATE dedicated_session SET send_boundary='settled'",
+            "UPDATE dedicated_session_command SET state='completed'",
+            "UPDATE credential_profile SET lock_owner=NULL",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+            let (placement, _) = released(&db, "connection-authority");
+            let generation = db
+                .external_connector_capability_generation(&placement)
+                .unwrap();
+            let capability_hash = "a".repeat(64);
+            db.prepare_external_connector(&placement, &generation, &capability_hash)
+                .unwrap();
+            contact_provider(&db, &placement);
+            if mutation == "UPDATE credential_profile SET lock_owner=NULL" {
+                // This authority loss is prohibited even before connection:
+                // active external cleanup retains the credential lock.
+                let error = db.conn.execute(mutation, []).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("external execution cleanup retains credential ownership")
+                );
+                continue;
+            }
+            db.conn.execute(mutation, []).unwrap();
+            assert!(
+                db.connect_external_connector(
+                    &placement,
+                    &generation,
+                    &capability_hash,
+                    &peer(4000, 101)
+                )
+                .is_err(),
+                "{mutation}"
+            );
+            assert_eq!(
+                db.external_connector(&placement).unwrap().unwrap().phase,
+                ExternalConnectorPhase::Prepared
+            );
+        }
+    }
+
+    #[test]
     fn stale_released_channel_cannot_consume_the_connection_claim() {
         for state in ["quiescing", "stopping"] {
             let root = tempfile::tempdir().unwrap();
@@ -715,6 +893,7 @@ mod tests {
                     params![placement, state],
                 )
                 .unwrap();
+            contact_provider(&db, &placement);
             assert!(
                 db.connect_external_connector(
                     &placement,
@@ -742,6 +921,7 @@ mod tests {
             .unwrap();
         db.author_external_owner_revocation(&placement, &owner)
             .unwrap();
+        contact_provider(&db, &placement);
         assert!(
             db.connect_external_connector(
                 &placement,
@@ -777,6 +957,7 @@ mod tests {
         let capability_hash = "a".repeat(64);
         db.prepare_external_connector(&placement, &generation, &capability_hash)
             .unwrap();
+        contact_provider(&db, &placement);
         db.conn
             .execute("UPDATE execution_workspace SET state='orphaned'", [])
             .unwrap();

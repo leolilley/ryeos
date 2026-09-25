@@ -78,6 +78,79 @@ pub fn digest_open_regular_file_stable_exact(
     unreachable!("bounded stable exact-digest loop always returns")
 }
 
+/// Digest one exact open inode as a whole and in fixed-size chunks during the
+/// same stable descriptor observation. The caller owns the chunk policy and
+/// expected digests; Lillux owns bounded positional reads and change detection.
+pub fn digest_open_regular_file_stable_chunked_exact(
+    file: &File,
+    expected_bytes: u64,
+    chunk_size: u64,
+) -> Result<(String, Vec<String>, std::fs::Metadata)> {
+    if chunk_size == 0 {
+        anyhow::bail!("regular file chunk size is zero");
+    }
+    for attempt in 0..2 {
+        let before = file.metadata()?;
+        if before.len() != expected_bytes {
+            anyhow::bail!("regular file size differs from admitted size {expected_bytes}");
+        }
+        let (whole, chunks) =
+            digest_open_regular_file_chunked_exact(file, expected_bytes, chunk_size)?;
+        let after = file.metadata()?;
+        if after.len() == expected_bytes && same_regular_file_observation(&before, &after) {
+            return Ok((whole, chunks, after));
+        }
+        if attempt == 1 {
+            anyhow::bail!("regular file changed repeatedly while its chunks were being verified");
+        }
+    }
+    unreachable!("bounded stable chunked-digest loop always returns")
+}
+
+fn digest_open_regular_file_chunked_exact(
+    file: &File,
+    expected_bytes: u64,
+    chunk_size: u64,
+) -> Result<(String, Vec<String>)> {
+    use sha2::Digest as _;
+    let mut whole = sha2::Sha256::new();
+    let mut chunk = sha2::Sha256::new();
+    let mut chunks = Vec::new();
+    let mut chunk_filled = 0u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut remaining = expected_bytes;
+    while remaining > 0 {
+        let requested = usize::try_from(
+            remaining
+                .min(buffer.len() as u64)
+                .min(chunk_size - chunk_filled),
+        )
+        .expect("bounded digest read always fits usize");
+        let read =
+            read_regular_file_at(file, &mut buffer[..requested], expected_bytes - remaining)?;
+        if read == 0 {
+            anyhow::bail!("regular file ended before admitted size {expected_bytes} was consumed");
+        }
+        whole.update(&buffer[..read]);
+        chunk.update(&buffer[..read]);
+        remaining -= read as u64;
+        chunk_filled += read as u64;
+        if chunk_filled == chunk_size {
+            chunks.push(format!("{:x}", chunk.finalize()));
+            chunk = sha2::Sha256::new();
+            chunk_filled = 0;
+        }
+    }
+    if chunk_filled > 0 {
+        chunks.push(format!("{:x}", chunk.finalize()));
+    }
+    let mut sentinel = [0_u8; 1];
+    if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
+        anyhow::bail!("regular file grew beyond admitted size {expected_bytes}");
+    }
+    Ok((format!("{:x}", whole.finalize()), chunks))
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -842,18 +915,74 @@ fn directory_names_bounded(
     directory: &File,
     max_entries: Option<usize>,
 ) -> Result<Vec<std::ffi::OsString>> {
-    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    let entries = std::fs::read_dir(&fd_path)
-        .with_context(|| format!("enumerate pinned directory {}", fd_path.display()))?;
-    let mut names = match max_entries {
-        Some(max_entries) => entries
-            .take(max_entries)
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<std::io::Result<Vec<_>>>()?,
-        None => entries
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<std::io::Result<Vec<_>>>()?,
+    use std::os::unix::ffi::OsStringExt as _;
+
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            // SAFETY: fdopendir returned this sole owned DIR pointer.
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+
+    // Reopen `.` relative to the retained inode to obtain an independent
+    // directory cursor. `dup` would share the original open-file offset, while
+    // `/proc/self/fd/N` is unavailable when this trusted process deliberately
+    // mounts a procfs for a child PID namespace in which it is not visible.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK,
+        )
     };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("reopen exact pinned directory for enumeration");
+    }
+    // SAFETY: fdopendir consumes the newly owned descriptor on success.
+    let stream = unsafe { libc::fdopendir(descriptor) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(descriptor);
+        }
+        return Err(error).context("open exact pinned directory stream");
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::new();
+    loop {
+        if max_entries.is_some_and(|maximum| names.len() >= maximum) {
+            break;
+        }
+        // POSIX distinguishes end-of-directory from failure only through
+        // errno when readdir returns null.
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        // SAFETY: the retained DIR pointer has one owner and this operation is
+        // serialized in the current call.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) != 0 {
+                return Err(error).context("enumerate exact pinned directory");
+            }
+            break;
+        }
+        // SAFETY: readdir returned a live dirent whose d_name is NUL-terminated.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if matches!(name, b"." | b"..") {
+            continue;
+        }
+        names.push(std::ffi::OsString::from_vec(name.to_vec()));
+    }
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     Ok(names)
 }
@@ -863,21 +992,11 @@ fn directory_names_with_limit(
     directory: &File,
     max_entries: usize,
 ) -> Result<Vec<std::ffi::OsString>> {
-    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    let entries = std::fs::read_dir(&fd_path)
-        .with_context(|| format!("enumerate pinned directory {}", fd_path.display()))?;
     let read_limit = max_entries.saturating_add(1);
-    let mut names = entries
-        .take(read_limit)
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let names = directory_names_bounded(directory, Some(read_limit))?;
     if names.len() > max_entries {
-        anyhow::bail!(
-            "secure directory traversal exceeds maximum entry count {max_entries} at {}",
-            fd_path.display()
-        );
+        anyhow::bail!("secure directory traversal exceeds maximum entry count {max_entries}");
     }
-    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     Ok(names)
 }
 
@@ -893,6 +1012,83 @@ pub struct PinnedDirectory {
     path: PathBuf,
     directory: File,
     path_binding_required: bool,
+}
+
+/// An empty regular mount target reserved in an explicitly owned directory.
+/// The mounted source is separate: no source bytes are copied into this inode.
+/// Callers retain this reservation until all processes using the mount retire.
+/// Explicit `close` reports cleanup failure and retains ownership for retry;
+/// Drop releases handles but deliberately leaves the namespace reservation:
+/// destruction is not proof that processes using the mount have retired.
+#[derive(Debug)]
+pub struct EmptyMountTargetReservation {
+    parent: PinnedDirectory,
+    target: Option<PinnedRegularFile>,
+}
+
+impl EmptyMountTargetReservation {
+    pub fn close(&mut self) -> Result<()> {
+        if let Some(target) = &self.target {
+            self.parent.remove_pinned_regular_if_same(target)?;
+            self.target = None;
+        }
+        Ok(())
+    }
+}
+
+/// Owner-private filesystem spelling for one inherited descriptor. Only the
+/// symlink coordinate persists; the protected bytes remain in the descriptor
+/// and disappear when its final owner closes.
+#[derive(Debug)]
+pub struct EphemeralDescriptorFileLink {
+    parent: PinnedDirectory,
+    name: OsString,
+    target: Vec<u8>,
+    source: crate::InheritedDescriptorAuthority,
+    active: bool,
+}
+
+impl EphemeralDescriptorFileLink {
+    pub fn source(&self) -> crate::InheritedDescriptorAuthority {
+        self.source.clone()
+    }
+
+    pub fn close(mut self) -> Result<()> {
+        self.remove_exact()?;
+        self.active = false;
+        Ok(())
+    }
+
+    fn remove_exact(&self) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("ephemeral descriptor file links require Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            if self.parent.read_symlink_target(&self.name, 64)?.as_deref()
+                != Some(self.target.as_slice())
+            {
+                anyhow::bail!("ephemeral descriptor link changed before removal");
+            }
+            let name = std::ffi::CString::new(self.name.as_bytes())?;
+            if unsafe { libc::unlinkat(self.parent.directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("remove exact ephemeral descriptor link");
+            }
+            self.parent.directory.sync_all()?;
+            Ok(())
+        }
+    }
+}
+
+impl Drop for EphemeralDescriptorFileLink {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.remove_exact();
+        }
+    }
 }
 
 /// One direct child opened without following links. Mixed-tree walkers use
@@ -917,6 +1113,29 @@ pub struct PinnedRegularFile {
     path: PathBuf,
     name: OsString,
     file: File,
+}
+
+/// One bounded stable read and its immutable descriptor projection. The source
+/// may subsequently change; neither the retained bytes nor the sealed copy do.
+/// Deliberately not Debug: captured host inputs may contain private data.
+pub struct CapturedRegularFile {
+    bytes: Vec<u8>,
+    digest: String,
+    authority: crate::InheritedDescriptorAuthority,
+}
+
+impl CapturedRegularFile {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn authority(&self) -> &crate::InheritedDescriptorAuthority {
+        &self.authority
+    }
 }
 
 /// Verify an absolute spelling inside an already-confined mount namespace.
@@ -1288,6 +1507,29 @@ impl PinnedRegularFile {
     ) -> Result<Vec<u8>> {
         let mut file = self.file.try_clone()?;
         read_open_regular_file_stable_bounded(&mut file, observation, max_bytes)
+    }
+
+    /// Capture exactly this prior descriptor observation, refusing an
+    /// unbounded or changed source. Path selection and policy remain with the
+    /// caller; sealing does not attest that the original host file is immutable.
+    pub fn capture_sealed_bounded(
+        &self,
+        observation: &OpenRegularFileObservation,
+        max_bytes: u64,
+    ) -> Result<CapturedRegularFile> {
+        anyhow::ensure!(
+            max_bytes > 0,
+            "regular file capture requires a positive bound"
+        );
+        let bytes = self.read_stable_bounded(observation, max_bytes)?;
+        let digest = crate::sha256_hex(&bytes);
+        let authority =
+            crate::sealed_memfd(c"lillux-captured-file", &bytes).map_err(anyhow::Error::msg)?;
+        Ok(CapturedRegularFile {
+            bytes,
+            digest,
+            authority,
+        })
     }
 
     /// Digest this exact descriptor at the size committed by `observation`
@@ -1790,8 +2032,21 @@ impl PinnedDirectory {
     pub fn configure_command_cwd(&self, command: &mut std::process::Command) -> Result<()> {
         #[cfg(unix)]
         {
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
             use std::os::unix::process::CommandExt as _;
-            let directory = self.directory.try_clone()?;
+            let mut directory = self.directory.try_clone()?;
+            // A caller may have closed standard descriptors. Keep the cwd
+            // authority above them so the child's piped stdio setup cannot
+            // replace the descriptor before this pre-exec fchdir runs.
+            if directory.as_raw_fd() <= libc::STDERR_FILENO {
+                let duplicate =
+                    unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+                if duplicate < 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("move pinned cwd descriptor above stdio");
+                }
+                directory = unsafe { File::from_raw_fd(duplicate) };
+            }
             // SAFETY: the hook owns the descriptor through exec; fchdir is
             // async-signal-safe and affects only the launching process.
             unsafe {
@@ -1872,6 +2127,24 @@ impl PinnedDirectory {
         })
     }
 
+    /// Retain an already-authenticated inherited directory descriptor.  The
+    /// supplied path is diagnostic only and must never be reopened or treated
+    /// as namespace authority.  Construction is crate-private so only typed
+    /// Lillux descriptor adoption can select this mode.
+    pub(crate) fn from_inherited_directory_descriptor(
+        path: PathBuf,
+        directory: File,
+    ) -> Result<Self> {
+        if !directory.metadata()?.is_dir() {
+            anyhow::bail!("inherited authority is not a directory: {}", path.display());
+        }
+        Ok(Self {
+            path,
+            directory,
+            path_binding_required: false,
+        })
+    }
+
     /// Adopt one exact directory descriptor deliberately mapped into this
     /// process by a trusted Lillux parent. `path` is diagnostic only.
     ///
@@ -1897,14 +2170,12 @@ impl PinnedDirectory {
         // SAFETY: upheld by the caller; PinnedDirectory immediately becomes
         // the unique descriptor owner.
         let directory = unsafe { File::from_raw_fd(raw) };
-        if !directory.metadata()?.is_dir() {
-            anyhow::bail!("inherited authority is not a directory: {}", path.display());
-        }
-        Ok(Self {
-            path,
-            directory,
-            path_binding_required: false,
-        })
+        Self::from_inherited_directory_descriptor(path, directory)
+    }
+
+    #[cfg(not(unix))]
+    pub unsafe fn take_inherited_directory(_path: PathBuf, _fd: u32) -> Result<Self> {
+        anyhow::bail!("inherited directory authority is unavailable on this platform")
     }
 
     pub fn identity(&self) -> Result<PinnedDirectoryIdentity> {
@@ -2280,6 +2551,9 @@ impl PinnedDirectory {
     /// which it was opened. Callers use this immediately before publishing
     /// facts that attribute descriptor-read content to that stable path.
     pub fn ensure_path_binding(&self) -> Result<()> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
         let current = Self::open(&self.path)?.ok_or_else(|| {
             anyhow::anyhow!("pinned directory path disappeared: {}", self.path.display())
         })?;
@@ -3484,6 +3758,86 @@ impl PinnedDirectory {
         }
     }
 
+    /// Publish one reserved child name as an ephemeral view of an exact
+    /// inherited regular-file descriptor. The target contains only the
+    /// process-local descriptor coordinate; file bytes never enter the
+    /// filesystem. This operation never infers ownership from a symlink target:
+    /// only the live returned handle may remove the entry it created.
+    pub fn install_ephemeral_descriptor_file_link(
+        &self,
+        name: &OsStr,
+        source: &crate::InheritedDescriptorAuthority,
+    ) -> Result<EphemeralDescriptorFileLink> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, source);
+            anyhow::bail!("ephemeral descriptor file links require Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(name)?;
+            source.regular_file_observation()?;
+            let descriptor = source.inherited_descriptor().map_err(anyhow::Error::msg)?;
+            let target = format!("/proc/self/fd/{descriptor}").into_bytes();
+            if self.entry_no_follow(name)?.is_some() {
+                anyhow::bail!("ephemeral descriptor link destination is already occupied");
+            }
+            self.create_symlink(name, &target)?;
+            if self.read_symlink_target(name, 64)?.as_deref() != Some(target.as_slice()) {
+                anyhow::bail!("ephemeral descriptor link changed during publication");
+            }
+            Ok(EphemeralDescriptorFileLink {
+                parent: self.try_clone()?,
+                name: name.to_os_string(),
+                target,
+                source: source.clone(),
+                active: true,
+            })
+        }
+    }
+
+    /// Read one exact ephemeral descriptor-file link published by
+    /// [`Self::install_ephemeral_descriptor_file_link`].
+    ///
+    /// Unlike an ordinary no-follow file read, this capability intentionally
+    /// accepts one descriptor-relative symlink whose target has the canonical
+    /// `/proc/self/fd/N` shape. The inherited target must still be an immutable
+    /// sealed regular file and the read remains byte-bounded. Callers receive
+    /// bytes, never a raw descriptor or ambient pathname authority.
+    pub fn read_ephemeral_descriptor_file_link(
+        &self,
+        name: &OsStr,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (name, max_bytes);
+            anyhow::bail!("ephemeral descriptor file links require Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            const PREFIX: &str = "/proc/self/fd/";
+            let target = self
+                .read_symlink_target(name, 64)?
+                .ok_or_else(|| anyhow::anyhow!("ephemeral descriptor file link is missing"))?;
+            let target = std::str::from_utf8(&target)
+                .context("ephemeral descriptor file link target is not UTF-8")?;
+            let coordinate = target.strip_prefix(PREFIX).ok_or_else(|| {
+                anyhow::anyhow!("ephemeral descriptor file link target is invalid")
+            })?;
+            let descriptor = coordinate
+                .parse::<u32>()
+                .context("ephemeral descriptor file link coordinate is invalid")?;
+            if descriptor <= libc::STDERR_FILENO as u32 || target != format!("{PREFIX}{descriptor}")
+            {
+                anyhow::bail!("ephemeral descriptor file link target is not canonical");
+            }
+            crate::sandbox::read_sealed_inherited_descriptor(descriptor, max_bytes)
+                .map_err(anyhow::Error::msg)
+                .context("read sealed ephemeral descriptor file")
+        }
+    }
+
     pub fn open_child_directory(&self, name: &OsStr) -> Result<Option<Self>> {
         #[cfg(not(unix))]
         {
@@ -3864,6 +4218,23 @@ impl PinnedDirectory {
                 name: name.to_os_string(),
                 file,
             }))
+    }
+
+    /// Reserve a previously absent mount target in an owner-private directory.
+    /// Never adopts an incumbent, including an empty file from an older run.
+    /// A process crash leaves ordinary retained state; callers must not infer
+    /// recovery ownership from its name, mode or contents.
+    pub fn reserve_empty_mount_target(&self, name: &OsStr) -> Result<EmptyMountTargetReservation> {
+        self.require_owner_private_directory()?;
+        // Acquire the cleanup owner before publishing anything.
+        let parent = self.try_clone()?;
+        let target = self
+            .atomic_create_pinned_regular(name, b"", 0o400)?
+            .context("mount target reservation destination is already occupied")?;
+        Ok(EmptyMountTargetReservation {
+            parent,
+            target: Some(target),
+        })
     }
 
     /// Stream and publish one bounded regular file without replacing an
@@ -7209,6 +7580,48 @@ mod tests {
         assert!(read_open_regular_file_stable_bounded(&mut file, &observed, 1024).is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sealed_regular_capture_retains_exact_bytes_after_source_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source");
+        std::fs::write(&path, b"captured").unwrap();
+        let file = open_pinned_regular_file_no_follow(&path).unwrap();
+        let captured = file
+            .capture_sealed_bounded(&file.observation().unwrap(), 8)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        drop(file);
+        assert_eq!(captured.bytes(), b"captured");
+        assert_eq!(captured.digest(), crate::sha256_hex(b"captured"));
+        let fd = captured.authority().inherited_descriptor().unwrap();
+        assert_eq!(
+            crate::read_sealed_inherited_descriptor(fd, 8).unwrap(),
+            b"captured"
+        );
+        assert!(crate::read_sealed_inherited_descriptor(fd, 7).is_err());
+        // Sealed capture descriptors are not accidentally inherited by exec.
+        let flags = unsafe { libc::fcntl(fd as libc::c_int, libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sealed_regular_capture_refuses_unbounded_oversized_and_changed_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source");
+        assert!(open_pinned_regular_file_no_follow(&path).is_err());
+        assert!(open_pinned_regular_file_no_follow(root.path()).is_err());
+        std::fs::write(&path, b"original").unwrap();
+        let file = open_pinned_regular_file_no_follow(&path).unwrap();
+        let observed = file.observation().unwrap();
+        assert!(file.capture_sealed_bounded(&observed, 0).is_err());
+        assert!(file.capture_sealed_bounded(&observed, 7).is_err());
+        std::fs::write(&path, b"changed-length").unwrap();
+        assert!(file.capture_sealed_bounded(&observed, 1024).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn exact_descriptor_reads_leave_a_shared_cursor_unchanged() {
@@ -8276,5 +8689,128 @@ mod tests {
         assert!(nested.require_disjoint_directory_tree(&first).is_err());
         assert!(first.require_disjoint_directory_tree(&first).is_err());
         first.require_disjoint_directory_tree(&second).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_mount_target_reservation_is_empty_exclusive_and_explicitly_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        directory.set_mode(0o700).unwrap();
+        let name = OsStr::new("configuration");
+        let mut reservation = directory.reserve_empty_mount_target(name).unwrap();
+        assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"");
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+        reservation.close().unwrap();
+        reservation.close().unwrap();
+        assert!(!root.path().join(name).exists());
+
+        // Partial preparation rolls back only the successfully acquired target.
+        let mut first = directory.reserve_empty_mount_target(name).unwrap();
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+        first.close().unwrap();
+        drop(first);
+        assert!(!root.path().join(name).exists());
+
+        let unsettled = directory.reserve_empty_mount_target(name).unwrap();
+        drop(unsettled);
+        assert!(root.path().join(name).exists());
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_mount_target_reservation_preserves_replacements_and_stale_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        directory.set_mode(0o700).unwrap();
+        let name = OsStr::new("configuration");
+        let path = root.path().join(name);
+        let mut reservation = directory.reserve_empty_mount_target(name).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(reservation.close().is_err());
+        assert!(reservation.close().is_err());
+        drop(reservation);
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+
+        std::fs::write(&path, b"").unwrap();
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+        assert_eq!(std::fs::read_link(&path).unwrap(), PathBuf::from("missing"));
+        std::fs::remove_file(&path).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(directory.reserve_empty_mount_target(name).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ephemeral_descriptor_link_never_replaces_live_or_stale_namespace_state() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let first = crate::sealed_memfd(c"ephemeral-first", b"first").unwrap();
+        let second = crate::sealed_memfd(c"ephemeral-second", b"second").unwrap();
+        let link = directory
+            .install_ephemeral_descriptor_file_link(OsStr::new("configuration"), &first)
+            .unwrap();
+        let first_target = std::fs::read_link(root.path().join("configuration")).unwrap();
+        assert_eq!(
+            directory
+                .read_ephemeral_descriptor_file_link(OsStr::new("configuration"), 5)
+                .unwrap(),
+            b"first"
+        );
+        assert!(
+            directory
+                .read_ephemeral_descriptor_file_link(OsStr::new("configuration"), 4)
+                .is_err()
+        );
+
+        assert!(
+            directory
+                .install_ephemeral_descriptor_file_link(OsStr::new("configuration"), &second,)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_link(root.path().join("configuration")).unwrap(),
+            first_target
+        );
+        drop(link);
+        assert!(std::fs::symlink_metadata(root.path().join("configuration")).is_err());
+
+        symlink("/proc/self/fd/55", root.path().join("configuration")).unwrap();
+        assert!(
+            directory
+                .install_ephemeral_descriptor_file_link(OsStr::new("configuration"), &second,)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_link(root.path().join("configuration")).unwrap(),
+            std::path::PathBuf::from("/proc/self/fd/55")
+        );
+    }
+
+    #[test]
+    fn chunked_exact_digest_uses_one_stable_open_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("chunks");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let (whole, chunks, _) =
+            digest_open_regular_file_stable_chunked_exact(&file, 10, 4).unwrap();
+        assert_eq!(whole, crate::sha256_hex(b"abcdefghij"));
+        assert_eq!(
+            chunks,
+            [b"abcd".as_slice(), b"efgh", b"ij"]
+                .into_iter()
+                .map(crate::sha256_hex)
+                .collect::<Vec<_>>()
+        );
+        assert!(digest_open_regular_file_stable_chunked_exact(&file, 9, 4).is_err());
+        assert!(digest_open_regular_file_stable_chunked_exact(&file, 10, 0).is_err());
     }
 }

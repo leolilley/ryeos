@@ -20,9 +20,9 @@ use ryeos_state::objects::{
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-/// v9 requires explicit external candidate requirements. Omission cannot
-/// select a local execution fallback during admission or recovery.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 9;
+/// v10 commits an external provider's generated private configuration
+/// destination so capture/restore exclusions are sealed before node contact.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 10;
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -250,6 +250,11 @@ pub fn compile(
             }
         }
         _ => bail!("structured-session workload_client must be present and nullable"),
+    }
+    if !object["external_candidate"].is_null() && !object["workload_client"].is_null() {
+        bail!(
+            "external candidate profile must declare workload_client null; delegated workload authority is not admitted"
+        );
     }
     if let Some(portable_state) = object
         .get("portable_state")
@@ -2442,13 +2447,16 @@ mod tests {
             .unwrap()
             .remove("external_candidate");
         assert!(compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).is_err());
-        profile["external_candidate"] = json!({"schema":3,
+        profile["external_candidate"] = json!({"schema":6,
         "protocol":ryeos_state::external_execution::admission::PROTOCOL,
         "connector_protocol":ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL,
         "execution_route":"connector_only",
+        "required_lifecycle_capabilities":[],
+        "provider_declaration_id":"codex-hosted",
+        "provider_configuration_destination":"environments.toml",
         "runtime_product_declaration_id":"candidate_runtime",
         "runtime_recipe":{
-            "schema":1,
+            "schema":2,
             "runtime_mount_destination":"/runtime",
             "executable_relative_path":"bin/codex",
             "argv0":"codex",
@@ -2458,18 +2466,54 @@ mod tests {
             "max_stdout_bytes":1048576,
             "max_stderr_bytes":1048576,
             "proc_filesystem":"pid_namespace_nested",
-            "contain_process_group":true,
+            "contain_process_group":false,
             "nested_sandbox":true
         }});
         let external = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
         assert!(external.external_candidate_requirement().unwrap().is_some());
         assert_ne!(local.profile_hash, external.profile_hash);
+        let mut reconciled = profile.clone();
+        reconciled["external_candidate"]["required_lifecycle_capabilities"] =
+            json!(["exact_allocation_reconciliation"]);
+        let reconciled = compile(&serde_json::to_vec(&reconciled).unwrap(), &schemas()).unwrap();
+        assert_ne!(external.profile_hash, reconciled.profile_hash);
+        assert_ne!(
+            external.external_candidate_requirement().unwrap(),
+            reconciled.external_candidate_requirement().unwrap()
+        );
+        let mut portable = profile.clone();
+        portable["portable_state"] = json!({
+            "schema":1,
+            "restore_contract":"ryeos.worker_session.restore.v1",
+            "max_depth":8,
+            "max_entries":8,
+            "max_file_bytes":1024,
+            "max_total_bytes":2048,
+            "selectors":[
+                {"pattern":"environments.toml","class":"forbidden_or_unknown","max_matches":1},
+                {"pattern":"sessions/{session_id}.json","class":"portable_session_state","max_matches":1}
+            ]
+        });
+        compile(&serde_json::to_vec(&portable).unwrap(), &schemas()).unwrap();
+        portable["portable_state"]["selectors"] = json!([
+            {"pattern":"sessions/{session_id}.json","class":"portable_session_state","max_matches":1}
+        ]);
+        assert!(compile(&serde_json::to_vec(&portable).unwrap(), &schemas()).is_err());
+        let mut delegated = profile.clone();
+        delegated["workload_client"] = json!({
+            "cli_endpoint_env":crate::protocol_vocabulary::WORKLOAD_CLIENT_ENDPOINT_ENV,
+            "structured_session":null
+        });
+        assert!(compile(&serde_json::to_vec(&delegated).unwrap(), &schemas()).is_err());
         let valid = profile.clone();
         for field in [
             "schema",
             "protocol",
             "connector_protocol",
             "execution_route",
+            "required_lifecycle_capabilities",
+            "provider_declaration_id",
+            "provider_configuration_destination",
             "runtime_product_declaration_id",
             "runtime_recipe",
         ] {
@@ -2480,6 +2524,13 @@ mod tests {
                 .remove(field);
             assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
         }
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["schema"] = json!(5);
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
+        let mut invalid = valid.clone();
+        invalid["external_candidate"]["required_lifecycle_capabilities"] =
+            json!(["unknown_lifecycle_capability"]);
+        assert!(compile(&serde_json::to_vec(&invalid).unwrap(), &schemas()).is_err());
         let mut invalid = valid.clone();
         invalid["external_candidate"]["runtime_recipe"]["executable_relative_path"] =
             json!("../bin/codex");

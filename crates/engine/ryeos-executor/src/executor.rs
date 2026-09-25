@@ -1274,7 +1274,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("differs from the sealed execution principal/scopes")
+                .contains("differs from sealed execution authority")
         );
     }
 

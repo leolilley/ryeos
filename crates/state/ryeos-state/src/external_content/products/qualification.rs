@@ -7,7 +7,7 @@
 //! its exact product/qualification witnesses. Historical program and terminal
 //! coordinates remain non-owning node testimony, not independent full-run proof.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
@@ -15,13 +15,16 @@ use serde_json::Value;
 
 use super::composition::ResolvedExternalProductSelections;
 use super::publication::ProductCaptureCoordinate;
+use super::transfer::ProductWitnessSource;
 use super::{validate_canonical_unsuffixed_ref, validate_hash, validate_name};
 use crate::Signer;
 use crate::objects::{AdmittedLaunchArtifactIdentity, Attestation, canonical_value_digest};
 
-pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v1";
+pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
+pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
+    "ryeos.product_qualification_launch_purpose.v1";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v5";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v7";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -30,8 +33,26 @@ pub const MAX_PRODUCT_QUALIFICATION_RESULT_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_SELECTIONS_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES: usize = 64 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_PARTICIPANTS: usize = 16;
+pub const MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS: usize = 8;
 pub const MAX_PRODUCT_QUALIFICATION_CALL_ID_BYTES: usize = 128;
 const MAX_PROBE_VALUE_BYTES: usize = 8 * 1024;
+
+/// What the node actually proved about a direct verifier after its target
+/// was reaped. A trusted process group is not whole-descendant containment:
+/// a child may create another session. Signed policy must explicitly allow
+/// that weaker controller lane; hard claims require a scoped observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierProcessSettlementAuthority {
+    ScopeEmpty,
+    TrustedProcessGroupAbsent,
+}
+
+impl VerifierProcessSettlementAuthority {
+    fn satisfies(self, minimum: Self) -> bool {
+        self == minimum || (self == Self::ScopeEmpty && minimum == Self::TrustedProcessGroupAbsent)
+    }
+}
 
 /// One signed Config's finite verifier allowance. Probe parameters are static
 /// signed inputs; output target compatibility is ecosystem meaning, not a
@@ -43,7 +64,19 @@ pub struct ProductQualificationPolicy {
     pub verifier_ref: String,
     pub subject_declaration_id: String,
     pub allowed_claims: Vec<String>,
+    pub minimum_verifier_process_settlement: VerifierProcessSettlementAuthority,
     pub verifier_parameters: Value,
+    /// Finite signed alternatives for one selected producer attempt per
+    /// admitted verifier root. A ref is only source identity, not permission
+    /// to launch: the daemon must resolve and admit a typed Bundle recipe.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub producer_scenarios: BTreeMap<String, ProductQualificationProducerScenario>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationProducerScenario {
+    pub recipe_ref: String,
 }
 
 impl ProductQualificationPolicy {
@@ -70,6 +103,19 @@ impl ProductQualificationPolicy {
             &self.verifier_parameters,
             "qualification verifier parameters",
         )?;
+        if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
+            bail!("qualification producer scenario count exceeds bound");
+        }
+        for (name, scenario) in &self.producer_scenarios {
+            validate_name(name)?;
+            validate_canonical_unsuffixed_ref(
+                "qualification producer recipe",
+                &scenario.recipe_ref,
+            )?;
+            if !scenario.recipe_ref.starts_with("config:") {
+                bail!("qualification producer recipe must be a Config ref");
+            }
+        }
         bounded(
             self,
             MAX_PRODUCT_QUALIFICATION_POLICY_BYTES,
@@ -94,6 +140,140 @@ pub struct ProductQualificationPolicySource {
     pub effective_definition_digest: String,
     pub publisher_fingerprint: String,
     pub policy: ProductQualificationPolicy,
+}
+
+/// Daemon-derived intent for one independently admitted verifier root. This
+/// is not a caller-authored declaration or qualification result: the launch
+/// owner must derive it from the exact product witness and signed relationship
+/// before attaching it to root admission. Recovery retains it unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationLaunchPurpose {
+    pub schema: String,
+    pub launch_id: String,
+    pub owner_fingerprint: String,
+    pub product_witness_hash: String,
+    pub witness_source: ProductWitnessSource,
+    pub relationship_name: String,
+    pub policy_source: ProductQualificationPolicySource,
+    /// Exact signed source for every scenario the verifier may later select.
+    /// A Config ref alone cannot prevent recipe drift after root admission.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub producer_recipe_sources: BTreeMap<String, ProductProducerRecipeSourceIdentity>,
+    pub subject_declaration_id: String,
+    pub subject_manifest_hash: String,
+    pub required_claims: Vec<String>,
+    pub admitted_parameters_digest: String,
+    pub verifier_ref: String,
+    /// Pre-realization effective definition admitted for the verifier root.
+    /// The capsule's realized D2 remains separately authoritative.
+    pub verifier_effective_definition_digest: String,
+    /// Exact current post-realization definition independently resolved from
+    /// the signed Bundle before launch. It must match the retained capsule's
+    /// realized definition at qualification; it is not interchangeable with
+    /// the root admission's pre-realization definition above.
+    pub verifier_realized_definition_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductProducerRecipeSourceIdentity {
+    pub bundle_generation_identity: String,
+    pub canonical_ref: String,
+    pub raw_content_digest: String,
+    pub effective_definition_digest: String,
+    pub publisher_fingerprint: String,
+    pub recipe_digest: String,
+}
+
+impl ProductProducerRecipeSourceIdentity {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        exact_coordinate(
+            "producer recipe Bundle generation",
+            &self.bundle_generation_identity,
+        )?;
+        validate_canonical_unsuffixed_ref("producer recipe", &self.canonical_ref)?;
+        if !self.canonical_ref.starts_with("config:") {
+            bail!("producer recipe source must be a Config");
+        }
+        validate_hash("producer recipe source", &self.raw_content_digest)?;
+        validate_hash(
+            "producer recipe definition",
+            &self.effective_definition_digest,
+        )?;
+        validate_hash("producer recipe publisher", &self.publisher_fingerprint)?;
+        validate_hash("producer recipe contents", &self.recipe_digest)
+    }
+}
+
+impl ProductQualificationLaunchPurpose {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA {
+            bail!("unsupported product qualification launch purpose schema");
+        }
+        if self.launch_id.len() != 34
+            || !self.launch_id.starts_with("L-")
+            || !self.launch_id[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("qualification launch id is not canonical");
+        }
+        exact_coordinate("qualification launch owner", &self.owner_fingerprint)?;
+        validate_hash("qualification product witness", &self.product_witness_hash)?;
+        self.witness_source.validate()?;
+        validate_name(&self.relationship_name)?;
+        self.policy_source.validate()?;
+        if self.producer_recipe_sources.len() != self.policy_source.policy.producer_scenarios.len()
+        {
+            bail!("qualification purpose does not pin every signed producer scenario");
+        }
+        for (name, scenario) in &self.policy_source.policy.producer_scenarios {
+            let source = self
+                .producer_recipe_sources
+                .get(name)
+                .context("qualification purpose has no producer source for signed scenario")?;
+            source.validate()?;
+            if source.canonical_ref != scenario.recipe_ref {
+                bail!("qualification purpose producer source differs from signed scenario");
+            }
+        }
+        validate_name(&self.subject_declaration_id)?;
+        validate_hash(
+            "qualification subject manifest",
+            &self.subject_manifest_hash,
+        )?;
+        validate_claims(&self.required_claims)?;
+        validate_hash(
+            "qualification admitted parameters",
+            &self.admitted_parameters_digest,
+        )?;
+        validate_canonical_unsuffixed_ref("qualification verifier", &self.verifier_ref)?;
+        validate_hash(
+            "qualification verifier definition",
+            &self.verifier_effective_definition_digest,
+        )?;
+        validate_hash(
+            "qualification realized verifier definition",
+            &self.verifier_realized_definition_digest,
+        )?;
+        let policy = &self.policy_source.policy;
+        if self.subject_declaration_id != policy.subject_declaration_id
+            || self.verifier_ref != policy.verifier_ref
+            || self.admitted_parameters_digest != policy.admitted_parameters_digest()?
+            || self
+                .required_claims
+                .iter()
+                .any(|claim| policy.allowed_claims.binary_search(claim).is_err())
+        {
+            bail!("qualification launch purpose contradicts its signed policy");
+        }
+        bounded(
+            self,
+            MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES,
+            "qualification launch purpose",
+        )
+    }
 }
 
 impl ProductQualificationPolicySource {
@@ -206,6 +386,16 @@ pub struct ProductQualificationVerifier {
     pub subject_declaration_id: String,
     pub subject_manifest_hash: String,
     pub terminal_snapshot_hash: String,
+    /// Daemon-authored signed-terminal bridge to an exact settled process
+    /// attempt. Direct subprocess verifiers require it; managed roots have
+    /// no direct subprocess and use their independently proved participants.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub process_settlement_witness_digest: Option<String>,
+    /// Explicit strength of the signed process-settlement witness. A direct
+    /// verifier has exactly one; managed roots have none and prove direct
+    /// participants independently.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub process_settlement_authority: Option<VerifierProcessSettlementAuthority>,
     pub result_digest: String,
 }
 
@@ -231,6 +421,28 @@ impl ProductQualificationVerifier {
         }
         validate_canonical_unsuffixed_ref("qualification verifier", &self.canonical_ref)?;
         validate_name(&self.subject_declaration_id)?;
+        match &self.artifact_identity {
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. } => {
+                validate_hash(
+                    "qualification direct process settlement",
+                    self.process_settlement_witness_digest
+                        .as_deref()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("direct verifier lacks process settlement")
+                        })?,
+                )?;
+                if self.process_settlement_authority.is_none() {
+                    bail!("direct verifier lacks typed process settlement authority");
+                }
+            }
+            AdmittedLaunchArtifactIdentity::ManagedRuntime { .. }
+                if self.process_settlement_witness_digest.is_some()
+                    || self.process_settlement_authority.is_some() =>
+            {
+                bail!("managed verifier cannot borrow a direct process settlement");
+            }
+            _ => {}
+        }
         for (label, hash) in [
             ("verifier capsule", &self.admitted_launch_capsule_hash),
             (
@@ -441,6 +653,17 @@ impl ProductQualificationEvidence {
         self.policy_source.validate()?;
         self.verifier.validate()?;
         self.execution_proof.validate_for(&self.verifier)?;
+        for verifier in self.execution_verifiers() {
+            if let Some(actual) = verifier.process_settlement_authority
+                && !actual.satisfies(
+                    self.policy_source
+                        .policy
+                        .minimum_verifier_process_settlement,
+                )
+            {
+                bail!("qualification verifier settlement is weaker than signed policy");
+            }
+        }
         for participant in &self.execution_proof.participants {
             if participant.verifier.chain_root_id == self.product_coordinate.chain_root_id
                 || participant.verifier.thread_id == self.product_coordinate.thread_id
@@ -726,5 +949,40 @@ fn exact_coordinate(label: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod tests;
+
+/// Exact qualification fixtures for cross-crate composed tests. Production
+/// builds cannot name this surface; callers must explicitly enable the
+/// repository's `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::super::composition::ResolvedExternalProductSelections;
+
+    pub fn qualified_runtime_selections(
+        runtime_manifest_hash: &str,
+    ) -> anyhow::Result<ResolvedExternalProductSelections> {
+        let evidence = super::tests::dynamic_evidence_with_auxiliary_proof();
+        let mut selections = evidence
+            .verifier_root_selections
+            .expect("qualified fixture retains verifier-root selections")
+            .into_inner();
+        let runtime = selections
+            .get_mut("auxiliary")
+            .expect("qualified fixture retains auxiliary runtime");
+        runtime.manifest_hash = runtime_manifest_hash.to_owned();
+        runtime.declaration.manifest_hash = runtime_manifest_hash.to_owned();
+        let qualification = runtime
+            .qualification
+            .as_mut()
+            .expect("qualified fixture retains runtime proof");
+        qualification.evidence.result.subject_manifest_hash = runtime_manifest_hash.to_owned();
+        qualification.evidence.verifier.subject_manifest_hash = runtime_manifest_hash.to_owned();
+        qualification.evidence.verifier.result_digest = qualification.evidence.result.digest()?;
+        ResolvedExternalProductSelections::new(selections)
+    }
+
+    pub fn launch_artifact_identity() -> crate::objects::AdmittedLaunchArtifactIdentity {
+        super::tests::artifact_identity()
+    }
+}

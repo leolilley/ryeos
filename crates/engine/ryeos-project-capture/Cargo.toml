@@ -1,0 +1,17 @@
+[package]
+name = "ryeos-project-capture"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Descriptor-relative project capture shared by RyeOS execution runtimes"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+ryeos-state = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+ryeos-app = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }

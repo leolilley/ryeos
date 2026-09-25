@@ -150,9 +150,12 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         self.db.execute(
             "UPDATE external_execution_allocation SET phase='bound', occurrence_json='{}'")
         self.db.execute("""INSERT INTO external_execution_channel
+            (placement_thread_id,binding_digest,binding_json,state,
+             completion_request_digest,export_snapshot_hash,
+             export_output_capture_hash,export_evidence_hash)
             VALUES('T-one','channel-binding',
                 '{"execution_binding_hash":"execution-binding"}',
-                'prepared',NULL,NULL,NULL)""")
+                'prepared',NULL,NULL,NULL,NULL)""")
         self.db.execute(
             "UPDATE external_execution_channel SET state='running' WHERE placement_thread_id='T-one'")
         self.db.execute("""INSERT INTO external_execution_frame
@@ -294,7 +297,10 @@ class ExternalAllocationSqlTests(unittest.TestCase):
     def channel_and_frame(self):
         self.reserve()
         self.db.execute("""INSERT INTO external_execution_channel
-            VALUES('T-one','binding','{}','prepared',NULL,NULL,NULL)""")
+            (placement_thread_id,binding_digest,binding_json,state,
+             completion_request_digest,export_snapshot_hash,
+             export_output_capture_hash,export_evidence_hash)
+            VALUES('T-one','binding','{}','prepared',NULL,NULL,NULL,NULL)""")
         self.db.execute("""INSERT INTO external_execution_frame
             VALUES('binding','owner_to_supervisor',1,1,'digest','{}',2,0,'pending')""")
 
@@ -310,13 +316,21 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         for state in ("ready", "running", "stopped"):
             with self.assertRaises(sqlite3.IntegrityError):
                 self.db.execute("""INSERT INTO external_execution_channel
-                    VALUES('T-one','binding','{}',?,NULL,NULL,NULL)""", (state,))
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.db.execute("""INSERT INTO external_execution_channel
-                VALUES('T-one','binding','{}','prepared',?,NULL,NULL)""",
-                ("completion",))
+                    (placement_thread_id,binding_digest,binding_json,state,
+                     completion_request_digest,export_snapshot_hash,
+                     export_output_capture_hash,export_evidence_hash)
+                    VALUES('T-one','binding','{}',?,NULL,NULL,NULL,NULL)""", (state,))
+        for column in ("completion_request_digest", "export_snapshot_hash",
+                       "export_output_capture_hash", "export_evidence_hash"):
+            with self.subTest(column=column), self.assertRaises(sqlite3.IntegrityError):
+                self.db.execute(f"""INSERT INTO external_execution_channel
+                    (placement_thread_id,binding_digest,binding_json,state,{column})
+                    VALUES('T-one','binding','{{}}','prepared',?)""", ("prepopulated",))
         self.db.execute("""INSERT INTO external_execution_channel
-            VALUES('T-one','binding','{}','prepared',NULL,NULL,NULL)""")
+            (placement_thread_id,binding_digest,binding_json,state,
+             completion_request_digest,export_snapshot_hash,
+             export_output_capture_hash,export_evidence_hash)
+            VALUES('T-one','binding','{}','prepared',NULL,NULL,NULL,NULL)""")
         for application in ("claimed", "applied", "revoked"):
             with self.assertRaises(sqlite3.IntegrityError):
                 self.db.execute("""INSERT INTO external_execution_frame
@@ -325,18 +339,26 @@ class ExternalAllocationSqlTests(unittest.TestCase):
 
     def test_retained_import_is_immutable_and_cannot_be_collected_early(self):
         self.channel_and_frame()
-        self.db.execute("INSERT INTO external_execution_import VALUES('binding','snapshot','evidence','completion','frame')")
+        self.db.execute("""INSERT INTO external_execution_import
+            (binding_digest,snapshot_hash,output_capture_hash,evidence_blob_hash,
+             completion_request_digest,export_frame_digest)
+            VALUES('binding','snapshot','output-capture','evidence','completion','frame')""")
         for statement in ("UPDATE external_execution_import SET snapshot_hash='other'",
+                          "UPDATE external_execution_import SET output_capture_hash='other'",
+                          "UPDATE external_execution_import SET output_capture_hash=NULL",
                           "DELETE FROM external_execution_import"):
             with self.assertRaises(sqlite3.IntegrityError):
                 self.db.execute(statement)
-        self.assertEqual(self.db.execute("SELECT snapshot_hash,evidence_blob_hash FROM external_execution_import").fetchone(),
-                         ("snapshot", "evidence"))
+        self.assertEqual(self.db.execute("SELECT snapshot_hash,output_capture_hash,evidence_blob_hash FROM external_execution_import").fetchone(),
+                         ("snapshot", "output-capture", "evidence"))
 
     def test_candidate_import_roots_commit_atomically(self):
         self.channel_and_frame()
         self.db.execute("BEGIN IMMEDIATE")
-        self.db.execute("INSERT INTO external_execution_import VALUES('binding','snapshot','evidence','completion','frame')")
+        self.db.execute("""INSERT INTO external_execution_import
+            (binding_digest,snapshot_hash,output_capture_hash,evidence_blob_hash,
+             completion_request_digest,export_frame_digest)
+            VALUES('binding','snapshot',NULL,'evidence','completion','frame')""")
         self.db.rollback()
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM external_execution_import").fetchone()[0], 0)
 
@@ -394,6 +416,24 @@ class ExternalAllocationSqlTests(unittest.TestCase):
         self.db.execute("UPDATE external_execution_frame SET application='claimed' WHERE sequence=3")
         with self.assertRaises(sqlite3.IntegrityError):
             self.db.execute("UPDATE external_execution_frame SET application='revoked' WHERE sequence=3")
+
+    def test_supervisor_output_cannot_be_revoked_as_unexecuted_input(self):
+        self.channel_and_frame()
+        # Schema-only evidence: these rows do not stand in for authenticated
+        # protocol admission. Even privileged mutation must not turn outgoing
+        # observations into a claim that they were never delivered to the peer.
+        for sequence, kind in enumerate(("protocol_bytes", "protocol_eof"), start=2):
+            with self.subTest(kind=kind):
+                wire = json.dumps({"frame": {"payload": {"kind": kind}}})
+                self.db.execute("""INSERT INTO external_execution_frame
+                    VALUES('binding','supervisor_to_owner',?,?,?, ?,?,0,'pending')""",
+                    (sequence, sequence, f"output-{sequence}", wire, len(wire)))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.db.execute("""UPDATE external_execution_frame SET application='revoked'
+                        WHERE direction='supervisor_to_owner' AND sequence=?""", (sequence,))
+                self.assertEqual(self.db.execute("""SELECT application FROM external_execution_frame
+                    WHERE direction='supervisor_to_owner' AND sequence=?""", (sequence,)).fetchone(),
+                    ("pending",))
 
 
 if __name__ == "__main__":

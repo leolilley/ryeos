@@ -8,13 +8,21 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v11";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v12";
+/// Second PID-first status document. The adapter may publish this only after
+/// Lillux's child-owned pre-exec observation; the parent requires EOF after
+/// exactly one document before accepting it.
+pub const ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA: &str =
+    "ryeos.isolation-adapter.applied-launch/v1";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 /// One closed digest receipt fits atomically beside exactly one view descriptor.
 /// Full workspace mutation JSON remains on the bounded stdout response channel.
 pub const MAX_WORKSPACE_VIEW_RECEIPT_BYTES: usize = 512;
+/// One canonical launch commitment travels beside exactly one namespace-bound
+/// listener descriptor. The packet does not itself prove namespace ownership.
+pub const MAX_LOOPBACK_LISTENER_RECEIPT_BYTES: usize = 512;
 pub const MAX_AUTHORITIES: usize = 4096;
 pub const MAX_MOUNTS: usize = 4096;
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 4096;
@@ -152,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v11")]
+    #[serde(rename = "ryeos.isolation-adapter/v12")]
     Current,
 }
 
@@ -218,6 +226,8 @@ pub enum IsolationCapability {
     NetworkHost,
     #[serde(rename = "network.isolated")]
     NetworkIsolated,
+    #[serde(rename = "network.isolated_loopback_ingress")]
+    NetworkIsolatedLoopbackIngress,
     #[serde(rename = "process.host_pid_namespace")]
     ProcessHostPidNamespace,
     #[serde(rename = "process.isolated_pid_namespace")]
@@ -514,6 +524,34 @@ pub enum IsolationNetwork {
     Isolated,
 }
 
+/// One exact listener in the target's isolated network namespace. This is
+/// ingress for a separately owned bounded relay, not host networking or a
+/// general target-selected egress route. The address is a canonical numeric
+/// IPv4 loopback socket coordinate with a fixed nonzero port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationLoopbackIngress {
+    pub address: String,
+}
+
+impl IsolationLoopbackIngress {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        let address: std::net::SocketAddr = self
+            .address
+            .parse()
+            .map_err(|_| ProtocolValidationError::new("loopback ingress address is invalid"))?;
+        if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            || address.port() == 0
+            || self.address != address.to_string()
+        {
+            return Err(ProtocolValidationError::new(
+                "loopback ingress requires canonical 127.0.0.1 and a fixed nonzero port",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationPidNamespace {
@@ -583,6 +621,8 @@ pub struct IsolationPlan {
     pub target_channels: Vec<IsolationTargetChannel>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loopback_ingress: Option<IsolationLoopbackIngress>,
     pub devices: IsolationDeviceSurface,
     pub character_devices: Vec<IsolationCharacterDevice>,
     pub private_tmp: bool,
@@ -599,6 +639,14 @@ impl IsolationPlan {
         &self,
         authorities: &[IsolationAuthority],
     ) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
+        if let Some(ingress) = &self.loopback_ingress {
+            ingress.validate()?;
+            if self.network != IsolationNetwork::Isolated {
+                return Err(ProtocolValidationError::new(
+                    "loopback ingress requires isolated network authority",
+                ));
+            }
+        }
         if authorities.len() > MAX_AUTHORITIES {
             return Err(ProtocolValidationError::new("too many authorities"));
         }
@@ -1029,6 +1077,9 @@ impl IsolationPlan {
             IsolationNetwork::Host => IsolationCapability::NetworkHost,
             IsolationNetwork::Isolated => IsolationCapability::NetworkIsolated,
         });
+        if self.loopback_ingress.is_some() {
+            capabilities.insert(IsolationCapability::NetworkIsolatedLoopbackIngress);
+        }
         capabilities.insert(match self.pid_namespace {
             IsolationPidNamespace::Host => IsolationCapability::ProcessHostPidNamespace,
             IsolationPidNamespace::Isolated => IsolationCapability::ProcessIsolatedPidNamespace,
@@ -1119,6 +1170,10 @@ pub struct AdapterLaunchRequest {
     /// duplicate as the sandbox-side sealed-argv bridge.
     pub adapter_fd: u32,
     pub status_fd: u32,
+    /// One-shot descriptor-transfer endpoint for the exact namespace-bound
+    /// listener. Present iff the plan requests isolated loopback ingress.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub loopback_transfer_fd: Option<u32>,
     pub lifecycle: AdapterLaunchLifecycle,
 }
 
@@ -1256,6 +1311,22 @@ pub struct WorkspaceViewTransferReceipt {
     pub protocol: IsolationAdapterProtocolVersion,
     pub request_digest: String,
     pub response_digest: String,
+}
+
+/// One-shot listener-transfer packet for the exact held launch request. The
+/// daemon compares this digest against the sealed request it sent, and then
+/// joins the received descriptor to the applied-launch/attachment evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopbackListenerTransferReceipt {
+    pub protocol: IsolationAdapterProtocolVersion,
+    pub request_digest: String,
+}
+
+impl LoopbackListenerTransferReceipt {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_sha256("loopback launch request digest", &self.request_digest)
+    }
 }
 
 impl WorkspaceViewTransferReceipt {
@@ -1521,6 +1592,21 @@ impl AdapterWorkspaceResponse {
 impl AdapterLaunchRequest {
     pub fn validate(&self) -> Result<BTreeSet<IsolationCapability>, ProtocolValidationError> {
         let required = self.plan.validate(&self.authorities)?;
+        if self.loopback_transfer_fd.is_some() != self.plan.loopback_ingress.is_some() {
+            return Err(ProtocolValidationError::new(
+                "loopback ingress requires exactly one transfer endpoint",
+            ));
+        }
+        if self.loopback_transfer_fd.is_some()
+            && !matches!(
+                self.lifecycle,
+                AdapterLaunchLifecycle::AwaitAttachment { .. }
+            )
+        {
+            return Err(ProtocolValidationError::new(
+                "loopback ingress requires a held attachment launch",
+            ));
+        }
         if self.status_fd <= 2 {
             return Err(ProtocolValidationError::new(
                 "status descriptor overlaps stdio",
@@ -1531,6 +1617,13 @@ impl AdapterLaunchRequest {
             return Err(ProtocolValidationError::new(
                 "adapter descriptor overlaps stdio or another isolation protocol role",
             ));
+        }
+        if let Some(transfer_fd) = self.loopback_transfer_fd {
+            if transfer_fd <= 2 || !descriptors.insert(transfer_fd) {
+                return Err(ProtocolValidationError::new(
+                    "loopback transfer descriptor overlaps stdio or another protocol role",
+                ));
+            }
         }
         if let AdapterLaunchLifecycle::AwaitAttachment {
             release_fd,
@@ -1808,6 +1901,7 @@ mod tests {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
                 network: IsolationNetwork::Isolated,
+                loopback_ingress: None,
                 devices: IsolationDeviceSurface::Minimal,
                 character_devices: Vec::new(),
                 private_tmp: true,
@@ -2201,8 +2295,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v11","protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v12","protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2211,7 +2305,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2219,7 +2313,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v11","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v12","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2606,6 +2700,7 @@ mod tests {
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             adapter_fd: 10,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 7,
                 release_keepalive_fd: 8,
@@ -2623,6 +2718,7 @@ mod tests {
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             adapter_fd: 7,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         assert!(
@@ -2644,9 +2740,60 @@ mod tests {
             artifacts: BTreeMap::new(),
             adapter_fd: 10,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         request.validate().unwrap();
+    }
+
+    #[test]
+    fn isolated_loopback_ingress_requires_exact_address_and_unique_held_transfer() {
+        let (mut plan, authorities) = complete_plan();
+        plan.loopback_ingress = Some(IsolationLoopbackIngress {
+            address: "127.0.0.1:18765".into(),
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::NetworkIsolatedLoopbackIngress)
+        );
+        let mut request = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities,
+            artifacts: BTreeMap::new(),
+            adapter_fd: 10,
+            status_fd: 6,
+            loopback_transfer_fd: Some(11),
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 8,
+                release_keepalive_fd: 9,
+            },
+        };
+        request.validate().unwrap();
+        request.loopback_transfer_fd = None;
+        assert!(request.validate().is_err());
+        request.loopback_transfer_fd = Some(8);
+        assert!(request.validate().is_err());
+        request.loopback_transfer_fd = Some(11);
+        request.lifecycle = AdapterLaunchLifecycle::Run;
+        assert!(request.validate().is_err());
+        request.lifecycle = AdapterLaunchLifecycle::AwaitAttachment {
+            release_fd: 8,
+            release_keepalive_fd: 9,
+        };
+        request.plan.network = IsolationNetwork::Host;
+        assert!(request.validate().is_err());
+        request.plan.network = IsolationNetwork::Isolated;
+        for address in [
+            "127.0.0.1:0",
+            "127.0.0.2:18765",
+            "0.0.0.0:18765",
+            "localhost:18765",
+        ] {
+            request.plan.loopback_ingress.as_mut().unwrap().address = address.into();
+            assert!(request.validate().is_err(), "accepted {address}");
+        }
     }
 
     #[test]
@@ -2673,6 +2820,7 @@ mod tests {
             artifacts: BTreeMap::new(),
             adapter_fd: 10,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         }
         .validate()
@@ -2689,6 +2837,7 @@ mod tests {
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             adapter_fd: 8,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::Run,
         };
         let value = serde_json::to_value(&run).unwrap();
@@ -2702,6 +2851,7 @@ mod tests {
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             adapter_fd: 10,
             status_fd: 6,
+            loopback_transfer_fd: None,
             lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
                 release_fd: 8,
                 release_keepalive_fd: 9,
@@ -2878,7 +3028,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v11");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v12");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3149,5 +3299,21 @@ mod tests {
         assert!(serde_json::from_value::<WorkspaceViewTransferReceipt>(value).is_err());
         receipt.response_digest = "B".repeat(64);
         assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn loopback_transfer_receipt_is_exact_and_bounded() {
+        let receipt = LoopbackListenerTransferReceipt {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            request_digest: "a".repeat(64),
+        };
+        receipt.validate().unwrap();
+        assert!(serde_json::to_vec(&receipt).unwrap().len() < MAX_LOOPBACK_LISTENER_RECEIPT_BYTES);
+        let mut changed = receipt.clone();
+        changed.request_digest = "A".repeat(64);
+        assert!(changed.validate().is_err());
+        let mut encoded = serde_json::to_value(receipt).unwrap();
+        encoded["extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<LoopbackListenerTransferReceipt>(encoded).is_err());
     }
 }

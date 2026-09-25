@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use anyhow::Context as _;
 
 pub mod products;
+pub mod realization_verification;
 pub mod retained_project;
 pub mod retained_workspace_output;
 

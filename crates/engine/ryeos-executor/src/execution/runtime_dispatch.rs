@@ -3368,6 +3368,7 @@ mod tests {
             depth: 4,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         };
 
         let ctx = parent_execution_context_from_capability(&cap);
@@ -3434,7 +3435,7 @@ mod tests {
         );
         assert_eq!(
             request_a,
-            "83b2f7a909d64356d2b61615745568f97f1e4f88c60d04fbdbdb02e64157ba96"
+            "3da7e8d71e799e25bcb6ac7c08862af25b71afdd693da62caf5671a76ead45fc"
         );
 
         let mut changed_action = action;

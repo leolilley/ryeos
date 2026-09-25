@@ -21,7 +21,8 @@ pub use oci_lifecycle::{OciHookState, OciLifecycleGeneration, OciLifecycleIntent
 pub use scope::{
     ControllerAccount, ProcessHostLifetime, ProcessScope, ProcessScopeAllocation,
     ProcessScopeCapability, ProcessScopeConfiguration, ProcessScopeLaunchError,
-    ProcessScopeProvider, ProcessScopeRecovery, QuiescedProcessScope, require_administrator,
+    ProcessScopeProvider, ProcessScopeRecovery, ProcessScopeResourceLimits, QuiescedProcessScope,
+    ResourceLimitedProcessScope, require_administrator,
 };
 
 #[cfg(target_os = "linux")]
@@ -367,6 +368,24 @@ pub fn capture_exact_process_identity(
     }
 }
 
+/// Capture this process's exact birth and process-group incarnation without
+/// exposing platform PID/group discovery to protocol or application code.
+pub fn capture_current_process_identity() -> Result<ExactProcessIdentity, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let pid = unsafe { libc::getpid() };
+        let group = unsafe { libc::getpgrp() };
+        if pid <= 1 || group <= 1 {
+            return Err("current process has no valid Linux process identity".to_owned());
+        }
+        capture_exact_process_identity(pid as u32, Some(group as u32))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("current process identity capture is unavailable on this OS".to_owned())
+    }
+}
+
 /// Kernel consumers which already retain the exact target descriptor call
 /// this internally; no application imports a pidfd or procfs branch.
 #[cfg(target_os = "linux")]
@@ -478,6 +497,34 @@ impl ExactProcessIdentity {
         });
         let canonical = crate::canonical_json(&value).map_err(|error| error.to_string())?;
         Ok(crate::sha256_hex(canonical.as_bytes()))
+    }
+
+    /// Observe whether this exact process incarnation has ended without ever
+    /// treating numeric-PID reuse as liveness. An inspection failure while a
+    /// process still occupies the coordinate is indeterminate and therefore
+    /// fails closed; only absence or a different captured birth identity is
+    /// terminal evidence.
+    pub fn has_ended(&self) -> Result<bool, String> {
+        self.validate()?;
+        #[cfg(target_os = "linux")]
+        {
+            match capture_exact_process_identity(self.target_pid, Some(self.group_leader_pid)) {
+                Ok(current) => Ok(current != *self),
+                Err(error) => {
+                    if std::path::PathBuf::from(format!("/proc/{}", self.target_pid)).exists() {
+                        Err(format!(
+                            "cannot classify exact process incarnation: {error}"
+                        ))
+                    } else {
+                        Ok(true)
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("exact process death observation is unavailable on this OS".to_owned())
+        }
     }
 }
 
@@ -1071,6 +1118,23 @@ mod tests {
             group_leader_start_time_ticks: 0,
         };
         assert!(quiesce_exact_process_group(&identity, Duration::ZERO).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exact_process_death_observation_preserves_birth_identity() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity = capture_exact_process_identity(child.id(), Some(child.id())).unwrap();
+        assert!(!identity.has_ended().unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(identity.has_ended().unwrap());
     }
 
     #[cfg(target_os = "linux")]

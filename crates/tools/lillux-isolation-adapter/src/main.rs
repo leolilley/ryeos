@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use ryeos_isolation_protocol::{
     AdapterInspectionRequest, AdapterInspectionResponse, AdapterLaunchLifecycle,
     AdapterLaunchRequest, AdapterWorkspaceRequest, AdapterWorkspaceResponse,
-    IsolationAdapterProtocolVersion, IsolationAuthorityPurpose, IsolationCapability,
-    IsolationDiagnostic, IsolationDiagnosticCode, IsolationMountAccess, IsolationNetwork,
-    IsolationTargetTriple, LauncherRefusalDocument, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA, IsolationAdapterProtocolVersion,
+    IsolationAuthorityPurpose, IsolationCapability, IsolationDiagnostic, IsolationDiagnosticCode,
+    IsolationMountAccess, IsolationNetwork, IsolationTargetTriple, LauncherRefusalDocument,
+    LoopbackListenerTransferReceipt, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
     MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES, MAX_WORKSPACE_VIEW_RECEIPT_BYTES,
     WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind,
     WorkspaceViewTransferReceipt, from_json_slice_strict,
@@ -96,8 +97,51 @@ fn launch(request_fd: u32) -> ! {
         Err(error) => fail(&error),
     };
     let status_fd = request.status_fd;
-    let result = translate_launch(&request).and_then(lillux::launch_linux_sandbox);
-    let process = match result {
+    let native = match translate_launch(&request) {
+        Ok(native) => native,
+        Err(error) => emit_refusal(status_fd, error),
+    };
+    let result = if let Some(ingress) = &request.plan.loopback_ingress {
+        let address = match ingress.address.parse() {
+            Ok(address) => address,
+            Err(error) => emit_refusal(
+                status_fd,
+                format!("parse admitted loopback address: {error}"),
+            ),
+        };
+        let transfer_fd = request.loopback_transfer_fd.unwrap_or_else(|| {
+            emit_refusal(status_fd, "loopback transfer descriptor missing".into())
+        });
+        let request_digest = canonical_digest(&request).unwrap_or_else(|error| {
+            emit_refusal(
+                status_fd,
+                format!("commit loopback launch request: {error}"),
+            )
+        });
+        let receipt = LoopbackListenerTransferReceipt {
+            protocol: request.protocol,
+            request_digest,
+        };
+        receipt.validate().unwrap_or_else(|error| {
+            emit_refusal(
+                status_fd,
+                format!("invalid loopback transfer receipt: {error}"),
+            )
+        });
+        let payload = canonical_bytes(&receipt).unwrap_or_else(|error| {
+            emit_refusal(status_fd, format!("serialize loopback transfer: {error}"))
+        });
+        lillux::launch_linux_sandbox_with_loopback_ingress(
+            native.clone(),
+            address,
+            transfer_fd,
+            &payload,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )
+    } else {
+        lillux::launch_linux_sandbox(native.clone())
+    };
+    let mut process = match result {
         Ok(process) => process,
         Err(error) => emit_refusal(status_fd, error),
     };
@@ -110,6 +154,66 @@ fn launch(request_fd: u32) -> ! {
     if let Err(error) = lillux::write_inherited_descriptor(status_fd, &bytes) {
         emit_refusal(status_fd, format!("publish target status: {error}"));
     }
+    // PID-first attachment is mandatory: a held target cannot reach its
+    // pre-exec receipt until the controller durably attaches and releases it.
+    // This second document is trusted-adapter testimony from Lillux's private
+    // child pipe, never target stdout or stderr.
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(3600));
+    let receipt = loop {
+        if deadline.has_elapsed() {
+            emit_refusal(
+                status_fd,
+                "applied-launch receipt exceeded adapter safety deadline".into(),
+            );
+        }
+        match process.try_observe_applied_launch() {
+            Ok(Some(receipt)) => break receipt,
+            Ok(None) => lillux::time::sleep(lillux::time::Duration::from_millis(1)),
+            Err(error) => emit_refusal(
+                status_fd,
+                format!("applied-launch receipt refused: {error}"),
+            ),
+        }
+    };
+    let exact_request = match receipt.matches_request(&native) {
+        Ok(exact) => exact,
+        Err(error) => emit_refusal(
+            status_fd,
+            format!("compare applied-launch receipt: {error}"),
+        ),
+    };
+    if receipt.owned_child_pid != process.child_pid() || !exact_request {
+        emit_refusal(
+            status_fd,
+            "applied-launch receipt differs from translated signed plan".into(),
+        );
+    }
+    let mut receipt_line = match serde_json::to_vec(&serde_json::json!({
+        "schema": ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+        "applied-launch": receipt,
+    })) {
+        Ok(bytes) => bytes,
+        Err(error) => emit_refusal(
+            status_fd,
+            format!("serialize applied-launch receipt: {error}"),
+        ),
+    };
+    receipt_line.push(b'\n');
+    if let Err(error) = lillux::write_inherited_descriptor(status_fd, &receipt_line) {
+        emit_refusal(
+            status_fd,
+            format!("publish applied-launch receipt: {error}"),
+        );
+    }
+    // SAFETY: the launcher alone owns this inherited status coordinate. It
+    // has no Rust owner, and Lillux's target closes it before untrusted exec.
+    // Closing now gives the parent an exact two-document EOF fence while the
+    // target remains under this adapter's process ownership.
+    let status_owner = match unsafe { lillux::take_inherited_descriptor_authority(status_fd) } {
+        Ok(owner) => owner,
+        Err(error) => fail(&format!("retire applied-launch status descriptor: {error}")),
+    };
+    drop(status_owner);
     match process.wait() {
         Ok(status) => lillux::exit_with_linux_sandbox_status(status),
         Err(error) => fail(&error),
@@ -732,6 +836,9 @@ mod tests {
         assert!(capabilities.contains(&IsolationCapability::FilesystemWorkspaceDelta));
         assert!(capabilities.contains(&IsolationCapability::ProcessIsolatedPidNamespace));
         assert!(!capabilities.contains(&IsolationCapability::ProcessHostPidNamespace));
+        // The native launch slice exists, but controller receiver ownership
+        // and joined qualification are not yet wired: admission stays closed.
+        assert!(!capabilities.contains(&IsolationCapability::NetworkIsolatedLoopbackIngress));
     }
 
     #[test]

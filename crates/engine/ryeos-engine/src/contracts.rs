@@ -12,10 +12,12 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 
+mod execution_endpoint;
 mod execution_plan;
 mod execution_target;
 mod runtime_decorations;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
+pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
     PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,

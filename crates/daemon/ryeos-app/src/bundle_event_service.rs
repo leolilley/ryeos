@@ -493,6 +493,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         }
     }
 

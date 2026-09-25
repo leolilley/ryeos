@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-18T23:00:46Z:82536cc5a4e86cb0f4fc37017e8962b14fa49e58f80926ecba9cab4af004b5f2:IKukAabNgkCimV/Dmrp3C+gGyLUulTjTXOm/mi6axhPhTZsmiC81f+i6xUbLukxW5f8HDaZiPTeNrXKjgPz/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T18:37:12Z:066335fed8304d419d07e692f1407b5085cfb82adc2a5a09903efd02b1b4c751:dFpluCUhpP/KbJwRGEpI6KKMui/xjCe4ixD45Rx0CXyzyjbt8/EYNCikHvmeA3nMpPgIwHlpk4rMEyILcyvXBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
 version: "1.2.0"
 location:
@@ -80,6 +80,7 @@ composed_value_contract:
     executor_id: {type: single, prim: string}
     config: {type: single, prim: mapping}
     external_content: {type: single, prim: array}
+    external_product_slots: {type: single, prim: array}
     execution_protocol: {type: single, prim: string}
     source: {type: single, prim: mapping}
     supported_target: {type: single, prim: mapping}
@@ -101,6 +102,7 @@ runtime:
     - executor_id
     - execution_protocol
     - external_content
+    - external_product_slots
     - source
     - supported_target
     - session_resources

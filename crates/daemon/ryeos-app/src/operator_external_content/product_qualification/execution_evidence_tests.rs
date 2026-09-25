@@ -6,6 +6,33 @@ use ryeos_engine::hooks::{EFFECTIVE_HOOK_PLAN_DERIVED_KEY, EffectiveHookPlan};
 use ryeos_engine::resolution::{KindComposedView, ResolutionStepName, ResolvedAncestor};
 use serde_json::json;
 
+#[test]
+fn direct_settlement_requires_one_signed_terminal_digest() {
+    let event = |payload| {
+        ryeos_state::objects::thread_event::NewEvent::new(
+            "T-verifier",
+            "T-verifier",
+            ryeos_state::event_types::THREAD_COMPLETED,
+        )
+        .payload(payload)
+        .build()
+    };
+    let exact = event(json!({"process_settlement_witness_digest":"a".repeat(64)}));
+    assert_eq!(
+        signed_terminal_process_settlement_digest(&[exact.clone()]).unwrap(),
+        "a".repeat(64)
+    );
+    assert!(signed_terminal_process_settlement_digest(&[]).is_err());
+    assert!(signed_terminal_process_settlement_digest(&[event(json!({}))]).is_err());
+    assert!(
+        signed_terminal_process_settlement_digest(&[event(json!({
+            "process_settlement_witness_digest":"not-a-hash"
+        }))])
+        .is_err()
+    );
+    assert!(signed_terminal_process_settlement_digest(&[exact.clone(), exact]).is_err());
+}
+
 fn resolution() -> ResolutionOutput {
     ResolutionOutput {
         root: ResolvedAncestor {
@@ -254,6 +281,48 @@ fn projector_identity_retains_descriptor_and_binary_authority_independently() {
             projected,
             "lost field {field}"
         );
+    }
+}
+
+#[test]
+fn projector_compatibility_ignores_only_unrelated_executor_set_changes() {
+    let retained = ProductQualificationProjectorIdentity {
+        canonical_ref: "handler:test/projector".into(),
+        descriptor_content_digest: "1".repeat(64),
+        descriptor_signer_fingerprint: "2".repeat(64),
+        binary_content_digest: "3".repeat(64),
+        binary_manifest_digest: "4".repeat(64),
+        binary_signer_fingerprint: "5".repeat(64),
+    };
+    let mut current = retained.clone();
+    assert!(compatible_projector_identity(&current, &retained));
+    current.binary_manifest_digest = "6".repeat(64);
+    assert!(compatible_projector_identity(&current, &retained));
+    assert_ne!(
+        current, retained,
+        "aggregate provenance must remain retained"
+    );
+
+    for change in [
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.canonical_ref = "handler:test/other".into()
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.descriptor_content_digest = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.descriptor_signer_fingerprint = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.binary_content_digest = "7".repeat(64)
+        },
+        |value: &mut ProductQualificationProjectorIdentity| {
+            value.binary_signer_fingerprint = "7".repeat(64)
+        },
+    ] {
+        let mut changed = current.clone();
+        change(&mut changed);
+        assert!(!compatible_projector_identity(&changed, &retained));
     }
 }
 

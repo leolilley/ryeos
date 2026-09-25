@@ -264,6 +264,17 @@ pub enum BuildAndLaunchError {
         stage: &'static str,
         detail: String,
     },
+    /// Preserve the managed runtime's existing terminal-error payload when
+    /// hosted cleanup prevents its fallback finalization. Neither a failed
+    /// root nor this diagnostic establishes external occurrence settlement.
+    /// The arbitrary cleanup error is deliberately not retained here: it may
+    /// contain private provider diagnostics. The fixed cleanup-unproved label
+    /// and existing occurrence journal carry the public uncertainty evidence.
+    #[error("runtime termination retains unresolved hosted cleanup")]
+    RuntimeCleanupUnresolved {
+        runtime_status: ryeos_runtime::envelope::RuntimeResultStatus,
+        runtime_error: Option<Value>,
+    },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -318,6 +329,9 @@ impl BuildAndLaunchError {
                 executor_ref: executor_ref.to_owned(),
                 detail: error.to_string(),
             },
+            error @ Self::RuntimeCleanupUnresolved { .. } => {
+                DispatchError::Internal(anyhow::Error::new(error))
+            }
             Self::Internal(error) => DispatchError::Internal(error),
         }
     }
@@ -348,9 +362,33 @@ impl BuildAndLaunchError {
             Self::Materialization(_)
             | Self::MissingSecrets { .. }
             | Self::CapabilityRejected { .. }
-            | Self::LaunchCancelled { .. } => false,
+            | Self::LaunchCancelled { .. }
+            | Self::RuntimeCleanupUnresolved { .. } => false,
             Self::LaunchPreparation(error) => error.retryable(),
         }
+    }
+}
+
+/// Same root audience and terminal-size validation as ordinary managed
+/// fallback. Runtime payloads are open, not sanitized: preserve only the exact
+/// error fallback already intended to publish, never additional process I/O.
+fn retained_launch_failure(error: &BuildAndLaunchError) -> Value {
+    match error {
+        BuildAndLaunchError::RuntimeCleanupUnresolved {
+            runtime_status,
+            runtime_error,
+            ..
+        } => json!({
+            "code": "runtime_cleanup_unresolved",
+            "retryable": false,
+            "runtime_status": runtime_status,
+            "runtime_error": runtime_error,
+            "cleanup": { "code": "cleanup_unproved" },
+        }),
+        other => json!({
+            "code": "launch_failure",
+            "message": format!("{other:#}"),
+        }),
     }
 }
 
@@ -5516,6 +5554,9 @@ fn admission_stage_for(
         BuildAndLaunchError::LaunchCancelled { stage, .. } => {
             (Stage::Cancelled, format!("cancelled_before_{stage}"))
         }
+        BuildAndLaunchError::RuntimeCleanupUnresolved { .. } => {
+            (Stage::Internal, "runtime_cleanup_unresolved".to_owned())
+        }
         BuildAndLaunchError::Internal(_) => (Stage::Internal, "internal".to_string()),
     }
 }
@@ -5686,6 +5727,51 @@ async fn build_and_launch_inner(
             Some(_) => {}
             None => metadata.effect_authority = Some(effect_authority.clone()),
         }
+    }
+
+    // Complete current realization admission before validating the sealed
+    // metadata or consulting an effect record. Replay is not a substitute for
+    // the producer's current admitted execution/resource authority.
+    let selected_resources = params
+        .state
+        .execution_resources
+        .select(authority.prepared_launch.target_requirement.as_ref())
+        .map_err(BuildAndLaunchError::Internal)?;
+    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
+    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
+    let realization_admission = super::execution_realization::admit_or_verify(
+        params.state,
+        authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch lost its admitted metadata"
+            ))
+        })?,
+        authority.effective_program.resolution(),
+        authority
+            .effective_program
+            .effective_definition_digest()
+            .as_str(),
+        &realization_contract_ref,
+        &realization_contract_digest,
+        selected_resources.selections(),
+        authority.pending_external_realization.as_mut(),
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
+    if authority.pending_external_realization.is_none() {
+        authority.pending_external_realization = realization_admission.publication;
+    }
+    authority.launch_metadata = authority
+        .launch_metadata
+        .take()
+        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
+    authority.selected_resources = Some(selected_resources);
+
+    if let Some(effect_authority) = params.effect_authority {
+        let metadata = authority.launch_metadata.as_ref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed effect launch lost its realized metadata"
+            ))
+        })?;
         metadata
             .validate()
             .map_err(BuildAndLaunchError::Internal)?;
@@ -5723,40 +5809,6 @@ async fn build_and_launch_inner(
             }
         }
     }
-
-    let selected_resources = params
-        .state
-        .execution_resources
-        .select(authority.prepared_launch.target_requirement.as_ref())
-        .map_err(BuildAndLaunchError::Internal)?;
-    let realization_contract_ref = authority.selected_runtime.canonical_ref.to_string();
-    let realization_contract_digest = authority.selected_runtime.raw_content_digest.clone();
-    let realization_admission = super::execution_realization::admit_or_verify(
-        params.state,
-        authority.launch_metadata.as_ref().ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed launch lost its admitted metadata"
-            ))
-        })?,
-        authority.effective_program.resolution(),
-        authority
-            .effective_program
-            .effective_definition_digest()
-            .as_str(),
-        &realization_contract_ref,
-        &realization_contract_digest,
-        selected_resources.selections(),
-        authority.pending_external_realization.as_mut(),
-    )
-    .map_err(BuildAndLaunchError::Internal)?;
-    if authority.pending_external_realization.is_none() {
-        authority.pending_external_realization = realization_admission.publication;
-    }
-    authority.launch_metadata = authority
-        .launch_metadata
-        .take()
-        .map(|metadata| metadata.with_execution_realization_hash(realization_admission.hash));
-    authority.selected_resources = Some(selected_resources);
 
     let initial_events = launch_audit_records(
         params.resolved,
@@ -6035,10 +6087,7 @@ async fn run_claimed_thread_row_with_authority(
     )
     .await;
     if let Err(ref err) = result {
-        guard.error = Some(json!({
-            "code": "launch_failure",
-            "message": format!("{err:#}"),
-        }));
+        guard.error = Some(retained_launch_failure(err));
     }
     let failure_precedes_cleanup = failure_precedes_lifecycle_cleanup(
         result.is_err(),
@@ -7407,6 +7456,22 @@ async fn run_claimed_thread_row_inner(
     let mut thread_detail = state.threads.get_thread(&thread_id)?.unwrap_or(thread);
     let already_finalized = is_thread_terminal_status(&thread_detail.status);
     let mut hosted_candidate_workspace_closed = false;
+    let external_candidate_without_completion = state
+        .state_store
+        .dedicated_session(&thread_id)?
+        .map(|session| {
+            let capsule = state
+                .state_store
+                .admitted_persistent_session_capsule(&session.admitted_capsule_hash)?;
+            capsule.validate()?;
+            Ok::<_, anyhow::Error>(
+                capsule.external_candidate.is_some()
+                    && session.terminal_reason.as_deref() != Some("completed"),
+            )
+        })
+        .transpose()
+        .map_err(BuildAndLaunchError::Internal)?
+        .unwrap_or(false);
     if !already_finalized {
         let mut terminal_status = runtime_terminal_status(runtime_result.status);
         // Kill-intent: a subprocess SIGKILLed by a daemon-issued `kill` exits
@@ -7419,7 +7484,13 @@ async fn run_claimed_thread_row_inner(
         {
             terminal_status = ryeos_state::objects::ThreadStatus::Killed;
         }
-        let result_generation = if owns_workspace {
+        // An externally placed candidate never executes in the controller's
+        // local COW view.  If the bounded session did not reach its exact
+        // completed fence, that view is still B and is not a partial result.
+        // Preserve the runtime's failure testimony and destroy the controller
+        // workspace after terminalization; only a completed authenticated
+        // import may enter the ordinary retained-generation freeze owner.
+        let result_generation = if owns_workspace && !external_candidate_without_completion {
             super::prepare_stopped_managed_runtime_terminal_project_result(
                 state,
                 provenance,
@@ -7570,6 +7641,7 @@ async fn run_claimed_thread_row_inner(
             && session.state == "terminal"
             && session.candidate_disposition
                 == ryeos_app::runtime_db::DedicatedCandidateDisposition::RetainedForReview
+            && session.terminal_reason.as_deref() == Some("completed")
         {
             runtime_result = ryeos_runtime::envelope::dedicated_session_terminal_result(
                 thread_id.clone(),
@@ -7579,6 +7651,7 @@ async fn run_claimed_thread_row_inner(
                 .map_err(BuildAndLaunchError::Internal)?,
             );
         }
+        let observed_runtime_status = runtime_result.status;
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
         runtime_result = fallback.runtime_result;
         let mut hosted_root_terminalization =
@@ -7596,9 +7669,13 @@ async fn run_claimed_thread_row_inner(
             };
         if let Some(session) = state.state_store.dedicated_session(&thread_id)?
             && session.state != "terminal"
+            && ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, &thread_id)
+                .is_err()
         {
-            ryeos_app::dedicated_session_service::abort_session_for_root_stop(state, &thread_id)
-                .map_err(BuildAndLaunchError::Internal)?;
+            return Err(BuildAndLaunchError::RuntimeCleanupUnresolved {
+                runtime_status: observed_runtime_status,
+                runtime_error: fallback.params.error,
+            });
         }
         let finalized = state.threads.finalize_thread_with_managed_envelope_owned(
             &fallback.params,
@@ -7669,7 +7746,15 @@ async fn run_claimed_thread_row_inner(
         .state_store
         .authoritative_result_project_snapshot(&thread_id)
         .map_err(BuildAndLaunchError::Internal)?;
-    if owns_workspace && !hosted_candidate_workspace_closed {
+    if owns_workspace && !hosted_candidate_workspace_closed && external_candidate_without_completion
+    {
+        super::runner::close_aborted_owned_workspace(
+            state,
+            provenance.workspace_lifeline().as_ref(),
+            &thread_id,
+        )
+        .map_err(BuildAndLaunchError::Internal)?;
+    } else if owns_workspace && !hosted_candidate_workspace_closed {
         let terminal_publication = provenance
             .project_authority()
             .terminal_publication()

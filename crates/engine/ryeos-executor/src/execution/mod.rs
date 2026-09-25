@@ -10,13 +10,9 @@ pub mod cache;
 mod direct_output;
 pub mod effective_program_projection;
 pub(crate) mod execution_realization;
-pub mod external_candidate;
-pub mod external_candidate_launcher;
-pub mod external_candidate_launcher_protocol;
-pub mod external_candidate_supervisor;
-pub mod external_candidate_transport;
 pub(crate) mod external_content;
-pub mod ingest;
+mod external_direct_inputs;
+pub(crate) mod external_guest_inputs;
 pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
@@ -378,7 +374,8 @@ pub(crate) fn capture_live_project_tree(
         ryeos_state::project_sync::ProjectSyncScope::FullProject,
     )?;
     let policy_hash = staged_roots.store_object_admitted(&guard, &cas, &policy.to_value())?;
-    let tree = ingest::ingest_project_tree(&authority, &guard, &project_root, &policy)?;
+    let tree =
+        ryeos_project_capture::ingest_project_tree(&authority, &guard, &project_root, &policy)?;
     ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
     let policy_after = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
         &project_root,
@@ -721,6 +718,12 @@ pub(crate) struct FoldBackOutputsParams<'a> {
     pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
     pub operational_shadow_paths: &'a [String],
     pub output_partition: Option<&'a ryeos_state::objects::WorkspaceOutputPartition>,
+    /// The admitted process cannot mutate the retained workspace in this mode;
+    /// all project changes are daemon-mediated callbacks against that exact
+    /// pinned root. Freeze still fences callbacks and validates the workspace
+    /// lifetime, then capture reads the retained root rather than an unrelated
+    /// process-overlay delta.
+    pub daemon_mediated_source_capture: bool,
 }
 
 pub(crate) struct FoldBackCapture {
@@ -937,6 +940,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
         workspace_record,
         operational_shadow_paths,
         output_partition,
+        daemon_mediated_source_capture,
     } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
@@ -1003,7 +1007,32 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
         anyhow::bail!("workspace freeze evidence does not match the durable creation journal");
     }
     let mut captured_outputs = None;
-    let new_tree = if isolation.is_enforced() {
+    let new_tree = if daemon_mediated_source_capture {
+        if output_partition.is_some() {
+            anyhow::bail!("daemon-mediated source capture cannot carry workspace-output authority");
+        }
+        if !lifecycle.evidence.mutations.is_empty() {
+            anyhow::bail!(
+                "daemon-mediated source capture observed unexpected process workspace mutations"
+            );
+        }
+        let project = lillux::PinnedDirectory::open(&layout.project)?
+            .ok_or_else(|| anyhow::anyhow!("daemon-private workspace project disappeared"))?;
+        let mut captured = ryeos_project_capture::ingest_project_tree_with_operational_exclusions(
+            authority,
+            cas_mutation_guard,
+            &project,
+            policy,
+            operational_shadow_paths,
+        )?;
+        ryeos_project_capture::restore_operational_shadow_files(
+            &mut captured,
+            pre_tree,
+            operational_shadow_paths,
+        )?;
+        ryeos_state::project_sync::validate_project_tree_paths(&captured, policy)?;
+        (captured != *pre_tree).then_some(captured)
+    } else if isolation.is_enforced() {
         let mutation_content = lifecycle.mutation_content.as_ref().ok_or_else(|| {
             anyhow::anyhow!("workspace adapter omitted its pinned mutation-content root")
         })?;
@@ -1051,7 +1080,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
             source_exclusions.sort();
             source_exclusions.dedup();
         }
-        let mut captured = ingest::ingest_project_tree_with_operational_exclusions(
+        let mut captured = ryeos_project_capture::ingest_project_tree_with_operational_exclusions(
             authority,
             cas_mutation_guard,
             &project,
@@ -1062,7 +1091,7 @@ pub(crate) fn fold_back_outputs(params: FoldBackOutputsParams<'_>) -> Result<Fol
         // Omitting their process-visible bytes must preserve any original
         // project bytes underneath, rather than turning an input overlay into
         // an authored deletion during native fold-back.
-        ingest::restore_operational_shadow_files(
+        ryeos_project_capture::restore_operational_shadow_files(
             &mut captured,
             pre_tree,
             operational_shadow_paths,
@@ -1221,6 +1250,7 @@ pub(crate) fn seal_callback_workspace_generation(
         workspace_record: &record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
+        daemon_mediated_source_capture: false,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
@@ -1350,6 +1380,7 @@ pub(crate) fn capture_runtime_workspace_input_generation(
             workspace_record: &record,
             operational_shadow_paths: &operational_shadow_paths,
             output_partition: output_context.as_ref().map(|context| &context.partition),
+            daemon_mediated_source_capture: false,
         })?;
         let snapshot_hash = match next_tree {
             Some(tree_hash) => store_foldback_snapshot(
@@ -1617,6 +1648,9 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
         .state_store
         .assert_execution_process_detached_owned(thread_id, launch_owner)?;
 
+    let external_generation =
+        ryeos_app::external_placement::completed_external_candidate_generation(state, thread_id)?;
+
     let layout = workspace::WorkspaceLayout::from_project(provenance.effective_path())?;
     let workspace_id = layout
         .root
@@ -1650,7 +1684,21 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
         WorkspaceState::Freezing => {}
         state => anyhow::bail!("stopped managed workspace cannot freeze from state {state}"),
     }
-    let generation = recover_interrupted_workspace_freeze(state, &record)?;
+    let completed_external_result = external_generation.is_some();
+    let generation = select_stopped_managed_runtime_result(external_generation, || {
+        recover_interrupted_workspace_freeze(state, &record)
+    })?;
+    if completed_external_result {
+        // The controller workspace remains B. Bind the independently verified
+        // remote C to the existing workspace/result owner without inspecting
+        // or relabelling local bytes as candidate output.
+        state.state_store.bind_frozen_execution_workspace(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            &generation,
+        )?;
+    }
     if let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
         head_ref,
         expected_hash,
@@ -1666,6 +1714,13 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
         )?;
     }
     Ok(Some(generation))
+}
+
+fn select_stopped_managed_runtime_result(
+    external_generation: Option<ryeos_state::objects::WorkspaceGenerationPair>,
+    capture_local_generation: impl FnOnce() -> Result<ryeos_state::objects::WorkspaceGenerationPair>,
+) -> Result<ryeos_state::objects::WorkspaceGenerationPair> {
+    external_generation.map_or_else(capture_local_generation, Ok)
 }
 
 fn advance_head_to_frozen_runtime_result(
@@ -1739,6 +1794,68 @@ pub fn recover_abandoned_interrupted_workspace_freeze(
     recover_interrupted_workspace_freeze_inner(state, record, true)
 }
 
+fn recovered_freeze_uses_daemon_mediated_source_capture(
+    state: &ryeos_app::state::AppState,
+    thread_id: &str,
+) -> Result<bool> {
+    let thread = state
+        .state_store
+        .get_thread(thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("freezing workspace thread disappeared"))?;
+    let Some(capsule_hash) = thread.admitted_launch_capsule_hash.as_deref() else {
+        return Ok(false);
+    };
+    let capsule = state
+        .state_store
+        .admitted_launch_capsule(thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("freezing workspace admitted capsule disappeared"))?;
+    if capsule.content_hash()? != capsule_hash {
+        anyhow::bail!("freezing workspace admitted capsule identity changed");
+    }
+    let sealed =
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
+            &capsule,
+        )?;
+    let Some(authority) = sealed.candidate_evaluation_authority() else {
+        return Ok(false);
+    };
+    if !matches!(
+        &authority.purpose,
+        ryeos_app::thread_lifecycle::CandidateOperationPurpose::Integrate { .. }
+    ) {
+        return Ok(false);
+    }
+    let operation_id =
+        ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact::operation_id(
+            authority,
+            thread_id,
+            capsule_hash,
+        )?;
+    let lookup = ryeos_app::authoritative_root_fact::lookup(
+        state,
+        thread_id,
+        ryeos_app::thread_lifecycle::CANDIDATE_INTEGRATION_PROCESS_COMPLETED_EVENT,
+        &operation_id,
+    )?;
+    if lookup.count > 1 {
+        anyhow::bail!("candidate integration completion fact is duplicated");
+    }
+    let Some(payload) = lookup.payload else {
+        return if lookup.count == 0 {
+            Ok(false)
+        } else {
+            Err(anyhow::anyhow!(
+                "candidate integration completion fact payload is unavailable"
+            ))
+        };
+    };
+    let fact: ryeos_app::thread_lifecycle::CandidateIntegrationProcessCompletionFact =
+        serde_json::from_value(payload)
+            .context("decode candidate integration completion fact during workspace recovery")?;
+    fact.validate_for(authority, thread_id, capsule_hash)?;
+    Ok(true)
+}
+
 fn recover_interrupted_workspace_freeze_inner(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
@@ -1755,6 +1872,8 @@ fn recover_interrupted_workspace_freeze_inner(
         .launch_owner
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("freezing workspace has no launch owner"))?;
+    let daemon_mediated_source_capture =
+        recovered_freeze_uses_daemon_mediated_source_capture(state, thread_id)?;
     assert_workspace_capture_processes_settled(state, record)?;
     let authority = pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
@@ -1792,6 +1911,7 @@ fn recover_interrupted_workspace_freeze_inner(
         workspace_record: record,
         operational_shadow_paths: &operational_shadow_paths,
         output_partition: output_context.as_ref().map(|context| &context.partition),
+        daemon_mediated_source_capture,
     })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
@@ -2182,6 +2302,31 @@ mod pinned_child_authority_tests {
         LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization, ProjectFile,
         ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree,
     };
+
+    #[test]
+    fn verified_external_c_bypasses_local_b_capture_at_the_terminal_result_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let controller_workspace = root.path().join("controller-workspace");
+        std::fs::create_dir(&controller_workspace).unwrap();
+        let base_file = controller_workspace.join("strategy.txt");
+        std::fs::write(&base_file, b"base B\n").unwrap();
+        let external = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: Some("d".repeat(64)),
+        };
+
+        let selected = select_stopped_managed_runtime_result(Some(external.clone()), || {
+            std::fs::write(&base_file, b"incorrect local capture\n").unwrap();
+            Ok(ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "b".repeat(64),
+                output_capture_hash: None,
+            })
+        })
+        .unwrap();
+
+        assert_eq!(selected, external);
+        assert_eq!(std::fs::read(&base_file).unwrap(), b"base B\n");
+    }
 
     #[test]
     fn workspace_capture_group_deduplication_requires_exact_group_birth() {

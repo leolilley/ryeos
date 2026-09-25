@@ -7,6 +7,38 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
+use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
+
+/// Protected root intent for one daemon-owned producer. This is a live bearer
+/// projection of the sealed qualification purpose, not permission to launch
+/// from an arbitrary Tool callback. The scoped-child handler must additionally
+/// recheck the durable owner and signed recipe before its irreversible cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedScopedProducerGrant {
+    pub purpose: ProductQualificationLaunchPurpose,
+    pub root_thread_id: String,
+    pub launch_owner: String,
+    /// Node isolation class captured before this root may launch a producer.
+    pub isolation_class: ryeos_engine::isolation::IsolationLaunchProvenance,
+}
+
+impl AdmittedScopedProducerGrant {
+    pub fn validate(&self) -> Result<()> {
+        self.purpose.validate()?;
+        if self.root_thread_id.is_empty() || self.launch_owner.is_empty() {
+            bail!("scoped producer grant has no exact root launch owner");
+        }
+        if self.isolation_class.plan_digest.is_some()
+            || self.isolation_class.mode != ryeos_engine::isolation::IsolationMode::Enforce
+            || self.isolation_class.backend_status
+                != ryeos_engine::isolation::IsolationBackendStatus::Available
+            || self.isolation_class.backend.is_none()
+        {
+            bail!("scoped producer grant has no available enforced isolation class");
+        }
+        Ok(())
+    }
+}
 
 /// Hook identity admitted at the same launch boundary that mints callback
 /// authority. Runtime callback input may select one of these identities; it
@@ -413,6 +445,9 @@ pub struct CallbackCapability {
     /// Absence preserves the ordinary callback contract. This is bound once
     /// before the protected child channel is exposed and can never be widened.
     pub workload_client_grant: Option<AdmittedWorkloadClientGrant>,
+    /// Absent on every ordinary Tool and managed runtime. Bound at most once,
+    /// before a protected verifier's callback token is exposed.
+    pub scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
 }
 
 impl CallbackCapability {
@@ -530,6 +565,7 @@ impl CallbackCapabilityStore {
             depth,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -660,6 +696,33 @@ impl CallbackCapabilityStore {
                     bail!("callback workload-client grant was already bound");
                 }
                 cap.workload_client_grant = Some(grant);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Bind protected qualification intent once, while the newly minted token
+    /// remains private to the launcher. A later callback cannot create or
+    /// replace this authority.
+    pub fn set_scoped_producer_grant(
+        &self,
+        token: &str,
+        grant: AdmittedScopedProducerGrant,
+    ) -> Result<bool> {
+        grant.validate()?;
+        Ok(match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                if cap.scoped_producer_grant.is_some() {
+                    bail!("callback scoped-producer grant was already bound");
+                }
+                if cap.thread_id != grant.root_thread_id
+                    || cap.launch_owner.as_deref() != Some(grant.launch_owner.as_str())
+                    || cap.item_ref.as_deref() != Some(grant.purpose.verifier_ref.as_str())
+                {
+                    bail!("callback scoped-producer grant contradicts its root bearer");
+                }
+                cap.scoped_producer_grant = Some(grant);
                 true
             }
             None => false,
@@ -983,6 +1046,7 @@ mod tests {
             .validate(&cap.token, "T-test123", PathBuf::from("/project").as_path())
             .unwrap();
         assert_eq!(validated.thread_id, "T-test123");
+        assert!(validated.scoped_producer_grant.is_none());
     }
 
     #[test]
@@ -1346,6 +1410,7 @@ mod tests {
             depth: 0,
             accounting_scope: None,
             workload_client_grant: None,
+            scoped_producer_grant: None,
         };
 
         let cloned = cap.clone();

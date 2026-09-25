@@ -96,24 +96,31 @@ pub(super) fn reconstruct_current_direct_artifact_identity(
             bail!("current qualification verifier artifact changed its admitted authored program");
         }
 
-        let mut prepared = crate::thread_lifecycle::prepare_bundle_item_plan_for_qualification(
+        let prepared = crate::thread_lifecycle::prepare_bundle_item_plan_for_qualification(
             &state.engine,
             resolved,
             state.isolation.as_ref(),
             finalized_program,
             logical_project_root,
         )?;
-        prepared.bind_realization_command_guarded(
+        let protocol =
+            crate::thread_lifecycle::resolve_direct_terminator_protocol(&state.engine, resolved)?;
+        // Fresh consumption checks today's exact executable closure against
+        // the original qualified execution. It does not launch that verifier
+        // again or require this consumer to have its execution capabilities.
+        // The consuming projection returns identity only; actual execution
+        // keeps its enforced-isolation binding and descriptor admission.
+        let artifact = prepared.into_current_artifact_identity_guarded(
             authority,
             guard,
             &state.engine,
             finalized_resolution,
-            state.isolation.as_ref(),
+            &state.node_config.external_execution,
+            state.isolation.verified_command_file_bytes(),
+            logical_project_root,
+            resolved,
+            protocol,
         )?;
-        prepared.bind_logical_project_root(logical_project_root)?;
-        let protocol =
-            crate::thread_lifecycle::resolve_direct_terminator_protocol(&state.engine, resolved)?;
-        let artifact = prepared.admitted_artifact_identity(resolved, protocol)?;
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executable_identity,
             ..

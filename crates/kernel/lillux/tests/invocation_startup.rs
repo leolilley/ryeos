@@ -11,7 +11,92 @@ mod linux {
     use std::io::{self, Read, Write};
     use std::process::{Child, Command, ExitStatus, Stdio};
 
+    fn interactive_child(mode: &str) -> Result<(), String> {
+        use lillux::inherited_pipes::InheritedPipePair;
+        if mode == "interactive-broken"
+            && unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) } == libc::SIG_ERR
+        {
+            return Err("cannot restore default SIGPIPE".into());
+        }
+        let vacant = match mode {
+            "interactive-vacant-input" => Some(0),
+            "interactive-vacant-output" => Some(1),
+            _ => None,
+        };
+        if let Some(fd) = vacant {
+            if unsafe { libc::close(fd) } != 0 {
+                return Err("cannot vacate fixture descriptor".into());
+            }
+        }
+        let deadline = MonotonicDeadline::after(Duration::from_secs(3));
+        // SAFETY: dedicated single-threaded executable startup. The parent owns
+        // only opposite endpoints; no Rust stdio owners or endpoint aliases.
+        let adopted = unsafe { InheritedPipePair::take_inherited_pipes(0, 1, 32, deadline) };
+        if vacant.is_some() {
+            if adopted.is_ok() {
+                return Err("vacant descriptor accepted".into());
+            }
+            // Even when one endpoint is absent, the other open endpoint was
+            // transferred and must be closed on partial adoption failure.
+            for fd in [0, 1] {
+                if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1
+                    || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+                {
+                    return Err("partial adoption leaked an endpoint".into());
+                }
+            }
+            return Ok(());
+        }
+        let (mut input, mut output, interrupt) = adopted.map_err(|e| e.to_string())?.split();
+        for fd in [0, 1] {
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1
+                || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+            {
+                return Err("interactive endpoint not relocated".into());
+            }
+        }
+        let mut handshake = [0; 5];
+        let mut offset = 0;
+        while offset < handshake.len() {
+            let count = input
+                .read_chunk(&mut handshake[offset..], Some(deadline))
+                .map_err(|e| e.to_string())?;
+            if count == 0 {
+                return Err("early handshake EOF".into());
+            }
+            offset += count;
+        }
+        if &handshake != b"ready" {
+            return Err("wrong handshake".into());
+        }
+        if mode == "interactive-broken" {
+            if output.write_all(b"answer", deadline).unwrap_err().kind()
+                != io::ErrorKind::BrokenPipe
+            {
+                return Err("interactive SIGPIPE did not return BrokenPipe".into());
+            }
+            if output.write_all(b"retry", deadline).unwrap_err().kind() != io::ErrorKind::BrokenPipe
+            {
+                return Err("broken interactive output was reusable".into());
+            }
+        } else if mode == "interactive-echo" {
+            output
+                .write_all(b"interactive:ready", deadline)
+                .map_err(|e| e.to_string())?;
+        } else {
+            return Err("unknown interactive mode".into());
+        }
+        interrupt.interrupt().map_err(|e| e.to_string())?;
+        if input.read_chunk(&mut [0; 1], None).unwrap_err().kind() != io::ErrorKind::Interrupted {
+            return Err("interactive cancellation confused with EOF".into());
+        }
+        Ok(())
+    }
+
     fn child(mode: &str) -> Result<(), String> {
+        if mode.starts_with("interactive-") {
+            return interactive_child(mode);
+        }
         // Rust startup normally ignores SIGPIPE. Restore the actual default
         // here, before acquisition, to exercise invocation's per-thread mask.
         if mode == "broken" {
@@ -150,6 +235,45 @@ mod linux {
             "trickle did not retain absolute input deadline"
         );
     }
+    fn interactive() {
+        let mut child = spawn("interactive-echo");
+        let mut writer = child.0.stdin.take().unwrap();
+        writer.write_all(b"ready").unwrap();
+        // Keep the parent writer alive: interactive input must not wait for EOF.
+        assert!(
+            wait(&mut child).success(),
+            "interactive stdio did not settle"
+        );
+        let mut bytes = Vec::new();
+        child
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .take(64)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"interactive:ready");
+        drop(writer);
+
+        let mut child = spawn("interactive-broken");
+        drop(child.0.stdout.take().unwrap());
+        let mut writer = child.0.stdin.take().unwrap();
+        writer.write_all(b"ready").unwrap();
+        assert!(
+            wait(&mut child).success(),
+            "interactive default SIGPIPE killed child"
+        );
+        drop(writer);
+
+        for mode in ["interactive-vacant-input", "interactive-vacant-output"] {
+            let mut child = spawn(mode);
+            assert!(
+                wait(&mut child).success(),
+                "partial adoption failed: {mode}"
+            );
+        }
+    }
     pub(super) fn run() {
         // Argument inspection is kernel test startup setup, not consumer-side
         // invocation parsing; it performs no stdio operation or thread spawn.
@@ -164,6 +288,7 @@ mod linux {
         echo();
         broken_pipe();
         trickle();
+        interactive();
     }
 }
 

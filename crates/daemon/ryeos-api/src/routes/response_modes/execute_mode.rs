@@ -811,39 +811,6 @@ pub struct ExecuteMode;
 
 pub struct CompiledExecuteMode;
 
-/// Own a durably reserved accepted-launch coordinate until the background
-/// task captures its own settlement guard. Any admission return, unwind, or
-/// rejection before that handoff leaves a terminal, queryable refusal instead
-/// of an ambiguous planning row.
-struct AcceptedLaunchAdmissionGuard {
-    state: ryeos_app::state::AppState,
-    reserved_thread_id: String,
-    armed: bool,
-}
-
-impl AcceptedLaunchAdmissionGuard {
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for AcceptedLaunchAdmissionGuard {
-    fn drop(&mut self) {
-        if self.armed
-            && let Err(error) = self
-                .state
-                .state_store
-                .settle_launch_planning_admission_exit(&self.reserved_thread_id)
-        {
-            tracing::error!(
-                thread_id = %self.reserved_thread_id,
-                error = %error,
-                "failed to settle accepted launch admission exit"
-            );
-        }
-    }
-}
-
 impl ResponseMode for ExecuteMode {
     fn key(&self) -> &'static str {
         "execute"
@@ -1185,18 +1152,16 @@ pub(crate) async fn admit_execution(
     // this succeeds every uncertain HTTP outcome has an exact owner-bound
     // status and a retry can never race still-running admission work.
     let mut accepted_admission_guard = if request.launch_mode == "accepted" {
-        let reserved_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         let launch_id = request
             .launch_id
             .as_deref()
             .expect("accepted route validated caller-retained launch id");
-        state
-                .state_store
-                .reserve_launch_planning_with_id(
-                    launch_id,
-                    &reserved_thread_id,
-                    &caller_principal_id,
-                )
+        Some(
+            crate::routes::launch::AcceptedLaunchAdmissionGuard::reserve(
+                &state,
+                launch_id,
+                &caller_principal_id,
+            )
                 .map_err(|error| match error {
                     ryeos_app::state_store::LaunchPlanningReservationError::AlreadyReserved(_) => {
                         RouteDispatchError::Conflict(
@@ -1215,12 +1180,8 @@ pub(crate) async fn admit_execution(
                             "reserve accepted launch identity: {error:#}"
                         ))
                     }
-                })?;
-        Some(AcceptedLaunchAdmissionGuard {
-            state: state.clone(),
-            reserved_thread_id,
-            armed: true,
-        })
+                })?,
+        )
     } else {
         None
     };
@@ -1736,6 +1697,11 @@ pub(crate) async fn admit_execution(
             readiness = ready => match readiness {
                 Ok(Ok(ready_thread_id)) => ready_thread_id,
                 Ok(Err(failure)) => {
+                    crate::routes::launch::retain_launch_workspace_until_task_terminal(
+                        handle,
+                        workspace_guard.clone(),
+                        thread_id.clone(),
+                    );
                     return Ok(launch_handoff_failure_response(failure));
                 }
                 Err(_) => {
@@ -1747,6 +1713,11 @@ pub(crate) async fn admit_execution(
             }
         };
         if ready_thread_id != response_thread_id {
+            crate::routes::launch::retain_launch_workspace_until_task_terminal(
+                handle,
+                workspace_guard.clone(),
+                thread_id.clone(),
+            );
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -1757,30 +1728,11 @@ pub(crate) async fn admit_execution(
                 .into());
         }
 
-        tokio::spawn(async move {
-            let _workspace_guard = workspace_guard;
-            let outcome = handle.await;
-            match outcome {
-                Ok(Ok(())) => {
-                    tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");
-                }
-                Ok(Err(err)) => {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        code = %err.code(),
-                        error = %err,
-                        "accepted execute background dispatch failed"
-                    );
-                }
-                Err(join_err) => {
-                    tracing::error!(
-                        thread_id = %thread_id,
-                        error = %join_err,
-                        "accepted execute background dispatch panicked"
-                    );
-                }
-            }
-        });
+        crate::routes::launch::retain_launch_workspace_until_task_terminal(
+            handle,
+            workspace_guard,
+            thread_id,
+        );
 
         return Ok((
             StatusCode::ACCEPTED,

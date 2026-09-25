@@ -156,6 +156,23 @@ impl IsolationRequestAwaitingAttachment {
         Self { request, scope }
     }
 
+    /// Require exact post-release applied-launch testimony on this held
+    /// supervised adapter request. This is an explicit stronger consumer
+    /// contract; ordinary managed launches keep their existing status floor.
+    pub fn require_applied_launch_receipt(mut self) -> Result<Self, EngineError> {
+        let status = self.request.supervised_status.as_mut().ok_or_else(|| {
+            EngineError::IsolationPolicyRefused {
+                reason: "held launch has no supervised adapter status channel".into(),
+            }
+        })?;
+        status
+            .require_applied_launch_receipt(
+                ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
+            )
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?;
+        Ok(self)
+    }
+
     /// Consume the typed isolation result through Lillux's matching lifecycle
     /// operation. The raw request is never exposed, so a disabled-isolation
     /// direct launch cannot be silently downgraded to ordinary spawn.
@@ -176,6 +193,10 @@ impl IsolationRequestAwaitingAttachment {
 pub struct AppliedIsolationLaunchAwaitingAttachment {
     pub request: IsolationRequestAwaitingAttachment,
     pub provenance: IsolationLaunchProvenance,
+    /// Engine-compiled target commitments, before adapter or child contact.
+    /// Not a public provenance field: hashes of low-entropy inputs are
+    /// sensitive and must remain in protected launch/evaluation custody.
+    pub expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
 }
 
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {

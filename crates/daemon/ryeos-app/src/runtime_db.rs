@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod external_execution;
+pub mod scoped_child_attempt;
 
 use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
 use crate::process::{
@@ -151,6 +152,36 @@ pub struct ProcessResourceReservationRecord {
     pub scope_allocation: lillux::ProcessScopeAllocation,
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
+}
+
+/// A device-free direct thread launch that nevertheless requires an exact
+/// process scope. This is an allocation/recovery obligation, never relaunch
+/// authority. Attachment consumes it into the thread's process identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadProcessScopeReservationRecord {
+    pub thread_id: String,
+    pub launch_owner: String,
+    pub daemon_generation_id: String,
+    pub scope_allocation: lillux::ProcessScopeAllocation,
+    pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
+}
+
+impl ThreadProcessScopeReservationRecord {
+    fn validate(&self) -> Result<()> {
+        validate_bounded_runtime_text("scope reservation thread", &self.thread_id, 256)?;
+        validate_bounded_runtime_text("scope reservation launch owner", &self.launch_owner, 4096)?;
+        if self.daemon_generation_id.is_empty() {
+            bail!("scope reservation lacks daemon generation");
+        }
+        self.scope_allocation.validate().map_err(anyhow::Error::msg)?;
+        if self.scope_recovery.as_ref().is_some_and(|recovery| {
+            !recovery.matches_allocation(&self.scope_allocation)
+        }) {
+            bail!("scope reservation recovery contradicts allocation");
+        }
+        Ok(())
+    }
 }
 
 impl ProcessResourceReservationRecord {
@@ -399,6 +430,42 @@ fn consume_process_resource_reservation(
     Ok(())
 }
 
+fn consume_thread_process_scope_reservation(
+    conn: &Connection,
+    thread_id: &str,
+    process_identity: &ExecutionProcessIdentity,
+) -> Result<bool> {
+    let encoded: Option<(String, String)> = conn.query_row(
+        "SELECT launch_owner, reservation FROM thread_process_scope_reservation WHERE thread_id=?1",
+        [thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((launch_owner, encoded)) = encoded else { return Ok(false) };
+    let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
+    reservation.validate()?;
+    if reservation.thread_id != thread_id
+        || reservation.launch_owner != launch_owner
+        || reservation.daemon_generation_id != daemon_generation_id()
+        || reservation.scope_recovery.is_none()
+        || reservation.scope_recovery.as_ref() != process_identity.process_scope.as_ref()
+        || !process_identity.resource_selections.is_empty()
+    {
+        bail!("held process differs from exact thread scope reservation");
+    }
+    let claim_owner: Option<String> = conn.query_row(
+        "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1", [thread_id], |row| row.get(0),
+    ).optional()?;
+    if claim_owner.as_deref() != Some(launch_owner.as_str()) {
+        bail!("thread scope reservation lost its exact launch owner");
+    }
+    let deleted = conn.execute(
+        "DELETE FROM thread_process_scope_reservation WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3",
+        params![thread_id, launch_owner, encoded],
+    )?;
+    if deleted != 1 { bail!("thread scope reservation was not consumed exactly once") }
+    Ok(true)
+}
+
 fn attach_process_resource_owner(
     conn: &Connection,
     owner_kind: &str,
@@ -544,6 +611,9 @@ fn clear_scope_lifetime_fence_if_settled(conn: &Connection) -> Result<()> {
     let unsettled: i64 = conn.query_row(
         "SELECT
             (SELECT COUNT(*) FROM process_resource_reservation)
+          + (SELECT COUNT(*) FROM thread_process_scope_reservation)
+          + (SELECT COUNT(*) FROM thread_runtime
+               WHERE json_type(process_identity, '$.process_scope')='object')
           + (SELECT COUNT(*) FROM process_resource_owner
                WHERE cleanup_state='owned'
                  AND json_type(process_identity, '$.process_scope') IS NOT 'null')
@@ -717,6 +787,8 @@ pub struct InProcessHandlerReservation {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeThreadHistoryDiscardReport {
+    pub scoped_child_attempts: usize,
+    pub scoped_child_input_operations: usize,
     pub thread_runtime: usize,
     pub in_process_handler_reservations: usize,
     pub thread_commands: usize,
@@ -736,7 +808,9 @@ pub struct RuntimeThreadHistoryDiscardReport {
 
 impl RuntimeThreadHistoryDiscardReport {
     pub fn total_rows(&self) -> usize {
-        self.thread_runtime
+        self.scoped_child_attempts
+            + self.scoped_child_input_operations
+            + self.thread_runtime
             + self.in_process_handler_reservations
             + self.thread_commands
             + self.hook_dispatch_ledger
@@ -769,6 +843,9 @@ pub struct ChainRecoveryPins {
     /// Whole-execution resources remain owned until their existing session
     /// retirement journal settles, even after the last observed PID exits.
     pub process_scope_obligations: u64,
+    /// External occurrences retain their authoritative chain even without a
+    /// local PID or live launch claim. Only exact lifecycle settlement unpins.
+    pub external_allocation_obligations: u64,
     pub launch_claims: u64,
     /// Active launch claims whose persisted launch contract is resume- or
     /// continuation-capable. This is deliberately derived from an owning claim;
@@ -798,6 +875,7 @@ impl ChainRecoveryPins {
             && self.in_process_handler_reservations == 0
             && self.live_processes == 0
             && self.process_scope_obligations == 0
+            && self.external_allocation_obligations == 0
             && self.launch_claims == 0
             && self.recovery_capable_launch_claims == 0
             && self.required_checkpoint_consumers == 0
@@ -1301,11 +1379,95 @@ pub struct LaunchOwner {
     pub daemon_generation_id: String,
 }
 
+/// One daemon-owned process-death observation retained after exact attachment
+/// compare-clear. The signed terminal must bind its digest before product
+/// qualification may use it; a mutable runtime row alone is not authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadProcessSettlement {
+    pub schema: u32,
+    pub thread_id: String,
+    pub launch_owner: LaunchOwner,
+    pub process_identity: ExecutionProcessIdentity,
+    pub workspace_binding: Option<RuntimeWorkspaceBinding>,
+    pub kind: ThreadProcessSettlementKind,
+    pub observed_at_ms: i64,
+}
+
+pub const THREAD_PROCESS_SETTLEMENT_SCHEMA: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadProcessSettlementKind {
+    ReapedScopeEmpty,
+    ReapedGroupAbsent,
+    RecoveryDeath,
+}
+
+impl ThreadProcessSettlement {
+    pub fn new(
+        thread_id: &str,
+        launch_owner: &LaunchOwner,
+        process_identity: &ExecutionProcessIdentity,
+        workspace_binding: Option<&RuntimeWorkspaceBinding>,
+        kind: ThreadProcessSettlementKind,
+    ) -> Result<Self> {
+        let value = Self {
+            schema: THREAD_PROCESS_SETTLEMENT_SCHEMA,
+            thread_id: thread_id.to_owned(),
+            launch_owner: launch_owner.clone(),
+            process_identity: process_identity.clone(),
+            workspace_binding: workspace_binding.cloned(),
+            kind,
+            observed_at_ms: lillux::time::timestamp_millis(),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != THREAD_PROCESS_SETTLEMENT_SCHEMA
+            || self.thread_id.is_empty()
+            || self.launch_owner.thread_id != self.thread_id
+            || self.launch_owner.monotonic_launch_epoch == 0
+            || self.launch_owner.unpredictable_nonce.is_empty()
+            || self.launch_owner.daemon_generation_id.is_empty()
+            || self.observed_at_ms <= 0
+        {
+            bail!("invalid exact thread process settlement coordinate");
+        }
+        validate_execution_process_identity_shape(&self.process_identity)?;
+        if let Some(binding) = &self.workspace_binding {
+            binding.validate_for(&self.thread_id)?;
+            if binding.borrower_launch_owner != self.launch_owner {
+                bail!("process settlement workspace has a different launch owner");
+            }
+        }
+        match self.kind {
+            ThreadProcessSettlementKind::ReapedScopeEmpty
+                if self.process_identity.process_scope.is_some() => {}
+            ThreadProcessSettlementKind::ReapedGroupAbsent
+                if self.process_identity.process_scope.is_none() => {}
+            ThreadProcessSettlementKind::RecoveryDeath => {}
+            _ => bail!("process settlement kind contradicts retained scope"),
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String> {
+        self.validate()?;
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(self)?)?.as_bytes(),
+        ))
+    }
+}
+
 /// Node-local membership in one exact created workspace view. This is process
 /// lifetime authority, not portable project or launch-metadata authority.
 /// A retained binding is conservatively live even without a PID or claim:
 /// adapter setup may have contacted the view before target attachment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeWorkspaceBinding {
     pub workspace_id: String,
     pub view_identity: String,
@@ -1700,10 +1862,11 @@ const SCOPE_LIFETIME_FENCE_SQL: &str = r#"CREATE TABLE execution_lifetime_fence 
 
 fn runtime_schema_sql() -> String {
     format!(
-        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}",
+        "{SCOPE_LIFETIME_FENCE_SQL};\nINSERT INTO execution_lifetime_fence VALUES(1,1,NULL);\n{SCHEMA_SQL}\n{};\nINSERT INTO external_execution_guard VALUES(1,1,0);\n{}\n{}\n{}",
         external_execution::GUARD_SQL,
         ryeos_state::external_execution::journal::CHANNEL_SQL,
         external_execution::JOURNAL_SQL,
+        scoped_child_attempt::JOURNAL_SQL,
     )
 }
 
@@ -1717,6 +1880,7 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     launch_metadata TEXT,
     resume_attempts INTEGER NOT NULL DEFAULT 0,
     process_identity TEXT,
+    latest_process_settlement TEXT,
     process_release_fence TEXT CHECK (
         process_release_fence IS NULL OR process_release_fence IN ('pending', 'consumed')
     ),
@@ -1776,6 +1940,14 @@ CREATE TABLE IF NOT EXISTS process_resource_reservation (
 
 CREATE INDEX IF NOT EXISTS idx_process_resource_reservation_coordinate
     ON process_resource_reservation(owner_kind, owner_coordinate);
+
+CREATE TABLE IF NOT EXISTS thread_process_scope_reservation (
+    thread_id TEXT PRIMARY KEY,
+    launch_owner TEXT NOT NULL,
+    reservation TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS in_process_handler_reservation (
     thread_id TEXT PRIMARY KEY,
@@ -2415,7 +2587,31 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // channel/artifact authority, authenticated peer incarnation and terminal
 // disconnect state. Epoch-54 stores cannot prove whether protocol bytes crossed
 // a predecessor connector and are never decoded as reconnect authority.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 55;
+// Epoch 57 cuts external channel bindings to schema 4. The execution mode is
+// mandatory authority: a session channel cannot become a direct command by
+// interpreting an absent field or accepting new terminal payloads implicitly.
+// Preserve predecessor stores as evidence; do not rewrite their channels.
+// Epoch 58 requires typed external allocation ownership. A direct immutable
+// thread must never decode predecessor session/workspace fields as authority.
+// Epoch 59 requires the closed session/direct placement binding (schema 9)
+// and explicit direct-plan endpoint authority. Do not reinterpret retained
+// predecessor reservations/capsules as the new execution contract.
+// Epoch 60 retains bounded compiler-authenticated direct programs inline in
+// allocation schema 5. Predecessor reservations are not rewritten on recovery.
+// Epoch 61 restricts executable-input revocation to owner-directed Release and
+// protocol bytes. Predecessor journals may falsely mark supervisor output as
+// never applied; do not reinterpret those rows or their immutable triggers.
+// Epoch 62 retains the exact last process-settlement attempt until terminal
+// signing can bind it; a fresh attachment invalidates the prior slot.
+// Epoch 63 retains a one-shot, owner-fenced scoped child attempt. A durable
+// release-permitted cut is contact-uncertain and never reopens into launch.
+// Epoch 64 retains a separate device-free, thread-owned root scope intent.
+// Epoch 65 persists Lillux scoped-child recovery death proof before removing
+// its exact bound scope, so restart after kernel retirement cannot re-run an
+// active-control operation against an intentionally absent resource.
+// Epoch 67 retains ordered scoped-child input reservations so uncertain local
+// delivery cannot be replayed as a fresh write or bypassed by a later close.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 67;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2428,6 +2624,40 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
         application_id: RUNTIME_APP_ID,
         tables: &[
+            sqlite_schema::TableSpec {
+                name: "scoped_child_attempt",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "attempt_id", col_type: "TEXT", pk: true, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "owner_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "launch_owner", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "recipe_digest", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "recipe_generation", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "scenario_digest", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "scope_allocation", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "scope_recovery", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "process_identity", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "natural_empty_receipt_digest", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "observation_object_hash", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "recovery_death_evidence_digest", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "retirement_evidence_digest", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "scoped_child_input_operation",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "attempt_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "sequence", col_type: "INTEGER", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "kind", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "payload_digest", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "byte_count", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
             sqlite_schema::TableSpec {
                 name: "external_execution_binding_generation",
                 columns: &[
@@ -2494,6 +2724,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "output_capture_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
                         name: "evidence_blob_hash",
@@ -2635,6 +2871,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "export_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "export_output_capture_hash",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -2946,6 +3188,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "latest_process_settlement",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "process_release_fence",
                         col_type: "TEXT",
                         pk: false,
@@ -3093,6 +3341,16 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_process_scope_reservation",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "launch_owner", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "reservation", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -5233,6 +5491,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     }
     assert_current_runtime_schema(&tx, path)?;
     external_execution::validate_current(&tx)?;
+    scoped_child_attempt::validate_current(&tx)?;
     read_scope_lifetime_fence(&tx)?;
     let rows = {
         let mut statement = tx.prepare(
@@ -13179,6 +13438,9 @@ impl RuntimeDb {
                 "execution-history reset requires completed process-scope retirement; preserve the runtime and settle its workspaces first"
             );
         }
+        if !self.unsettled_scoped_child_attempt_ids()?.is_empty() {
+            bail!("execution-history reset requires settlement of every scoped child attempt");
+        }
         ensure_scope_lifetime_resettable(&self.conn, RUNTIME_OPERATOR_SCHEMA_EPOCH)?;
         fn count(conn: &Connection, table: &str) -> Result<usize> {
             let rows: i64 =
@@ -13190,6 +13452,8 @@ impl RuntimeDb {
 
         if dry_run {
             return Ok(RuntimeThreadHistoryDiscardReport {
+                scoped_child_attempts: count(&self.conn, "scoped_child_attempt")?,
+                scoped_child_input_operations: count(&self.conn, "scoped_child_input_operation")?,
                 thread_runtime: count(&self.conn, "thread_runtime")?,
                 in_process_handler_reservations: count(
                     &self.conn,
@@ -13213,6 +13477,8 @@ impl RuntimeDb {
 
         let conn = self.conn.unchecked_transaction()?;
         let report = RuntimeThreadHistoryDiscardReport {
+            scoped_child_input_operations: conn.execute("DELETE FROM scoped_child_input_operation", [])?,
+            scoped_child_attempts: conn.execute("DELETE FROM scoped_child_attempt", [])?,
             in_process_handler_reservations: conn
                 .execute("DELETE FROM in_process_handler_reservation", [])?,
             follow_waiter_children: conn.execute("DELETE FROM follow_waiter_child", [])?,
@@ -14967,24 +15233,41 @@ impl RuntimeDb {
         thread_id: &str,
         binding: &RuntimeWorkspaceBinding,
         identity: &ExecutionProcessIdentity,
+        settlement: &ThreadProcessSettlement,
     ) -> Result<bool> {
         binding.validate_for(thread_id)?;
         validate_execution_process_identity_shape(identity)?;
+        settlement.validate()?;
+        if settlement.thread_id != thread_id
+            || settlement.process_identity != *identity
+            || settlement.workspace_binding.as_ref() != Some(binding)
+        {
+            bail!("workspace process settlement differs from attached occurrence");
+        }
         if self.workspace_descendants_have_members(thread_id, binding)? {
             return Ok(false);
         }
         let owner = lillux::canonical_json(&serde_json::to_value(&binding.borrower_launch_owner)?)?;
         let identity = serde_json::to_string(identity)?;
-        Ok(self.conn.execute(
+        let encoded_settlement = lillux::canonical_json(&serde_json::to_value(settlement)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE thread_runtime
                 SET pid=NULL, pgid=NULL, process_identity=NULL, process_release_fence=NULL,
                     process_dead_observed_at_ms=NULL,
-                    workspace_id=NULL, workspace_view_identity=NULL, workspace_borrower_launch_owner=NULL
+                    workspace_id=NULL, workspace_view_identity=NULL, workspace_borrower_launch_owner=NULL,
+                    latest_process_settlement=?6
               WHERE thread_id=?1 AND workspace_id=?2 AND workspace_view_identity=?3
                 AND workspace_borrower_launch_owner=?4 AND process_identity=?5
                 AND NOT EXISTS(SELECT 1 FROM in_process_handler_reservation WHERE thread_id=?1)",
-            params![thread_id, binding.workspace_id, binding.view_identity, owner, identity],
-        )? == 1)
+            params![thread_id, binding.workspace_id, binding.view_identity, owner, identity, encoded_settlement],
+        )?;
+        if changed == 1 {
+            clear_scope_lifetime_fence_if_settled(&tx)?;
+        }
+        tx.commit()
+            .context("commit exact workspace process settlement")?;
+        Ok(changed == 1)
     }
 
     pub fn insert_thread_runtime(&self, thread_id: &str, chain_root_id: &str) -> Result<()> {
@@ -15578,6 +15861,22 @@ impl RuntimeDb {
                 |row| row.get(0),
             )?
         };
+        let scope_only: i64 = self.conn.query_row(
+            if chain_root_id.is_some() {
+                "SELECT COUNT(*) FROM thread_process_scope_reservation r JOIN thread_runtime t ON t.thread_id=r.thread_id WHERE t.chain_root_id=?1"
+            } else {
+                "SELECT COUNT(*) FROM thread_process_scope_reservation WHERE ?1 IS NULL"
+            },
+            [chain_root_id], |row| row.get(0),
+        )?;
+        let attached_threads: i64 = self.conn.query_row(
+            if chain_root_id.is_some() {
+                "SELECT COUNT(*) FROM thread_runtime WHERE chain_root_id=?1 AND json_type(process_identity, '$.process_scope')='object'"
+            } else {
+                "SELECT COUNT(*) FROM thread_runtime WHERE ?1 IS NULL AND json_type(process_identity, '$.process_scope')='object'"
+            },
+            [chain_root_id], |row| row.get(0),
+        )?;
         let owners: i64 = if chain_root_id.is_some() {
             self.conn.query_row(
                 "SELECT COUNT(*) FROM process_resource_owner
@@ -15597,10 +15896,28 @@ impl RuntimeDb {
                 |row| row.get(0),
             )?
         };
+        let scoped_children: i64 = if chain_root_id.is_some() {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM scoped_child_attempt a JOIN thread_runtime t
+                    ON t.thread_id=a.owner_thread_id
+                  WHERE a.phase!='retired' AND t.chain_root_id=?1",
+                [chain_root_id],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM scoped_child_attempt WHERE phase!='retired'",
+                [],
+                |row| row.get(0),
+            )?
+        };
         u64::try_from(
             dedicated
                 .checked_add(reservations)
+                .and_then(|v| v.checked_add(scope_only))
+                .and_then(|v| v.checked_add(attached_threads))
                 .and_then(|v| v.checked_add(owners))
+                .and_then(|v| v.checked_add(scoped_children))
                 .context("process-scope obligation count overflow")?,
         )
         .context("negative process-scope obligation count")
@@ -15640,6 +15957,7 @@ impl RuntimeDb {
         )?;
         let mut pins = ChainRecoveryPins {
             process_scope_obligations: self.unsettled_process_scope_count(Some(chain_root_id))?,
+            external_allocation_obligations: self.unsettled_external_chain_count(chain_root_id)?,
             // A parent follow waiter owns the graph checkpoint until its
             // successor is durably resumed or the waiter is otherwise settled.
             required_checkpoint_consumers: parent_follow_waiters,
@@ -16195,10 +16513,20 @@ impl RuntimeDb {
             bail!("refusing to attach over unverified pid/pgid residue for thread {thread_id}");
         }
 
-        let release_fence = (!process_identity.resource_selections.is_empty())
+        let release_fence = (process_identity.process_scope.is_some())
             .then_some(ProcessReleaseFenceState::Pending.as_str());
 
         let tx = self.conn.unchecked_transaction()?;
+        let scope_only = consume_thread_process_scope_reservation(&tx, thread_id, process_identity)?;
+        if process_identity.process_scope.is_some()
+            && process_identity.resource_selections.is_empty()
+            && !scope_only
+        {
+            bail!("scope-only thread process has no exact pre-contact reservation");
+        }
+        if scope_only && !require_empty {
+            bail!("scope-only process must attach before target release");
+        }
         attach_process_resource_owner(&tx, "thread", thread_id, process_identity)?;
 
         // Preserve seeded launch metadata. A self-attach over UDS sends only
@@ -16209,6 +16537,7 @@ impl RuntimeDb {
             let updated = tx.execute(
                 "UPDATE thread_runtime
                     SET pid = ?2, pgid = ?3, process_identity = ?4,
+                        latest_process_settlement = NULL,
                         process_release_fence = ?5,
                         resume_attempts = CASE WHEN ?6 THEN 0 ELSE resume_attempts END
                   WHERE thread_id = ?1
@@ -16235,6 +16564,7 @@ impl RuntimeDb {
         let updated = tx.execute(
             "UPDATE thread_runtime
                 SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5,
+                    latest_process_settlement = NULL,
                     process_release_fence = ?6,
                     resume_attempts = CASE WHEN ?7 THEN 0 ELSE resume_attempts END
               WHERE thread_id = ?1
@@ -16294,6 +16624,135 @@ impl RuntimeDb {
         )?;
         reserve_process_resources(&tx, reservation)?;
         tx.commit().context("commit process resource reservation")
+    }
+
+    pub fn reserve_thread_process_scope(
+        &self,
+        reservation: &ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        reservation.validate()?;
+        if reservation.scope_recovery.is_some() || reservation.daemon_generation_id != daemon_generation_id() {
+            bail!("thread scope intent must be unbound and current");
+        }
+        let lifetime = reservation.scope_allocation.host_lifetime().map_err(anyhow::Error::msg)?;
+        let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
+        let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(incumbent) = read_scope_lifetime_fence(&tx)? {
+            if incumbent != lifetime && !incumbent.has_ended().map_err(anyhow::Error::msg)? {
+                bail!("thread scope intent requires retirement of previous host lifetime");
+            }
+        }
+        let eligible: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM thread_launch_claim c JOIN thread_runtime t ON t.thread_id=c.thread_id
+              WHERE c.thread_id=?1 AND c.claimed_by=?2 AND t.stop_requested_at_ms IS NULL
+                AND t.pid IS NULL AND t.process_identity IS NULL",
+            params![reservation.thread_id, reservation.launch_owner], |row| row.get(0),
+        )?;
+        if eligible != 1 { bail!("thread scope intent lost exact launch owner or uncontacted thread") }
+        tx.execute("UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1", [&encoded_lifetime])?;
+        tx.execute(
+            "INSERT INTO thread_process_scope_reservation (thread_id, launch_owner, reservation, created_at_ms, updated_at_ms)
+              VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![reservation.thread_id, reservation.launch_owner, encoded, i64::try_from(lillux::time::timestamp_millis())?],
+        )?;
+        tx.commit().context("commit thread scope intent")
+    }
+
+    pub fn thread_process_scope_reservation(
+        &self, thread_id: &str,
+    ) -> Result<Option<ThreadProcessScopeReservationRecord>> {
+        let encoded: Option<String> = self.conn.query_row(
+            "SELECT reservation FROM thread_process_scope_reservation WHERE thread_id=?1",
+            [thread_id], |row| row.get(0),
+        ).optional()?;
+        encoded.map(|encoded| {
+            let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
+            reservation.validate()?;
+            if reservation.thread_id != thread_id || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
+                bail!("thread scope intent is not exact canonical authority");
+            }
+            Ok(reservation)
+        }).transpose()
+    }
+
+    pub fn thread_process_scope_reservations(&self) -> Result<Vec<ThreadProcessScopeReservationRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT thread_id, launch_owner, reservation FROM thread_process_scope_reservation ORDER BY thread_id"
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(|(thread_id, launch_owner, encoded)| {
+            let reservation: ThreadProcessScopeReservationRecord = serde_json::from_str(&encoded)?;
+            reservation.validate()?;
+            if reservation.thread_id != thread_id || reservation.launch_owner != launch_owner
+                || lillux::canonical_json(&serde_json::to_value(&reservation)?)? != encoded {
+                bail!("retained thread scope reservation is not exact canonical authority");
+            }
+            Ok(reservation)
+        }).collect()
+    }
+
+    /// Startup recovery's no-relaunch cut. A pre-attach scope may already
+    /// contain an unrecorded held child, so the thread is durably stopped
+    /// before Lillux retirement is attempted. A proof failure leaves both
+    /// tombstone and exact scope row in place.
+    pub fn fence_thread_process_scope_recovery(
+        &self, reservation: &ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        reservation.validate()?;
+        let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE thread_runtime SET stop_requested_at_ms=COALESCE(stop_requested_at_ms, ?4),
+                stop_intent='kill'
+              WHERE thread_id=?1 AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
+                AND EXISTS(SELECT 1 FROM thread_process_scope_reservation
+                    WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3)",
+            params![reservation.thread_id, reservation.launch_owner, encoded,
+                i64::try_from(lillux::time::timestamp_millis())?],
+        )?;
+        if changed != 1 { bail!("scope-only recovery lost exact unattached intent") }
+        tx.commit().context("fence uncertain scope-only launch")
+    }
+
+    pub fn bind_thread_process_scope(
+        &self, thread_id: &str, launch_owner: &str, recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let mut reservation = self.thread_process_scope_reservation(thread_id)?
+            .ok_or_else(|| anyhow!("thread scope binding has no intent"))?;
+        if reservation.launch_owner != launch_owner || reservation.scope_recovery.is_some()
+            || reservation.daemon_generation_id != daemon_generation_id()
+            || !recovery.matches_allocation(&reservation.scope_allocation) {
+            bail!("thread scope binding contradicts exact allocation or launch owner");
+        }
+        let expected = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
+        reservation.scope_recovery = Some(recovery.clone());
+        let bound = lillux::canonical_json(&serde_json::to_value(&reservation)?)?;
+        let changed = self.conn.execute(
+            "UPDATE thread_process_scope_reservation SET reservation=?4, updated_at_ms=?5
+              WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3
+                AND EXISTS(SELECT 1 FROM thread_launch_claim WHERE thread_id=?1 AND claimed_by=?2)
+                AND EXISTS(SELECT 1 FROM thread_runtime WHERE thread_id=?1 AND stop_requested_at_ms IS NULL AND process_identity IS NULL)",
+            params![thread_id, launch_owner, expected, bound, i64::try_from(lillux::time::timestamp_millis())?],
+        )?;
+        if changed != 1 { bail!("thread scope binding was not committed exactly once") }
+        Ok(())
+    }
+
+    pub fn clear_thread_process_scope_reservation(
+        &self, reservation: &ThreadProcessScopeReservationRecord,
+    ) -> Result<()> {
+        reservation.validate()?;
+        let encoded = lillux::canonical_json(&serde_json::to_value(reservation)?)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "DELETE FROM thread_process_scope_reservation WHERE thread_id=?1 AND launch_owner=?2 AND reservation=?3",
+            params![reservation.thread_id, reservation.launch_owner, encoded],
+        )?;
+        if changed != 1 { bail!("exact thread scope reservation is absent or contradictory") }
+        clear_scope_lifetime_fence_if_settled(&tx)?;
+        tx.commit().context("clear thread scope reservation")
     }
 
     pub fn bind_process_resource_scope(
@@ -16558,7 +17017,7 @@ impl RuntimeDb {
         thread_id: &str,
         process_identity: &ExecutionProcessIdentity,
     ) -> Result<()> {
-        if process_identity.resource_selections.is_empty() {
+        if process_identity.process_scope.is_none() {
             return Ok(());
         }
         let identity_json = serde_json::to_string(process_identity)
@@ -16629,23 +17088,57 @@ impl RuntimeDb {
         thread_id: &str,
         process_identity: &ExecutionProcessIdentity,
     ) -> Result<bool> {
+        self.clear_process_if_matches_with_settlement(thread_id, process_identity, None)
+    }
+
+    /// The owned path atomically retains the daemon's exact process-settlement
+    /// attempt while clearing its live attachment. An unowned clear retains no
+    /// qualification witness. Neither path can replace a different process.
+    pub fn clear_process_if_matches_with_settlement(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        settlement: Option<&ThreadProcessSettlement>,
+    ) -> Result<bool> {
+        let (settlement_json, launch_owner_json) = if let Some(settlement) = settlement {
+            settlement.validate()?;
+            if settlement.thread_id != thread_id
+                || settlement.process_identity != *process_identity
+                || settlement.workspace_binding.is_some()
+            {
+                bail!("thread process settlement differs from attached occurrence");
+            }
+            (
+                Some(lillux::canonical_json(&serde_json::to_value(settlement)?)?),
+                Some(lillux::canonical_json(&serde_json::to_value(
+                    &settlement.launch_owner,
+                )?)?),
+            )
+        } else {
+            (None, None)
+        };
         let identity_json = serde_json::to_string(process_identity)
             .context("failed to encode process_identity for compare-and-clear")?;
         let tx = self.conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE thread_runtime
                 SET pid = NULL, pgid = NULL, process_identity = NULL,
-                    process_release_fence = NULL, process_dead_observed_at_ms = NULL
+                    process_release_fence = NULL, process_dead_observed_at_ms = NULL,
+                    latest_process_settlement = ?3
               WHERE thread_id = ?1 AND process_identity = ?2
                 AND workspace_id IS NULL AND workspace_view_identity IS NULL
-                AND workspace_borrower_launch_owner IS NULL",
-            params![thread_id, identity_json],
+                AND workspace_borrower_launch_owner IS NULL
+                AND (?4 IS NULL OR EXISTS (
+                    SELECT 1 FROM thread_launch_claim
+                     WHERE thread_id=?1 AND claimed_by=?4))",
+            params![thread_id, identity_json, settlement_json, launch_owner_json],
         )?;
         if changed == 0 {
             tx.commit()?;
             return Ok(false);
         }
         clear_process_resource_owner(&tx, "thread", thread_id, process_identity)?;
+        clear_scope_lifetime_fence_if_settled(&tx)?;
         tx.commit()
             .context("commit exact thread resource-owner cleanup")?;
         Ok(true)
@@ -16821,11 +17314,11 @@ impl RuntimeDb {
             .as_deref()
             .map(ProcessReleaseFenceState::parse)
             .transpose()?;
-        let resource_bearing = process_identity
+        let scoped = process_identity
             .as_ref()
-            .is_some_and(|identity| !identity.resource_selections.is_empty());
-        if resource_bearing != process_release_fence.is_some() {
-            bail!("thread {thread_id} process release fence contradicts its resource ownership");
+            .is_some_and(|identity| identity.process_scope.is_some());
+        if scoped != process_release_fence.is_some() {
+            bail!("thread {thread_id} process release fence contradicts its scope ownership");
         }
         let stop_intent = stop_intent.as_deref().map(StopIntent::parse).transpose()?;
         if stop_requested_at_ms.is_some() != stop_intent.is_some() {
@@ -16846,6 +17339,35 @@ impl RuntimeDb {
             incompatible_launch_metadata,
             recovery_wait,
         }))
+    }
+
+    /// This operational slot is not itself qualification authority. The
+    /// daemon-authored terminal must bind its digest under the exact launch
+    /// owner; a later attachment atomically invalidates this slot.
+    pub fn latest_thread_process_settlement(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ThreadProcessSettlement>> {
+        let encoded: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT latest_process_settlement FROM thread_runtime WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(encoded) = encoded.flatten() else {
+            return Ok(None);
+        };
+        let settlement: ThreadProcessSettlement = serde_json::from_str(&encoded)
+            .context("decode exact latest thread process settlement")?;
+        settlement.validate()?;
+        if settlement.thread_id != thread_id
+            || lillux::canonical_json(&serde_json::to_value(&settlement)?)? != encoded
+        {
+            bail!("thread process settlement row is not exact or canonical");
+        }
+        Ok(Some(settlement))
     }
 
     /// Read the auto-resume attempt counter for a thread.
@@ -25423,6 +25945,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn latest_process_settlement_is_exact_owned_and_invalidated_by_next_attach() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("T-settlement", "T-settlement")
+            .unwrap();
+        db.claim_thread_launch("T-settlement", "claim-1", "daemon-1")
+            .unwrap();
+        let owner = db.get_launch_claim("T-settlement").unwrap().unwrap().owner;
+        let first = fake_process_identity(401, 401);
+        db.attach_new_process(
+            "T-settlement",
+            401,
+            401,
+            &first,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        let mut wrong_owner = owner.clone();
+        wrong_owner.unpredictable_nonce = "other-claim".into();
+        let wrong = ThreadProcessSettlement::new(
+            "T-settlement",
+            &wrong_owner,
+            &first,
+            None,
+            ThreadProcessSettlementKind::ReapedGroupAbsent,
+        )
+        .unwrap();
+        assert!(
+            !db.clear_process_if_matches_with_settlement("T-settlement", &first, Some(&wrong))
+                .unwrap()
+        );
+        assert!(
+            db.latest_thread_process_settlement("T-settlement")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.get_runtime_info("T-settlement")
+                .unwrap()
+                .unwrap()
+                .process_identity,
+            Some(first.clone())
+        );
+        let exact = ThreadProcessSettlement::new(
+            "T-settlement",
+            &owner,
+            &first,
+            None,
+            ThreadProcessSettlementKind::ReapedGroupAbsent,
+        )
+        .unwrap();
+        assert!(
+            db.clear_process_if_matches_with_settlement("T-settlement", &first, Some(&exact))
+                .unwrap()
+        );
+        assert_eq!(
+            db.latest_thread_process_settlement("T-settlement").unwrap(),
+            Some(exact)
+        );
+        let second = fake_process_identity(402, 402);
+        db.attach_new_process(
+            "T-settlement",
+            402,
+            402,
+            &second,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            db.latest_thread_process_settlement("T-settlement")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     fn resource_process_identity(
         pid: i64,
         pgid: i64,
@@ -25652,6 +26249,97 @@ mod tests {
             db.get_runtime_info("t1").unwrap().unwrap().process_identity,
             Some(identity)
         );
+    }
+
+    #[test]
+    fn scope_only_thread_intent_is_owner_fenced_and_consumed_at_held_attach() {
+        let (tmp, db) = fresh_db();
+        db.insert_thread_runtime("scope-t", "scope-c").unwrap();
+        db.claim_thread_launch("scope-t", "scope-claim", daemon_generation_id()).unwrap();
+        let owner = db.get_launch_claim("scope-t").unwrap().unwrap().claimed_by;
+        let host = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let planned = serde_json::json!({
+            "version": 2,
+            "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": host["backend"]["boot_id"],
+                "parent": {"containing_device": 1, "inode": 2},
+                "name": "scope-only-test"}
+        });
+        let allocation: lillux::ProcessScopeAllocation = serde_json::from_value(planned.clone()).unwrap();
+        let reservation = ThreadProcessScopeReservationRecord {
+            thread_id: "scope-t".into(), launch_owner: owner.clone(),
+            daemon_generation_id: daemon_generation_id().into(),
+            scope_allocation: allocation, scope_recovery: None,
+        };
+        db.reserve_thread_process_scope(&reservation).unwrap();
+        assert!(db.reserve_thread_process_scope(&reservation).is_err());
+        let mut bound = planned;
+        bound["version"] = 4.into();
+        bound["backend"]["directory"] = serde_json::json!({"containing_device": 1, "inode": 101});
+        let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(bound).unwrap();
+        assert!(db.bind_thread_process_scope("scope-t", "wrong-owner", &recovery).is_err());
+        db.bind_thread_process_scope("scope-t", &owner, &recovery).unwrap();
+        assert!(db.bind_thread_process_scope("scope-t", &owner, &recovery).is_err());
+        let mut wrong = fake_process_identity(101, 101);
+        wrong.boot_id = host["backend"]["boot_id"].as_str().unwrap().into();
+        assert!(db.attach_new_process("scope-t", 101, 101, &wrong, &RuntimeLaunchMetadata::default()).is_err());
+        let mut exact = wrong;
+        exact.process_scope = Some(recovery);
+        db.attach_new_process("scope-t", 101, 101, &exact, &RuntimeLaunchMetadata::default()).unwrap();
+        assert!(db.thread_process_scope_reservation("scope-t").unwrap().is_none());
+        assert_eq!(db.get_runtime_info("scope-t").unwrap().unwrap().process_release_fence, Some(ProcessReleaseFenceState::Pending));
+        let path = tmp.path().join("runtime.db");
+        drop(db);
+        let reopened = RuntimeDb::open(&path).unwrap();
+        assert!(reopened.thread_process_scope_reservations().unwrap().is_empty());
+        assert_eq!(reopened.get_runtime_info("scope-t").unwrap().unwrap().process_identity, Some(exact.clone()));
+        reopened.consume_process_release_fence("scope-t", &exact).unwrap();
+        assert!(reopened.consume_process_release_fence("scope-t", &exact).is_err());
+        assert!(reopened.clear_process_if_matches("scope-t", &exact).unwrap());
+    }
+
+    #[test]
+    fn scope_only_cold_recovery_tombstones_before_unproved_cleanup() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("scope-recovery", "scope-chain").unwrap();
+        db.claim_thread_launch("scope-recovery", "crashed-owner", daemon_generation_id()).unwrap();
+        let owner = db.get_launch_claim("scope-recovery").unwrap().unwrap().claimed_by;
+        let host = serde_json::to_value(lillux::ProcessHostLifetime::capture_current().unwrap()).unwrap();
+        let allocation: lillux::ProcessScopeAllocation = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": host["backend"]["boot_id"],
+                "parent": {"containing_device": 1, "inode": 2},
+                "name": "scope-recovery-test"}
+        })).unwrap();
+        let reservation = ThreadProcessScopeReservationRecord {
+            thread_id: "scope-recovery".into(), launch_owner: owner,
+            daemon_generation_id: daemon_generation_id().into(),
+            scope_allocation: allocation, scope_recovery: None,
+        };
+        db.reserve_thread_process_scope(&reservation).unwrap();
+        assert!(db.unsettled_process_scope_count(None).unwrap() > 0);
+        db.fence_thread_process_scope_recovery(&reservation).unwrap();
+        let runtime = db.get_runtime_info("scope-recovery").unwrap().unwrap();
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Kill));
+        assert!(runtime.stop_requested_at_ms.is_some());
+        assert!(db.thread_process_scope_reservation("scope-recovery").unwrap().is_some());
+        assert!(db.attach_new_process(
+            "scope-recovery", 101, 101, &fake_process_identity(101, 101),
+            &RuntimeLaunchMetadata::default(),
+        ).is_err());
+        let mut contradictory = reservation.clone();
+        contradictory.launch_owner = "other-owner".into();
+        assert!(db.fence_thread_process_scope_recovery(&contradictory).is_err());
+        assert!(db.thread_process_scope_reservation("scope-recovery").unwrap().is_some());
     }
 
     #[test]
@@ -27094,7 +27782,18 @@ mod tests {
                      VALUES ('T-child', 'window-1', 1, 1);
                  INSERT INTO seat_lease
                      (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
-                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);"
+                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);
+                 INSERT INTO scoped_child_attempt
+                     (attempt_id, owner_thread_id, launch_owner, recipe_digest,
+                      recipe_generation, scenario_digest, scope_allocation,
+                      phase, created_at_ms, updated_at_ms)
+                     VALUES ('scoped-retired', 'T-root', 'owner-retired', 'recipe',
+                             'generation', 'scenario', '{{}}', 'retired', 1, 1);
+                 INSERT INTO scoped_child_input_operation
+                     (attempt_id, sequence, kind, payload_digest, byte_count,
+                      phase, created_at_ms, updated_at_ms)
+                     VALUES ('scoped-retired', 0, 'write', 'digest', 1,
+                             'delivered', 1, 1);"
             ))
             .unwrap();
         db.reserve_in_process_handler_birth("T-root", "T-root", &in_process_launch_metadata())
@@ -27103,15 +27802,19 @@ mod tests {
 
         let preview = db.discard_all_thread_history(true).unwrap();
         assert_eq!(preview.in_process_handler_reservations, 1);
-        assert_eq!(preview.total_rows(), 12);
+        assert_eq!(preview.scoped_child_attempts, 1);
+        assert_eq!(preview.scoped_child_input_operations, 1);
+        assert_eq!(preview.total_rows(), 14);
         assert_eq!(
             db.discard_all_thread_history(true).unwrap().total_rows(),
-            12
+            14
         );
 
         let removed = db.discard_all_thread_history(false).unwrap();
         assert_eq!(removed.in_process_handler_reservations, 1);
-        assert_eq!(removed.total_rows(), 12);
+        assert_eq!(removed.scoped_child_attempts, 1);
+        assert_eq!(removed.scoped_child_input_operations, 1);
+        assert_eq!(removed.total_rows(), 14);
         assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 0);
         drop(db);
 

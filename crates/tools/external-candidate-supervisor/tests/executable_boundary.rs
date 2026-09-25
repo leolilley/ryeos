@@ -6,8 +6,9 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_candidate_supervisor::runtime::{
-    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCHER_FD,
-    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE, SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
+    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
+    SUPERVISOR_STATE_ROOT_FD,
 };
 use ryeos_state::external_execution::ExecutionChannelBinding;
 use ryeos_state::external_execution::admission::{
@@ -64,7 +65,7 @@ fn bind_directory(
 fn bootstrap() -> ExternalSupervisorBootstrap {
     let roots = vec![STANDARD.encode(b"bounded executable-boundary root")];
     let recipe = ExternalCandidateRuntimeRecipe {
-        schema: 1,
+        schema: 2,
         runtime_mount_destination: "/runtime".into(),
         executable_relative_path: "bin/codex".into(),
         argv0: "codex".into(),
@@ -74,14 +75,72 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         max_stdout_bytes: 1024 * 1024,
         max_stderr_bytes: 1024 * 1024,
         proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
-        contain_process_group: true,
+        contain_process_group: false,
         nested_sandbox: true,
     };
     let runtime_recipe_digest = recipe.digest().unwrap();
+    let guest_inputs = ryeos_external_execution_contract::ExternalGuestInputProjection {
+        schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+        base_snapshot: ryeos_external_execution_contract::GuestBaseSnapshotInput {
+            descriptor: 55,
+            snapshot_hash: "c".repeat(64),
+            closure_digest: "5".repeat(64),
+            object_count: 3,
+            blob_count: 1,
+            total_bytes: 1,
+        },
+        workspace_outputs: None,
+        inputs: vec![ryeos_external_execution_contract::GuestMountInput {
+            role: ryeos_external_execution_contract::GuestMountRole::Product,
+            authority_id: "runtime".into(),
+            descriptor: 64,
+            destination: "/runtime".into(),
+            kind: ryeos_external_execution_contract::GuestMountKind::Directory,
+            access: ryeos_external_execution_contract::GuestMountAccess::ReadOnly,
+            normalized_mode: None,
+            content_authority:
+                ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
+                    manifest_kind:
+                        ryeos_external_execution_contract::GuestProductManifestKind::Content,
+                    manifest_hash: "e".repeat(64),
+                    manifest_descriptor: 65,
+                    manifest_bytes: 256,
+                },
+            bytes: 1,
+        }],
+        executable_search: vec!["/runtime/bin".into()],
+        environment: BTreeMap::new(),
+    };
+    let guest_input_identity = guest_inputs.identity_digest().unwrap();
+    let requirement = ExternalCandidateRequirement {
+        schema: 6,
+        required_lifecycle_capabilities: Default::default(),
+        protocol: PROTOCOL.into(),
+        connector_protocol:
+            ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+        execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+        provider_declaration_id: "codex-hosted".into(),
+        provider_configuration_destination: "environments.toml".into(),
+        runtime_product_declaration_id: "runtime".into(),
+        runtime_recipe: recipe,
+    };
+    let qualification_use =
+        ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+            &requirement,
+        )
+        .unwrap();
     ExternalSupervisorBootstrap {
-        schema: 4,
+        schema: 7,
         controller: ExternalControllerTransportContract {
-            schema: 1,
+            schema: 2,
+            network_inputs: ryeos_state::external_execution::transport::ExternalNetworkInputPolicy {
+                resolver: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                    source: "/etc/resolv.conf".into(), max_bytes: 64 * 1024,
+                },
+                hosts: ryeos_state::external_execution::transport::ExternalNetworkInputSelection {
+                    source: "/etc/hosts".into(), max_bytes: 64 * 1024,
+                },
+            },
             https_origin: "https://controller.invalid".into(),
             route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
             tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
@@ -99,21 +158,17 @@ fn bootstrap() -> ExternalSupervisorBootstrap {
         supervisor_runtime_hash: "e".repeat(64),
         launcher_artifact_hash: "4".repeat(64),
         candidate_program: AdmittedExternalCandidateProgram {
-            requirement: ExternalCandidateRequirement {
-                schema: 3,
-                protocol: PROTOCOL.into(),
-                connector_protocol:
-                    ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
-                execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
-                runtime_product_declaration_id: "runtime".into(),
-                runtime_recipe: recipe,
-            },
+            requirement,
+            qualification_use,
+            runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
             runtime_manifest_hash: "e".repeat(64),
             runtime_witness_hash: "1".repeat(64),
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "3".repeat(64),
-            runtime_recipe_digest,
-        },
+       runtime_recipe_digest,
+        }.into(),
+       guest_input_identity,
+        guest_inputs,
         owner_public_key: encode_channel_public_key(
             &lillux::crypto::SigningKey::from_bytes(&[51; 32]).verifying_key(),
         )
@@ -242,12 +297,39 @@ fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
     admitted.launcher_artifact_hash = launcher
         .digest_regular_file_stable_exact(&launcher.regular_file_observation().unwrap())
         .unwrap();
-    admitted.candidate_program.runtime_manifest_hash =
-        ryeos_state::external_content_manifest_digest(
-            &ryeos_state::observe_external_content_tree_exact(&runtime).unwrap(),
-        )
-        .unwrap();
-    admitted.supervisor_runtime_hash = admitted.candidate_program.runtime_manifest_hash.clone();
+    let runtime_manifest = ryeos_state::observe_external_content_tree_exact(&runtime).unwrap();
+    let runtime_manifest_bytes =
+        lillux::canonical_json(&serde_json::to_value(&runtime_manifest).unwrap())
+            .unwrap()
+            .into_bytes();
+    let runtime_manifest_document = lillux::sealed_memfd(
+        c"external-supervisor-runtime-manifest",
+        &runtime_manifest_bytes,
+    )
+    .unwrap();
+    admitted
+        .candidate_program
+        .worker_mut()
+        .unwrap()
+        .runtime_manifest_hash = lillux::sha256_hex(&runtime_manifest_bytes);
+    admitted.supervisor_runtime_hash = admitted
+        .candidate_program
+        .runtime_manifest_hash()
+        .unwrap()
+        .to_owned();
+    admitted.guest_inputs.inputs[0].content_authority =
+        ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
+            manifest_kind: ryeos_external_execution_contract::GuestProductManifestKind::Content,
+            manifest_hash: admitted
+                .candidate_program
+                .runtime_manifest_hash()
+                .unwrap()
+                .to_owned(),
+            manifest_descriptor: 65,
+            manifest_bytes: runtime_manifest_bytes.len() as u64,
+        };
+    admitted.guest_inputs.inputs[0].bytes = runtime_manifest.total_bytes;
+    admitted.guest_input_identity = admitted.guest_inputs.identity_digest().unwrap();
 
     let outer = state.create_child(OsStr::new("outer"), 0o700).unwrap();
     let guest = state.create_child(OsStr::new("guest"), 0o700).unwrap();
@@ -255,13 +337,21 @@ fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
     let prepared = PreparedExternalSupervisorJournal::create(
         outer,
         retained_bootstrap,
+        ryeos_state::external_execution::transport::ExternalCapturedNetworkInputs::from_bytes(
+            &admitted.controller.network_inputs,
+            b"nameserver 127.0.0.1\n",
+            b"127.0.0.1 localhost\n",
+        )
+        .unwrap(),
         lillux::crypto::generate_signing_key(),
     )
     .unwrap();
     let store_identity = prepared.store_identity().clone();
     let issued_at_ms = lillux::time::timestamp_millis();
     let binding = ExecutionChannelBinding {
-        schema: 3,
+        schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+        execution_mode:
+            ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
         placement_thread_id: admitted.placement_thread_id.clone(),
         allocation_request_digest: admitted.allocation_request_digest.clone(),
         occurrence_id: admitted.occurrence_id.clone(),
@@ -333,6 +423,9 @@ fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
         .bind_to_subprocess_request(&mut child, SUPERVISOR_LAUNCHER_FD)
         .unwrap();
     bind_directory(&mut child, &runtime, SUPERVISOR_RUNTIME_MOUNT_FD_BASE);
+    runtime_manifest_document
+        .bind_to_subprocess_request(&mut child, SUPERVISOR_CONTENT_RECORD_FD_BASE)
+        .unwrap();
 
     let result = lillux::run(child);
     assert!(!result.success);

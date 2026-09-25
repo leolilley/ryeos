@@ -16,7 +16,7 @@ use ryeos_handler_protocol::{
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
     ProductQualificationParticipant, ProductQualificationProjectorIdentity,
-    ProductQualificationVerifier,
+    ProductQualificationVerifier, VerifierProcessSettlementAuthority,
 };
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, ExternalContentRealizationSet,
@@ -53,6 +53,27 @@ fn projector_identity(
         binary_manifest_digest: identity.binary_manifest_digest.clone(),
         binary_signer_fingerprint: identity.binary_signer_fingerprint.clone(),
     }
+}
+
+/// Decide whether the currently installed projector is the same executable
+/// authority that interpreted the retained qualification.
+///
+/// `binary_manifest_digest` records the complete signed executor set of the
+/// bundle generation that supplied the projector. That set can change when an
+/// unrelated executable in the same bundle changes. It remains useful
+/// historical provenance, but it is not part of the projector's semantic
+/// identity: the signed descriptor, exact executable bytes, and their signer
+/// are. Requiring the aggregate set digest here would invalidate otherwise
+/// reusable qualification evidence after any unrelated core-binary release.
+fn compatible_projector_identity(
+    current: &ProductQualificationProjectorIdentity,
+    retained: &ProductQualificationProjectorIdentity,
+) -> bool {
+    current.canonical_ref == retained.canonical_ref
+        && current.descriptor_content_digest == retained.descriptor_content_digest
+        && current.descriptor_signer_fingerprint == retained.descriptor_signer_fingerprint
+        && current.binary_content_digest == retained.binary_content_digest
+        && current.binary_signer_fingerprint == retained.binary_signer_fingerprint
 }
 
 fn require_terminal_invocation(
@@ -191,6 +212,75 @@ fn history(
     Ok(events)
 }
 
+/// A direct verifier's successful terminal must sign the daemon's exact
+/// compare-cleared launch attempt. The mutable runtime slot is checked only
+/// against that signed digest, then Lillux rechecks whole-scope emptiness.
+/// Managed graph roots have no direct process and prove their direct children
+/// independently through the same function.
+fn direct_process_settlement(
+    state: &AppState,
+    snapshot: &ThreadSnapshot,
+    artifact: &AdmittedLaunchArtifactIdentity,
+    events: &[ThreadEvent],
+) -> anyhow::Result<Option<(String, VerifierProcessSettlementAuthority)>> {
+    if !matches!(
+        artifact,
+        AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
+    ) {
+        return Ok(None);
+    }
+    let digest = signed_terminal_process_settlement_digest(events)?;
+    let settlement = state
+        .state_store
+        .latest_thread_process_settlement(&snapshot.thread_id)?
+        .context("direct qualification verifier lost its exact process settlement")?;
+    if settlement.thread_id != snapshot.thread_id || settlement.digest()? != digest {
+        bail!("direct qualification verifier settlement differs from signed terminal");
+    }
+    let authority = match settlement.kind {
+        crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => {
+            VerifierProcessSettlementAuthority::ScopeEmpty
+        }
+        crate::runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent => {
+            if !state
+                .isolation
+                .inspection()
+                .process_scope_readiness
+                .trusted_exclusive_session
+                .ready
+            {
+                bail!("node policy does not admit trusted process-group verifier cleanup");
+            }
+            VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent
+        }
+        crate::runtime_db::ThreadProcessSettlementKind::RecoveryDeath => {
+            bail!("recovery death cannot qualify a direct verifier")
+        }
+    };
+    crate::process::assert_reaped_process_group_absent(&settlement.process_identity)
+        .context("direct qualification verifier process authority is not settled")?;
+    Ok(Some((digest, authority)))
+}
+
+fn signed_terminal_process_settlement_digest(events: &[ThreadEvent]) -> anyhow::Result<String> {
+    let mut completed = events
+        .iter()
+        .filter(|event| event.event_type == ryeos_state::event_types::THREAD_COMPLETED);
+    let event = completed
+        .next()
+        .context("direct qualification verifier has no signed completed event")?;
+    if completed.next().is_some() {
+        bail!("direct qualification verifier has duplicate completed events");
+    }
+    let digest = event.payload["process_settlement_witness_digest"]
+        .as_str()
+        .context("direct qualification verifier terminal has no settlement witness")?;
+    if !lillux::valid_hash(digest) {
+        bail!("direct qualification verifier settlement digest is invalid");
+    }
+    Ok(digest.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prove(
     state: &AppState,
@@ -204,7 +294,11 @@ pub(super) fn prove(
     current: &CurrentBundleVerifierIdentity,
     subject_id: &str,
     subject_hash: &str,
-) -> anyhow::Result<(Value, ProductQualificationExecutionProof)> {
+) -> anyhow::Result<(
+    Value,
+    ProductQualificationExecutionProof,
+    Option<(String, VerifierProcessSettlementAuthority)>,
+)> {
     require_terminal_invocation(terminal, capsule)?;
     let (contract_ref, contract_digest) = projection_owner(&capsule.artifact_identity);
     let projector = state
@@ -230,6 +324,8 @@ pub(super) fn prove(
         bail!("current execution contract changed its required participants");
     }
     let events = history(authority, guard, terminal, projector.declaration.limits)?;
+    let root_settlement_digest =
+        direct_process_settlement(state, terminal, &capsule.artifact_identity, &events)?;
     let response = state.engine.project_execution_evidence(
         &projector,
         ExecutionEvidenceProjectRequest {
@@ -276,6 +372,7 @@ pub(super) fn prove(
             authority,
             guard,
             limits,
+            projector.declaration.limits,
             context,
             terminal,
             &current.realizations,
@@ -311,6 +408,7 @@ pub(super) fn prove(
             projector: projector_identity(&projector.projector),
             participants,
         },
+        root_settlement_digest,
     ))
 }
 
@@ -320,6 +418,7 @@ fn prove_participant(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     limits: ryeos_state::object_closure::ObjectClosureLimits,
+    history_limits: ExecutionEvidenceLimitsWire,
     context: &HandlerContext,
     parent: &ThreadSnapshot,
     inherited: &ExternalContentRealizationSet,
@@ -461,6 +560,9 @@ fn prove_participant(
     }
     let _source =
         crate::source_closure_admission::recover_source_closure(state, &state.engine, resolution)?;
+    let child_events = history(authority, guard, &child, history_limits)?;
+    let process_settlement =
+        direct_process_settlement(state, &child, &capsule.artifact_identity, &child_events)?;
     Ok(ProductQualificationParticipant {
         call_id: required.call_id.clone(),
         operation_id: call.operation_id.clone(),
@@ -483,6 +585,10 @@ fn prove_participant(
             subject_declaration_id: subject_id.to_owned(),
             subject_manifest_hash: subject_hash.to_owned(),
             terminal_snapshot_hash: ryeos_state::objects::thread_snapshot::hash_snapshot(&child)?,
+            process_settlement_witness_digest: process_settlement
+                .as_ref()
+                .map(|(digest, _)| digest.clone()),
+            process_settlement_authority: process_settlement.map(|(_, authority)| authority),
             result_digest: call.result_digest.clone(),
         },
     })
@@ -522,7 +628,7 @@ pub(in crate::operator_external_content) fn verify_current(
             &proof.projection_contract_digest,
         )?
         .context("current execution contract no longer supports qualification evidence")?;
-    if projector_identity(&projector.projector) != proof.projector {
+    if !compatible_projector_identity(&projector_identity(&projector.projector), &proof.projector) {
         bail!("qualification evidence projector identity changed");
     }
     let required = described(state.engine.describe_execution_evidence(

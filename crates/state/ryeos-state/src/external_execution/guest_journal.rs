@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 8;
+const SCHEMA_EPOCH: i64 = 10;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=8),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=10),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -65,6 +65,7 @@ CREATE TABLE external_guest_export_retention (
     occurrence_digest TEXT NOT NULL UNIQUE,
     durable_receipt_id TEXT NOT NULL UNIQUE,
     snapshot_hash TEXT NOT NULL,
+    output_capture_hash TEXT,
     completion_request_digest TEXT NOT NULL,
     writer_exclusion_evidence_hash TEXT NOT NULL,
     FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
@@ -75,6 +76,7 @@ CREATE TABLE external_guest_native_capture (
     occurrence_digest TEXT NOT NULL UNIQUE,
     durable_stage_id TEXT NOT NULL UNIQUE,
     snapshot_hash TEXT NOT NULL,
+    output_capture_hash TEXT,
     completion_request_digest TEXT NOT NULL,
     writer_exclusion_evidence_hash TEXT NOT NULL,
     FOREIGN KEY(binding_digest) REFERENCES external_execution_channel(binding_digest)
@@ -257,6 +259,7 @@ pub struct DurableNativeCandidateCapture {
     pub occurrence_digest: String,
     pub durable_stage_id: String,
     pub snapshot_hash: String,
+    pub output_capture_hash: Option<String>,
     pub completion_request_digest: String,
     pub writer_exclusion_evidence_hash: String,
 }
@@ -411,7 +414,7 @@ impl ReservedGuestJournal {
     pub fn initialize(self) -> Result<PreparedGuestJournal> {
         ensure_same_file(&self.directory, &self.database_file)?;
         ensure!(
-            self.database_file.metadata()?.len() == 0,
+            lillux::observe_open_regular_file(&self.database_file)?.size() == 0,
             "reserved external guest database is not empty"
         );
         ensure!(
@@ -444,7 +447,7 @@ impl ReservedGuestJournal {
             ],
         )?;
         tx.execute(
-            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL)",
+            "INSERT INTO external_execution_channel VALUES(?1,?2,?3,'prepared',NULL,NULL,NULL,NULL)",
             params![
                 &self.binding.placement_thread_id,
                 self.binding.digest()?,
@@ -656,7 +659,7 @@ impl LiveGuestJournal {
             .conn
             .query_row(
                 "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
-                        snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
+                        snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
                  FROM external_guest_native_capture
                  WHERE binding_digest=?1 AND quiesce_frame_digest=?2",
                 params![self.0.binding.digest()?, quiesce_frame_digest],
@@ -666,8 +669,9 @@ impl LiveGuestJournal {
                         occurrence_digest: row.get(1)?,
                         durable_stage_id: row.get(2)?,
                         snapshot_hash: row.get(3)?,
-                        completion_request_digest: row.get(4)?,
-                        writer_exclusion_evidence_hash: row.get(5)?,
+                        output_capture_hash: row.get(4)?,
+                        completion_request_digest: row.get(5)?,
+                        writer_exclusion_evidence_hash: row.get(6)?,
                     })
                 },
             )
@@ -707,11 +711,13 @@ impl LiveGuestJournal {
                  WHERE binding_digest=?1 AND direction='supervisor_to_owner'
                  AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
                  AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?2
-                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?3
-                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?4",
+                 AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?3
+                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?4
+                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?5",
                 params![
                     self.0.binding.digest()?,
                     capture.snapshot_hash,
+                    capture.output_capture_hash,
                     capture.completion_request_digest,
                     capture.writer_exclusion_evidence_hash
                 ],
@@ -1313,9 +1319,12 @@ impl LiveGuestJournal {
                     &sealed.frame().payload,
                     ExecutionChannelPayload::ExportSealed {
                         candidate_snapshot_hash,
+                        candidate_output_capture_hash,
                         completion_request_digest,
                         writer_exclusion_evidence_hash,
                     } if candidate_snapshot_hash == content.snapshot_hash()
+                        && candidate_output_capture_hash.as_deref()
+                            == content.output_capture_hash()
                         && completion_request_digest == content.completion_request_digest()
                         && writer_exclusion_evidence_hash
                             == content.claimed_writer_exclusion_evidence_hash()
@@ -1358,12 +1367,14 @@ impl LiveGuestJournal {
              AND frame_digest=?2
              AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
              AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?3
-             AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?4
-             AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?5)",
+             AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?4
+             AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?5
+             AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?6)",
             params![
                 content.channel_binding_digest(),
                 sealed_frame_digest,
                 content.snapshot_hash(),
+                content.output_capture_hash(),
                 content.completion_request_digest(),
                 content.claimed_writer_exclusion_evidence_hash()
             ],
@@ -1375,13 +1386,14 @@ impl LiveGuestJournal {
         );
         let changed = tx.execute(
             "INSERT OR IGNORE INTO external_guest_export_retention
-             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 content.channel_binding_digest(),
                 sealed_frame_digest,
                 occurrence_digest,
                 receipt.staging_id(),
                 content.snapshot_hash(),
+                content.output_capture_hash(),
                 content.completion_request_digest(),
                 content.claimed_writer_exclusion_evidence_hash()
             ],
@@ -1392,6 +1404,7 @@ impl LiveGuestJournal {
                 &self.0.binding,
                 sealed_frame_digest,
                 content.snapshot_hash(),
+                content.output_capture_hash(),
                 content.completion_request_digest(),
                 content.claimed_writer_exclusion_evidence_hash(),
             )?;
@@ -1399,14 +1412,16 @@ impl LiveGuestJournal {
                 "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
                  WHERE binding_digest=?1 AND sealed_frame_digest=?2
                  AND occurrence_digest=?3 AND durable_receipt_id=?4
-                 AND snapshot_hash=?5 AND completion_request_digest=?6
-                 AND writer_exclusion_evidence_hash=?7)",
+                 AND snapshot_hash=?5 AND output_capture_hash IS ?6
+                 AND completion_request_digest=?7
+                 AND writer_exclusion_evidence_hash=?8)",
                 params![
                     content.channel_binding_digest(),
                     sealed_frame_digest,
                     occurrence_digest,
                     receipt.staging_id(),
                     content.snapshot_hash(),
+                    content.output_capture_hash(),
                     content.completion_request_digest(),
                     content.claimed_writer_exclusion_evidence_hash()
                 ],
@@ -1450,6 +1465,9 @@ impl LiveGuestJournal {
         ] {
             hash(value, label)?;
         }
+        if let Some(output_capture_hash) = &capture.output_capture_hash {
+            hash(output_capture_hash, "candidate output capture hash")?;
+        }
         ensure!(
             quiesce.digest() == capture.quiesce_frame_digest
                 && quiesce.frame().binding_digest == self.0.binding.digest()?
@@ -1474,6 +1492,7 @@ impl LiveGuestJournal {
             &guard,
             &self.0.binding,
             &capture.snapshot_hash,
+            capture.output_capture_hash.as_deref(),
             &capture.completion_request_digest,
             &capture.writer_exclusion_evidence_hash,
         )?;
@@ -1513,13 +1532,14 @@ impl LiveGuestJournal {
             "native capture has no exact claimed quiesce application"
         );
         let changed = tx.execute(
-            "INSERT OR IGNORE INTO external_guest_native_capture VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT OR IGNORE INTO external_guest_native_capture VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 self.0.binding.digest()?,
                 capture.quiesce_frame_digest,
                 capture.occurrence_digest,
                 capture.durable_stage_id,
                 capture.snapshot_hash,
+                capture.output_capture_hash,
                 capture.completion_request_digest,
                 capture.writer_exclusion_evidence_hash
             ],
@@ -1529,14 +1549,16 @@ impl LiveGuestJournal {
                 "SELECT EXISTS(SELECT 1 FROM external_guest_native_capture
                  WHERE binding_digest=?1 AND quiesce_frame_digest=?2
                  AND occurrence_digest=?3 AND durable_stage_id=?4
-                 AND snapshot_hash=?5 AND completion_request_digest=?6
-                 AND writer_exclusion_evidence_hash=?7)",
+                 AND snapshot_hash=?5 AND output_capture_hash IS ?6
+                 AND completion_request_digest=?7
+                 AND writer_exclusion_evidence_hash=?8)",
                 params![
                     self.0.binding.digest()?,
                     capture.quiesce_frame_digest,
                     capture.occurrence_digest,
                     capture.durable_stage_id,
                     capture.snapshot_hash,
+                    capture.output_capture_hash,
                     capture.completion_request_digest,
                     capture.writer_exclusion_evidence_hash
                 ],
@@ -1710,7 +1732,7 @@ impl GuestStore {
         let guard = authority.acquire_shared_guard()?;
         let mut captures = self.conn.prepare(
             "SELECT quiesce_frame_digest,occurrence_digest,durable_stage_id,
-                    snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
+                    snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
              FROM external_guest_native_capture ORDER BY binding_digest",
         )?;
         let captures = captures
@@ -1720,12 +1742,15 @@ impl GuestStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (quiesce, occurrence, stage_id, snapshot, completion, evidence) in captures {
+        for (quiesce, occurrence, stage_id, snapshot, output_capture, completion, evidence) in
+            captures
+        {
             let application: Option<String> = self
                 .conn
                 .query_row(
@@ -1747,6 +1772,7 @@ impl GuestStore {
                 &guard,
                 &self.binding,
                 &snapshot,
+                output_capture.as_deref(),
                 &completion,
                 &evidence,
             )?;
@@ -1770,7 +1796,7 @@ impl GuestStore {
         }
         let mut rows = self.conn.prepare(
             "SELECT sealed_frame_digest,occurrence_digest,durable_receipt_id,
-                    snapshot_hash,completion_request_digest,writer_exclusion_evidence_hash
+                    snapshot_hash,output_capture_hash,completion_request_digest,writer_exclusion_evidence_hash
              FROM external_guest_export_retention ORDER BY binding_digest",
         )?;
         let retained = rows
@@ -1780,17 +1806,21 @@ impl GuestStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (sealed, occurrence, receipt_id, snapshot, completion, evidence) in retained {
+        for (sealed, occurrence, receipt_id, snapshot, output_capture, completion, evidence) in
+            retained
+        {
             let (objects, blobs) = validated_retained_candidate_root_sets(
                 authority,
                 &guard,
                 &self.binding,
                 &snapshot,
+                output_capture.as_deref(),
                 &completion,
                 &evidence,
             )?;
@@ -1800,12 +1830,14 @@ impl GuestStore {
                  AND frame_digest=?2
                  AND json_extract(frame_json,'$.frame.payload.kind')='export_sealed'
                  AND json_extract(frame_json,'$.frame.payload.candidate_snapshot_hash')=?3
-                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?4
-                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?5)",
+                 AND json_extract(frame_json,'$.frame.payload.candidate_output_capture_hash') IS ?4
+                 AND json_extract(frame_json,'$.frame.payload.completion_request_digest')=?5
+                 AND json_extract(frame_json,'$.frame.payload.writer_exclusion_evidence_hash')=?6)",
                 params![
                     self.binding.digest()?,
                     sealed,
                     snapshot,
+                    output_capture,
                     completion,
                     evidence
                 ],
@@ -1941,23 +1973,39 @@ impl JournalOwner for GuestOwner<'_> {
         Ok(())
     }
 
+    fn permits_execution_input_transport(
+        &self,
+        conn: &Connection,
+        _binding: &ExecutionChannelBinding,
+    ) -> Result<bool> {
+        let lifecycle: String = conn.query_row(
+            "SELECT lifecycle FROM external_guest_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(lifecycle == "ready")
+    }
+
     fn require_export_retention(
         &self,
         conn: &Connection,
         binding: &ExecutionChannelBinding,
         frame_digest: &str,
         candidate_snapshot_hash: &str,
+        candidate_output_capture_hash: Option<&str>,
         completion_request_digest: &str,
         writer_exclusion_evidence_hash: &str,
     ) -> Result<()> {
         let retained: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM external_guest_export_retention
              WHERE binding_digest=?1 AND sealed_frame_digest=?2 AND snapshot_hash=?3
-             AND completion_request_digest=?4 AND writer_exclusion_evidence_hash=?5)",
+             AND output_capture_hash IS ?4
+             AND completion_request_digest=?5 AND writer_exclusion_evidence_hash=?6)",
             params![
                 binding.digest()?,
                 frame_digest,
                 candidate_snapshot_hash,
+                candidate_output_capture_hash,
                 completion_request_digest,
                 writer_exclusion_evidence_hash
             ],
@@ -2018,7 +2066,7 @@ impl JournalOwner for GuestOwner<'_> {
 }
 
 fn configure(conn: &Connection) -> Result<()> {
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(lillux::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     let mode: String = conn.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
@@ -2082,7 +2130,9 @@ mod tests {
         let now = lillux::time::timestamp_millis();
         (
             ExecutionChannelBinding {
-                schema: 3,
+                schema: crate::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+                execution_mode:
+                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
                 placement_thread_id: "T-guest".into(),
                 allocation_request_digest: "a".repeat(64),
                 occurrence_id: "occurrence-guest".into(),
@@ -2792,6 +2842,7 @@ mod tests {
             &guard,
             &binding,
             &snapshot_hash,
+            None,
             &completion,
             &evidence_hash,
         )
@@ -2827,6 +2878,7 @@ mod tests {
             occurrence_digest,
             durable_stage_id: stage_id,
             snapshot_hash,
+            output_capture_hash: None,
             completion_request_digest: completion,
             writer_exclusion_evidence_hash: evidence_hash,
         };

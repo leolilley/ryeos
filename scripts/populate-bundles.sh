@@ -300,6 +300,14 @@ staged_payload_records_for_set() {
         browser ryeos-browser-tools ryeos-browser-tools release
       ;;
   esac
+  case "$BUNDLE_SET" in
+    full|hosted-workflow|release-artifacts)
+      printf '%s\t%s\t%s\t%s\n' \
+        codex ryeos-external-candidate-connector ryeos-external-candidate-connector static \
+        codex ryeos-codex-external-configuration ryeos-codex-external-configuration static \
+        codex ryeos-codex-guest-runtime-producer ryeos-codex-guest-runtime-producer static
+      ;;
+  esac
 }
 
 package_selected() {
@@ -363,8 +371,17 @@ materialize_staged_payloads() {
 
 require_static_payload() {
   local path="$1"
-  if readelf -l "$path" | grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' \
-      || readelf -d "$path" | grep -Eq 'NEEDED'; then
+  local program_headers dynamic_entries
+  # An absent marker is meaningful only after a successful ELF inspection.
+  # Capture first: grep's early exit must not turn a producer SIGPIPE into
+  # apparent evidence that the executable has no dynamic dependency.
+  if ! program_headers="$(readelf -l "$path")" \
+      || ! dynamic_entries="$(readelf -d "$path")"; then
+    ryeos_term_fail "cannot inspect admitted persistent-session ELF payload: $path"
+    exit 2
+  fi
+  if grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' <<< "$program_headers" \
+      || grep -Eq 'NEEDED' <<< "$dynamic_entries"; then
     ryeos_term_fail "admitted persistent-session payload is not fully static: $path"
     exit 2
   fi
@@ -396,7 +413,9 @@ case "$BUNDLE_SET" in
   full|release-artifacts)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
-          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter)
+          ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
+          ryeos-external-candidate-connector ryeos-codex-external-configuration \
+          ryeos-codex-guest-runtime-producer)
     ;;
   central-host)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
@@ -411,7 +430,8 @@ case "$BUNDLE_SET" in
   hosted-workflow)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
-          ryeos-lillux-isolation-adapter)
+          ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
+          ryeos-codex-external-configuration ryeos-codex-guest-runtime-producer)
     ;;
   hosted-node)
     pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
@@ -419,8 +439,8 @@ case "$BUNDLE_SET" in
     ;;
 esac
 
-# --crates overrides the build list (staging still copies all bundle binaries
-# from target/release, so unbuilt ones must already exist there).
+# --crates overrides the build list. Unselected payloads retain their exact
+# existing bundle generation; they are never taken from ambient target outputs.
 if [[ -n "$CRATES_OVERRIDE" ]]; then
   read -ra pkgs <<< "$CRATES_OVERRIDE"
 fi
@@ -431,11 +451,17 @@ host_pkgs=()
 build_static_session_exec=0
 build_static_structured_session=0
 build_static_lillux_isolation_adapter=0
+build_static_external_candidate_connector=0
+build_static_codex_external_configuration=0
+build_static_codex_guest_runtime_producer=0
 for p in "${pkgs[@]}"; do
   case "$p" in
     ryeos-session-exec) build_static_session_exec=1 ;;
     ryeos-structured-session) build_static_structured_session=1 ;;
     ryeos-lillux-isolation-adapter) build_static_lillux_isolation_adapter=1 ;;
+    ryeos-external-candidate-connector) build_static_external_candidate_connector=1 ;;
+    ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
+    ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     *) host_pkgs+=("$p") ;;
   esac
 done
@@ -483,6 +509,9 @@ static_build_labels=()
 (( build_static_session_exec == 1 )) && static_build_labels+=(ryeos-session-exec)
 (( build_static_structured_session == 1 )) && static_build_labels+=(ryeos-structured-session)
 (( build_static_lillux_isolation_adapter == 1 )) && static_build_labels+=(ryeos-lillux-isolation-adapter)
+(( build_static_external_candidate_connector == 1 )) && static_build_labels+=(ryeos-external-candidate-connector)
+(( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
+(( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
@@ -501,6 +530,21 @@ if (( ${#static_build_labels[@]} > 0 )); then
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
       "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-lillux-isolation-adapter
   fi
+  if (( build_static_external_candidate_connector == 1 )); then
+    ryeos_term_info "static external execution build: ryeos-external-candidate-connector"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-candidate-connector
+  fi
+  if (( build_static_codex_external_configuration == 1 )); then
+    ryeos_term_info "static external execution build: ryeos-codex-external-configuration"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-codex-external-configuration
+  fi
+  if (( build_static_codex_guest_runtime_producer == 1 )); then
+    ryeos_term_info "static Codex guest runtime producer build: ryeos-codex-guest-runtime-producer"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-codex-guest-runtime-producer
+  fi
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"
@@ -514,9 +558,12 @@ materialize_staged_payloads
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-session-exec"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-launch-preparer"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-worker-execution-runtime"
+require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
-  require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-connector"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
 fi
 prepare_bundle_trees
 

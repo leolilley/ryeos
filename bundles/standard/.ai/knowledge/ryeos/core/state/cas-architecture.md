@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T00:12:54Z:581f8753bc4d84ba9bcc6bab7be63445f37603b14d13367987b6755a2bc0a107:UzhmGKr/WM+ccCQWxivHP7UD0tN3gXmdpW/Dt/rGUE8MaXZA1B1WNxxyOltZ4+nSUQwA+LcVjsWdQpiV0f7aAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-09-23T01:51:04Z:3f31e3043cd3347deb7f902ba46de30b54dfe4d2089f120fb80b6d2302cff0cc:i82ZrR6Uw/A5ptYff7fq7R/ruB+Q/pqcY9l6hOUboxlkDIlbsdeLo5P80Kd1lOEgJt68v211DJ/mBP879c8VAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -301,6 +301,15 @@ qualification policy. That bundle-owned policy chooses an admitted verifier and
 finite claims. Qualification is published from the verifier's exact successful
 terminal execution over the captured manifest, not producer-supplied assertions.
 Static admission consumes this evidence without running probes.
+
+Consumption reconstructs the current verifier artifact from its signed source,
+runtime, protocol and exact executable-member content. This is an identity proof,
+not permission to execute that verifier again on the consuming node. It retains
+the qualification's authenticated execution realization and checks current
+policy, trust, subject, scope and validity; it never substitutes a cached artifact
+for current reconstruction. A consumer may therefore use valid qualification
+produced on a different execution substrate. Any new verifier or evaluator
+execution must separately satisfy its selected endpoint's admission requirements.
 
 The current verifier lane requires a pre-authored literal pin for its subject.
 It can qualify reproduction of that expected manifest; qualification of a new

@@ -1152,6 +1152,44 @@ pub struct CasMutationGuard {
 }
 
 impl CasMutationGuard {
+    /// Initialize the minimum recovery generation in a fresh, unpublished
+    /// private runtime without acquiring process-local guard authority. This
+    /// includes both the mutation-lock anchor and the descriptor-pinned
+    /// thread-projection root used by durable CAS publication stages.
+    ///
+    /// This operation exists for descriptor-held runtime construction: the
+    /// caller exclusively owns a runtime that has not yet been handed to any
+    /// reader or publisher, while it may already hold a guard for a distinct
+    /// source runtime. Published runtimes must use the ordinary guard
+    /// acquisition APIs instead.
+    pub fn initialize_fresh_recovery_in_pinned_runtime(
+        runtime: &lillux::PinnedDirectory,
+    ) -> Result<()> {
+        runtime.require_owner_private_directory()?;
+        let recovery_name = std::ffi::OsStr::new("recovery");
+        let recovery = runtime.create_child(recovery_name, 0o700)?;
+        let result = (|| -> Result<()> {
+            let lock = recovery.open_regular_create(
+                std::ffi::OsStr::new("cas-mutation.lock"),
+                true,
+                true,
+                0o600,
+            )?;
+            let thread_projection =
+                recovery.create_child(std::ffi::OsStr::new("thread-projection"), 0o700)?;
+            lock.sync_all()?;
+            thread_projection.sync()?;
+            recovery.sync()?;
+            runtime.sync()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = recovery.remove_contents_recursive();
+            let _ = runtime.remove_empty_child_if_same(recovery_name, &recovery);
+        }
+        result
+    }
+
     #[track_caller]
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,

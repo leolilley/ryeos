@@ -22,6 +22,7 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
+ryeos-external-execution-contract = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }
 thiserror = { workspace = true }

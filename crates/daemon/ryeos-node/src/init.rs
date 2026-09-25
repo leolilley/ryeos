@@ -2884,6 +2884,8 @@ typo_field: oops
             smoke: vec![],
             shadows: vec![],
             isolation_backends: vec![],
+            external_providers: vec![],
+            external_lifecycle_adapters: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

@@ -178,25 +178,139 @@ grep -Fq -- \
   <<<"$daemon_scope_output"
 test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 
-set +e
-static_scope_output="$(
-  RYEOS_TTY=never \
-  CARGO=/bin/echo \
-  CARGO_TARGET_DIR="$scope_tmp/target" \
-    "$scope_tmp/repo/scripts/populate-bundles.sh" \
-      --key "$scope_tmp/publisher.pem" \
-      --owner test \
-      --bundle-set full \
-      --crates ryeos-session-exec 2>&1
-)"
-static_scope_status=$?
-set -e
-[[ "$static_scope_status" -eq 2 ]]
-grep -Fq -- 'build --release --target x86_64-unknown-linux-gnu -p ryeos-session-exec' \
-  <<<"$static_scope_output"
-! grep -Fq -- '-p ryeos-structured-session' <<<"$static_scope_output"
-grep -Fq -- "$scope_tmp/target/x86_64-unknown-linux-gnu/release/ryeos-session-exec" \
-  <<<"$static_scope_output"
-test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
+static_package_cases=(
+  'ryeos-session-exec|ryeos-session-exec'
+  'ryeos-structured-session|ryeos-worker-execution-launch-preparer ryeos-worker-execution-runtime ryeos-structured-session-bridge'
+  'ryeos-external-candidate-connector|ryeos-external-candidate-connector'
+  'ryeos-codex-external-configuration|ryeos-codex-external-configuration'
+  'ryeos-codex-guest-runtime-producer|ryeos-codex-guest-runtime-producer'
+)
+for package_case in "${static_package_cases[@]}"; do
+  selected_package="${package_case%%|*}"
+  read -ra expected_outputs <<<"${package_case#*|}"
+  set +e
+  static_scope_output="$(
+    RYEOS_TTY=never \
+    CARGO=/bin/echo \
+    CARGO_TARGET_DIR="$scope_tmp/target" \
+      "$scope_tmp/repo/scripts/populate-bundles.sh" \
+        --key "$scope_tmp/publisher.pem" \
+        --owner test \
+        --bundle-set full \
+        --crates "$selected_package" 2>&1
+  )"
+  static_scope_status=$?
+  set -e
+  [[ "$static_scope_status" -eq 2 ]]
+  # Exactly one static Cargo request: no host duplicate or implicit companion
+  # package build. Every binary belonging to that package uses its target path.
+  [[ "$(sed -n '/^build /p' <<<"$static_scope_output")" \
+    == "build --release --target x86_64-unknown-linux-gnu -p $selected_package" ]]
+  for binary in "${expected_outputs[@]}"; do
+    grep -Fxq -- \
+      "    - $scope_tmp/target/x86_64-unknown-linux-gnu/release/$binary" \
+      <<<"$static_scope_output"
+  done
+  grep -Fxq -- \
+    "    - $scope_tmp/repo/bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools" \
+    <<<"$static_scope_output"
+  test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
+done
+
+# Exercise the real population control flow with disposable retained payloads.
+# Cargo remains inert. The deletion fence aborts before source signing or
+# publication if an invalid payload incorrectly passes static qualification.
+while IFS= read -r line; do
+  case "$line" in
+    "    - $scope_tmp/repo/bundles/"*)
+      artifact="${line#    - }"
+      mkdir -p "$(dirname "$artifact")"
+      cp /bin/true "$artifact"
+      ;;
+  esac
+done <<<"$daemon_scope_output"
+mkdir -p "$scope_tmp/probes"
+real_readelf="$(command -v readelf)"
+real_rm="$(command -v rm)"
+cat > "$scope_tmp/probes/readelf" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+artifact="${@: -1}"
+printf '%s %s\n' "$1" "$artifact" >> "$TEST_ELF_OBSERVATIONS"
+if [[ "$artifact" == */ryeos-structured-session-bridge ]]; then
+  case "$TEST_BRIDGE_ELF" in
+    interpreter) printf '%s\n' '  INTERP 0x0000000000000040'; exit 0 ;;
+    dependency) printf '%s\n' '  (NEEDED) Shared library: [libc.so.6]'; exit 0 ;;
+    invalid) exec "$TEST_REAL_READELF" "$@" ;;
+    inspection-failure) printf '%s\n' 'fixture ELF inspection failed' >&2; exit 19 ;;
+    *) exit 20 ;;
+  esac
+fi
+# Other fixture payloads stand for successfully inspected static ELF objects.
+printf '%s\n' 'ELF Header:' 'There is no dynamic section in this file.'
+EOF
+cat > "$scope_tmp/probes/rm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  case "$argument" in
+    "$TEST_SCOPE_REPO"/bundles/*/.ai/bin)
+      printf '%s\n' 'invalid payload reached destructive bundle preparation' >&2
+      exit 87
+      ;;
+  esac
+done
+exec "$TEST_REAL_RM" "$@"
+EOF
+chmod 0755 "$scope_tmp/probes/readelf" "$scope_tmp/probes/rm"
+
+static_failures=0
+assert_bridge_rejected_before_publication() {
+  local bundle_set="$1" elf_kind="$2" output status
+  : > "$scope_tmp/elf-observations"
+  set +e
+  output="$(
+    PATH="$scope_tmp/probes:$PATH" \
+    TEST_BRIDGE_ELF="$elf_kind" \
+    TEST_REAL_READELF="$real_readelf" \
+    TEST_REAL_RM="$real_rm" \
+    TEST_SCOPE_REPO="$scope_tmp/repo" \
+    TEST_ELF_OBSERVATIONS="$scope_tmp/elf-observations" \
+    RYEOS_TTY=never \
+    CARGO=/bin/echo \
+    CARGO_TARGET_DIR="$scope_tmp/target" \
+      "$scope_tmp/repo/scripts/populate-bundles.sh" \
+        --key "$scope_tmp/publisher.pem" \
+        --owner test \
+        --bundle-set "$bundle_set" \
+        --crates ryeosd 2>&1
+  )"
+  status=$?
+  set -e
+  if [[ "$status" -ne 2 ]] \
+      || ! grep -Fq '/ryeos-structured-session-bridge' "$scope_tmp/elf-observations" \
+      || grep -Fq 'invalid payload reached destructive bundle preparation' <<<"$output" \
+      || [[ ! -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel" ]]; then
+    printf 'static payload gate failed: set=%s bridge=%s status=%s\n%s\n' \
+      "$bundle_set" "$elf_kind" "$status" "$output" >&2
+    static_failures=$((static_failures + 1))
+  fi
+}
+
+# The bridge belongs to core in every publication set, not only hosted sets.
+for set_name in "${bundle_set_ids[@]}" release-artifacts; do
+  assert_bridge_rejected_before_publication "$set_name" interpreter
+done
+assert_bridge_rejected_before_publication hosted-workflow dependency
+assert_bridge_rejected_before_publication hosted-workflow inspection-failure
+# Let the real inspector reject an executable text file, rather than equating
+# lack of INTERP/NEEDED output with proof that inspection succeeded.
+printf '%s\n' 'not an ELF executable' \
+  > "$scope_tmp/repo/bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-structured-session-bridge"
+assert_bridge_rejected_before_publication hosted-workflow invalid
+if (( static_failures > 0 )); then
+  printf 'static payload gate regressions: %s\n' "$static_failures" >&2
+  exit 1
+fi
 
 printf '%s\n' "bundle set contract ok"

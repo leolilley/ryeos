@@ -12,10 +12,10 @@ use ryeos_state::external_execution::{
     ChannelDirection, ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
 };
 
-use super::external_candidate_launcher_protocol::{
+use crate::launcher_protocol::{
     ExternalOwnerFrameDispatch, ExternalOwnerFrameOutcome, LiveInheritedExternalCandidateSupervisor,
 };
-use super::external_candidate_supervisor::SupervisorApplicationOutcome;
+use crate::supervisor::SupervisorApplicationOutcome;
 
 /// Controller frame returned by the occurrence-authenticated exchange route.
 /// The transport adapter must decode canonical base64 before constructing it.
@@ -99,7 +99,7 @@ pub trait ExternalSupervisorRuntime {
     fn ready_frame(&self) -> &str;
     fn has_durable_capture(&self) -> Result<bool>;
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
-    fn poll_protocol_output(&mut self) -> Result<Option<String>>;
+    fn poll_execution_output(&mut self) -> Result<Option<String>>;
     fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>>;
 }
 
@@ -120,8 +120,8 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
         self.dispatch_owner_frame(wire)
     }
 
-    fn poll_protocol_output(&mut self) -> Result<Option<String>> {
-        LiveInheritedExternalCandidateSupervisor::poll_protocol_output(self)
+    fn poll_execution_output(&mut self) -> Result<Option<String>> {
+        LiveInheritedExternalCandidateSupervisor::poll_execution_output(self)
     }
 
     fn next_pending_transport_frame_after(&self, after_sequence: u64) -> Result<Option<Vec<u8>>> {
@@ -149,6 +149,9 @@ pub enum ExternalTransportProgress {
     /// authored and durably retained by this supervisor. Transport receipt or
     /// a merely retained/claimed acknowledgement cannot produce this state.
     ExportApplied,
+    /// Exact direct-command terminal observation has an authenticated Applied
+    /// receipt. This does not mean code-zero success or provider cleanup.
+    CommandTerminatedApplied,
 }
 
 /// Bounded, single-occurrence control loop. It owns neither placement nor
@@ -164,6 +167,8 @@ pub struct ExternalCandidateTransportDriver<R, T> {
     sealed_exports: BTreeSet<(u64, String)>,
     capture_retained: bool,
     export_applied: bool,
+    command_terminated: Option<(u64, String)>,
+    command_terminated_applied: bool,
     maximum_response_frames: usize,
     maximum_response_bytes: usize,
 }
@@ -206,6 +211,8 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             sealed_exports: BTreeSet::new(),
             capture_retained,
             export_applied: false,
+            command_terminated: None,
+            command_terminated_applied: false,
             maximum_response_frames,
             maximum_response_bytes,
         })
@@ -217,6 +224,17 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
 
     pub fn is_export_applied(&self) -> bool {
         self.export_applied
+    }
+
+    pub fn is_command_terminated_applied(&self) -> bool {
+        self.command_terminated_applied
+    }
+
+    pub fn is_direct_command(&self) -> bool {
+        matches!(
+            self.runtime.binding().execution_mode,
+            ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. }
+        )
     }
 
     pub fn has_sealed_export(&self) -> bool {
@@ -256,10 +274,11 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     ) -> std::result::Result<ExternalTransportProgress, ExternalTransportStepFailure> {
         self.enqueue_next_durable_supervisor_frame()?;
         if self.pending_supervisor.is_empty()
-            && self.revocation_progress.is_none()
+            && (self.revocation_progress.is_none() || self.is_direct_command())
             && !self.export_applied
             && self.sealed_exports.is_empty()
-            && let Some(wire) = self.runtime.poll_protocol_output()?
+            && self.command_terminated.is_none()
+            && let Some(wire) = self.runtime.poll_execution_output()?
         {
             let verified = SignedExecutionFrame::decode_and_verify(
                 wire.as_bytes(),
@@ -267,19 +286,21 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 lillux::time::timestamp_millis(),
             )?;
             if !(verified.frame().direction == ChannelDirection::SupervisorToOwner
-                && matches!(
-                    verified.frame().payload,
-                    ExecutionChannelPayload::ProtocolBytes { .. }
-                        | ExecutionChannelPayload::ProtocolEof
-                ))
+                && match self.runtime.binding().execution_mode {
+                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} =>
+                        matches!(verified.frame().payload, ExecutionChannelPayload::ProtocolBytes { .. }
+                            | ExecutionChannelPayload::ProtocolEof),
+                    ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } =>
+                        matches!(verified.frame().payload, ExecutionChannelPayload::CommandOutput { .. }
+                            | ExecutionChannelPayload::CommandTerminated { .. }),
+                })
             {
                 return Err(anyhow::anyhow!(
-                    "external runtime output poll returned a non-protocol supervisor frame"
+                    "external runtime output poll returned a frame outside its execution mode"
                 )
                 .into());
             }
-            self.pending_supervisor
-                .insert(verified.frame().sequence, wire.into_bytes());
+            self.enqueue_supervisor_wire(wire.into_bytes())?;
         }
         let outgoing = self
             .pending_supervisor
@@ -346,7 +367,9 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 }
             }
         }
-        if self.export_applied {
+        if self.command_terminated_applied {
+            Ok(ExternalTransportProgress::CommandTerminatedApplied)
+        } else if self.export_applied {
             Ok(ExternalTransportProgress::ExportApplied)
         } else if let Some(progress) = self.revocation_progress {
             Ok(progress)
@@ -511,6 +534,15 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
                 {
                     self.export_applied = true;
                 }
+                if self
+                    .command_terminated
+                    .as_ref()
+                    .is_some_and(|(sequence, digest)| {
+                        sequence == peer_frame_sequence && digest == peer_frame_digest
+                    })
+                {
+                    self.command_terminated_applied = true;
+                }
             }
         }
         let is_partial = matches!(
@@ -614,6 +646,19 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             self.sealed_exports
                 .insert((verified.frame().sequence, verified.digest().to_owned()));
         }
+        if matches!(
+            verified.frame().payload,
+            ExecutionChannelPayload::CommandTerminated { .. }
+        ) {
+            let identity = (verified.frame().sequence, verified.digest().to_owned());
+            ensure!(
+                self.command_terminated
+                    .as_ref()
+                    .is_none_or(|retained| retained == &identity),
+                "external dispatcher changed its exact command termination"
+            );
+            self.command_terminated = Some(identity);
+        }
         if let Some(delivered_digest) = self.delivered_supervisor.get(&verified.frame().sequence) {
             ensure!(
                 delivered_digest == verified.digest(),
@@ -677,6 +722,7 @@ mod tests {
         cancel_uncertain: bool,
         fail_next_dispatch: bool,
         protocol_outputs: VecDeque<Vec<u8>>,
+        command_outputs: VecDeque<ExecutionChannelPayload>,
         protocol_output_polls: usize,
         pending_transport: RefCell<VecDeque<Vec<u8>>>,
         last_acknowledgement: Option<(u64, String, ExecutionFrameApplication, String)>,
@@ -713,6 +759,7 @@ mod tests {
                 cancel_uncertain: false,
                 fail_next_dispatch: false,
                 protocol_outputs: VecDeque::new(),
+                command_outputs: VecDeque::new(),
                 protocol_output_polls: 0,
                 pending_transport: RefCell::new(VecDeque::new()),
                 last_acknowledgement: None,
@@ -855,9 +902,16 @@ mod tests {
             })
         }
 
-        fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+        fn poll_execution_output(&mut self) -> Result<Option<String>> {
             self.protocol_output_polls += 1;
-            let Some(bytes) = self.protocol_outputs.pop_front() else {
+            let payload = self.command_outputs.pop_front().or_else(|| {
+                self.protocol_outputs.pop_front().map(|bytes| {
+                    ExecutionChannelPayload::ProtocolBytes {
+                        bytes_base64: STANDARD.encode(bytes),
+                    }
+                })
+            });
+            let Some(payload) = payload else {
                 return Ok(None);
             };
             let frame = sign(
@@ -867,9 +921,7 @@ mod tests {
                 self.next_sequence,
                 Some(self.previous_digest.clone()),
                 0,
-                ExecutionChannelPayload::ProtocolBytes {
-                    bytes_base64: STANDARD.encode(bytes),
-                },
+                payload,
             );
             self.next_sequence += 1;
             self.previous_digest = frame.digest().to_owned();
@@ -1026,6 +1078,7 @@ mod tests {
                         },
                         ExecutionChannelPayload::ExportSealed {
                             candidate_snapshot_hash: "1".repeat(64),
+                            candidate_output_capture_hash: None,
                             completion_request_digest: "2".repeat(64),
                             writer_exclusion_evidence_hash: "3".repeat(64),
                         },
@@ -1184,7 +1237,7 @@ mod tests {
             })
         }
 
-        fn poll_protocol_output(&mut self) -> Result<Option<String>> {
+        fn poll_execution_output(&mut self) -> Result<Option<String>> {
             let Some(bytes) = self.protocol_outputs.pop_front() else {
                 return Ok(None);
             };
@@ -1356,7 +1409,9 @@ mod tests {
         let supervisor = lillux::crypto::SigningKey::from_bytes(&[12; 32]);
         let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
         let binding = ExecutionChannelBinding {
-            schema: 3,
+            schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+            execution_mode:
+                ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
             placement_thread_id: "T-external-transport".into(),
             allocation_request_digest: "a".repeat(64),
             occurrence_id: "occurrence-one".into(),
@@ -1383,6 +1438,319 @@ mod tests {
         };
         binding.validate().unwrap();
         (binding, owner, supervisor)
+    }
+
+    fn direct_fixture() -> (
+        ExecutionChannelBinding,
+        lillux::crypto::SigningKey,
+        lillux::crypto::SigningKey,
+    ) {
+        let (mut binding, owner, supervisor) = fixture();
+        binding.execution_mode =
+            ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand {
+                stdout_max_bytes: 4096,
+                stderr_max_bytes: 2048,
+            };
+        binding.candidate_export_max_bytes = 0;
+        binding.validate().unwrap();
+        (binding, owner, supervisor)
+    }
+
+    fn direct_terminal(stdout: &[u8], stderr: &[u8]) -> ExecutionChannelPayload {
+        use ryeos_state::external_execution::{
+            ExternalCommandOutputCommitment, ExternalCommandTermination,
+            ExternalCommandTerminationReason, ExternalTargetExit,
+        };
+        let commitment = |bytes: &[u8]| ExternalCommandOutputCommitment {
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(bytes),
+            truncated: false,
+        };
+        ExecutionChannelPayload::CommandTerminated {
+            observation: ExternalCommandTermination {
+                target_exit: ExternalTargetExit::Code(0),
+                reason: ExternalCommandTerminationReason::TargetExited,
+                stdout: commitment(stdout),
+                stderr: commitment(stderr),
+            },
+        }
+    }
+
+    #[test]
+    fn direct_terminal_requires_exact_applied_ack_and_is_not_an_export() {
+        let (binding, owner, supervisor) = direct_fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor.clone());
+        let mut driver =
+            ExternalCandidateTransportDriver::new(runtime, FixtureTransport::new(vec![])).unwrap();
+        let ready = SignedExecutionFrame::decode_and_verify(
+            driver.runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let terminal = sign(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready.digest().into()),
+            0,
+            direct_terminal(b"", b""),
+        );
+        driver
+            .enqueue_supervisor_wire(terminal.canonical().as_bytes().to_vec())
+            .unwrap();
+        driver.runtime.next_sequence = 3;
+        driver.runtime.previous_digest = terminal.digest().into();
+        let mut predecessor = None;
+        for (index, (application, sequence, digest, accepted)) in [
+            (
+                ExecutionFrameApplication::Retained,
+                2,
+                terminal.digest(),
+                false,
+            ),
+            (
+                ExecutionFrameApplication::Claimed,
+                2,
+                terminal.digest(),
+                false,
+            ),
+            (ExecutionFrameApplication::Applied, 1, ready.digest(), false),
+            (
+                ExecutionFrameApplication::Applied,
+                2,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                false,
+            ),
+            (
+                ExecutionFrameApplication::Applied,
+                2,
+                terminal.digest(),
+                true,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ack = sign(
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                index as u64 + 1,
+                predecessor.clone(),
+                sequence,
+                ExecutionChannelPayload::Acknowledge {
+                    peer_frame_sequence: sequence,
+                    peer_frame_digest: digest.into(),
+                    application,
+                },
+            );
+            driver
+                .dispatch_ordinary(ack.canonical().as_bytes())
+                .unwrap();
+            predecessor = Some(ack.digest().into());
+            assert_eq!(driver.is_command_terminated_applied(), accepted);
+            assert!(!driver.is_export_applied());
+        }
+        // Exact retry is allowed; a second terminal identity is not.
+        driver
+            .enqueue_supervisor_wire(terminal.canonical().as_bytes().to_vec())
+            .unwrap();
+        let duplicate = sign(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            60,
+            Some(terminal.digest().into()),
+            0,
+            direct_terminal(b"", b""),
+        );
+        assert!(
+            driver
+                .enqueue_supervisor_wire(duplicate.canonical().as_bytes().to_vec())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn direct_terminal_journal_replays_exact_bytes_after_lost_or_missing_ack() {
+        use ryeos_state::external_execution::ExternalCommandOutputStream;
+        for lost_response in [false, true] {
+            let (binding, owner, supervisor) = direct_fixture();
+            let mut runtime =
+                JournalFixtureRuntime::running(binding.clone(), &owner, supervisor, vec![]);
+            runtime.protocol_outputs.clear();
+            let frames = runtime
+                .journal
+                .author_supervisor_frames(
+                    &runtime.supervisor_key,
+                    [
+                        ExecutionChannelPayload::CommandOutput {
+                            stream: ExternalCommandOutputStream::Stdout,
+                            offset: 0,
+                            bytes_base64: STANDARD.encode(b"ok"),
+                        },
+                        ExecutionChannelPayload::CommandOutput {
+                            stream: ExternalCommandOutputStream::Stderr,
+                            offset: 0,
+                            bytes_base64: STANDARD.encode(b"err"),
+                        },
+                        direct_terminal(b"ok", b"err"),
+                    ],
+                )
+                .unwrap();
+            let terminal = frames.last().unwrap();
+            let mut transport = AppliedAckTransport::new(
+                binding.clone(),
+                owner,
+                2,
+                Some(runtime.owner_predecessor_digest.clone()),
+                if lost_response {
+                    terminal.frame().sequence
+                } else {
+                    0
+                },
+            );
+            if !lost_response {
+                transport.omit_ack_once_at_supervisor_sequence = Some(terminal.frame().sequence);
+            }
+            transport.suppress_ack_of_ack = true;
+            let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+            for _ in 0..12 {
+                match driver.step_classified() {
+                    Ok(ExternalTransportProgress::CommandTerminatedApplied) => break,
+                    Ok(_) | Err(ExternalTransportStepFailure::AmbiguousTransport(_)) => {}
+                    Err(error) => panic!("unexpected direct transcript failure: {error}"),
+                }
+                assert!(!driver.is_command_terminated_applied());
+            }
+            assert!(driver.is_command_terminated_applied());
+            assert!(!driver.is_export_applied());
+            let calls: Vec<_> = driver
+                .transport
+                .calls
+                .iter()
+                .filter(|wire| {
+                    SignedExecutionFrame::decode_and_verify(wire, &binding, binding.issued_at_ms)
+                        .unwrap()
+                        .frame()
+                        .sequence
+                        == terminal.frame().sequence
+                })
+                .collect();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0], calls[1]);
+            assert_eq!(calls[0].as_slice(), terminal.canonical().as_bytes());
+            // No replay reads output again or mints a second terminal frame.
+            assert_eq!(
+                driver.command_terminated,
+                Some((terminal.frame().sequence, terminal.digest().into()))
+            );
+        }
+    }
+
+    #[test]
+    fn direct_revocation_drains_output_without_releasing_again_or_claiming_completion() {
+        use ryeos_state::external_execution::ExternalCommandOutputStream;
+        let (binding, owner, supervisor) = direct_fixture();
+        let mut runtime = FixtureRuntime::new(binding.clone(), supervisor);
+        runtime
+            .command_outputs
+            .push_back(ExecutionChannelPayload::CommandOutput {
+                stream: ExternalCommandOutputStream::Stderr,
+                offset: 0,
+                bytes_base64: STANDARD.encode(b"cancelled"),
+            });
+        let ready = SignedExecutionFrame::decode_and_verify(
+            runtime.ready.as_bytes(),
+            &binding,
+            binding.issued_at_ms,
+        )
+        .unwrap();
+        let cancel = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            ready.frame().sequence,
+            ExecutionChannelPayload::Cancel,
+        );
+        let mut transport = AppliedAckTransport::new(
+            binding.clone(),
+            owner.clone(),
+            2,
+            Some(cancel.digest().into()),
+            0,
+        );
+        transport.suppress_ack_of_ack = true;
+        let mut driver = ExternalCandidateTransportDriver::new(runtime, transport).unwrap();
+        driver
+            .dispatch_urgent_revocation(&envelope(&cancel))
+            .unwrap();
+        for _ in 0..6 {
+            driver.step().unwrap();
+        }
+        assert!(driver.is_revoked());
+        assert!(driver.runtime.protocol_output_polls > 0);
+        assert!(driver.runtime.command_outputs.is_empty());
+        assert!(!driver.is_command_terminated_applied());
+        assert!(!driver.is_export_applied());
+        let late_release = sign(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            60,
+            Some(cancel.digest().into()),
+            ready.frame().sequence,
+            ExecutionChannelPayload::Release,
+        );
+        driver
+            .dispatch_ordinary(late_release.canonical().as_bytes())
+            .unwrap();
+        assert!(!driver.runtime.dispatched.contains(&"release"));
+    }
+
+    #[test]
+    fn direct_mode_does_not_accept_session_output_or_export_frames() {
+        let (binding, _, supervisor) = direct_fixture();
+        let runtime = FixtureRuntime::new(binding.clone(), supervisor.clone());
+        let mut driver =
+            ExternalCandidateTransportDriver::new(runtime, FixtureTransport::new(vec![])).unwrap();
+        // A correctly signed frame from a different execution contract cannot
+        // be substituted into the direct endpoint even if its keys are shared.
+        let mut session = binding.clone();
+        session.execution_mode =
+            ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {};
+        session.candidate_export_max_bytes = 1024;
+        for payload in [
+            ExecutionChannelPayload::ProtocolEof,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"wrong mode"),
+            },
+            ExecutionChannelPayload::ExportSealed {
+                candidate_snapshot_hash: "1".repeat(64),
+                candidate_output_capture_hash: None,
+                completion_request_digest: "2".repeat(64),
+                writer_exclusion_evidence_hash: "3".repeat(64),
+            },
+        ] {
+            let frame = sign(
+                &session,
+                &supervisor,
+                ChannelDirection::SupervisorToOwner,
+                2,
+                Some(lillux::sha256_hex(driver.runtime.ready.as_bytes())),
+                0,
+                payload,
+            );
+            assert!(
+                driver
+                    .enqueue_supervisor_wire(frame.canonical().as_bytes().to_vec())
+                    .is_err()
+            );
+        }
     }
 
     fn sign(
@@ -1657,6 +2025,7 @@ mod tests {
             0,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: "1".repeat(64),
+                candidate_output_capture_hash: None,
                 completion_request_digest: "2".repeat(64),
                 writer_exclusion_evidence_hash: "3".repeat(64),
             },
@@ -1767,6 +2136,7 @@ mod tests {
             0,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: "1".repeat(64),
+                candidate_output_capture_hash: None,
                 completion_request_digest: "2".repeat(64),
                 writer_exclusion_evidence_hash: "3".repeat(64),
             },
@@ -1977,6 +2347,7 @@ mod tests {
             0,
             ExecutionChannelPayload::ExportSealed {
                 candidate_snapshot_hash: "1".repeat(64),
+                candidate_output_capture_hash: None,
                 completion_request_digest: "2".repeat(64),
                 writer_exclusion_evidence_hash: "3".repeat(64),
             },

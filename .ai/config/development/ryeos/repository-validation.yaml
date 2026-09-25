@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-07T08:40:52Z:6c286f89a3fb6a80e29e09452304af55ce7011f9daa27aec24d32eff77fb36ac:pPn80KPGB3rWaCOf8oL92b+bkQFLyWQ7Pg9R/XICRQ3QaZx7XBd2OBXnwq2dcnmxw6YiX2nZh6aKQZXt16FuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-21T02:33:03Z:6e02751a71adeedbc382da7b37b60043f3214b65ad318697e0a8cdc3c0644775:ps9XGJ1iOfe59psxadrnpzQhLDPEXhQL6Onfs2r38upUafTwDRqXOdkDEVvzj7ibYIOg3ivWt8cdiBJop3/6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 {
   "category": "development/ryeos",
   "name": "repository-validation",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "schema": "ryeos.development.repository-validation.v1",
   "limits": {
     "max_file_bytes": 16777216,
@@ -15,6 +15,9 @@
     "workspace_manifest": "Cargo.toml",
     "forbidden_edges": {
       "lillux": [
+        "ryeos-external-execution-contract",
+        "ryeos-external-execution",
+        "ryeos-project-capture",
         "ryeos-state",
         "ryeos-engine",
         "ryeos-runtime",
@@ -25,6 +28,8 @@
         "ryeos-ui"
       ],
       "ryeos-state": [
+        "ryeos-external-execution",
+        "ryeos-project-capture",
         "ryeos-engine",
         "ryeos-runtime",
         "ryeos-app",
@@ -46,6 +51,31 @@
         "ryeos-api",
         "ryeos-node",
         "ryeos-ui"
+      ],
+      "ryeos-external-execution-contract": [
+        "ryeos-state", "ryeos-engine", "ryeos-runtime", "ryeos-app",
+        "ryeos-executor", "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-external-execution": [
+        "ryeos-engine", "ryeos-runtime", "ryeos-app", "ryeos-executor",
+        "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-project-capture": [
+        "ryeos-engine", "ryeos-runtime", "ryeos-app", "ryeos-executor",
+        "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-external-candidate-launcher": [
+        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-external-candidate-supervisor": [
+        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-external-candidate-connector": [
+        "ryeos-app", "ryeos-executor", "ryeos-api", "ryeos-node"
+      ],
+      "ryeos-codex-external-configuration": [
+        "ryeos-state", "ryeos-engine", "ryeos-runtime", "ryeos-app",
+        "ryeos-executor", "ryeos-api", "ryeos-node"
       ],
       "ryeos-app": [
         "ryeos-executor",
@@ -202,6 +232,79 @@
         ],
         "patterns": [
           "eprintln!|std::io::stderr"
+        ],
+        "regex": true,
+        "ignore_case": false
+      }
+    ],
+    "host-capability-ownership": [
+      {
+        "roots": [
+          "crates/tools/structured-session/src/main.rs",
+          "crates/engine/ryeos-executor/src/execution/runner/external_direct.rs",
+          "crates/tools/external-candidate-supervisor/src/lib.rs",
+          "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/routed_guest.rs"
+        ],
+        "exclude": [],
+        "suffixes": [".rs"],
+        "patterns": [
+          "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
+          "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
+          "\\bInstant::now\\s*\\(",
+          "\\bstd::fs::(?:read|write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy|set_permissions|metadata|canonicalize|open)\\b",
+          "\\bstd::net::(?:TcpListener|TcpStream|UdpSocket)\\b"
+        ],
+        "regex": true,
+        "ignore_case": false,
+        "before_marker": "#[cfg(test)]\nmod tests {"
+      },
+      {
+        "roots": [
+          "crates/tools/structured-session/src/workload_client_broker.rs"
+        ],
+        "exclude": [],
+        "suffixes": [".rs"],
+        "patterns": [
+          "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
+          "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
+          "\\bInstant::now\\s*\\(",
+          "\\bstd::fs::(?:read|write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy|set_permissions|metadata|canonicalize|open)\\b",
+          "\\bstd::net::(?:TcpListener|TcpStream|UdpSocket)\\b"
+        ],
+        "regex": true,
+        "ignore_case": false,
+        "before_marker": "#[cfg(all(test, target_os = \"linux\"))]\nmod tests {"
+      },
+      {
+        "roots": [
+          "crates/tools/external-candidate-connector/src/main.rs",
+          "crates/tools/external-candidate-connector/tests/connector.rs",
+          "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/provider.rs"
+        ],
+        "exclude": [],
+        "suffixes": [".rs"],
+        "patterns": [
+          "\\b(?:std::)?process::Command\\b|\\bCommand::new\\s*\\(",
+          "\\b(?:std::)?thread::(?:Builder|spawn|sleep)\\b",
+          "\\bInstant::now\\s*\\(",
+          "\\bstd::fs::(?:read|write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy|set_permissions|metadata|canonicalize|open)\\b",
+          "\\bstd::net::(?:TcpListener|TcpStream|UdpSocket)\\b"
+        ],
+        "regex": true,
+        "ignore_case": false
+      },
+      {
+        "roots": [
+          "crates/tools/external-candidate-connector/src/main.rs",
+          "tests/e2e/external-execution/synthetic-lifecycle-adapter/src/bin/routed_guest.rs"
+        ],
+        "exclude": [],
+        "suffixes": [".rs"],
+        "patterns": [
+          "\\b(?:std::)?io\\s*::\\s*(?:stdin|stdout)\\b",
+          "\\b(?:stdin|stdout)\\s*(?:as\\s+\\w+)?\\s*[,}]",
+          "\\b(?:std|io)\\s+as\\s+\\w+",
+          "\\.detach\\s*\\("
         ],
         "regex": true,
         "ignore_case": false

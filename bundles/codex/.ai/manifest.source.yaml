@@ -3,10 +3,22 @@ version: "1.0.0"
 description: "Supported RyeOS-hosted Codex structured-session worker and remote session surfaces"
 requires_kinds:
   - config
+  - graph
   - handler
   - knowledge
   - protocol
   - runtime
+  - tool
   - worker
   - worker_execution
 uses_kinds: []
+external_providers:
+  - id: codex-hosted
+    protocol: ryeos.external-execution.provider-configuration.v1
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+    connector: ryeos-external-candidate-connector
+    connector_process_group: new
+    configuration_adapter: ryeos-codex-external-configuration
+    configuration_destination: environments.toml

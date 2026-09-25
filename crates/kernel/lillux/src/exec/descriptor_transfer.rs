@@ -93,7 +93,7 @@ impl InheritedDescriptorTransferChildAuthority {
         bind_inherited_channel_to_subprocess_request(
             &self.socket,
             request,
-            descriptor_env_name,
+            Some(descriptor_env_name),
             target_fd,
         )
     }
@@ -116,6 +116,10 @@ impl ReceivedDescriptorAuthority {
     /// Share the exact registered owner; no unregistered duplicate is minted.
     pub fn for_child(&self) -> Result<InheritedDescriptorAuthority, String> {
         Ok(self.descriptor.clone())
+    }
+
+    pub(crate) fn file(&self) -> &File {
+        self.descriptor.file()
     }
 }
 
@@ -259,85 +263,118 @@ impl InheritedDescriptorTransferReceiver {
         bounds: DescriptorTransferBounds,
         deadline: MonotonicDeadline,
     ) -> io::Result<ReceivedDescriptorTransfer> {
-        let mut payload = vec![0u8; bounds.maximum_payload_bytes];
-        // Receive up to the mechanical ceiling, not merely the expected count:
-        // extra delivered descriptors must be adopted and closed on rejection.
-        let mut control = control_buffer(MAX_TRANSFER_DESCRIPTORS);
-        loop {
-            wait_ready(self.socket.file().as_raw_fd(), libc::POLLIN, deadline)?;
-            // Never block while holding this lease: it would prevent the very
-            // child launch whose packet we need. Readiness can race, so use
-            // MSG_DONTWAIT and return to the same deadline on EAGAIN/EINTR.
-            let lease = super::retain_fork_sensitive_descriptors_until(deadline)?;
-            if deadline.has_elapsed() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "descriptor transfer deadline elapsed",
-                ));
-            }
-            let mut files = Vec::with_capacity(MAX_TRANSFER_DESCRIPTORS);
-            let mut iov = libc::iovec {
-                iov_base: payload.as_mut_ptr().cast(),
-                iov_len: payload.len(),
-            };
-            let mut message: libc::msghdr = unsafe { zeroed() };
-            message.msg_iov = &mut iov;
-            message.msg_iovlen = 1;
-            message.msg_control = control.as_mut_ptr().cast();
-            message.msg_controllen = control.len() * size_of::<usize>();
-            // SAFETY: writable buffers and header remain live for recvmsg.
-            // MSG_CMSG_CLOEXEC installs every received fd atomically CLOEXEC.
-            let bytes = unsafe {
-                libc::recvmsg(
-                    self.socket.file().as_raw_fd(),
-                    &mut message,
-                    libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC,
-                )
-            };
-            if bytes < 0 {
-                let error = io::Error::last_os_error();
-                drop(lease);
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) {
-                    continue;
-                }
-                return Err(error);
-            }
-            // Always adopt ancillary rights before testing payload/flags/EOF.
-            // Linux closes rights omitted by MSG_CTRUNC; this owns all rights
-            // actually delivered in the control buffer.
-            let ancillary = unsafe { collect_rights(&message, &mut files) };
-            if message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
-                return Err(invalid(
-                    "descriptor transfer packet or ancillary data was truncated",
-                ));
-            }
-            ancillary?;
-            if bytes == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "descriptor transfer peer closed or sent an empty packet",
-                ));
-            }
-            let bytes = usize::try_from(bytes).map_err(|_| invalid("invalid packet size"))?;
-            bounds.validate_packet(bytes, files.len())?;
-            payload.truncate(bytes);
-            let descriptors = files
-                .into_iter()
-                .map(|file| {
-                    InheritedDescriptorAuthority::from_owned_file(file, &lease)
-                        .map(|descriptor| ReceivedDescriptorAuthority { descriptor })
-                        .map_err(io::Error::other)
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            drop(lease);
-            return Ok(ReceivedDescriptorTransfer {
-                payload,
-                descriptors,
-            });
+        receive_packet(self.socket.file().as_raw_fd(), bounds, deadline)
+    }
+}
+
+/// Carry one registered descriptor over an already-owned inherited duplex
+/// stream. The single marker byte makes SCM_RIGHTS delivery unambiguous on a
+/// byte stream; the application sends authenticated framing and ACK afterward.
+/// Neither a successful send nor a received descriptor is application consent.
+pub(super) fn send_one_on_duplex(
+    channel_fd: RawFd,
+    descriptor_fd: RawFd,
+    deadline: MonotonicDeadline,
+) -> io::Result<()> {
+    send_packet(channel_fd, &[0x52], &[descriptor_fd], deadline)
+}
+
+pub(super) fn receive_one_on_duplex(
+    channel_fd: RawFd,
+    deadline: MonotonicDeadline,
+) -> io::Result<ReceivedDescriptorAuthority> {
+    let bounds = DescriptorTransferBounds::new(1, 1)?;
+    let transfer = receive_packet(channel_fd, bounds, deadline)?;
+    let (payload, mut descriptors) = transfer.into_parts();
+    if payload != [0x52] {
+        return Err(invalid("inherited duplex descriptor marker differs"));
+    }
+    Ok(descriptors.remove(0))
+}
+
+fn receive_packet(
+    socket_fd: RawFd,
+    bounds: DescriptorTransferBounds,
+    deadline: MonotonicDeadline,
+) -> io::Result<ReceivedDescriptorTransfer> {
+    let mut payload = vec![0u8; bounds.maximum_payload_bytes];
+    // Receive up to the mechanical ceiling, not merely the expected count:
+    // extra delivered descriptors must be adopted and closed on rejection.
+    let mut control = control_buffer(MAX_TRANSFER_DESCRIPTORS);
+    loop {
+        wait_ready(socket_fd, libc::POLLIN, deadline)?;
+        // Never block while holding this lease: it would prevent the very
+        // child launch whose packet we need. Readiness can race, so use
+        // MSG_DONTWAIT and return to the same deadline on EAGAIN/EINTR.
+        let lease = super::retain_fork_sensitive_descriptors_until(deadline)?;
+        if deadline.has_elapsed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "descriptor transfer deadline elapsed",
+            ));
         }
+        let mut files = Vec::with_capacity(MAX_TRANSFER_DESCRIPTORS);
+        let mut iov = libc::iovec {
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
+        };
+        let mut message: libc::msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = control.len() * size_of::<usize>();
+        // SAFETY: writable buffers and header remain live for recvmsg.
+        // MSG_CMSG_CLOEXEC installs every received fd atomically CLOEXEC.
+        let bytes = unsafe {
+            libc::recvmsg(
+                socket_fd,
+                &mut message,
+                libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC,
+            )
+        };
+        if bytes < 0 {
+            let error = io::Error::last_os_error();
+            drop(lease);
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) {
+                continue;
+            }
+            return Err(error);
+        }
+        // Always adopt ancillary rights before testing payload/flags/EOF.
+        // Linux closes rights omitted by MSG_CTRUNC; this owns all rights
+        // actually delivered in the control buffer.
+        let ancillary = unsafe { collect_rights(&message, &mut files) };
+        if message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
+            return Err(invalid(
+                "descriptor transfer packet or ancillary data was truncated",
+            ));
+        }
+        ancillary?;
+        if bytes == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "descriptor transfer peer closed or sent an empty packet",
+            ));
+        }
+        let bytes = usize::try_from(bytes).map_err(|_| invalid("invalid packet size"))?;
+        bounds.validate_packet(bytes, files.len())?;
+        payload.truncate(bytes);
+        let descriptors = files
+            .into_iter()
+            .map(|file| {
+                InheritedDescriptorAuthority::from_owned_file(file, &lease)
+                    .map(|descriptor| ReceivedDescriptorAuthority { descriptor })
+                    .map_err(io::Error::other)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        drop(lease);
+        return Ok(ReceivedDescriptorTransfer {
+            payload,
+            descriptors,
+        });
     }
 }
 
@@ -467,6 +504,31 @@ mod tests {
 
     fn deadline() -> MonotonicDeadline {
         MonotonicDeadline::after(Duration::from_secs(2))
+    }
+
+    #[test]
+    #[ignore = "requires native loopback socket binding"]
+    fn inherited_duplex_transfers_exact_listener_without_rebinding() {
+        use crate::loopback::ExactLoopbackListener;
+        use std::net::TcpListener;
+
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let (mut parent, child) = crate::inherited_duplex_channel_pair().unwrap();
+        let mut peer = crate::InheritedDuplexChannel {
+            stream: child.channel.clone(),
+        };
+        drop(child);
+        ExactLoopbackListener::bind_exact(address)
+            .unwrap()
+            .transfer_over_inherited_duplex(&mut parent, deadline())
+            .unwrap();
+        let received =
+            ExactLoopbackListener::receive_over_inherited_duplex(&mut peer, address, deadline())
+                .unwrap();
+        assert_eq!(received.address(), address);
+        assert!(TcpListener::bind(address).is_err());
     }
 
     fn sender(
@@ -885,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_refuses_unrelated_occupied_target_without_overwriting_it() {
+    fn mapping_retains_unrelated_parent_target_without_overwriting_it() {
         let (reader, received) = received_pipe_authority();
         let (other_reader, other) = received_pipe_authority();
         let occupied = other.for_child().unwrap();
@@ -894,18 +956,14 @@ mod tests {
             source: received.for_child().unwrap(),
             target_fd: occupied.inherited_descriptor().unwrap(),
         }];
-        let failure = match super::super::prepare_inherited_fd_mappings(
+        let prepared = super::super::prepare_inherited_fd_mappings(
             &mappings,
             &[],
             &std::collections::BTreeSet::new(),
-        ) {
-            Ok(_) => panic!("unrelated occupied mapping target must be refused"),
-            Err(error) => error,
-        };
-        assert!(
-            failure.contains("occupied without request-owned authority"),
-            "{failure}"
-        );
+        )
+        .expect("an occupied parent coordinate is replaced only in the child");
+        assert_eq!(occupied.file_identity().unwrap(), identity);
+        drop(prepared);
         assert_eq!(occupied.file_identity().unwrap(), identity);
         drop((mappings, received, occupied, other));
         assert_no_writer_leaked(reader);

@@ -4596,6 +4596,45 @@ pub fn prepare_launch_contract(
     project_path: &Path,
     ctx: &ExecutionContext,
 ) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
+    prepare_launch_contract_with_cache(
+        applicability,
+        primary,
+        ref_bindings,
+        project_path,
+        ctx,
+        None,
+    )
+}
+
+#[cfg(feature = "test-support")]
+pub fn prepare_launch_contract_with_materialization(
+    applicability: &LaunchContractApplicability,
+    primary: &ResolvedItem,
+    ref_bindings: &BTreeMap<String, String>,
+    project_path: &Path,
+    ctx: &ExecutionContext,
+    cache: crate::execution::launch_preparation::PreparedResolutionCacheContext<'_>,
+) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
+    prepare_launch_contract_with_cache(
+        applicability,
+        primary,
+        ref_bindings,
+        project_path,
+        ctx,
+        Some(cache),
+    )
+}
+
+fn prepare_launch_contract_with_cache(
+    applicability: &LaunchContractApplicability,
+    primary: &ResolvedItem,
+    ref_bindings: &BTreeMap<String, String>,
+    project_path: &Path,
+    ctx: &ExecutionContext,
+    resolution_cache: Option<
+        crate::execution::launch_preparation::PreparedResolutionCacheContext<'_>,
+    >,
+) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
     let runtime = match applicability {
         LaunchContractApplicability::NonEnvelope { class } => {
             if ref_bindings.is_empty() {
@@ -4654,7 +4693,7 @@ pub fn prepare_launch_contract(
             trust_store: &request_snapshot.trust_store,
             principal: &ctx.plan_ctx.requested_by,
             subject_resolution_authority: &ctx.plan_ctx.subject_resolution_authority,
-            resolution_cache: None,
+            resolution_cache,
             ref_binding_resolution_timings: None,
         },
     )
@@ -6470,7 +6509,15 @@ metadata:
             ParserRegistry::empty(),
             std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         );
+        let registered_bundle_roots = bundle_roots
+            .iter()
+            .map(|root| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: "example-bundle".to_owned(),
+                canonical_root: std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()),
+            })
+            .collect();
         Engine::new(kinds, parser_dispatcher, bundle_roots)
+            .with_registered_bundle_roots(registered_bundle_roots)
             .with_trust_store(item_trust_store)
             .with_node_trust_store(node_trust_store)
     }
@@ -7318,8 +7365,7 @@ runtime_authority:
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
             .unwrap_err();
         assert!(
-            err.to_string()
-                .contains("not inside a registered installed bundle root"),
+            err.to_string().contains("contradicts typed bundle root"),
             "source-space labels alone must not establish installed provenance: {err}"
         );
     }
@@ -7930,6 +7976,7 @@ requires:
             network_authority_ceiling: None,
             filesystem_authority_ceiling: None,
             target: None,
+            endpoint: None,
             resource_authority_ceiling: None,
         }
     }

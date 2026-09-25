@@ -74,6 +74,10 @@ pub fn execute_plan(
 }
 
 fn validate_plan_target_without_selection(plan: &ExecutionPlan) -> Result<(), EngineError> {
+    plan.require_local_endpoint_for_dispatch()
+        .map_err(|error| EngineError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
     plan.resource_authority_ceiling
         .admits(plan.target_requirement.as_ref())
         .map_err(|error| EngineError::ExecutionFailed {
@@ -100,6 +104,10 @@ fn validate_plan_target_with_selection(
     selections: &[crate::contracts::ExecutionResourceSelection],
     devices: Option<&lillux::CharacterDeviceSet>,
 ) -> Result<(), EngineError> {
+    plan.require_local_endpoint_for_dispatch()
+        .map_err(|error| EngineError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
     plan.resource_authority_ceiling
         .admits(plan.target_requirement.as_ref())
         .map_err(|error| EngineError::ExecutionFailed {
@@ -317,34 +325,122 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
         };
     }
 
+    let mut completion = interpret_terminal_output_with_success(
+        result.success,
+        result.exit_code,
+        &result.stdout,
+        &result.stderr,
+    );
+    // Native lifecycle and accounting facts belong to the native owner, not
+    // to the transport-independent interpretation of the Tool's output.
+    completion.metadata = Some(base_metadata(&result));
+    completion
+}
+
+/// Interpret complete terminal output from an authoritatively observed target
+/// exit code. This is the same Tool-result decoder used by local dispatch.
+///
+/// The caller owns release/application authority, output completeness and
+/// bounds, actual target termination, cleanup, and replay eligibility. This
+/// function proves none of those facts and must not be used to turn a timeout,
+/// signal, transport EOF, or uncertain termination into an observed exit code.
+/// It supplies no process identity, duration, cost, or endpoint metadata.
+pub fn interpret_terminal_output(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> ExecutionCompletion {
+    interpret_terminal_output_with_success(exit_code == 0, exit_code, stdout, stderr)
+}
+
+/// Interpret reconstructed external target output with the ordinary Tool
+/// contract. This pure projection is not a completion permit: the owner must
+/// authenticate the transcript, settle cleanup, and check current authority at
+/// finalization. Shared here so the runner and authoritative finalizer cannot
+/// disagree about result meaning. Signals and deadlines are not exit codes.
+pub fn interpret_external_terminal(
+    observation: &ryeos_state::external_execution::ExternalCommandTermination,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> ExecutionCompletion {
+    use ryeos_state::external_execution::{
+        ExternalCommandTerminationReason as Reason, ExternalTargetExit,
+    };
+    let truncated = observation.stdout.truncated || observation.stderr.truncated;
+    if observation.reason == Reason::TargetExited
+        && !truncated
+        && let ExternalTargetExit::Code(code) = observation.target_exit
+    {
+        return interpret_terminal_output(
+            code,
+            &String::from_utf8_lossy(stdout),
+            &String::from_utf8_lossy(stderr),
+        );
+    }
+    let (status, outcome) = match observation.reason {
+        Reason::Cancelled => (ThreadTerminalStatus::Cancelled, "cancelled"),
+        Reason::Deadline => (ThreadTerminalStatus::Killed, "timeout"),
+        Reason::OutputLimit => (ThreadTerminalStatus::Failed, "external_output_limit"),
+        Reason::Fault => (ThreadTerminalStatus::Failed, "external_command_fault"),
+        Reason::TargetExited if truncated => {
+            (ThreadTerminalStatus::Failed, "external_output_incomplete")
+        }
+        Reason::TargetExited => (ThreadTerminalStatus::Failed, "external_target_signal"),
+    };
+    ExecutionCompletion {
+        status,
+        outcome_code: Some(outcome.into()),
+        // Interrupted output cannot carry a parseable success envelope, even
+        // when the observed target exit happened to be zero.
+        result: None,
+        error: Some(serde_json::json!({
+            "reason": observation.reason,
+            "target_exit": observation.target_exit,
+            "stdout_truncated": observation.stdout.truncated,
+            "stderr_truncated": observation.stderr.truncated,
+        })),
+        artifacts: Vec::new(),
+        final_cost: None,
+        continuation_request: None,
+        // No fabricated local PID, duration, provider cost or death evidence.
+        metadata: None,
+    }
+}
+
+fn interpret_terminal_output_with_success(
+    success: bool,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> ExecutionCompletion {
     // Process-level failure (non-zero exit). The actionable exception is
     // normally at the end of stderr, so retain its bounded tail instead of a
     // prefix that can stop midway through a traceback.
-    if !result.success {
+    if !success {
         return ExecutionCompletion {
             status: ThreadTerminalStatus::Failed,
-            outcome_code: Some(format!("exit:{}", result.exit_code)),
+            outcome_code: Some(format!("exit:{exit_code}")),
             result: None,
             error: Some(serde_json::json!({
-                "exit_code": result.exit_code,
-                "stdout": truncate_for_error(&result.stdout, 2000),
-                "stderr": truncate_tail_for_error(&result.stderr, STDERR_TAIL_CAP),
+                "exit_code": exit_code,
+                "stdout": truncate_for_error(stdout, 2000),
+                "stderr": truncate_tail_for_error(stderr, STDERR_TAIL_CAP),
             })),
             artifacts: Vec::new(),
             final_cost: None,
             continuation_request: None,
-            metadata: Some(base_metadata(&result)),
+            metadata: None,
         };
     }
 
     // Process exited 0. Parse stdout as the tool result JSON — but a
     // catch-and-report tool may still signal failure *inside* that JSON
     // while the process exits clean.
-    let parsed = match serde_json::from_str::<Value>(&result.stdout) {
+    let parsed = match serde_json::from_str::<Value>(stdout) {
         Ok(v) => Some(v),
         Err(e) => {
             tracing::trace!(
-                stdout_len = result.stdout.len(),
+                stdout_len = stdout.len(),
                 "subprocess stdout is not valid JSON, wrapping as string: {e}"
             );
             None
@@ -352,44 +448,44 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
     };
     let result_value = parsed
         .clone()
-        .unwrap_or_else(|| Value::String(result.stdout.clone()));
+        .unwrap_or_else(|| Value::String(stdout.to_owned()));
 
     // Soft failure: exit 0, but the result shape reports the tool failed.
     // The tool's real error (Python traceback, `logger.error(...)`) was
-    // written to stderr — captured by lillux, but dropped on the success
-    // path. Retain a bounded TAIL of stderr (where the error lands) in
+    // written to stderr — retained by the execution owner, but omitted on the
+    // success path. Retain a bounded TAIL of stderr (where the error lands) in
     // `error`, which IS persisted into the run record; `metadata` is not.
     // Flipping to Failed also lines up with the graph runtime, which keys
     // subprocess-leaf failure off `error` being non-null.
     if parsed.as_ref().is_some_and(result_reports_failure) {
         return ExecutionCompletion {
             status: ThreadTerminalStatus::Failed,
-            outcome_code: Some(format!("exit:{}", result.exit_code)),
+            outcome_code: Some(format!("exit:{exit_code}")),
             result: Some(result_value),
             error: Some(serde_json::json!({
-                "exit_code": result.exit_code,
+                "exit_code": exit_code,
                 "soft_failure": true,
-                "stdout": truncate_for_error(&result.stdout, 2000),
-                "stderr": truncate_tail_for_error(&result.stderr, STDERR_TAIL_CAP),
+                "stdout": truncate_for_error(stdout, 2000),
+                "stderr": truncate_tail_for_error(stderr, STDERR_TAIL_CAP),
             })),
             artifacts: Vec::new(),
             final_cost: None,
             continuation_request: None,
-            metadata: Some(base_metadata(&result)),
+            metadata: None,
         };
     }
 
     // Genuine success. Keep stderr OUT of the durable record so healthy
-    // runs don't spam logs — `base_metadata` notes only its byte count.
+    // runs don't spam logs. The execution owner can retain its byte count.
     ExecutionCompletion {
         status: ThreadTerminalStatus::Completed,
-        outcome_code: Some(format!("exit:{}", result.exit_code)),
+        outcome_code: Some(format!("exit:{exit_code}")),
         result: Some(result_value),
         error: None,
         artifacts: Vec::new(),
         final_cost: None,
         continuation_request: None,
-        metadata: Some(base_metadata(&result)),
+        metadata: None,
     }
 }
 
@@ -986,9 +1082,14 @@ mod tests {
         let app_root = tempdir();
         let policy_dir = app_root.join(".ai/test-fixtures");
         fs::create_dir_all(&policy_dir).unwrap();
+        let mut isolation_policy = crate::isolation::IsolationPolicy::disabled_for_authoring();
+        isolation_policy.filesystem.readable.clear();
+        isolation_policy.filesystem.writable = vec!["{project}".into()];
+        isolation_policy.network.mode = crate::isolation::IsolationNetworkMode::Isolated;
+        isolation_policy.limits.open_files = Some(128);
         fs::write(
             policy_dir.join("isolation-policy.yaml"),
-            "version: 1\nmode: disabled\nbackend: null\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            serde_yaml::to_string(&isolation_policy).unwrap(),
         )
         .unwrap();
         let isolation =
@@ -1054,6 +1155,8 @@ mod tests {
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
             target_requirement: None,
+            endpoint_requirement: crate::contracts::ExecutionEndpointRequirement::Local {},
+            external_endpoint_binding: None,
             resource_authority_ceiling:
                 crate::contracts::ExecutionResourceAuthorityCeiling::NodePolicy,
             cache_key: "test".into(),
@@ -1062,6 +1165,96 @@ mod tests {
             runtime_identity: None,
             debug_raw: false,
         }
+    }
+
+    #[test]
+    fn endpoint_planning_sealing_and_local_dispatch_have_distinct_guards() {
+        use crate::contracts::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
+        let mut plan = make_plan(Vec::new());
+        plan.validate_endpoint_for_planning().unwrap();
+        plan.validate_endpoint_for_sealing().unwrap();
+        validate_plan_target_without_selection(&plan).unwrap();
+        validate_plan_target_with_selection(&plan, &[], None).unwrap();
+        let binding = ExternalEndpointBindingIdentity {
+            binding_id: "farm-direct".into(),
+            binding_digest: "a".repeat(64),
+        };
+        plan.external_endpoint_binding = Some(binding.clone());
+        assert!(plan.validate_endpoint_for_planning().is_err());
+        assert!(plan.validate_endpoint_for_sealing().is_err());
+        assert!(validate_plan_target_without_selection(&plan).is_err());
+        plan.external_endpoint_binding = None;
+        plan.endpoint_requirement = ExecutionEndpointRequirement::External {
+            binding_id: "farm-direct".into(),
+            stdout_max_bytes: 1024,
+            stderr_max_bytes: 1024,
+        };
+        plan.validate_endpoint_for_planning().unwrap();
+        assert!(plan.validate_endpoint_for_sealing().is_err());
+        assert!(validate_plan_target_without_selection(&plan).is_err());
+        assert!(validate_plan_target_with_selection(&plan, &[], None).is_err());
+        plan.external_endpoint_binding = Some(binding);
+        plan.validate_endpoint_for_sealing().unwrap();
+        assert!(validate_plan_target_without_selection(&plan).is_err());
+        assert!(validate_plan_target_with_selection(&plan, &[], None).is_err());
+        // These public entry points must refuse before reaching any spawn,
+        // even with an empty plan and no platform/resource selector.
+        let context = test_engine_context();
+        assert!(execute_plan(&plan, &context).is_err());
+        assert!(spawn_plan(&plan, &context).is_err());
+        assert!(spawn_plan_with_resources(&plan, &context, &[], None).is_err());
+        plan.external_endpoint_binding.as_mut().unwrap().binding_id = "other".into();
+        assert!(plan.validate_endpoint_for_planning().is_err());
+        plan.external_endpoint_binding.as_mut().unwrap().binding_id = "farm-direct".into();
+        plan.external_endpoint_binding
+            .as_mut()
+            .unwrap()
+            .binding_digest = "A".repeat(64);
+        assert!(plan.validate_endpoint_for_sealing().is_err());
+    }
+
+    #[test]
+    fn endpoint_plan_wire_requires_explicit_intent_and_binding_presence() {
+        use crate::contracts::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
+        let mut plan = make_plan(Vec::new());
+        let local = serde_json::to_value(&plan).unwrap();
+        assert_eq!(
+            local["endpoint_requirement"],
+            serde_json::json!({"kind":"local"})
+        );
+        assert!(local["external_endpoint_binding"].is_null());
+        for field in ["endpoint_requirement", "external_endpoint_binding"] {
+            let mut predecessor = local.clone();
+            predecessor.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ExecutionPlan>(predecessor).is_err());
+        }
+        plan.endpoint_requirement = ExecutionEndpointRequirement::External {
+            binding_id: "farm-direct".into(),
+            stdout_max_bytes: 1024,
+            stderr_max_bytes: 1024,
+        };
+        plan.external_endpoint_binding = Some(ExternalEndpointBindingIdentity {
+            binding_id: "farm-direct".into(),
+            binding_digest: "a".repeat(64),
+        });
+        let exact = serde_json::to_value(&plan).unwrap();
+        let restored: ExecutionPlan = serde_json::from_value(exact.clone()).unwrap();
+        restored.validate_endpoint_for_sealing().unwrap();
+        assert_ne!(
+            lillux::canonical_json(&local).unwrap(),
+            lillux::canonical_json(&exact).unwrap()
+        );
+        plan.external_endpoint_binding
+            .as_mut()
+            .unwrap()
+            .binding_digest = "b".repeat(64);
+        assert_ne!(
+            lillux::canonical_json(&exact).unwrap(),
+            lillux::canonical_json(&serde_json::to_value(&plan).unwrap()).unwrap()
+        );
+        let mut unknown = exact;
+        unknown["external_endpoint_binding"]["provider_url"] = "https://provider".into();
+        assert!(serde_json::from_value::<ExecutionPlan>(unknown).is_err());
     }
 
     #[test]
@@ -1217,6 +1410,112 @@ mod tests {
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Failed);
         assert!(completion.error.is_some());
+    }
+
+    #[test]
+    fn terminal_output_interprets_json_and_plain_text_without_process_metadata() {
+        for (stdout, expected) in [
+            (r#"{"score":42}"#, serde_json::json!({"score": 42})),
+            ("plain output\n", Value::String("plain output\n".into())),
+            ("", Value::String(String::new())),
+        ] {
+            let completion = interpret_terminal_output(0, stdout, "healthy diagnostic");
+            assert_eq!(completion.status, ThreadTerminalStatus::Completed);
+            assert_eq!(completion.outcome_code.as_deref(), Some("exit:0"));
+            assert_eq!(completion.result, Some(expected));
+            assert!(completion.error.is_none());
+            assert!(completion.metadata.is_none());
+            assert!(completion.artifacts.is_empty());
+            assert!(completion.final_cost.is_none());
+            assert!(completion.continuation_request.is_none());
+        }
+    }
+
+    #[test]
+    fn terminal_output_zero_exit_preserves_all_json_soft_failure_signals() {
+        let stderr = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(1024));
+        for stdout in [
+            r#"{"success":false}"#,
+            r#"{"error":"failed"}"#,
+            r#"{"errors":["failed"]}"#,
+        ] {
+            let completion = interpret_terminal_output(0, stdout, &stderr);
+            assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+            assert_eq!(completion.outcome_code.as_deref(), Some("exit:0"));
+            assert_eq!(
+                completion.result,
+                Some(serde_json::from_str(stdout).unwrap())
+            );
+            let error = completion.error.unwrap();
+            assert_eq!(error["soft_failure"], true);
+            let tail = error["stderr"].as_str().unwrap();
+            assert!(tail.starts_with("… (truncated,"));
+            assert!(tail.ends_with("FINAL_EXCEPTION"));
+            assert!(completion.metadata.is_none());
+        }
+        let success =
+            interpret_terminal_output(0, r#"{"success":true,"error":null,"errors":[]}"#, "");
+        assert_eq!(success.status, ThreadTerminalStatus::Completed);
+    }
+
+    #[test]
+    fn terminal_output_nonzero_exit_overrides_success_json_and_retains_stderr_tail() {
+        let stderr = format!("{}FINAL_EXCEPTION", "traceback frame\n".repeat(1024));
+        let completion = interpret_terminal_output(7, r#"{"success":true}"#, &stderr);
+        assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+        assert_eq!(completion.outcome_code.as_deref(), Some("exit:7"));
+        assert!(completion.result.is_none());
+        let error = completion.error.unwrap();
+        assert_eq!(error["exit_code"], 7);
+        assert_eq!(error["stdout"], r#"{"success":true}"#);
+        assert!(
+            error["stderr"]
+                .as_str()
+                .unwrap()
+                .ends_with("FINAL_EXCEPTION")
+        );
+        assert!(completion.metadata.is_none());
+    }
+
+    #[test]
+    fn local_terminal_translation_retains_native_metadata_and_shared_result_semantics() {
+        for (success, exit_code, stdout) in [
+            (true, 0, r#"{"score":42}"#),
+            (true, 0, r#"{"success":false}"#),
+            (false, 7, r#"{"success":true}"#),
+            // Native failure is authoritative even with an anomalous zero code.
+            (false, 0, r#"{"success":true}"#),
+        ] {
+            let completion = translate_result(lillux::SubprocessResult {
+                success,
+                stdout: stdout.into(),
+                stderr: "diagnostic".into(),
+                exit_code,
+                duration_ms: 12.0,
+                pid: 42,
+                timed_out: false,
+                launcher_refusal: None,
+                aborted_before_attachment: None,
+                output_limit_exceeded: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            });
+            let expected =
+                interpret_terminal_output_with_success(success, exit_code, stdout, "diagnostic");
+            assert_eq!(completion.status, expected.status);
+            assert_eq!(completion.outcome_code, expected.outcome_code);
+            assert_eq!(completion.result, expected.result);
+            assert_eq!(completion.error, expected.error);
+            assert_eq!(
+                completion.metadata,
+                Some(serde_json::json!({
+                    "duration_ms": 12.0,
+                    "exit_code": exit_code,
+                    "pid": 42,
+                    "stderr_bytes": 10,
+                }))
+            );
+        }
     }
 
     #[test]

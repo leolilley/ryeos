@@ -17,8 +17,8 @@ use ryeos_isolation_protocol::{
     AdapterLaunchLifecycle, AdapterLaunchRequest, AdapterWorkspaceRequest,
     AdapterWorkspaceResponse, IsolationAdapterProtocolVersion, IsolationAuthority,
     IsolationAuthorityId, IsolationAuthorityPurpose, IsolationCapability, IsolationDeviceSurface,
-    IsolationEnvironment, IsolationFixedParentView, IsolationMount, IsolationMountAccess,
-    IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
+    IsolationEnvironment, IsolationFixedParentView, IsolationLoopbackIngress, IsolationMount,
+    IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPidNamespace, IsolationPlan,
     IsolationProjectWorkspace, IsolationTarget, IsolationTargetChannel,
     IsolationWorkspaceDescendantMount, MAX_AUTHORITIES, WorkspaceLifecycleOperation,
 };
@@ -85,6 +85,119 @@ enum RequestedLaunchLifecycle {
 struct CompiledIsolationLaunch {
     request: lillux::SubprocessRequest,
     provenance: IsolationLaunchProvenance,
+    expected_applied_launch: Option<lillux::LinuxSandboxAppliedLaunchCommitments>,
+    loopback_transfer: Option<CompiledLoopbackTransfer>,
+}
+
+struct CompiledLoopbackTransfer {
+    receiver: lillux::InheritedDescriptorTransferReceiver,
+    request: AdapterLaunchRequest,
+}
+
+/// A held launch whose exact one-shot listener must be received before the
+/// target can be released. This does not itself qualify the target.
+pub struct AppliedIsolationLaunchWithLoopbackIngress {
+    request: IsolationRequestAwaitingAttachment,
+    transfer: CompiledLoopbackTransfer,
+    pub provenance: IsolationLaunchProvenance,
+    pub expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+}
+
+pub struct HeldIsolationLaunchWithLoopbackIngress {
+    held: lillux::ProcessAwaitingAttachment,
+    transfer: CompiledLoopbackTransfer,
+}
+
+/// Exact adapter listener packet and checked socket, still short of applied
+/// launch or namespace qualification. The receipt can bind the subsequent
+/// verifier handoff to this held request without accepting adapter testimony
+/// as a substitute for daemon-owned process evidence.
+pub struct ValidatedHeldLoopbackListener {
+    listener: lillux::loopback::ExactLoopbackListener,
+    receipt: ryeos_isolation_protocol::LoopbackListenerTransferReceipt,
+}
+
+impl ValidatedHeldLoopbackListener {
+    pub fn into_parts(
+        self,
+    ) -> (
+        lillux::loopback::ExactLoopbackListener,
+        ryeos_isolation_protocol::LoopbackListenerTransferReceipt,
+    ) {
+        (self.listener, self.receipt)
+    }
+}
+
+impl AppliedIsolationLaunchWithLoopbackIngress {
+    pub fn require_applied_launch_receipt(mut self) -> Result<Self, EngineError> {
+        self.request = self.request.require_applied_launch_receipt()?;
+        Ok(self)
+    }
+
+    pub fn spawn(self) -> Result<HeldIsolationLaunchWithLoopbackIngress, lillux::SubprocessResult> {
+        Ok(HeldIsolationLaunchWithLoopbackIngress {
+            held: self.request.spawn()?,
+            transfer: self.transfer,
+        })
+    }
+}
+
+impl HeldIsolationLaunchWithLoopbackIngress {
+    /// On refusal the exact held process is returned for the durable owner to
+    /// abort and reap; neither a silent Drop nor a second launch is allowed.
+    pub fn receive_listener(
+        self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        (
+            lillux::ProcessAwaitingAttachment,
+            ValidatedHeldLoopbackListener,
+        ),
+        (EngineError, lillux::ProcessAwaitingAttachment),
+    > {
+        let Self { held, transfer } = self;
+        let result = (|| {
+            let bounds = lillux::DescriptorTransferBounds::new(
+                ryeos_isolation_protocol::MAX_LOOPBACK_LISTENER_RECEIPT_BYTES,
+                1,
+            )
+            .map_err(|error| refused(format!("bound loopback listener transfer: {error}")))?;
+            let packet = transfer
+                .receiver
+                .receive(bounds, deadline)
+                .map_err(|error| refused(format!("receive loopback listener: {error}")))?;
+            let (bytes, mut descriptors) = packet.into_parts();
+            let receipt = validate_loopback_listener_transfer_receipt(
+                &bytes,
+                descriptors.len(),
+                &transfer.request,
+            )?;
+            let ingress = transfer
+                .request
+                .plan
+                .loopback_ingress
+                .as_ref()
+                .ok_or_else(|| {
+                    refused("loopback ingress disappeared from sealed request".into())
+                })?;
+            let address = ingress
+                .address
+                .parse()
+                .map_err(|error| refused(format!("parse sealed loopback address: {error}")))?;
+            let listener = lillux::loopback::ExactLoopbackListener::from_transferred(
+                descriptors
+                    .pop()
+                    .ok_or_else(|| refused("loopback listener descriptor missing".into()))?,
+                address,
+            )
+            .map_err(|error| refused(format!("validate transferred loopback listener: {error}")))?;
+            Ok(ValidatedHeldLoopbackListener { listener, receipt })
+        })();
+        match result {
+            Ok(listener) => Ok((held, listener)),
+            Err(error) => Err((error, held)),
+        }
+    }
 }
 
 /// Higher-level guard that binds a composed runtime to the exact registered
@@ -195,6 +308,26 @@ impl std::fmt::Debug for IsolationRuntime {
                 &self._generation_lifeline.is_some(),
             )
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod retained_scratch_view_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_scratch_cannot_stand_in_for_retained_view() {
+        let parent = tempfile::tempdir().unwrap();
+        let original = parent.path().join("private");
+        let moved = parent.path().join("retained");
+        std::fs::create_dir(&original).unwrap();
+        let pinned = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        let view = pinned.inherited_descriptor_authority().unwrap();
+        require_retained_scratch_view_matches(&pinned, &view, &original).unwrap();
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        let replacement = lillux::PinnedDirectory::open(&original).unwrap().unwrap();
+        assert!(require_retained_scratch_view_matches(&replacement, &view, &original).is_err());
     }
 }
 
@@ -681,15 +814,48 @@ fn validate_workspace_view_context(
     project: IsolationProjectAuthority,
     view: Option<&lillux::InheritedDescriptorAuthority>,
 ) -> Result<(), EngineError> {
-    let requires_view = state == IsolationRuntimeState::Enforced
-        && project == IsolationProjectAuthority::RuntimeWorkspace;
-    if requires_view != view.is_some() {
-        return Err(refused(if requires_view {
-            "enforced runtime workspace launch requires its exact retained view; lower/state reconstruction is not launch authority".to_string()
-        } else {
+    if state == IsolationRuntimeState::Enforced
+        && project == IsolationProjectAuthority::RuntimeWorkspace
+        && view.is_none()
+    {
+        return Err(refused("enforced runtime workspace launch requires its exact retained view; lower/state reconstruction is not launch authority".to_string()));
+    }
+    if view.is_some()
+        && !(state == IsolationRuntimeState::Enforced
+            && matches!(
+                project,
+                IsolationProjectAuthority::RuntimeWorkspace
+                    | IsolationProjectAuthority::EphemeralScratch
+            ))
+    {
+        return Err(refused(
             "nonworkspace or explicitly disabled launch cannot carry a retained workspace view"
-                .to_string()
-        }));
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_retained_scratch_view_matches(
+    expected: &lillux::PinnedDirectory,
+    view: &lillux::InheritedDescriptorAuthority,
+    diagnostic_path: &Path,
+) -> Result<(), EngineError> {
+    let retained = view
+        .try_clone_pinned_directory(diagnostic_path.to_path_buf())
+        .map_err(|error| {
+            refused(format!(
+                "retained projectless scratch view cannot be opened: {error}"
+            ))
+        })?;
+    if !expected.is_same_directory(&retained).map_err(|error| {
+        refused(format!(
+            "retained projectless scratch identity cannot be compared: {error}"
+        ))
+    })? {
+        return Err(refused(
+            "projectless scratch differs from its retained pinned view".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2147,6 +2313,7 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::Run,
             None,
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunch {
@@ -2204,11 +2371,13 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::AwaitAttachment,
             scope.as_ref().map(|scope| scope.recovery()),
             None,
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
         })
     }
 
@@ -2241,11 +2410,59 @@ impl IsolationRuntime {
             RequestedLaunchLifecycle::AwaitAttachment,
             scope.as_ref().map(|scope| scope.recovery()),
             Some(devices),
+            None,
         )?;
         self.ensure_registered_generation_current()?;
         Ok(AppliedIsolationLaunchAwaitingAttachment {
             request: IsolationRequestAwaitingAttachment::new(applied.request, scope),
             provenance: applied.provenance,
+            expected_applied_launch: applied.expected_applied_launch,
+        })
+    }
+
+    /// Compile an exact held scoped target with isolated-loopback ingress.
+    /// This generic compiler does not authenticate the ingress choice: the
+    /// caller must derive it from retained signed authority before invoking
+    /// this API. It never reads an endpoint from target parameters.
+    pub fn apply_awaiting_attachment_in_scope_with_loopback_ingress(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+        scope: lillux::ProcessScope,
+        ingress: &IsolationLoopbackIngress,
+    ) -> Result<AppliedIsolationLaunchWithLoopbackIngress, EngineError> {
+        self.ensure_registered_generation_current()?;
+        ingress
+            .validate()
+            .map_err(|error| refused(error.to_string()))?;
+        let timeout = self.process_scope_control_timeout()?;
+        let provider = self.process_scope_provider.as_ref().ok_or_else(|| {
+            refused("retained scope has no admitted provider generation".to_owned())
+        })?;
+        provider.validate_scope(&scope).map_err(refused)?;
+        if scope.recovery().control_timeout() != timeout {
+            return Err(refused(
+                "retained process scope differs from the admitted control budget".into(),
+            ));
+        }
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+            Some(scope.recovery()),
+            None,
+            Some(ingress),
+        )?;
+        self.ensure_registered_generation_current()?;
+        Ok(AppliedIsolationLaunchWithLoopbackIngress {
+            request: IsolationRequestAwaitingAttachment::new(applied.request, Some(scope)),
+            transfer: applied
+                .loopback_transfer
+                .ok_or_else(|| refused("compiled loopback transfer is absent".into()))?,
+            provenance: applied.provenance,
+            expected_applied_launch: applied
+                .expected_applied_launch
+                .ok_or_else(|| refused("compiled applied launch commitments are absent".into()))?,
         })
     }
 
@@ -2256,6 +2473,7 @@ impl IsolationRuntime {
         lifecycle: RequestedLaunchLifecycle,
         process_scope: Option<&lillux::ProcessScopeRecovery>,
         selected_devices: Option<&lillux::CharacterDeviceSet>,
+        loopback_ingress: Option<&IsolationLoopbackIngress>,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
         // Keep this seam backend-neutral. The engine may compile only the
         // signed generic isolation policy/protocol and retain exact descriptor
@@ -2270,6 +2488,11 @@ impl IsolationRuntime {
         if self.state == IsolationRuntimeState::Disabled && selected_devices.is_some() {
             return Err(refused(
                 "exact character-device grants require enforced isolation".to_owned(),
+            ));
+        }
+        if self.state == IsolationRuntimeState::Disabled && loopback_ingress.is_some() {
+            return Err(refused(
+                "isolated loopback ingress requires enforced isolation".into(),
             ));
         }
         let verified_command_authority = context
@@ -2627,6 +2850,8 @@ impl IsolationRuntime {
             return Ok(CompiledIsolationLaunch {
                 request,
                 provenance: self.launch_provenance(None),
+                expected_applied_launch: None,
+                loopback_transfer: None,
             });
         }
         if !request.inherited_fds.is_empty() {
@@ -2945,6 +3170,9 @@ impl IsolationRuntime {
                     "projectless scratch does not match its daemon-owned child authority"
                         .to_string(),
                 ));
+            }
+            if let Some(view) = context.workspace_view {
+                require_retained_scratch_view_matches(&expected, view, &canonical_project)?;
             }
             let handle = expected.inherited_descriptor_authority().map_err(|error| {
                 refused(format!(
@@ -3566,6 +3794,29 @@ impl IsolationRuntime {
                         )));
                     }
                 }
+                IsolationReadOnlyMountScope::RuntimeEndpoint => {
+                    let root = Path::new(ryeos_state::objects::SESSION_RUNTIME_ENDPOINTS_ROOT);
+                    if destination == root || !destination.starts_with(root) {
+                        return Err(refused(format!(
+                            "session runtime endpoint {} is not a strict child of {}",
+                            destination.display(),
+                            root.display(),
+                        )));
+                    }
+                    if paths_overlap(destination, &project_destination)
+                        || paths_overlap(destination, &command_path)
+                        || readable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                        || writable_mounts
+                            .iter()
+                            .any(|mount| paths_overlap(destination, &mount.destination))
+                    {
+                        return Err(refused(
+                            "session runtime endpoint overlaps another launch authority".into(),
+                        ));
+                    }
+                }
             }
             if external_destinations.iter().any(|other: &PathBuf| {
                 destination.starts_with(other) || other.starts_with(destination)
@@ -3580,7 +3831,11 @@ impl IsolationRuntime {
                 source: external.source_path().to_path_buf(),
                 destination: destination.to_path_buf(),
                 source_handle: external.source().clone(),
-                layer: if external.scope() == IsolationReadOnlyMountScope::StateOverlay {
+                layer: if matches!(
+                    external.scope(),
+                    IsolationReadOnlyMountScope::StateOverlay
+                        | IsolationReadOnlyMountScope::RuntimeEndpoint
+                ) {
                     40
                 } else {
                     30
@@ -4202,6 +4457,7 @@ impl IsolationRuntime {
                     }
                 }
             },
+            loopback_ingress: loopback_ingress.cloned(),
             devices: IsolationDeviceSurface::Minimal,
             character_devices: character_device_plan,
             private_tmp: true,
@@ -4244,11 +4500,19 @@ impl IsolationRuntime {
             )));
         }
         let plan_digest = redacted_plan_digest(&plan)?;
+        let expected_applied_launch = expected_applied_launch_commitments(&plan)?;
         let artifact_fds = backend
             .artifact_handles
             .iter()
             .map(|(role, handle)| inherited_fd(handle).map(|fd| (*role, fd)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let (transfer_receiver, transfer_child) = if loopback_ingress.is_some() {
+            let (receiver, child) = lillux::inherited_descriptor_transfer_pair()
+                .map_err(|error| refused(format!("create isolated loopback transfer: {error}")))?;
+            (Some(receiver), Some(child))
+        } else {
+            (None, None)
+        };
         let launch_request = AdapterLaunchRequest {
             protocol: IsolationAdapterProtocolVersion::Current,
             plan,
@@ -4256,6 +4520,11 @@ impl IsolationRuntime {
             artifacts: artifact_fds,
             adapter_fd: inherited_fd(&backend.adapter_handle)?,
             status_fd,
+            loopback_transfer_fd: transfer_child
+                .as_ref()
+                .map(|child| child.inherited_descriptor())
+                .transpose()
+                .map_err(|error| refused(format!("inspect loopback transfer endpoint: {error}")))?,
             lifecycle: adapter_lifecycle,
         };
         launch_request
@@ -4272,6 +4541,9 @@ impl IsolationRuntime {
         let request_handle = lillux::sealed_memfd(c"ryeos-isolation-request", &request_bytes)
             .map_err(|error| refused(format!("seal isolation request: {error}")))?;
         let request_fd = inherited_fd(&request_handle)?.to_string();
+        if let Some(child) = transfer_child.as_ref() {
+            child.retain_for_child(&mut inherited_fds);
+        }
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
         // The exact signed adapter is both the initial executable and the
@@ -4328,6 +4600,11 @@ impl IsolationRuntime {
                 supervised_status: Some(supervised_status),
             },
             provenance: self.launch_provenance(Some(plan_digest)),
+            expected_applied_launch: Some(expected_applied_launch),
+            loopback_transfer: transfer_receiver.map(|receiver| CompiledLoopbackTransfer {
+                receiver,
+                request: launch_request,
+            }),
         })
     }
 
@@ -4688,6 +4965,7 @@ impl IsolationRuntime {
             mount.scope(),
             IsolationReadOnlyMountScope::StateOverlay
                 | IsolationReadOnlyMountScope::RuntimeConfiguration
+                | IsolationReadOnlyMountScope::RuntimeEndpoint
         ) {
             return Err(refused(format!(
                 "verified code {} is covered by an ineligible configuration mount",
@@ -5022,6 +5300,29 @@ impl IsolationRuntime {
             scope_admission: ProcessScopeAdmission::DefinitionValidation,
         })
         .expect("compiled disabled isolation fixture policy is valid")
+    }
+
+    /// Construct the explicit disabled execution boundary with exact app-root
+    /// and runtime-workspace descriptor authority. Downstream composed tests
+    /// use this instead of the authoring-only runtime when they exercise the
+    /// real workspace lifecycle owner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn disabled_for_test_execution(app_root: &Path) -> Result<Self, EngineError> {
+        let app_root_authority = lillux::PinnedDirectory::open_or_create(app_root)
+            .map_err(|error| refused(format!("open test app-root authority: {error}")))?;
+        Self::resolve(IsolationRuntimeResolution {
+            policy: IsolationPolicy::disabled_for_authoring(),
+            source: None,
+            digest: None,
+            app_root: Some(app_root.to_path_buf()),
+            app_root_authority: Some(Arc::new(app_root_authority)),
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::Execution,
+        })
     }
 }
 
@@ -6199,6 +6500,94 @@ fn validate_workspace_view_receipt(
     Ok(())
 }
 
+/// Correlate one received listener to the exact sealed held-launch request.
+/// This is only a packet check; socket type/address, applied launch, namespace
+/// ownership and scope settlement require independent checks by their owners.
+fn validate_loopback_listener_transfer_receipt(
+    bytes: &[u8],
+    descriptor_count: usize,
+    request: &AdapterLaunchRequest,
+) -> Result<ryeos_isolation_protocol::LoopbackListenerTransferReceipt, EngineError> {
+    if bytes.len() > ryeos_isolation_protocol::MAX_LOOPBACK_LISTENER_RECEIPT_BYTES
+        || descriptor_count != 1
+        || request.plan.loopback_ingress.is_none()
+        || request.loopback_transfer_fd.is_none()
+        || !matches!(
+            request.lifecycle,
+            AdapterLaunchLifecycle::AwaitAttachment { .. }
+        )
+    {
+        return Err(refused("invalid loopback listener transfer shape".into()));
+    }
+    let receipt: ryeos_isolation_protocol::LoopbackListenerTransferReceipt =
+        ryeos_isolation_protocol::from_json_slice_strict(bytes)
+            .map_err(|error| refused(format!("decode loopback listener receipt: {error}")))?;
+    receipt
+        .validate()
+        .map_err(|error| refused(format!("validate loopback listener receipt: {error}")))?;
+    let canonical = lillux::canonical_json(
+        &serde_json::to_value(&receipt)
+            .map_err(|error| refused(format!("encode loopback listener receipt: {error}")))?,
+    )
+    .map_err(|error| refused(format!("canonicalize loopback listener receipt: {error}")))?;
+    let request_digest = workspace_transfer_value_digest(
+        serde_json::to_value(request)
+            .map_err(|error| refused(format!("encode loopback launch request: {error}")))?,
+    )?;
+    if canonical.as_bytes() != bytes
+        || receipt.protocol != request.protocol
+        || receipt.request_digest != request_digest
+    {
+        return Err(refused(
+            "loopback listener receipt changed its exact invocation".into(),
+        ));
+    }
+    Ok(receipt)
+}
+
+fn expected_applied_launch_commitments(
+    plan: &IsolationPlan,
+) -> Result<lillux::LinuxSandboxAppliedLaunchCommitments, EngineError> {
+    // This projection is computed by the independent compiler before the
+    // signed adapter sees the sealed plan. The mount destination is the
+    // executable passed to Lillux, not its descriptor/source authority ID.
+    let executable = plan
+        .mounts
+        .iter()
+        .find(|mount| mount.source == plan.target.executable)
+        .ok_or_else(|| refused("compiled target executable has no mount".into()))?;
+    let executable = PathBuf::from(executable.destination.as_str());
+    let argv0 = std::ffi::OsString::from(&plan.target.argv0);
+    let arguments = plan
+        .target
+        .arguments
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    let cwd = PathBuf::from(plan.target.cwd.as_str());
+    let environment = plan
+        .environment
+        .values
+        .iter()
+        .map(|(name, value)| {
+            (
+                std::ffi::OsString::from(name),
+                std::ffi::OsString::from(value),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+        lillux::LinuxSandboxAppliedLaunchTarget {
+            executable: &executable,
+            argv0: &argv0,
+            arguments: &arguments,
+            cwd: &cwd,
+            environment: &environment,
+        },
+    )
+    .map_err(|error| refused(format!("compile applied target commitments: {error}")))
+}
+
 fn refused(reason: String) -> EngineError {
     EngineError::IsolationPolicyRefused { reason }
 }
@@ -6381,6 +6770,77 @@ mod tests {
             .join(TEST_ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(policy_path, serde_yaml::to_string(policy).unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn admitted_realization_member_promotion_checks_exact_pinned_bytes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let backend = resolved_backend();
+        let mut policy = IsolationPolicy::disabled_for_authoring();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(backend.selection.clone());
+        write_policy(app_root.path(), &policy);
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+
+        let source = app_root.path().join("retained-runtime");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("codex"), b"exact-executable").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let pinned = lillux::PinnedDirectory::open(&source).unwrap().unwrap();
+        let mount = IsolationReadOnlyMountAuthority::new_execution_runtime(
+            source.clone(),
+            PathBuf::from("/ryeos/realizations/codex_runtime"),
+            pinned.inherited_descriptor_authority().unwrap(),
+        );
+        let expected = lillux::sha256_hex(b"exact-executable");
+        let promoted = runtime
+            .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+            .unwrap();
+        assert_eq!(promoted.command().identity().content_hash, expected);
+        std::fs::rename(source.join("codex"), source.join("old-codex")).unwrap();
+        std::fs::write(source.join("codex"), b"replacement-bytes").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (retained_bytes, _) = promoted
+            .command()
+            .executable()
+            .read_regular_file_stable_bounded(1024)
+            .unwrap();
+        assert_eq!(retained_bytes, b"exact-executable");
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(
+                    &mount,
+                    Path::new("codex"),
+                    &"0".repeat(64),
+                )
+                .is_err()
+        );
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("../codex"), &expected)
+                .is_err()
+        );
+        std::fs::write(source.join("codex"), b"exact-executable").unwrap();
+        std::fs::set_permissions(source.join("codex"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(
+            runtime
+                .bind_admitted_realization_member_command(&mount, Path::new("codex"), &expected)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 0o755")
+        );
     }
 
     #[cfg(unix)]
@@ -8881,7 +9341,12 @@ mod tests {
                 arguments: vec!["first-secret".to_string()],
                 cwd: IsolationPath::new("/workspace").unwrap(),
             },
-            mounts: Vec::new(),
+            mounts: vec![IsolationMount {
+                source: IsolationAuthorityId::new("target").unwrap(),
+                destination: IsolationPath::new("/run/ryeos/verified-code/tool").unwrap(),
+                access: IsolationMountAccess::ReadOnly,
+                layer: 0,
+            }],
             fixed_parent_views: Vec::new(),
             project_workspace: None,
             target_channels: Vec::new(),
@@ -8889,6 +9354,7 @@ mod tests {
                 values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
             },
             network: IsolationNetwork::Isolated,
+            loopback_ingress: None,
             devices: IsolationDeviceSurface::Minimal,
             character_devices: Vec::new(),
             private_tmp: true,
@@ -8898,15 +9364,79 @@ mod tests {
             nested_sandbox: false,
         };
         let digest = redacted_plan_digest(&plan).unwrap();
+        let target = expected_applied_launch_commitments(&plan).unwrap();
 
         plan.target.arguments[0] = "second-secret".to_string();
         plan.environment
             .values
             .insert("API_TOKEN".to_string(), "second-token".to_string());
         assert_eq!(redacted_plan_digest(&plan).unwrap(), digest);
+        let changed = expected_applied_launch_commitments(&plan).unwrap();
+        assert_eq!(target.executable_sha256, changed.executable_sha256);
+        assert_eq!(target.cwd_sha256, changed.cwd_sha256);
+        assert_ne!(target.argv_sha256, changed.argv_sha256);
+        assert_ne!(target.environment_sha256, changed.environment_sha256);
 
         plan.network = IsolationNetwork::Host;
         assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
+    }
+
+    #[test]
+    fn loopback_receipt_requires_exact_held_request_and_one_descriptor() {
+        let plan = IsolationPlan {
+            target: IsolationTarget {
+                executable: IsolationAuthorityId::new("target").unwrap(),
+                argv0: "tool".into(),
+                arguments: vec!["arg".into()],
+                cwd: IsolationPath::new("/workspace").unwrap(),
+            },
+            mounts: Vec::new(),
+            fixed_parent_views: Vec::new(),
+            project_workspace: None,
+            target_channels: Vec::new(),
+            environment: IsolationEnvironment {
+                values: BTreeMap::new(),
+            },
+            network: IsolationNetwork::Isolated,
+            loopback_ingress: Some(ryeos_isolation_protocol::IsolationLoopbackIngress {
+                address: "127.0.0.1:7411".into(),
+            }),
+            devices: IsolationDeviceSurface::Minimal,
+            character_devices: Vec::new(),
+            private_tmp: true,
+            proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
+            pid_namespace: IsolationPidNamespace::Isolated,
+            shared_process_group: true,
+            nested_sandbox: false,
+        };
+        let mut request = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::Current,
+            plan,
+            authorities: Vec::new(),
+            artifacts: BTreeMap::new(),
+            adapter_fd: 10,
+            status_fd: 11,
+            loopback_transfer_fd: Some(12),
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 13,
+                release_keepalive_fd: 14,
+            },
+        };
+        let digest =
+            workspace_transfer_value_digest(serde_json::to_value(&request).unwrap()).unwrap();
+        let receipt = ryeos_isolation_protocol::LoopbackListenerTransferReceipt {
+            protocol: request.protocol,
+            request_digest: digest,
+        };
+        let bytes = lillux::canonical_json(&serde_json::to_value(receipt).unwrap()).unwrap();
+        validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 1, &request).unwrap();
+        assert!(
+            validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 0, &request).is_err()
+        );
+        request.plan.target.arguments.push("changed".into());
+        assert!(
+            validate_loopback_listener_transfer_receipt(bytes.as_bytes(), 1, &request).is_err()
+        );
     }
 
     #[cfg(unix)]

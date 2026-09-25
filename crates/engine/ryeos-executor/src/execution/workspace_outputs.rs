@@ -44,89 +44,9 @@ pub(crate) fn capture_native_workspace_outputs(
     isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> anyhow::Result<BTreeMap<String, WorkspaceOutputCaptureState>> {
     require_native_backend(isolation)?;
-    authority.ensure_guard(guard)?;
-    let matcher = validate_capture_policy(partition, policy)?;
-    project.ensure_path_binding()?;
-    let cas = authority.cas_store()?;
-    let mut outputs = BTreeMap::new();
-    for root in &partition.roots {
-        // Validate ancestors before testing optional absence: an excluded
-        // ancestor is a refusal, not an absent output.
-        let content_policy = ryeos_state::ExternalCapturePolicy::new(root.path.clone(), &matcher)?;
-        let Some(directory) = open_output_directory(project, &root.path)? else {
-            outputs.insert(root.name.clone(), WorkspaceOutputCaptureState::Absent);
-            continue;
-        };
-        let mut sink = OutputSink {
-            cas: &cas,
-            authority,
-            guard,
-        };
-        let state = match root.storage {
-            ProductStorage::Content => {
-                let bounds = &root.effective_bounds;
-                let mut budget = ryeos_state::LaunchCaptureBudget::bounded(
-                    bounds.maximum_depth,
-                    bounds.maximum_entries,
-                    bounds.maximum_file_bytes,
-                    bounds.maximum_total_bytes,
-                )?;
-                let manifest = ryeos_state::external_content::capture_tree(
-                    &directory,
-                    &[],
-                    &content_policy,
-                    &mut budget,
-                    &mut sink,
-                )?;
-                if manifest.entries.is_empty() {
-                    WorkspaceOutputCaptureState::EmptyDirectory
-                } else {
-                    let hash = stage.store_object_admitted(
-                        guard,
-                        &cas,
-                        &serde_json::to_value(&manifest)?,
-                    )?;
-                    WorkspaceOutputCaptureState::Captured {
-                        manifest_kind: manifest.kind,
-                        manifest_hash: hash,
-                    }
-                }
-            }
-            ProductStorage::LargeContent => {
-                let bounds = &root.effective_bounds;
-                let capture_policy = ryeos_state::LargeContentCapturePolicy::new(
-                    root.path.clone(),
-                    &matcher,
-                    ryeos_state::LargeContentCaptureBounds {
-                        max_depth: bounds.maximum_depth,
-                        max_entries: bounds.maximum_entries,
-                        max_file_bytes: bounds.maximum_file_bytes,
-                        max_total_bytes: bounds.maximum_total_bytes,
-                    },
-                )?;
-                match ryeos_state::external_content::capture_large_tree_optional(
-                    &directory,
-                    &capture_policy,
-                    &mut sink,
-                )? {
-                    None => WorkspaceOutputCaptureState::EmptyDirectory,
-                    Some(manifest) => {
-                        let hash =
-                            stage.store_object_admitted(guard, &cas, &manifest.to_value()?)?;
-                        WorkspaceOutputCaptureState::Captured {
-                            manifest_kind: manifest.kind,
-                            manifest_hash: hash,
-                        }
-                    }
-                }
-            }
-        };
-        directory.ensure_path_binding()?;
-        project.ensure_path_binding()?;
-        outputs.insert(root.name.clone(), state);
-    }
-    project.ensure_path_binding()?;
-    Ok(outputs)
+    ryeos_project_capture::capture_native_workspace_outputs(
+        authority, guard, stage, project, partition, policy,
+    )
 }
 
 /// Restore outputs only after the existing full source proof succeeds. This
@@ -328,59 +248,6 @@ fn validate_manifest_entries<'a>(
         ryeos_state::ExternalCapturePolicy::new(format!("{}/{}", root.path, path), matcher)?;
     }
     Ok(())
-}
-
-struct OutputSink<'a> {
-    cas: &'a lillux::CasStore,
-    authority: &'a ryeos_state::PinnedStateAuthority,
-    guard: &'a ryeos_state::CasMutationGuard,
-}
-
-impl ryeos_state::ExternalContentBlobSink for OutputSink<'_> {
-    fn store_file(
-        &mut self,
-        file: std::fs::File,
-        path: &str,
-        expected_size: u64,
-    ) -> anyhow::Result<(String, u64)> {
-        self.authority.ensure_guard(self.guard)?;
-        let captured = self.cas.put_blob_from_open_regular_bounded(
-            file,
-            std::path::Path::new(path),
-            ryeos_state::MAX_CAPTURE_FILE_BYTES,
-        )?;
-        if captured.size != expected_size {
-            bail!("workspace output changed size during capture");
-        }
-        Ok((captured.hash, captured.size))
-    }
-}
-
-impl ryeos_state::ExternalLargeContentSink for OutputSink<'_> {
-    fn store_large_file(
-        &mut self,
-        file: std::fs::File,
-        identity: ryeos_state::PinnedLargeObjectSourceIdentity,
-        relative_path: &str,
-        expected_sha256: Option<&str>,
-    ) -> anyhow::Result<ryeos_state::IngestedLargeObject> {
-        self.authority.ensure_guard(self.guard)?;
-        self.authority.large_object_store()?.ingest_open_regular(
-            file,
-            identity,
-            relative_path,
-            expected_sha256,
-        )
-    }
-
-    fn store_content_file(
-        &mut self,
-        file: std::fs::File,
-        path: &str,
-        expected_size: u64,
-    ) -> anyhow::Result<(String, u64)> {
-        ryeos_state::ExternalContentBlobSink::store_file(self, file, path, expected_size)
-    }
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail, ensure};
 
@@ -25,8 +25,10 @@ pub struct ExternalCandidateImportPool {
     /// Exact live owners. `true` records a wake that arrived while the owner
     /// was running, so the owner must re-read durable state before retiring.
     active: Mutex<BTreeMap<ImportKey, bool>>,
-    changed: Condvar,
+    changed: lillux::task::HostCondition,
     shutdown: AtomicBool,
+    #[cfg(feature = "test-support")]
+    last_failure: Mutex<Option<String>>,
 }
 
 impl ExternalCandidateImportPool {
@@ -87,11 +89,13 @@ impl ExternalCandidateImportPool {
         let reconcile = {
             let state_store = Arc::clone(&state_store);
             Arc::new(move |key: &ImportKey| {
-                state_store.reconcile_external_candidate_import(
+                let result = state_store.reconcile_external_candidate_import(
                     &key.placement,
                     key.seal_sequence,
                     &key.seal_digest,
-                )
+                );
+                crate::dedicated_session_service::notify_projection_change(&key.placement);
+                result
             }) as Arc<dyn Fn(&ImportKey) -> Result<()> + Send + Sync>
         };
         self.wake_with(key, reconcile)
@@ -123,71 +127,82 @@ impl ExternalCandidateImportPool {
 
         let pool = Arc::clone(self);
         let thread_key = key.clone();
-        let spawn = std::thread::Builder::new()
-            .name(format!(
-                "external-import-{}",
-                &lillux::sha256_hex(key.placement.as_bytes())[..12]
-            ))
-            .spawn(move || {
-                loop {
-                    let result = reconcile(&thread_key);
-                    match &result {
-                        Ok(()) => tracing::info!(
-                            placement = %thread_key.placement,
-                            seal_sequence = thread_key.seal_sequence,
-                            seal_digest = %thread_key.seal_digest,
-                            "external candidate import retained"
-                        ),
-                        Err(error) => tracing::error!(
-                            placement = %thread_key.placement,
-                            seal_sequence = thread_key.seal_sequence,
-                            seal_digest = %thread_key.seal_digest,
-                            error = %error,
-                            "external candidate import reconciliation failed"
-                        ),
-                    }
-                    let Ok(mut active) = pool.active.lock() else {
-                        return;
-                    };
-                    let rerun = active.get_mut(&thread_key).is_some_and(|rerun| {
-                        let value = *rerun;
-                        *rerun = false;
-                        value
-                    });
-                    if rerun {
-                        drop(active);
-                        continue;
-                    }
-                    active.remove(&thread_key);
-                    pool.changed.notify_all();
-                    break;
+        let task_name = format!(
+            "external-import-{}",
+            &lillux::sha256_hex(key.placement.as_bytes())[..12]
+        );
+        let spawn = lillux::task::spawn_host_task(&task_name, move || {
+            loop {
+                let result = reconcile(&thread_key);
+                match &result {
+                    Ok(()) => tracing::info!(
+                        placement = %thread_key.placement,
+                        seal_sequence = thread_key.seal_sequence,
+                        seal_digest = %thread_key.seal_digest,
+                        "external candidate import retained"
+                    ),
+                    Err(error) => tracing::error!(
+                        placement = %thread_key.placement,
+                        seal_sequence = thread_key.seal_sequence,
+                        seal_digest = %thread_key.seal_digest,
+                        error = %error,
+                        "external candidate import reconciliation failed"
+                    ),
                 }
-            });
-        if let Err(error) = spawn {
-            let mut active = self
-                .active
-                .lock()
-                .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
-            active.remove(&key);
-            self.changed.notify_all();
-            return Err(error).context("spawn external candidate import owner");
-        }
+                #[cfg(feature = "test-support")]
+                {
+                    *pool.last_failure.lock().expect("import diagnostic lock") =
+                        result.as_ref().err().map(|error| format!("{error:#}"));
+                }
+                let Ok(mut active) = pool.active.lock() else {
+                    return;
+                };
+                let rerun = active.get_mut(&thread_key).is_some_and(|rerun| {
+                    let value = *rerun;
+                    *rerun = false;
+                    value
+                });
+                if rerun {
+                    drop(active);
+                    continue;
+                }
+                active.remove(&thread_key);
+                pool.changed.notify_all();
+                break;
+            }
+        });
+        let task = match spawn {
+            Ok(task) => task,
+            Err(error) => {
+                let mut active = self
+                    .active
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
+                active.remove(&key);
+                self.changed.notify_all();
+                return Err(error).context("spawn external candidate import owner");
+            }
+        };
+        // This pool fences/waits on its active keys. The durable transcript
+        // owns restart recovery; the host task handle is not execution evidence.
+        task.detach();
         Ok(true)
     }
 
     /// Fence new wakes and wait for every already-owned reconstruction to
     /// release its CAS/state authority. A timeout is an unclean shutdown; the
     /// durable claimed transcript remains the next daemon's recovery input.
-    pub fn shutdown_and_wait(&self, timeout: std::time::Duration) -> Result<usize> {
+    pub fn shutdown_and_wait(&self, timeout: lillux::time::Duration) -> Result<usize> {
+        let deadline = lillux::time::MonotonicDeadline::after(timeout);
         self.shutdown.store(true, Ordering::Release);
         let active = self
             .active
             .lock()
             .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
         let initial = active.len();
-        let (active, _) = self
+        let active = self
             .changed
-            .wait_timeout_while(active, timeout, |active| !active.is_empty())
+            .wait_while_until(active, deadline, |active| !active.is_empty())
             .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
         ensure!(
             active.is_empty(),
@@ -196,22 +211,29 @@ impl ExternalCandidateImportPool {
         Ok(initial)
     }
 
-    #[cfg(test)]
-    pub(crate) fn wait_for_idle(&self, timeout: std::time::Duration) -> Result<()> {
+    pub fn wait_for_idle(&self, timeout: lillux::time::Duration) -> Result<()> {
+        let deadline = lillux::time::MonotonicDeadline::after(timeout);
         let active = self
             .active
             .lock()
             .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
-        let (active, result) = self
+        let active = self
             .changed
-            .wait_timeout_while(active, timeout, |active| !active.is_empty())
+            .wait_while_until(active, deadline, |active| !active.is_empty())
             .map_err(|_| anyhow::anyhow!("external candidate import pool poisoned"))?;
-        let _ = result;
         ensure!(
             active.is_empty(),
             "external candidate import owner did not become idle"
         );
         Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn last_failure_for_test(&self) -> Option<String> {
+        self.last_failure
+            .lock()
+            .expect("import diagnostic lock")
+            .clone()
     }
 }
 
@@ -225,6 +247,7 @@ mod tests {
         NativeWriterExclusionMechanism, NativeWriterExclusionObservation, SignedExecutionFrame,
     };
     use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
+    use std::sync::Condvar;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -352,7 +375,8 @@ mod tests {
         fn new() -> Self {
             use crate::node_config::sections::external_execution::RetainedExternalExecutionBinding;
             use crate::runtime_db::external_execution::{
-                ExternalAllocationOccurrence, ExternalAllocationReservation,
+                ExternalAllocationOccurrence, ExternalAllocationOwner,
+                ExternalAllocationReservation, ExternalDedicatedSessionOwner,
                 ExternalSupervisorActivationIntent, external_supervisor_activation_request_digest,
             };
             use crate::vault::external_channel::ExternalChannelAuthority;
@@ -389,13 +413,17 @@ mod tests {
             let owner = lillux::crypto::SigningKey::from_bytes(&[19; 32]);
             let supervisor = lillux::crypto::generate_signing_key();
             let now = i64::try_from(lillux::time::timestamp_millis()).unwrap();
+            let startup_deadline =
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
             let reservation = ExternalAllocationReservation {
-                schema: 2,
+                schema: crate::runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
                 placement_thread_id: "T-external-import-composed".into(),
                 admitted_capsule_hash: "a".repeat(64),
-                workspace_id: "W-external-import-composed".into(),
-                worker_instance_id: "worker-external-import-composed".into(),
-                worker_boot_epoch: 1,
+                owner: ExternalAllocationOwner::DedicatedSession(ExternalDedicatedSessionOwner {
+                    workspace_id: "W-external-import-composed".into(),
+                    worker_instance_id: "worker-external-import-composed".into(),
+                    worker_boot_epoch: 1,
+                }),
                 base_snapshot_hash: base_snapshot_hash.clone(),
                 binding_hash: retained.digest().into(),
                 capacity_owner: retained.capacity_owner().into(),
@@ -406,6 +434,8 @@ mod tests {
                 max_active: 1,
                 timeout_seconds: 60,
                 contact_deadline_ms: now + 60_000,
+                startup_started_at_ms: now,
+                startup_deadline_ms: now + 60_000,
             };
             store
                 .install_external_placement_test_fixture(&reservation, &retained)
@@ -424,7 +454,14 @@ mod tests {
                 provider_observation_digest: "f".repeat(64),
             };
             store
-                .bind_external_allocation(&reservation.placement_thread_id, &occurrence)
+                .bind_external_allocation(
+                    &reservation.placement_thread_id,
+                    &occurrence,
+                    crate::runtime_db::external_execution::ExternalObservationTiming::Startup {
+                        deadline_exceeded: false,
+                        live_deadline: startup_deadline,
+                    },
+                )
                 .unwrap();
             let contract = retained.backend_contract();
             let attachment_deadline_ms = reservation.contact_deadline_ms
@@ -432,12 +469,19 @@ mod tests {
             let post_execution_timeout_seconds =
                 contract.observation_timeout_seconds + contract.cleanup_timeout_seconds;
             let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
+            let guest_input_identity = "9".repeat(64);
             let activation = ExternalSupervisorActivationIntent {
-                schema: 1,
+                schema: 2,
                 binding_hash: reservation.binding_hash.clone(),
                 request_digest: reservation.request_digest.clone(),
                 occurrence_id: occurrence.occurrence_id.clone(),
-                supervisor_runtime_hash: contract.runtime_manifest_hash.clone(),
+                supervisor_runtime_hash: contract
+                    .workload
+                    .structured_session()
+                    .unwrap()
+                    .runtime_manifest_hash
+                    .clone(),
+                guest_input_identity: guest_input_identity.clone(),
                 activation_request_digest: external_supervisor_activation_request_digest(
                     &reservation,
                     &occurrence,
@@ -445,6 +489,7 @@ mod tests {
                     attachment_deadline_ms,
                     post_execution_timeout_seconds,
                     channel_max_bytes,
+                    &guest_input_identity,
                 )
                 .unwrap(),
                 attachment_deadline_ms,
@@ -461,7 +506,9 @@ mod tests {
                     .unwrap()
             );
             let binding = ExecutionChannelBinding {
-                schema: 3,
+                schema: ryeos_state::external_execution::EXECUTION_CHANNEL_BINDING_SCHEMA,
+                execution_mode:
+                    ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {},
                 placement_thread_id: reservation.placement_thread_id.clone(),
                 allocation_request_digest: reservation.request_digest.clone(),
                 occurrence_id: occurrence.occurrence_id,
@@ -502,20 +549,13 @@ mod tests {
                 &owner,
             )
             .unwrap();
-            store
-                .apply_external_frame_test_fixture(
-                    &binding.placement_thread_id,
-                    ChannelDirection::SupervisorToOwner,
-                    1,
-                    &ready_digest,
-                )
-                .unwrap();
             let release = store
-                .author_external_owner_frame(
+                .admit_external_ready_and_author_release(
                     &binding.placement_thread_id,
                     &owner,
-                    ExecutionChannelPayload::Release,
+                    startup_deadline,
                 )
+                .unwrap()
                 .unwrap();
             let (release_ack_wire, release_ack_digest) = signed_wire(
                 &binding,
@@ -781,6 +821,7 @@ mod tests {
         }
         let seal = ExecutionChannelPayload::ExportSealed {
             candidate_snapshot_hash: content.snapshot_hash.clone(),
+            candidate_output_capture_hash: None,
             completion_request_digest: fixture.completion_request_digest.clone(),
             writer_exclusion_evidence_hash: content.evidence_hash.clone(),
         };

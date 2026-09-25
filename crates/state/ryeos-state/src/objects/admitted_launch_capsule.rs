@@ -33,7 +33,10 @@ use super::{
 // v24 is already allocated to the coordinating fixed-parent confinement cut.
 // v27 admits the complete typed root/dependency product-selection list.
 // v28 retains exact product receipt proofs separately from semantic program identity.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 28;
+// v29 requires explicit ordinary endpoint intent and exact selected external
+// binding identity in direct plans. Missing predecessor fields are not local
+// execution authority and must never be filled from current node preferences.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 29;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 
@@ -1116,6 +1119,13 @@ impl AdmittedLaunchCapsule {
     pub fn source_binding_hash_in_program(
         exact_program: &serde_json::Value,
     ) -> anyhow::Result<Option<String>> {
+        Ok(Self::source_projection_in_program(exact_program)?
+            .map(|projection| projection.binding_hash))
+    }
+
+    pub fn source_projection_in_program(
+        exact_program: &serde_json::Value,
+    ) -> anyhow::Result<Option<super::EffectiveSourceClosureProjection>> {
         let Some(value) = exact_program
             .get("resolution_output")
             .and_then(|resolution| resolution.get("composed"))
@@ -1124,9 +1134,9 @@ impl AdmittedLaunchCapsule {
         else {
             return Ok(None);
         };
-        Ok(Some(
-            super::EffectiveSourceClosureProjection::from_value(value)?.binding_hash,
-        ))
+        Ok(Some(super::EffectiveSourceClosureProjection::from_value(
+            value,
+        )?))
     }
 
     /// Verify the complete realization/substrate evidence named by this

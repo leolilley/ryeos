@@ -37,6 +37,7 @@ use ryeos_engine::history_policy::{
 };
 use ryeos_engine::resolution::TrustClass as ResolutionTrustClass;
 use ryeos_state::UsageSubject;
+use ryeos_state::external_content::products::qualification::ProductQualificationLaunchPurpose;
 use ryeos_state::objects::ThreadStatus;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
@@ -48,12 +49,19 @@ pub mod managed_runtime_identity;
 mod sealed_request;
 mod validation;
 
+#[cfg(test)]
+pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
     ADMITTED_DIRECT_PROJECT_ROOT, PreparedItemPlan, RunningItem, SpawnItemFailure,
     SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
-    SpawnedPersistentSessionAwaitingAttachment, effective_child_external_content_declarations,
+    SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
+    effective_child_external_content_declarations, external_direct_environment,
     prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan, prepare_item_plan,
     spawn_item,
+};
+pub(crate) use direct_execution::{
+    CompiledExternalDirectProgram, compile_external_direct_program,
+    validate_retained_external_direct_program,
 };
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
@@ -2077,6 +2085,7 @@ pub struct RootExecutionAdmission {
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
     project_binding: AdmittedProjectBinding,
     candidate_evaluation: Option<Arc<CandidateEvaluationExecutionScope>>,
+    product_qualification: Option<ProductQualificationLaunchPurpose>,
     admitted_request_snapshot: Option<Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
     selected_executor_route: Option<AdmittedExecutorRoute>,
 }
@@ -2144,6 +2153,26 @@ impl RootExecutionAdmission {
 
     pub fn candidate_evaluation_scope(&self) -> Option<&Arc<CandidateEvaluationExecutionScope>> {
         self.candidate_evaluation.as_ref()
+    }
+
+    pub fn product_qualification_purpose(&self) -> Option<&ProductQualificationLaunchPurpose> {
+        self.product_qualification.as_ref()
+    }
+
+    /// Attach only a daemon-derived, exact product-qualification purpose to a
+    /// fresh root. Public execution has no path to manufacture this field.
+    pub fn for_product_qualification(
+        mut self,
+        purpose: ProductQualificationLaunchPurpose,
+    ) -> Result<Self> {
+        if self.product_qualification.is_some() {
+            bail!("root admission already has product qualification purpose");
+        }
+        self.validate()?;
+        purpose.validate()?;
+        self.product_qualification = Some(purpose);
+        self.validate()?;
+        Ok(self)
     }
 
     fn resolution_project_binding(&self) -> &AdmittedProjectBinding {
@@ -2364,7 +2393,7 @@ impl RootExecutionAdmission {
         candidate_provenance: &crate::execution_provenance::ExecutionProvenance,
         scope: Arc<CandidateEvaluationExecutionScope>,
     ) -> Result<Self> {
-        if self.candidate_evaluation.is_some() {
+        if self.candidate_evaluation.is_some() || self.product_qualification.is_some() {
             bail!("candidate evaluator admission is already rebound");
         }
         if candidate_provenance
@@ -2681,6 +2710,49 @@ impl RootExecutionAdmission {
         ryeos_state::external_content::products::composition::validate_product_selection_inputs(
             &self.product_selections,
         )?;
+        if let Some(purpose) = &self.product_qualification {
+            purpose.validate()?;
+            if self.candidate_evaluation.is_some()
+                || self.plan_context.scheduled_fire.is_some()
+                || self.plan_context.project_context != ProjectContext::None
+                || !matches!(
+                    self.project_authority(),
+                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
+                )
+                || !self.ref_bindings.is_empty()
+                || self.usage_subject.is_some()
+                || self.usage_subject_asserted_by.is_some()
+            {
+                bail!("qualification verifier is not a fresh projectless root");
+            }
+            let verified = &self.verified_subject;
+            if verified.resolved.source_space != ItemSpace::Bundle
+                || verified.trust_class != TrustClass::Trusted
+                || self.resolution_output().effective_trust_class
+                    != ResolutionTrustClass::TrustedBundle
+                || verified.resolved.canonical_ref.to_string() != purpose.verifier_ref
+                || self
+                    .resolution_output()
+                    .effective_definition_digest()?
+                    .as_str()
+                    != purpose.verifier_effective_definition_digest
+                || plan_principal_identifier(&self.plan_context) != purpose.owner_fingerprint
+            {
+                bail!("qualification purpose differs from admitted trusted verifier root");
+            }
+            match self.product_selections.as_slice() {
+                [] => {}, // Signed fixed pin is checked against the exact subject realization.
+                [selected]
+                    if matches!(
+                        selected.target,
+                        ryeos_state::external_content::products::composition::ProductSelectionTarget::Root {}
+                    ) && selected.selection.declaration_id == purpose.subject_declaration_id
+                        && selected.selection.witness_hash == purpose.product_witness_hash
+                        && selected.selection.witness_source == purpose.witness_source
+                        && selected.selection.qualification_hash.is_none() => {}
+                _ => bail!("qualification purpose differs from admitted unqualified subject selection"),
+            }
+        }
         if !self.product_selections.is_empty() {
             if self.plan_context.scheduled_fire.is_some() {
                 bail!(
@@ -2904,6 +2976,15 @@ impl RootExecutionAdmission {
 
     pub fn ensure_matches_request(&self, request: &ResolvedExecutionRequest) -> Result<()> {
         self.validate()?;
+        if let Some(purpose) = &self.product_qualification {
+            if ryeos_state::objects::canonical_value_digest(&request.parameters)?
+                != purpose.admitted_parameters_digest
+                || request.target_site_id.is_some()
+                || request.launch_mode != "wait"
+            {
+                bail!("qualification verifier request differs from its sealed purpose");
+            }
+        }
         if !same_plan_context(&self.plan_context, &request.plan_context) {
             let mismatches = plan_context_mismatches(&self.plan_context, &request.plan_context);
             let project_context_detail = if mismatches.contains(&"project_context") {
@@ -7168,6 +7249,7 @@ fn admit_verified_root_execution_inner(
         resolved_result_policy: launch_policy.result,
         project_binding,
         candidate_evaluation: None,
+        product_qualification: None,
         admitted_request_snapshot,
         selected_executor_route: None,
     };

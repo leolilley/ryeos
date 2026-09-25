@@ -24,7 +24,7 @@ pub fn apply_workspace_delta(
 ) -> Result<Option<ProjectTree>> {
     authority.ensure_guard(guard)?;
     policy.validate()?;
-    super::ingest::validate_operational_exclusions(operational_shadow_paths)?;
+    ryeos_project_capture::validate_operational_exclusions(operational_shadow_paths)?;
     if mutations.len() > ryeos_isolation_protocol::MAX_WORKSPACE_MUTATIONS {
         anyhow::bail!("workspace mutation count exceeds protocol limit");
     }
@@ -37,7 +37,7 @@ pub fn apply_workspace_delta(
         // These are admitted mount/copy destinations, not another ignore
         // policy. Neither input bytes nor private mount placeholders are
         // authored outputs. Skip them before opening or importing bytes.
-        if super::ingest::is_operationally_excluded(relative, operational_shadow_paths) {
+        if ryeos_project_capture::is_operationally_excluded(relative, operational_shadow_paths) {
             continue;
         }
         let included = !ryeos_state::project_sync::is_project_snapshot_floor_excluded(relative)
@@ -174,7 +174,7 @@ pub fn apply_workspace_delta(
     // An ancestor delete/opaque mutation can also cover an input shadow.
     // Reuse copy-based fold-back's exact base restoration and collision
     // validation rather than inventing backend-specific exclusion semantics.
-    super::ingest::restore_operational_shadow_files(
+    ryeos_project_capture::restore_operational_shadow_files(
         &mut next,
         base_tree,
         operational_shadow_paths,

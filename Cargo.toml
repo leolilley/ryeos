@@ -15,6 +15,8 @@ members = [
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
     "crates/engine/ryeos-effect-contract",
+    "crates/engine/ryeos-external-execution-contract",
+    "crates/engine/ryeos-external-execution",
     "crates/engine/ryeos-expression",
     "crates/kinds/graph-definition",
     "crates/engine/ryeos-engine",
@@ -24,6 +26,7 @@ members = [
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
     "crates/engine/ryeos-provider-contract",
+    "crates/engine/ryeos-project-capture",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
     "crates/state/ryeos-scheduler",
@@ -36,6 +39,10 @@ members = [
     "crates/tools/external-candidate-launcher",
     "crates/tools/external-candidate-connector",
     "crates/tools/external-candidate-supervisor",
+    "crates/tools/codex-external-configuration",
+    "crates/tools/codex-guest-runtime-producer",
+    "crates/tools/independent-runtime-verifier",
+    "tests/e2e/external-execution/synthetic-lifecycle-adapter",
     "crates/host-adapters/lillux-oci-hook",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
@@ -72,6 +79,8 @@ opt-level = 3
 lillux = { path = "crates/kernel/lillux" }
 ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
 ryeos-effect-contract = { path = "crates/engine/ryeos-effect-contract" }
+ryeos-external-execution-contract = { path = "crates/engine/ryeos-external-execution-contract" }
+ryeos-external-execution = { path = "crates/engine/ryeos-external-execution" }
 ryeos-api = { path = "crates/daemon/ryeos-api" }
 ryeos-app = { path = "crates/daemon/ryeos-app" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
@@ -85,6 +94,7 @@ ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
 ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
 ryeos-provider-contract = { path = "crates/engine/ryeos-provider-contract" }
+ryeos-project-capture = { path = "crates/engine/ryeos-project-capture" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }

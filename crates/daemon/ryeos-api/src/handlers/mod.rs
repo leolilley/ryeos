@@ -61,6 +61,7 @@ pub mod objects_closure_get;
 pub mod objects_get;
 pub mod objects_has;
 pub mod objects_put;
+pub mod product_qualification_launch;
 pub mod project_apply_snapshot;
 pub mod project_snapshot_status;
 pub mod project_status;
@@ -181,6 +182,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_products::GET_DESCRIPTOR,
     external_content_products::COMPOSE_DESCRIPTOR,
     external_content_products::QUALIFY_DESCRIPTOR,
+    product_qualification_launch::DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
     external_content_release::DESCRIPTOR,

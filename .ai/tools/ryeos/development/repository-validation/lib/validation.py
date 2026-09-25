@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T06:36:51Z:72bc7fa983891ac47500ac2a97516ccd720adb8afd7b83f2fe505d3e504dd914:tcYTX/+V212pDmOUZ8iUGehXfcR90nytRYG/1wz1nmqjUlg9BdM/A9MrhBzfracMGBqhz/gBWqer1lOk4bAJAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-09-21T02:32:22Z:0162eb18c6231fdb90d4a1be761e257bb53b5f238ef206757a2f1ea0e9f1b6ba:hPIUfsnIoLo8qqNO5HnspB/pMHVgD7uCG6Q9Ql2E00jD9NBvrlmO9WGmvZDRqdgmWYMxRl7qQEKTm2M05F2OCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Read-only repository validation shared by signed Tools and external CI.
 
 The resolved project Config owns rules and input selection. This module owns
@@ -11,6 +11,7 @@ from this source closure's path or fall back to host commands/configuration.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import fnmatch
 import json
 import re
@@ -79,9 +80,12 @@ def validate_config(config: dict) -> None:
         if not isinstance(rules, list) or not rules:
             raise ValueError("missing text rules")
         for rule in rules:
-            if not isinstance(rule, dict) or set(rule) != {
+            if not isinstance(rule, dict) or not set(rule).issubset({
+                "roots", "exclude", "suffixes", "patterns", "regex", "ignore_case",
+                "before_marker"
+            }) or not {
                 "roots", "exclude", "suffixes", "patterns", "regex", "ignore_case"
-            }:
+            }.issubset(rule):
                 raise ValueError("incomplete text rule")
             for field in ("roots", "exclude", "suffixes", "patterns"):
                 if not isinstance(rule[field], list) or any(not isinstance(v, str) or not v for v in rule[field]):
@@ -93,6 +97,9 @@ def validate_config(config: dict) -> None:
             for flag in ("regex", "ignore_case"):
                 if type(rule[flag]) is not bool:
                     raise ValueError("text rule flags must be explicit booleans")
+            marker = rule.get("before_marker")
+            if marker is not None and (not isinstance(marker, str) or not marker):
+                raise ValueError("text rule product marker must be nonempty text")
             for pattern in rule["patterns"]:
                 re.compile(pattern if rule["regex"] else re.escape(pattern))
 
@@ -170,8 +177,18 @@ def dependency_layers(root: Path, config: dict) -> tuple[list[str], int]:
     for owner, denied in selection["forbidden_edges"].items():
         if owner not in graph:
             raise ValueError(f"configured dependency owner is absent: {owner}")
-        for dependency in sorted(graph[owner] & set(denied)):
-            failures.append(f"forbidden dependency: {owner} -> {dependency}")
+        # Ownership applies to the complete production dependency closure.
+        # Moving a forbidden import behind a helper crate must not admit it.
+        paths = {owner: [owner]}
+        pending = deque([owner])
+        while pending:
+            current = pending.popleft()
+            for dependency in sorted(graph[current]):
+                if dependency not in paths:
+                    paths[dependency] = paths[current] + [dependency]
+                    pending.append(dependency)
+        for dependency in sorted((set(paths) - {owner}) & set(denied)):
+            failures.append("forbidden dependency: " + " -> ".join(paths[dependency]))
     cycle = find_cycle(graph)
     if cycle:
         failures.append("workspace dependency cycle: " + " -> ".join(cycle))
@@ -213,6 +230,12 @@ def text_check(root: Path, config: dict, operation: str) -> tuple[list[str], int
             if total > limits["max_total_bytes"]:
                 raise ValueError("scan exceeds validation byte bound")
             checked.add(value)
+            marker = rule.get("before_marker")
+            if marker is not None:
+                if body.count(marker) != 1:
+                    raise ValueError(
+                        f"validation product marker is not unique: {value}")
+                body = body.split(marker, 1)[0]
             for line, text in enumerate(body.splitlines(), 1):
                 if any(pattern.search(text) for pattern in patterns):
                     # Report bounded coordinates, not arbitrary source content.
