@@ -833,33 +833,53 @@ impl SealedRootExecutionRequest {
         let SealedPrincipal::Local { fingerprint, .. } = &self.planning_principal else {
             bail!("qualification verifier cannot use delegated principal authority");
         };
-        if self.candidate_evaluation.is_some()
-            || self.scheduled_fire.is_some()
-            || self.project_context != ProjectContext::None
-            || !matches!(
-                self.project_authority,
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
-            )
-            || !self.ref_bindings.is_empty()
-            || self.usage_subject.is_some()
-            || self.usage_subject_asserted_by.is_some()
-            || self.target_site_id.is_some()
-            || self.launch_mode != "wait"
-            || self.requested_by.as_deref() != Some(purpose.owner_fingerprint.as_str())
-            || fingerprint != &purpose.owner_fingerprint
-            || self.item_ref != purpose.verifier_ref
-            || self.verified_subject.source_space != ItemSpace::Bundle
-            || self.verified_trust_class != TrustClass::Trusted
-            || self.resolution_output.effective_trust_class != ResolutionTrustClass::TrustedBundle
-            || self
-                .resolution_output
-                .effective_definition_digest()?
-                .as_str()
-                != purpose.verifier_effective_definition_digest
-            || ryeos_state::objects::canonical_value_digest(&self.parameters)?
-                != purpose.admitted_parameters_digest
-        {
-            bail!("sealed qualification purpose contradicts admitted verifier root");
+        // Name the failed invariant without echoing any protected coordinate.
+        // A blanket refusal makes a post-birth admission failure impossible to
+        // distinguish from an altered source or launch parameter.
+        let checks = [
+            ("candidate evaluation", self.candidate_evaluation.is_none()),
+            ("scheduled fire", self.scheduled_fire.is_none()),
+            ("project context", self.project_context == ProjectContext::None),
+            (
+                "project authority",
+                matches!(
+                    self.project_authority,
+                    ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
+                ),
+            ),
+            ("reference bindings", self.ref_bindings.is_empty()),
+            ("usage subject", self.usage_subject.is_none()),
+            ("usage assertion", self.usage_subject_asserted_by.is_none()),
+            ("target site", self.target_site_id.is_none()),
+            ("launch mode", self.launch_mode == "wait"),
+            (
+                "requested owner",
+                self.requested_by.as_deref() == Some(purpose.owner_fingerprint.as_str()),
+            ),
+            ("planning principal", fingerprint == &purpose.owner_fingerprint),
+            ("verifier ref", self.item_ref == purpose.verifier_ref),
+            ("verifier source space", self.verified_subject.source_space == ItemSpace::Bundle),
+            ("verifier trust", self.verified_trust_class == TrustClass::Trusted),
+            (
+                "resolution trust",
+                self.resolution_output.effective_trust_class == ResolutionTrustClass::TrustedBundle,
+            ),
+            (
+                "verifier definition",
+                // Root admission checked the pre-realization definition.
+                // This sealed request carries the finalized definition after
+                // the exact fixed external pin was realized.
+                self.resolution_output.effective_definition_digest()?.as_str()
+                    == purpose.verifier_realized_definition_digest,
+            ),
+            (
+                "verifier parameters",
+                ryeos_state::objects::canonical_value_digest(&self.parameters)?
+                    == purpose.admitted_parameters_digest,
+            ),
+        ];
+        if let Some((name, _)) = checks.iter().find(|(_, matches)| !matches) {
+            bail!("sealed qualification purpose contradicts admitted verifier root: {name}");
         }
         match self.product_selections.as_slice() {
             [] => {}, // Fixed signed pin is checked by product admission/proof.
@@ -2205,6 +2225,69 @@ mod authority_tests {
         assert!(sealed.requires_process_scope_for_qualification().is_err());
         let root = tempfile::tempdir().unwrap();
         assert!(sealed.restore(&empty_engine(), root.path()).is_err());
+    }
+
+    #[test]
+    fn sealed_qualification_checks_realized_not_pre_realization_definition() {
+        let mut sealed = SealedRootExecutionRequest::storage_test_fixture();
+        let verifier_ref = "tool:test/qualify_runtime";
+        sealed.item_ref = verifier_ref.to_owned();
+        sealed.launch_mode = "wait".to_owned();
+        sealed.verified_subject.source_space = ItemSpace::Bundle;
+        sealed.verified_subject.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.verified_trust_class = TrustClass::Trusted;
+        sealed.resolution_output.effective_trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.source_space = ItemSpace::Bundle;
+        sealed.resolution_output.root.source_root = ItemSourceRoot::Bundle {
+            name: "test".to_owned(),
+        };
+        sealed.resolution_output.root.trust_class = ResolutionTrustClass::TrustedBundle;
+        sealed.resolution_output.root.signer_fingerprint = Some("e".repeat(64));
+        let realized = sealed
+            .resolution_output
+            .effective_definition_digest()
+            .unwrap();
+        sealed.effective_definition_digest = realized.clone();
+        let admitted = "1".repeat(64);
+        assert_ne!(admitted, realized.as_str());
+        let parameters_digest = sealed.admitted_parameters_digest().unwrap();
+        sealed.product_qualification = Some(serde_json::from_value(json!({
+            "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA,
+            "launch_id": format!("L-{}", "a".repeat(32)),
+            "owner_fingerprint": "session:test",
+            "product_witness_hash": "b".repeat(64),
+            "witness_source": {"kind":"local_capture"},
+            "relationship_name": "runtime_to_worker",
+            "policy_source": {
+                "canonical_ref": "config:test/qualification_policy",
+                "raw_content_digest": "c".repeat(64),
+                "effective_definition_digest": "d".repeat(64),
+                "publisher_fingerprint": "e".repeat(64),
+                "policy": {
+                    "schema": ryeos_state::external_content::products::qualification::PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+                    "verifier_ref": verifier_ref,
+                    "subject_declaration_id": "runtime",
+                    "allowed_claims": ["command_probe"],
+                    "minimum_verifier_process_settlement": "scope_empty",
+                    "verifier_parameters": {}
+                }
+            },
+            "subject_declaration_id": "runtime",
+            "subject_manifest_hash": "f".repeat(64),
+            "required_claims": ["command_probe"],
+            "admitted_parameters_digest": parameters_digest,
+            "verifier_ref": verifier_ref,
+            "verifier_effective_definition_digest": admitted,
+            "verifier_realized_definition_digest": realized.as_str()
+        })).unwrap());
+        sealed.validate_product_qualification_purpose().unwrap();
+
+        sealed.product_qualification.as_mut().unwrap().verifier_realized_definition_digest =
+            "2".repeat(64);
+        assert!(sealed.validate_product_qualification_purpose().unwrap_err().to_string()
+            .contains("verifier definition"));
     }
 
     #[test]

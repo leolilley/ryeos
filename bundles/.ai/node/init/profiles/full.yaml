@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-24T10:24:07Z:6c15244b3df3d4d4c599d5fdd085b7eafe35d208a33c1adf5ae4ab3e7b4a74b3:8mUwfyQf8SolxFXhHlymPzfkCFj/EkmFyIhu66Bjqrn/J08ri3W8VdvNuKX4J+Fx+V1BA7ThuV7ycfQEQ3VfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-25T06:44:42Z:b84d53e481f52ae39c3b259b8d4dc10e76d78264b7829a8cdac3ff5d369b10de:Sraom8I+IHaC9ebbCvj2GS//hZOZWC2xrh9pT3etl3p8mxfYacoZ83DYuHwy2Ht95T2dtzoifDz5ut+8lyqFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -115,8 +115,8 @@ policies:
     workload_client: null
     producer_resource_ceiling:
       maximum_wall_time_ms: 600000
-      maximum_stdout_bytes: 8388608
-      maximum_stderr_bytes: 8388608
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
       maximum_memory_bytes: 2147483648
       maximum_processes: 64
     resource_authority:

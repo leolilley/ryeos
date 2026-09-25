@@ -24,7 +24,7 @@ pub const POLICY_REF: &str = "config:fixtures/independent-runtime/qualification"
 pub const PRODUCER_SCENARIO_ID: &str = ryeos_independent_runtime_verifier::PRODUCER_SCENARIO_ID;
 pub const VERIFIER_BIN: &str = "independent-runtime-verifier";
 const SCENARIO: &str = "test.independent_routed_runtime.v1";
-const CLAIMS: [&str; 5] = [
+pub const CLAIMS: [&str; 5] = [
     "bounded_candidate_capture",
     "candidate_only_execution",
     "controller_credential_exclusion",
@@ -257,7 +257,7 @@ impl IndependentVerifierScenario {
         let tool = json!({
             "category":"fixtures/independent-runtime", "name":"verify", "version":"1.0.0",
             "description":"Independently check exact scripted runtime scenario; not production profile qualification",
-            "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/opaque",
+            "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/tool_callback",
             "effects":"live", "filesystem_authority":"node_policy", "network_authority":"node_policy",
             "external_content":declarations,
             "config":{"command":format!("bin:{VERIFIER_BIN}"), "args":[], "input_data":"${params_json}", "timeout_secs":300},

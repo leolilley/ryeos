@@ -47,6 +47,9 @@ pub struct StagedDirectTargetProbe {
 
 pub const DIRECT_OCCURRENCE_ID: &str = "codex-occurrence";
 pub const DIRECT_HOME_ID: &str = "codex-home";
+const DIRECT_CONTROLLER_EXECUTABLE: &str =
+    "/workspace/qualification/controller/bin/ryeos-synthetic-routed-guest";
+const DIRECT_CONTROLLER_CANARY: &str = "/workspace/verifier-controller/canary";
 
 fn direct_prepared_destination(id: &str) -> Result<PathBuf> {
     ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
@@ -104,7 +107,10 @@ impl ParentChallenge {
         Ok(result)
     }
     pub fn canary_path(&self) -> PathBuf {
-        self.directory.path().join("canary")
+        // The signed command must address the guest's logical workspace,
+        // not the verifier's potentially relative descriptor path. The
+        // controller-owned canary remains pinned separately for recheck.
+        PathBuf::from(DIRECT_CONTROLLER_CANARY)
     }
 
     pub fn value(&self) -> &str {
@@ -906,10 +912,11 @@ pub fn stage_direct_target_probe(
     )?;
     // The controller remains an exact read-only selected realization member.
     // A verifier-owned memfd path cannot be used by the daemon-owned target.
-    let controller_executable = roots
-        .controller
-        .path()
-        .join("bin/ryeos-synthetic-routed-guest");
+    // The selected controller tree is admitted at qualification/controller in
+    // the projectless workspace. Its source descriptor path may be relative
+    // (the verifier opens "."), whereas Codex needs the fixed absolute path
+    // inside its isolated workspace view.
+    let controller_executable = Path::new(DIRECT_CONTROLLER_EXECUTABLE);
     let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
     let command_environment = materialize_command_environment(
         &roots.configurations,
@@ -1171,6 +1178,11 @@ mod tests {
 
     #[test]
     fn direct_prepared_paths_are_fixed_namespace_coordinates() {
+        assert_eq!(DIRECT_CONTROLLER_CANARY, "/workspace/verifier-controller/canary");
+        assert_eq!(
+            Path::new(DIRECT_CONTROLLER_EXECUTABLE),
+            Path::new("/workspace/qualification/controller/bin/ryeos-synthetic-routed-guest")
+        );
         assert_eq!(
             direct_prepared_destination(DIRECT_HOME_ID).unwrap(),
             Path::new("/ryeos/producer-prepared/codex-home")

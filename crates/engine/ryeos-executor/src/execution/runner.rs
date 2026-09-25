@@ -3034,9 +3034,11 @@ fn admitted_scoped_producer_grant(
         .get("effective_definition_digest")
         .and_then(Value::as_str)
         .context("qualification capsule has no realized definition")?;
+    // Both the capsule and sealed invocation are finalized definitions. The
+    // admitted pre-realization digest was checked at root admission instead.
     if realized != purpose.verifier_realized_definition_digest
         || sealed.effective_definition_digest().as_str()
-            != purpose.verifier_effective_definition_digest
+            != purpose.verifier_realized_definition_digest
     {
         bail!("qualification verifier definition changed before callback grant");
     }

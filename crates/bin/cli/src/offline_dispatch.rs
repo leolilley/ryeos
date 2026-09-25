@@ -760,6 +760,7 @@ fn exec_tool(
                 // realization to bind; declaring kinds refuse at finalization.
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",

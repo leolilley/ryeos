@@ -805,7 +805,10 @@ fn admit_independent_verifier_input_root(
     let source = std::fs::read_to_string(&path)?;
     let mut policy: ExternalContentImportPolicyRecord =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&source))?;
-    ensure!(policy.roots.is_empty(), "fixture has ambient import roots");
+    ensure!(
+        policy.roots.keys().all(|id| id == codex_runtime_producer::IMPORT_ROOT),
+        "fixture has unrelated ambient import roots"
+    );
     ensure!(
         policy.limits.max_file_bytes >= 268_435_456 && policy.limits.max_total_bytes >= 268_435_456,
         "current import policy cannot admit the bounded Codex executable"
@@ -1001,9 +1004,14 @@ fn stage_independent_verifier_inputs(
         "RYEOS_TEST_ZSH_BIN",
         "tools/bin/zsh",
         64 * 1024 * 1024,
-        None,
+        Some("6f505dbe067690d648c618c62d6d0a31fce71f28c801789376a828274d34e8b2"),
     )?;
-    link_binary("RYEOS_TEST_RG_BIN", "tools/bin/rg", 64 * 1024 * 1024, None)?;
+    link_binary(
+        "RYEOS_TEST_RG_BIN",
+        "tools/bin/rg",
+        64 * 1024 * 1024,
+        Some("e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849"),
+    )?;
     let scripted = include_str!(
         "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
     )
@@ -1039,6 +1047,79 @@ fn stage_independent_verifier_inputs(
     std::fs::write(configurations.join("environments.toml.template"), template)?;
     std::fs::write(configurations.join("admitted-profile.json"), &profile)?;
     Ok((root, admitted))
+}
+
+/// Credential-free local diagnostic only. The realization tuple from the
+/// sample fixture is not a production Worker closure, so this cannot issue
+/// qualification claims even if the scoped Codex conversation succeeds.
+fn native_unsigned_direct_configuration()
+-> anyhow::Result<ryeos_independent_runtime_verifier::ExactScenario> {
+    use anyhow::Context as _;
+
+    let seed = independent_verifier_scenario::tests::scenario();
+    let mut value = serde_json::to_value(seed)?;
+    value
+        .as_object_mut()
+        .context("direct fixture seed is not an object")?
+        .remove("qualification_use");
+    for key in [
+        "subject_manifest_hash",
+        "controller_manifest_hash",
+        "tools_manifest_hash",
+        "configurations_manifest_hash",
+    ] {
+        value[key] = json!("0".repeat(64));
+    }
+    value["expected_producer_recipe"]["executable_source"]["manifest_hash"] = json!("0".repeat(64));
+    let origin = value["responses_origin"]
+        .as_str()
+        .context("direct fixture has no scripted origin")?;
+    let scripted = include_str!(
+        "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
+    )
+    .replace("{ORIGIN}", origin);
+    value["scripted_baseline_sha256"] = json!(lillux::sha256_hex(scripted.as_bytes()));
+    value["command_environment_template_sha256"] = json!(lillux::sha256_hex(
+        include_str!(
+            "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"
+        )
+        .as_bytes()
+    ));
+    value["codex_sha256"] =
+        json!("cb0a15567e9a60a5820d54b0f6ae86d504dc3805c1eab21a47f70e3eb7b73a40");
+    value["relay_sha256"] =
+        json!("1d87b372e94b25c06d009c0f7e34f467e83be6b7bb4790f9e9fea865003141de");
+    value["expected_producer_recipe"]["executable_source"]["executable_sha256"] =
+        value["codex_sha256"].clone();
+    value["expected_command_output"] = json!(concat!(
+        "/workspace\n",
+        "ripgrep 15.2.0 (rev e89fff89ac)\n\n",
+        "features:+pcre2\n",
+        "simd(compile):+SSE2,-SSSE3,-AVX2\n",
+        "simd(runtime):+SSE2,+SSSE3,+AVX2\n\n",
+        "PCRE2 10.45 is available (JIT is available)\n"
+    ));
+    Ok(serde_json::from_value(value)?)
+}
+
+#[test]
+fn native_direct_configuration_is_unbound_and_credential_free() -> anyhow::Result<()> {
+    let configuration = native_unsigned_direct_configuration()?;
+    let value = serde_json::to_value(&configuration)?;
+    anyhow::ensure!(
+        configuration.subject_manifest_hash == "0".repeat(64)
+            && configuration.controller_manifest_hash == "0".repeat(64)
+            && configuration.tools_manifest_hash == "0".repeat(64)
+            && configuration.configurations_manifest_hash == "0".repeat(64)
+            && value["expected_producer_recipe"]["executable_source"]["manifest_hash"]
+                == "0".repeat(64)
+            && value["expected_producer_recipe"]["executable_source"]["executable_sha256"]
+                == configuration.codex_sha256
+            && configuration.responses_origin == "http://127.0.0.1:18765"
+            && !serde_json::to_string(&value)?.contains("api_key"),
+        "native diagnostic configuration unexpectedly carries authority or a bound import"
+    );
+    Ok(())
 }
 
 fn author_independent_verifier_scenario(
@@ -1078,6 +1159,27 @@ fn author_independent_verifier_scenario(
     configuration.controller_manifest_hash = hashes[1].clone();
     configuration.tools_manifest_hash = hashes[2].clone();
     configuration.configurations_manifest_hash = hashes[3].clone();
+    let mut realizations = configuration
+        .execution_environment
+        .realizations
+        .to_value()?;
+    let entries = realizations
+        .as_array_mut()
+        .context("typed direct realizations are not an array")?;
+    for (id, imported) in [
+        ("authoring-tools", &imports[2]),
+        ("guest-runtime", &imports[0]),
+    ] {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry["id"] == id)
+            .with_context(|| format!("typed direct realizations omit {id}"))?;
+        entry["manifest_hash"] = imported["manifest_hash"].clone();
+        entry["entry_count"] = imported["entry_count"].clone();
+        entry["total_bytes"] = imported["total_bytes"].clone();
+    }
+    configuration.execution_environment.realizations =
+        ryeos_state::objects::ExternalContentRealizationSet::from_value(&realizations)?;
     let mut recipe = serde_json::to_value(&configuration.expected_producer_recipe)?;
     let origin_address = configuration
         .responses_origin
@@ -1113,6 +1215,25 @@ fn author_independent_verifier_scenario(
     Ok(scenario)
 }
 
+async fn author_independent_verifier_scenario_from_public_import(
+    input_root: &Path,
+    configuration: ryeos_independent_runtime_verifier::ExactScenario,
+    admitted: &admitted_worker_evidence::AdmittedWorkerEvidence,
+) -> anyhow::Result<independent_verifier_scenario::IndependentVerifierScenario> {
+    let (mut authoring_node, _) = DaemonHarness::start_fast_with(
+        |state, _, fixture| {
+            common::fast_fixture::register_standard_bundle(state, fixture)?;
+            admit_independent_verifier_input_root(state, fixture, input_root)
+        },
+        |_| {},
+    )
+    .await?;
+    let imports = import_independent_verifier_trees(&authoring_node).await?;
+    let scenario = author_independent_verifier_scenario(configuration, &imports, admitted)?;
+    authoring_node.kill_daemon().await?;
+    Ok(scenario)
+}
+
 #[test]
 fn direct_scenario_authors_import_identities_after_signed_worker_admission() -> anyhow::Result<()> {
     let seed = independent_verifier_scenario::tests::scenario();
@@ -1132,96 +1253,281 @@ fn direct_scenario_authors_import_identities_after_signed_worker_admission() -> 
     configuration["expected_producer_recipe"]["executable_source"]["manifest_hash"] =
         json!("0".repeat(64));
     let configuration = serde_json::from_value(configuration)?;
-    let imports = ["a", "b", "c", "d"].map(|digit| json!({"manifest_hash": digit.repeat(64)}));
+    let imports = ["a", "b", "c", "d"].map(
+        |digit| json!({"manifest_hash": digit.repeat(64), "entry_count": 2, "total_bytes": 2}),
+    );
     let admitted = admit_signed_codex_worker()?;
     let authored = author_independent_verifier_scenario(configuration, &imports, &admitted)?;
+    let tools = authored
+        .execution_environment
+        .realizations
+        .iter()
+        .find(|entry| entry.id == "authoring-tools");
+    let product = authored
+        .execution_environment
+        .realizations
+        .iter()
+        .find(|entry| entry.id == "guest-runtime");
     anyhow::ensure!(
         authored.subject_manifest_hash == "a".repeat(64)
             && authored.controller_manifest_hash == "b".repeat(64)
             && authored.tools_manifest_hash == "c".repeat(64)
             && authored.configurations_manifest_hash == "d".repeat(64)
             && authored.qualification_use.profile_hash == admitted.profile.profile_hash
-            && authored.qualification_use.source_binding_hash == admitted.source.binding_hash,
+            && authored.qualification_use.source_binding_hash == admitted.source.binding_hash
+            && tools.is_some_and(|entry| entry.manifest_hash == "c".repeat(64))
+            && product.is_some_and(|entry| entry.manifest_hash == "a".repeat(64)),
         "direct scenario did not bind public imports and signed Worker admission"
     );
     Ok(())
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
+async fn capture_codex_subject_for_verifier(
+    harness: &DaemonHarness,
+    inputs: &codex_runtime_producer::ProductionInputs,
+) -> anyhow::Result<Value> {
+    use anyhow::{Context as _, ensure};
+
+    let imported = production_service(
+        harness,
+        "service:external-content/import",
+        json!({
+            "source":"filesystem",
+            "root":codex_runtime_producer::IMPORT_ROOT,
+            "path":"codex",
+            "shape":"file",
+            "storage":"large_content",
+            "maximum_bytes":inputs.maximum_bytes,
+            "expected_file_sha256":inputs.file_sha256,
+        }),
+    ).await?;
+    ensure!(
+        imported["manifest_hash"] == inputs.input_manifest_hash,
+        "Codex producer input import changed exact identity"
+    );
+    let bound = production_service(harness, "service:external-content/bind", json!({
+        "staging_id":imported["staging_id"],
+        "request_digest":imported["request_digest"],
+        "manifest_hash":imported["manifest_hash"],
+        "consumer_ref":codex_runtime_producer::CONSUMER_REF,
+        "consumer_kind":"installed_bundle",
+    })).await?;
+    ensure!(bound["manifest_hash"] == imported["manifest_hash"],
+        "Codex producer input binding changed identity");
+
+    let mut project = tempfile::tempdir()?;
+    project.disable_cleanup(true);
+    std::fs::create_dir(project.path().join(".ai"))?;
+    let launch_id = "L-8c91a32effdd468f94c7daf2e8a4f8a5";
+    let (accepted, terminal) = public_launch::terminal_launch(
+        harness,
+        json!({
+            "item_ref":codex_runtime_producer::PRODUCER_REF,
+            "launch_id":launch_id,
+            "ref_bindings":{},
+            "project_path":project.path(),
+            "parameters":{},
+            "execution_policy":ExecutionPolicy::local_pinned_capture(ExecutionResponse::Accepted)
+                .exclude_operator_vault(),
+        }),
+        launch_id,
+        std::time::Duration::from_secs(420),
+    ).await?;
+    ensure!(
+        terminal.pointer("/thread/status") == Some(&json!("completed")),
+        "Codex runtime product producer failed: {terminal}"
+    );
+    let root = accepted["thread_id"].as_str().context("Codex product root absent")?;
+    let captured = production_service(harness, "service:external-content/capture-product", json!({
+        "chain_root_id":root,
+        "thread_id":root,
+        "recipe_binding":"product_recipe",
+        "product_name":"runtime",
+    })).await?;
+    ensure!(
+        captured["state"] == "captured"
+            && captured["witness_hash"].as_str().is_some_and(lillux::valid_hash),
+        "Codex product capture did not return a node-signed witness: {captured}"
+    );
+    eprintln!("direct verifier subject producer root={root} witness={}",
+        captured["witness_hash"]);
+    Ok(captured)
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex and verifier binaries plus an unsigned direct configuration; uses only a local scripted provider"]
+#[ignore = "requires exact Codex, static producer, and verifier binaries; local scripted provider only"]
 async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let configuration_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON is required")?,
-    );
     let verifier_path = PathBuf::from(
         std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
             .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
     );
-    let configuration: ryeos_independent_runtime_verifier::ExactScenario = serde_json::from_slice(
-        &lillux::secure_fs::read_regular_file_bounded_no_follow(&configuration_path, 16 * 1024)?,
-    )?;
+    let configuration = native_unsigned_direct_configuration()?;
     let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
     let verifier_bytes =
         lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
+    let producer_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER")
+            .context("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER is required")?,
+    );
+    let producer_sha256 = std::env::var("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER_SHA256")
+        .context("RYEOS_TEST_CODEX_GUEST_RUNTIME_PRODUCER_SHA256 is required")?;
+    let codex_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_CODEX_0147_BIN")
+            .context("RYEOS_TEST_CODEX_0147_BIN is required")?,
+    );
+    let scenario = author_independent_verifier_scenario_from_public_import(
+        input_root.path(),
+        configuration,
+        &admitted,
+    )
+    .await?;
+    let mut producer_inputs = None;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
             common::fast_fixture::register_standard_bundle(state, fixture)?;
-            admit_independent_verifier_input_root(state, fixture, input_root.path())
+            // The fast node defaults to the 64 MiB full-profile command
+            // ceiling. This fixture admits an exact 258 MiB Codex member, so
+            // use the bounded development-profile ceiling before node seal.
+            let policy_path = state.join(".ai/node/policies/isolation.yaml");
+            let raw = std::fs::read_to_string(&policy_path)?;
+            let mut policy: Value = serde_yaml::from_str(
+                &lillux::signature::strip_signature_lines(&raw),
+            )?;
+            ensure!(
+                policy.pointer("/policy/limits/verified_artifact_file_bytes")
+                    == Some(&json!(67_108_864))
+                    && policy.pointer("/policy/limits/verified_artifact_total_bytes")
+                        == Some(&json!(268_435_456)),
+                "unexpected fast-node isolation resource baseline"
+            );
+            policy["policy"]["limits"]["verified_artifact_file_bytes"] = json!(268_435_456);
+            policy["policy"]["limits"]["verified_artifact_total_bytes"] = json!(1_073_741_824);
+            let isolation: ryeos_engine::isolation::IsolationPolicy =
+                serde_json::from_value(policy["policy"].clone())?;
+            ryeos_engine::isolation::IsolationRuntime::validate_policy(&isolation)?;
+            std::fs::write(
+                &policy_path,
+                lillux::signature::sign_content_at(
+                    &serde_yaml::to_string(&policy)?,
+                    &fixture.node,
+                    "#",
+                    None,
+                    common::fast_fixture::FAST_FIXTURE_TIME,
+                ),
+            )?;
+            producer_inputs = Some(codex_runtime_producer::prepare(
+                &common::workspace_root(),
+                state,
+                fixture,
+                &codex_path,
+                &producer_path,
+                &producer_sha256,
+                Some((
+                    independent_verifier_scenario::POLICY_REF,
+                    &independent_verifier_scenario::CLAIMS,
+                )),
+            )?);
+            admit_independent_verifier_input_root(state, fixture, input_root.path())?;
+            install_signed_independent_verifier_fixture(
+                state,
+                fixture,
+                &scenario,
+                &verifier_bytes,
+                false,
+            )
         },
         |_| {},
     )
     .await?;
+    let producer_inputs = producer_inputs.context("signed Codex product fixture was not prepared")?;
     harness.retain_evidence_on_drop(true);
-    let staged = import_independent_verifier_trees(&harness).await?;
-    let scenario = author_independent_verifier_scenario(configuration, &staged, &admitted)?;
-    let parameters = scenario.parameters()?;
-    harness.kill_daemon().await?;
-    install_signed_independent_verifier_fixture(
-        &harness.state_path,
-        &keys,
-        &scenario,
-        &verifier_bytes,
-        false,
-    )?;
-    harness.respawn_with(|_| {}).await?;
+    let captured_subject = capture_codex_subject_for_verifier(&harness, &producer_inputs).await?;
+    ensure!(
+        captured_subject["evidence"]["manifest_hash"] == scenario.subject_manifest_hash,
+        "real Codex product manifest differs from the signed verifier subject pin"
+    );
+    let subject = production_service(
+        &harness,
+        "service:external-content/import",
+        json!({
+            "source":"retained_product",
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "maximum_bytes":268_435_456,
+        }),
+    ).await?;
+    let staged = [
+        subject,
+        import_independent_verifier_tree(&harness, "controller", "content", 64 * 1024 * 1024).await?,
+        import_independent_verifier_tree(&harness, "tools", "content", 64 * 1024 * 1024).await?,
+        import_independent_verifier_tree(&harness, "configurations", "content", 1024 * 1024).await?,
+    ];
+    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
     for imported in &staged {
         bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
     }
-    let launch_id = "L-f321054b98a409f7da7cd63e7bdacc09";
-    let (accepted, terminal) = public_launch::terminal_launch(
+    harness.kill_daemon().await?;
+    harness.respawn_with(|_| {}).await?;
+    let launch_id = "L-771adc873ac744bd89f1cac896098f51";
+    let accepted = production_service(
         &harness,
+        "service:external-content/launch-product-qualification",
         json!({
-            "item_ref":independent_verifier_scenario::TOOL_REF,
-            "launch_id":launch_id,"ref_bindings":{},"parameters":parameters,
-            "execution_policy":ExecutionPolicy::projectless(ExecutionResponse::Accepted)
-                .exclude_operator_vault(),
+            "launch_id":launch_id,
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "relationship_name":"runtime_to_external_authoring_worker",
         }),
-        launch_id,
-        std::time::Duration::from_secs(330),
-    )
-    .await?;
+    ).await?;
+    ensure!(
+        accepted["status"] == "accepted" && accepted["launch_id"] == launch_id,
+        "qualification launch did not return an exact accepted coordinate: {accepted}"
+    );
     let root = accepted["thread_id"]
         .as_str()
-        .context("accepted direct verifier root absent")?;
+        .context("accepted direct verifier root absent")?
+        .to_owned();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
+        loop {
+            let detail = production_service(
+                &harness,
+                "service:threads/get",
+                json!({"thread_id":root}),
+            ).await?;
+            ensure!(
+                detail.pointer("/thread/thread_id") == Some(&json!(root)),
+                "qualification point read changed root identity"
+            );
+            let status = detail.pointer("/thread/status")
+                .and_then(Value::as_str)
+                .context("qualification root status absent")?;
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+                .is_some_and(|status| status.is_terminal())
+            {
+                return Ok::<_, anyhow::Error>(detail);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }).await.context("accepted qualification observation timed out; do not relaunch")??;
     ensure!(
         terminal.pointer("/thread/status") == Some(&json!("failed")),
         "incomplete direct qualification incorrectly succeeded"
     );
     let error = terminal
-        .pointer("/thread/error")
-        .context("failed direct verifier has no authoritative error")?;
+        .pointer("/result/error/stderr")
+        .with_context(|| format!("failed direct verifier has no tool stderr: {terminal}"))?;
     ensure!(
         serde_json::to_string(error)?.contains(
             "effective namespace environment and complete qualification evidence remain unproven"
         ),
         "direct run failed before its explicit no-claims boundary: {error}"
     );
-    let scoped = exact_scoped_producer_observation(&harness.state_path, root)?;
+    let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;
     let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
         scoped["launch_owner"]["thread_id"] == root
@@ -1272,46 +1578,48 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact verifier executable and unsigned direct configuration; no provider credentials"]
+#[ignore = "requires exact verifier and Codex executables; no provider credentials"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let configuration_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON is required")?,
-    );
     let verifier_path = PathBuf::from(
         std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
             .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
     );
-    let configuration_bytes =
-        lillux::secure_fs::read_regular_file_bounded_no_follow(&configuration_path, 16 * 1024)?;
-    let configuration: ryeos_independent_runtime_verifier::ExactScenario =
-        serde_json::from_slice(&configuration_bytes)?;
+    let configuration = native_unsigned_direct_configuration()?;
     let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
     let verifier_bytes =
         lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
+    let scenario = author_independent_verifier_scenario_from_public_import(
+        input_root.path(),
+        configuration,
+        &admitted,
+    )
+    .await?;
+    let parameters = scenario.parameters()?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
             common::fast_fixture::register_standard_bundle(state, fixture)?;
-            admit_independent_verifier_input_root(state, fixture, input_root.path())
+            admit_independent_verifier_input_root(state, fixture, input_root.path())?;
+            install_signed_independent_verifier_fixture(
+                state,
+                fixture,
+                &scenario,
+                &verifier_bytes,
+                true,
+            )
         },
         |_| {},
     )
     .await?;
     harness.retain_evidence_on_drop(true);
     let staged = import_independent_verifier_trees(&harness).await?;
-    let scenario = author_independent_verifier_scenario(configuration, &staged, &admitted)?;
-    let parameters = scenario.parameters()?;
+    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
+    for imported in &staged {
+        bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
+    }
     harness.kill_daemon().await?;
-    install_signed_independent_verifier_fixture(
-        &harness.state_path,
-        &keys,
-        &scenario,
-        &verifier_bytes,
-        true,
-    )?;
     let (mut gate, child) = common::ScopedReservedAttemptGate::pair()?;
     harness
         .respawn_with(move |command| {
@@ -1319,9 +1627,6 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
                 .expect("bind signed scoped race gate");
         })
         .await?;
-    for imported in &staged {
-        bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
-    }
     let launch_id = "L-45e7fd8950c6f85790be5301dcd066cb";
     let (launched, held) = tokio::join!(
         public_launch::terminal_launch(
@@ -2477,6 +2782,7 @@ async fn public_codex_runtime_production_captures_real_workspace_output() -> any
                 &input_path,
                 &producer_path,
                 &producer_sha256,
+                None,
             )?);
             Ok(())
         },

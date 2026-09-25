@@ -36,7 +36,10 @@ use super::{
 // v29 requires explicit ordinary endpoint intent and exact selected external
 // binding identity in direct plans. Missing predecessor fields are not local
 // execution authority and must never be filled from current node preferences.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 29;
+// v30 classifies product-qualification purpose as executable-program authority.
+// A verifier's selected policy, witness and purpose cannot enter or leave the
+// sealed invocation without moving the exact program identity.
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 30;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
 
@@ -61,6 +64,7 @@ const SEALED_ROOT_INVOCATION_FIELDS: &[&str] = &[
     "project_binding_subject_authority",
     "project_context",
     "product_selections",
+    "product_qualification",
     "ref_bindings",
     "resolved_ref_bindings",
     "requested_by",
@@ -2081,6 +2085,7 @@ mod tests {
             "resolved_result_policy": {"retention":"full"},
             "captured_history_policy": {"retention":"durable"},
             "candidate_evaluation": null,
+            "product_qualification": null,
         });
         sealed_invocation
             .as_object_mut()
@@ -2290,6 +2295,23 @@ mod tests {
                 .to_string()
                 .contains("must contain exactly")
         );
+    }
+
+    #[test]
+    fn qualification_purpose_moves_exact_program_identity() {
+        let (mut invocation, ordinary, _) =
+            sealed_invocation_fixture("tool:test/run", "runtime:direct", "tool:test/executor");
+        invocation["product_qualification"] = serde_json::json!({"selected_policy":"first"});
+        let first = project_sealed_root_exact_program(&invocation).unwrap();
+        assert_ne!(first, ordinary);
+        invocation["product_qualification"] = serde_json::json!({"selected_policy":"second"});
+        let second = project_sealed_root_exact_program(&invocation).unwrap();
+        assert_ne!(second, first);
+        invocation
+            .as_object_mut()
+            .unwrap()
+            .remove("product_qualification");
+        assert!(project_sealed_root_exact_program(&invocation).is_err());
     }
 
     #[test]

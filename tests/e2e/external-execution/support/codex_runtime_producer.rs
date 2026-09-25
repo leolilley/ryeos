@@ -66,6 +66,7 @@ pub fn prepare(
     codex_path: &Path,
     producer_path: &Path,
     expected_producer_sha256: &str,
+    qualification: Option<(&str, &[&str])>,
 ) -> anyhow::Result<ProductionInputs> {
     let source_root = repository.join("bundles/codex/.ai");
     let read_source = |relative: &str| -> anyhow::Result<String> {
@@ -106,8 +107,21 @@ pub fn prepare(
             && lillux::valid_hash(expected_producer_sha256),
         "fixture inputs require exact canonical hashes"
     );
-    let recipe: Value =
+    let mut recipe: Value =
         serde_yaml::from_str(&read_source("config/codex/guest-runtime-products.yaml")?)?;
+    if let Some((policy_ref, required_claims)) = qualification {
+        let relationship = &mut recipe["product_relationships"]["relationships"][0];
+        ensure!(
+            relationship["name"] == "runtime_to_external_authoring_worker"
+                && relationship["qualification"]["policy_ref"].is_null()
+                && relationship["qualification"]["required_claims"] == json!([]),
+            "production relationship changed before qualification fixture authoring"
+        );
+        relationship["qualification"] = json!({
+            "policy_ref": policy_ref,
+            "required_claims": required_claims,
+        });
+    }
     let declarations = ryeos_state::external_content::products::ProductDeclarations::from_value(
         recipe["build_products"].clone(),
     )?;
@@ -136,7 +150,13 @@ pub fn prepare(
         "tools/codex/guest-runtime/produce.yaml",
         "config/codex/guest-runtime-products.yaml",
     ] {
-        let body = read_source(relative)?;
+        let body = if qualification.is_some()
+            && relative == "config/codex/guest-runtime-products.yaml"
+        {
+            serde_yaml::to_string(&recipe)?
+        } else {
+            read_source(relative)?
+        };
         let destination = bundle.join(".ai").join(relative);
         std::fs::create_dir_all(destination.parent().context("fixture source parent")?)?;
         std::fs::write(

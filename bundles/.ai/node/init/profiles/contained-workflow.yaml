@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-24T10:24:07Z:f6410b32e716441f39bfdebb459f0a5d0a7c0e2e8a25225a658b75b762fea946:VvLg5M+aFF4B5liOPtbxI7VpfxMtkx7E1b/envP4UJ4TShqrnry4U+rPC5SgP9Rspn16qReszHbWvV4nFcu8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-25T06:44:42Z:1db062ce23dfd0af8fe50dba0fe258eac65c89a68fc5e35c0009fb2ed3d47c4f:NiUGzklE5LH31+Mhj78ySIuUBJi+eMSkwMZSoU8eGAiOJQCsy+dH7OmMtFZJV6246LTDsDBW2TS+ozEi2SgKDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -107,8 +107,8 @@ policies:
     workload_client: null
     producer_resource_ceiling:
       maximum_wall_time_ms: 600000
-      maximum_stdout_bytes: 8388608
-      maximum_stderr_bytes: 8388608
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
       maximum_memory_bytes: 2147483648
       maximum_processes: 64
     resource_authority: null
