@@ -134,3 +134,23 @@ does **not** by itself prove the old guest executable/cwd descriptor handoff
 or prevent pathname substitution of a mutable child directory. Qualification
 must remain disabled until the launch/isolation contract supplies and tests
 those exact authorities, including a joined native direct-target run.
+
+The prepared-directory integration must use a separate producer authority,
+not reinterpret session runtime-view mounts. One logical ID binds a canonical
+workspace-relative descendant and its pinned directory descriptor; the fixed
+producer destination derives only from that ID. Isolation must compare the
+descriptor with the retained workspace descendant, reject duplicate or
+overlapping destinations across mount classes, and commit the resulting mount
+through the existing applied-launch plan. Several environment names may refer
+to one ID. The private-workspace binding likewise needs a stable namespace
+destination; `/proc/self/fd/N` in an environment value is not a descendant-
+stable contract.
+
+There is a separate CWD cut: isolation currently interprets the requested CWD
+as a host path before mapping it into the namespace. A prepared CWD cannot be
+implemented by merely putting `/ryeos/producer-prepared/<id>` in the request.
+The descriptor-backed mapping and CWD visibility check must recognize the
+retained prepared descendant and commit its effective destination. All signed
+IDs must resolve before launch reservation; disabled or non-enforced isolation
+must refuse these bindings. Mount identity alone does not attest prepared file
+content, concurrent writers, or final frozen output.
