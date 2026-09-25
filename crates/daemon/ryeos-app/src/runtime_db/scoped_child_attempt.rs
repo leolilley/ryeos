@@ -2335,6 +2335,65 @@ mod tests {
     }
 
     #[test]
+    fn restart_retains_prepared_content_map_and_rejects_legacy_or_noncanonical_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.sqlite3");
+        let (initial, recovery, identity) = fixture();
+        let mut evidence = mount_evidence(&identity);
+        evidence.expected.mount_count = 3;
+        evidence.observed.mount_count = 3;
+        evidence.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/config.toml".into(),
+            "a".repeat(64),
+        );
+        evidence.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/environments.toml".into(),
+            "b".repeat(64),
+        );
+        {
+            let db = RuntimeDb::open(&path).unwrap();
+            seed_owner(&db, &initial.owner);
+            db.reserve_scoped_child_attempt(&initial).unwrap();
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &evidence).unwrap();
+            db.permit_scoped_child_release(&initial.attempt_id, &identity).unwrap();
+        }
+        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        assert_eq!(
+            reopened.get_scoped_child_attempt(&initial.attempt_id).unwrap().unwrap()
+                .mount_preparation_evidence,
+            Some(evidence.clone())
+        );
+        drop(reopened);
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // Reopening validates the retained row's shape, not the signed
+        // recipe. The live pre-contact path already checked these hashes
+        // against signed bytes; that authority cannot be reconstructed from
+        // a standalone SQLite row after restart.
+        let mut noncanonical = evidence.clone();
+        noncanonical.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/config.toml".into(),
+            "A".repeat(64),
+        );
+        let encoded = lillux::canonical_json(&serde_json::to_value(noncanonical).unwrap()).unwrap();
+        conn.execute(
+            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+            params![initial.attempt_id, encoded],
+        ).unwrap();
+        assert!(RuntimeDb::open_existing_current(&path).is_err());
+
+        let mut legacy = evidence;
+        legacy.schema = 1;
+        let encoded = lillux::canonical_json(&serde_json::to_value(legacy).unwrap()).unwrap();
+        conn.execute(
+            "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+            params![initial.attempt_id, encoded],
+        ).unwrap();
+        assert!(RuntimeDb::open_existing_current(&path).is_err());
+    }
+
+    #[test]
     fn unsettled_attempt_requires_exact_host_lifetime_on_reopen_and_reserve() {
         for corrupt_fence in [None, Some("different_lifetime")] {
             let temp = tempfile::tempdir().unwrap();
