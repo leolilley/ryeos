@@ -872,6 +872,45 @@ async fn import_independent_verifier_tree(
     Ok(imported)
 }
 
+/// The public service, not fixture-side hashing, produces the four identities
+/// that can subsequently be committed into the signed verifier scenario.
+async fn import_independent_verifier_trees(harness: &DaemonHarness) -> anyhow::Result<[Value; 4]> {
+    let mut imports = Vec::with_capacity(4);
+    for (member, storage, limit) in [
+        ("subject", "large_content", 268_435_456),
+        ("controller", "content", 64 * 1024 * 1024),
+        ("tools", "content", 64 * 1024 * 1024),
+        ("configurations", "content", 1024 * 1024),
+    ] {
+        imports.push(import_independent_verifier_tree(harness, member, storage, limit).await?);
+    }
+    Ok(imports.try_into().expect("four fixed verifier imports"))
+}
+
+fn require_independent_verifier_imports_match_scenario(
+    imports: &[Value; 4],
+    scenario: &independent_verifier_scenario::IndependentVerifierScenario,
+) -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    for ((member, imported), expected) in ["subject", "controller", "tools", "configurations"]
+        .into_iter()
+        .zip(imports)
+        .zip([
+            &scenario.subject_manifest_hash,
+            &scenario.controller_manifest_hash,
+            &scenario.tools_manifest_hash,
+            &scenario.configurations_manifest_hash,
+        ])
+    {
+        ensure!(
+            imported["manifest_hash"] == expected.as_str(),
+            "public {member} import differs from the signed direct scenario"
+        );
+    }
+    Ok(())
+}
+
 async fn bind_independent_verifier_tree(
     harness: &DaemonHarness,
     imported: &Value,
@@ -1045,41 +1084,8 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
     )
     .await?;
     harness.retain_evidence_on_drop(true);
-    let imports = [
-        (
-            "subject",
-            "large_content",
-            268_435_456,
-            &scenario.subject_manifest_hash,
-        ),
-        (
-            "controller",
-            "content",
-            64 * 1024 * 1024,
-            &scenario.controller_manifest_hash,
-        ),
-        (
-            "tools",
-            "content",
-            64 * 1024 * 1024,
-            &scenario.tools_manifest_hash,
-        ),
-        (
-            "configurations",
-            "content",
-            1024 * 1024,
-            &scenario.configurations_manifest_hash,
-        ),
-    ];
-    let mut staged = Vec::new();
-    for (member, storage, limit, expected) in imports {
-        let imported = import_independent_verifier_tree(&harness, member, storage, limit).await?;
-        ensure!(
-            imported["manifest_hash"] == expected.as_str(),
-            "public {member} import differs from the authored direct scenario"
-        );
-        staged.push(imported);
-    }
+    let staged = import_independent_verifier_trees(&harness).await?;
+    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
     harness.kill_daemon().await?;
     install_signed_independent_verifier_fixture(
         &harness.state_path,
@@ -1202,41 +1208,8 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
     )
     .await?;
     harness.retain_evidence_on_drop(true);
-    let imports = [
-        (
-            "subject",
-            "large_content",
-            268_435_456,
-            &scenario.subject_manifest_hash,
-        ),
-        (
-            "controller",
-            "content",
-            64 * 1024 * 1024,
-            &scenario.controller_manifest_hash,
-        ),
-        (
-            "tools",
-            "content",
-            64 * 1024 * 1024,
-            &scenario.tools_manifest_hash,
-        ),
-        (
-            "configurations",
-            "content",
-            1024 * 1024,
-            &scenario.configurations_manifest_hash,
-        ),
-    ];
-    let mut staged = Vec::new();
-    for (member, storage, limit, expected) in imports {
-        let imported = import_independent_verifier_tree(&harness, member, storage, limit).await?;
-        ensure!(
-            imported["manifest_hash"] == expected.as_str(),
-            "public {member} import differs from the authored scenario"
-        );
-        staged.push(imported);
-    }
+    let staged = import_independent_verifier_trees(&harness).await?;
+    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
     harness.kill_daemon().await?;
     install_signed_independent_verifier_fixture(
         &harness.state_path,
