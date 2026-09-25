@@ -48,6 +48,9 @@ mod candidate_authoring;
 #[path = "../../../../tests/e2e/external-execution/support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
 
+#[path = "../../../../tests/e2e/external-execution/support/admitted_worker_evidence.rs"]
+mod admitted_worker_evidence;
+
 #[path = "../../../../tests/e2e/external-execution/support/ordinary_direct.rs"]
 mod ordinary_direct;
 
@@ -62,6 +65,75 @@ use common::DaemonHarness;
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
 use ryeos_state::external_content::products::ProductCaptureEvidence;
 use serde_json::{Value, json};
+
+#[test]
+fn signed_codex_worker_source_admits_direct_qualification_profile() -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    let admitted = admit_signed_codex_worker()?;
+    let requirement = admitted
+        .profile
+        .external_candidate_requirement()?
+        .ok_or_else(|| anyhow::anyhow!("admitted Codex Worker has no external candidate"))?;
+    ensure!(
+        requirement.provider_declaration_id == "codex-hosted"
+            && requirement.runtime_product_declaration_id == "guest-runtime"
+            && lillux::valid_hash(&admitted.source.binding_hash)
+            && lillux::valid_hash(&admitted.source.content_manifest_hash)
+            && lillux::valid_hash(&admitted.profile.profile_hash),
+        "signed Codex Worker admission changed the direct qualification identity"
+    );
+    eprintln!(
+        "signed Codex Worker admission: {}",
+        json!({
+            "source_binding_hash":admitted.source.binding_hash,
+            "source_content_manifest_hash":admitted.source.content_manifest_hash,
+            "profile_hash":admitted.profile.profile_hash,
+        })
+    );
+    Ok(())
+}
+
+fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::AdmittedWorkerEvidence> {
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir()?;
+    let mut state = ryeos_app::state::test_support::build(root.path())?;
+    let core = ryeos_engine::test_support::core_bundle_root();
+    let standard = ryeos_engine::test_support::standard_bundle_root();
+    let codex = ryeos_engine::test_support::workspace_root().join("bundles/codex");
+    let roots = vec![core.clone(), standard.clone(), codex];
+    let trust = ryeos_engine::test_support::live_trust_store();
+    let kinds = ryeos_engine::kind_registry::KindRegistry::load_base(
+        &[
+            core.join(".ai/node/engine/kinds"),
+            standard.join(".ai/node/engine/kinds"),
+        ],
+        &trust,
+    )?;
+    let (parsers, _) = ryeos_engine::parsers::ParserRegistry::load_base(&roots, &trust, &kinds)?;
+    let handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let dispatcher = ryeos_engine::parsers::ParserDispatcher::new(parsers, Arc::clone(&handlers));
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)?;
+    let registered = ["core", "standard", "codex"]
+        .into_iter()
+        .zip(roots.iter().cloned())
+        .map(
+            |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                name: name.to_owned(),
+                canonical_root,
+            },
+        )
+        .collect();
+    state.engine = Arc::new(
+        ryeos_engine::engine::Engine::new(kinds, dispatcher, roots)
+            .with_trust_store(trust.clone())
+            .with_node_trust_store(trust)
+            .with_composers(composers)
+            .with_registered_bundle_roots(registered),
+    );
+    admitted_worker_evidence::admit_worker(&state, "worker:codex/external-hosted-authoring")
+}
 
 fn artifact(directory: &Path, name: &str) -> PathBuf {
     let path = directory.join(name);
@@ -899,30 +971,9 @@ fn stage_independent_verifier_inputs(
         lillux::sha256_hex(template.as_bytes()) == scenario.command_environment_template_sha256,
         "command environment template differs from signed scenario"
     );
-    let admitted_profile_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_ADMITTED_PROFILE_OBJECT_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_ADMITTED_PROFILE_OBJECT_JSON is required")?,
-    );
-    let source_projection_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_SOURCE_PROJECTION_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_SOURCE_PROJECTION_JSON is required")?,
-    );
-    ensure!(
-        admitted_profile_path.is_absolute() && source_projection_path.is_absolute(),
-        "admitted Worker evidence paths must be absolute"
-    );
-    let admitted_profile: ryeos_state::objects::AdmittedStructuredSessionProfile =
-        serde_json::from_slice(&lillux::secure_fs::read_regular_file_bounded_no_follow(
-            &admitted_profile_path,
-            128 * 1024,
-        )?)?;
-    let source_projection: ryeos_state::objects::EffectiveSourceClosureProjection =
-        serde_json::from_slice(&lillux::secure_fs::read_regular_file_bounded_no_follow(
-            &source_projection_path,
-            128 * 1024,
-        )?)?;
-    admitted_profile.validate()?;
-    source_projection.validate()?;
+    let admitted = admit_signed_codex_worker()?;
+    let admitted_profile = admitted.profile;
+    let source_projection = admitted.source;
     let profile = lillux::canonical_json(&admitted_profile.contract)?.into_bytes();
     ensure!(
         profile.len() <= 64 * 1024,
