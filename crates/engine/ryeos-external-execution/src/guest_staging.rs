@@ -1000,6 +1000,14 @@ mod tests {
         };
         let prepared = prepare().unwrap();
         assert_eq!(prepared.manifest(), &produced_manifest);
+        assert_eq!(
+            prepared.manifest_sha256(),
+            lillux::sha256_hex(
+                lillux::canonical_json(&serde_json::to_value(&produced_manifest).unwrap())
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
         assert_eq!(prepared.bytes(), produced_bytes.len() as u64);
         assert_eq!(prepared.sha256(), lillux::sha256_hex(&produced_bytes));
         let delivery = prepared.delivery_descriptor().unwrap();

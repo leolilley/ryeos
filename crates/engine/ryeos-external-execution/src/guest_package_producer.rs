@@ -31,6 +31,7 @@ pub struct PreparedGuestPackage {
     root: lillux::PinnedDirectory,
     payload: lillux::PinnedRegularFile,
     manifest: GuestStagingPackageManifest,
+    manifest_sha256: String,
     bytes: u64,
     sha256: String,
 }
@@ -42,6 +43,14 @@ impl PreparedGuestPackage {
 
     pub fn manifest(&self) -> &GuestStagingPackageManifest {
         &self.manifest
+    }
+
+    /// Digest of the canonical inventory that the guest must re-import.
+    /// This is distinct from the framed payload digest. The eventual durable
+    /// activation must bind both so neither a changed inventory nor changed
+    /// file bytes can silently substitute for the prepared package.
+    pub fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
     }
 
     pub fn bytes(&self) -> u64 {
@@ -124,15 +133,19 @@ pub fn prepare_private_guest_package(
         }
         check?;
         require_time(deadline)?;
-        Ok((payload, manifest, bytes, sha256))
+        let manifest_sha256 = lillux::sha256_hex(
+            lillux::canonical_json(&serde_json::to_value(&manifest)?)?.as_bytes(),
+        );
+        Ok((payload, manifest, manifest_sha256, bytes, sha256))
     })();
     match result {
-        Ok((payload, manifest, bytes, sha256)) => Ok(PreparedGuestPackage {
+        Ok((payload, manifest, manifest_sha256, bytes, sha256)) => Ok(PreparedGuestPackage {
             parent: owner,
             name,
             root,
             payload,
             manifest,
+            manifest_sha256,
             bytes,
             sha256,
         }),
