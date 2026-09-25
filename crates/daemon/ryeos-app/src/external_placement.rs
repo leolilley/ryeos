@@ -7140,6 +7140,16 @@ mod tests {
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
 
+        let app_root = tempfile::tempdir().unwrap();
+        let mut state = crate::state::test_support::build(app_root.path()).unwrap();
+        state.state_store = store.clone();
+        request_external_candidate_cleanup(&state, &reservation.placement_thread_id).unwrap();
+        assert_eq!(
+            store.external_allocation(&reservation.placement_thread_id)
+                .unwrap().unwrap().phase,
+            ExternalAllocationPhase::Quarantined,
+        );
+
         let ExternalPlacementContactDecision::Reconcile(cleanup) = prepared_fixture(
             store.clone(), backend.clone(), &reservation, &binding,
             gate.clone(), controller_lifetime.clone(),
