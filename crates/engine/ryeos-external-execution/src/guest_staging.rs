@@ -809,6 +809,23 @@ mod tests {
         writable_source.write_all(b"run").unwrap();
         writable_source.sync_all().unwrap();
         crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        for (name, original) in [
+            ("record-01", &source_binding_bytes),
+            ("record-02", &source_manifest_bytes),
+        ] {
+            let mut writable = staged
+                .root()
+                .open_regular(OsStr::new(name), true)
+                .unwrap()
+                .unwrap();
+            writable.write_all(b"x").unwrap();
+            writable.sync_all().unwrap();
+            assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+            writable.rewind().unwrap();
+            writable.write_all(original).unwrap();
+            writable.sync_all().unwrap();
+            crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        }
         assert!(
             staged
                 .root()
