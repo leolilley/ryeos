@@ -6,6 +6,8 @@
 //! ambient path; its exact bounded contents are supplied out of band by the
 //! controller that admitted the adapter.
 
+pub mod staging_package;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
