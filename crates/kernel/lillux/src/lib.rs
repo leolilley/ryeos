@@ -107,7 +107,7 @@ pub use secure_fs::{
     OpenFileIdentity, OpenMountEntryKind, OpenRegularFileObservation, PinnedDirectory,
     PinnedDirectoryEntry, PinnedDirectoryEntryMetadata, PinnedDirectoryIdentity,
     PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, PinnedRegularFileIdentity,
-    ProcessScopedFlatDirectoryGeneration, canonicalize_existing_path,
+    ProcessScopedFlatDirectoryGeneration, StablePinnedRegularReader, canonicalize_existing_path,
     collect_directory_tree_no_follow, collect_pinned_regular_files_no_follow_bounded,
     collect_regular_files_no_follow, current_user_home,
     digest_open_regular_file_stable_chunked_exact, digest_open_regular_file_stable_exact,

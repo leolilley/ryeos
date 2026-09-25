@@ -1115,6 +1115,73 @@ pub struct PinnedRegularFile {
     file: File,
 }
 
+/// Positional, bounded stream from one pinned regular inode. The expected
+/// digest is supplied by the caller's authority, not learned from this file.
+/// No pathname is reopened and no shared descriptor cursor is changed.
+pub struct StablePinnedRegularReader {
+    file: File,
+    observation: OpenRegularFileObservation,
+    length: u64,
+    offset: u64,
+    expected_sha256: String,
+    digest: sha2::Sha256,
+}
+
+impl StablePinnedRegularReader {
+    pub fn finish(self) -> Result<()> {
+        anyhow::ensure!(
+            self.offset == self.length,
+            "pinned regular stream was not fully consumed"
+        );
+        ensure_open_regular_file_unchanged(&self.file, &self.observation)?;
+        let mut sentinel = [0_u8; 1];
+        anyhow::ensure!(
+            read_regular_file_at(&self.file, &mut sentinel, self.length)? == 0,
+            "pinned regular stream grew during read"
+        );
+        use sha2::Digest as _;
+        anyhow::ensure!(
+            format!("{:x}", self.digest.finalize()) == self.expected_sha256,
+            "pinned regular stream digest changed"
+        );
+        Ok(())
+    }
+}
+
+impl Read for StablePinnedRegularReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        ensure_open_regular_file_unchanged(&self.file, &self.observation)
+            .map_err(std::io::Error::other)?;
+        if self.offset == self.length {
+            let mut sentinel = [0_u8; 1];
+            if read_regular_file_at(&self.file, &mut sentinel, self.length)? != 0 {
+                return Err(std::io::Error::other(
+                    "pinned regular stream grew during read",
+                ));
+            }
+            return Ok(0);
+        }
+        let request = usize::try_from((self.length - self.offset).min(buffer.len() as u64))
+            .expect("bounded buffer length fits usize");
+        let count = read_regular_file_at(&self.file, &mut buffer[..request], self.offset)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "pinned regular stream ended before admitted size",
+            ));
+        }
+        ensure_open_regular_file_unchanged(&self.file, &self.observation)
+            .map_err(std::io::Error::other)?;
+        use sha2::Digest as _;
+        self.digest.update(&buffer[..count]);
+        self.offset += count as u64;
+        Ok(count)
+    }
+}
+
 /// One bounded stable read and its immutable descriptor projection. The source
 /// may subsequently change; neither the retained bytes nor the sealed copy do.
 /// Deliberately not Debug: captured host inputs may contain private data.
@@ -1434,6 +1501,41 @@ fn remove_flat_directory_generation(
 }
 
 impl PinnedRegularFile {
+    /// Open one exact bounded byte stream whose digest must match an
+    /// independently admitted upload identity. The stream must be consumed
+    /// and finished before its bytes can be treated as staged input.
+    pub fn stable_reader_exact(
+        &self,
+        expected_bytes: u64,
+        expected_sha256: &str,
+        maximum_bytes: u64,
+    ) -> Result<StablePinnedRegularReader> {
+        anyhow::ensure!(
+            expected_bytes <= maximum_bytes,
+            "pinned regular stream exceeds admitted byte bound"
+        );
+        anyhow::ensure!(
+            expected_sha256.len() == 64
+                && expected_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "pinned regular stream digest is invalid"
+        );
+        let observation = self.observation()?;
+        anyhow::ensure!(
+            observation.size() == expected_bytes,
+            "pinned regular stream length changed"
+        );
+        Ok(StablePinnedRegularReader {
+            file: self.try_clone_descriptor()?,
+            observation,
+            length: expected_bytes,
+            offset: 0,
+            expected_sha256: expected_sha256.to_owned(),
+            digest: sha2::Sha256::default(),
+        })
+    }
+
     /// Require administrator-selected ownership of this exact file. Callers
     /// must separately protect its containing namespace; mode bits on a file
     /// alone cannot prevent replacement through a writable parent.
@@ -7225,6 +7327,43 @@ mod tests {
 
         let mut file = File::open(&path).unwrap();
         assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+    }
+
+    #[test]
+    fn stable_pinned_stream_requires_full_exact_bytes_and_digest() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("upload"), b"exact stream").unwrap();
+        let parent = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let upload = parent
+            .open_pinned_regular(OsStr::new("upload"), false)
+            .unwrap()
+            .unwrap();
+        let expected = crate::sha256_hex(b"exact stream");
+        assert!(upload.stable_reader_exact(1, &expected, 100).is_err());
+        assert!(upload.stable_reader_exact(12, &expected, 11).is_err());
+        assert!(
+            upload
+                .stable_reader_exact(12, &expected.to_uppercase(), 100)
+                .is_err()
+        );
+
+        let mut reader = upload.stable_reader_exact(12, &expected, 100).unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(bytes, b"exact stream");
+
+        let mut reader = upload
+            .stable_reader_exact(12, &"0".repeat(64), 100)
+            .unwrap();
+        reader.read_to_end(&mut Vec::new()).unwrap();
+        assert!(reader.finish().is_err());
+
+        let mut reader = upload.stable_reader_exact(12, &expected, 100).unwrap();
+        let mut first = [0_u8; 5];
+        reader.read_exact(&mut first).unwrap();
+        std::fs::write(root.path().join("upload"), b"changed data").unwrap();
+        assert!(reader.read_to_end(&mut Vec::new()).is_err());
     }
 
     #[test]

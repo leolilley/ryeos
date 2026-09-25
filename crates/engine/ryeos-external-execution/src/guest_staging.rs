@@ -79,6 +79,30 @@ pub fn stage_guest_package<R: Read>(
     }
 }
 
+/// Import the exact uploaded inode named by an independently retained byte
+/// count and digest. Lillux performs positional, mutation-checked reads; a
+/// full-stream digest mismatch discards even an otherwise valid staged tree.
+pub fn stage_uploaded_guest_package(
+    upload: &lillux::PinnedRegularFile,
+    upload_bytes: u64,
+    upload_sha256: &str,
+    parent: &lillux::PinnedDirectory,
+    expected: &GuestStagingExpected<'_>,
+) -> Result<StagedGuestPackage> {
+    let mut reader =
+        upload.stable_reader_exact(upload_bytes, upload_sha256, expected.maximum_framed_bytes)?;
+    let staged = stage_guest_package(&mut reader, parent, expected)?;
+    if let Err(error) = reader.finish() {
+        if let Err(cleanup_error) = staged.discard() {
+            return Err(error.context(format!(
+                "uploaded guest staging cleanup failed: {cleanup_error:#}"
+            )));
+        }
+        return Err(error);
+    }
+    Ok(staged)
+}
+
 fn remove_staged_generation(
     parent: &lillux::PinnedDirectory,
     name: &OsStr,
@@ -178,6 +202,7 @@ fn staging_budget() -> lillux::DirectoryTraversalBudget {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Write;
     use std::sync::Arc;
 
     use super::*;
@@ -453,7 +478,40 @@ mod tests {
             assert!(stage_guest_package(invalid.as_slice(), &parent, &expected).is_err());
             assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
         }
-        let staged = stage_guest_package(bytes.as_slice(), &parent, &expected).unwrap();
+        let upload_dir = tempfile::tempdir().unwrap();
+        let upload_parent = lillux::PinnedDirectory::open(upload_dir.path())
+            .unwrap()
+            .unwrap();
+        upload_parent.tighten_owner_private_directory().unwrap();
+        let mut upload_file = upload_parent
+            .open_regular_create(OsStr::new("payload"), true, true, 0o600)
+            .unwrap();
+        upload_file.write_all(&bytes).unwrap();
+        upload_file.sync_all().unwrap();
+        drop(upload_file);
+        let upload = upload_parent
+            .open_pinned_regular(OsStr::new("payload"), false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            stage_uploaded_guest_package(
+                &upload,
+                bytes.len() as u64,
+                &"0".repeat(64),
+                &parent,
+                &expected,
+            )
+            .is_err()
+        );
+        assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
+        let staged = stage_uploaded_guest_package(
+            &upload,
+            bytes.len() as u64,
+            &lillux::sha256_hex(&bytes),
+            &parent,
+            &expected,
+        )
+        .unwrap();
         assert_eq!(staged.base(), &measurement);
         assert_eq!(staged.manifest(), &manifest);
         assert!(
