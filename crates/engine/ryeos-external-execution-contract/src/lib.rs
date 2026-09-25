@@ -709,6 +709,10 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCapability {
     ExactAllocationReconciliation,
+    /// Exact evidence that this allocation request created no occurrence.
+    /// This may be provider testimony or a transport-owned proof that no
+    /// request bytes were sent. A provider error after transmission, a lost
+    /// response, and list absence do not establish this capability.
     AuthoritativeNoOccurrence,
     ExactActivationReconciliation,
     IdempotentTermination,
@@ -1034,6 +1038,9 @@ pub enum LifecycleAdapterResponse {
     AllocationNoOccurrence {
         operation_id: String,
         request_digest: String,
+        /// Digest of exact no-occurrence evidence. Despite the historical
+        /// field name, the evidence may be a local pre-request transport fact
+        /// rather than a response from the provider.
         provider_observation_digest: String,
     },
     AllocationPending {
