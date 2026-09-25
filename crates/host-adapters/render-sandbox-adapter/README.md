@@ -19,12 +19,13 @@ support, signing, installation, or provider qualification.
 - Creates a Sandbox through `POST /v1/sandboxes`, placing `ownerId` in the JSON
   body as required by the pinned generated client. It also takes plan,
   region, immutable `snapshotId`, the reserved maximum lifetime, and `deny-all`
-  network policy from the admitted settings/request inputs. The reservation's
-  base snapshot digest must match the digest paired with `snapshotId` in those
-  settings, and both values are included in the allocation observation digest.
-  Render's create response does not echo a snapshot ID or content digest, so
-  this records the configured mapping that was sent; it is not an independent
-  provider attestation that the snapshot contents match the RyeOS digest.
+  network policy from the admitted settings/request inputs. `snapshotId`
+  selects a reusable Render runtime image, while the reservation's distinct
+  RyeOS base snapshot B is transferred and verified during guest activation.
+  Both identities are included separately in the allocation observation
+  digest. Render's create response does not echo a snapshot ID or content
+  digest: this records only the configured runtime image selection, not an
+  independent provider attestation of its contents or the guest base B.
 - A valid `201 application/json` response must match the pinned Sandbox shape,
   including the requested plan, region, lifetime and network policy, before
   its provider ID is returned as an occurrence.
@@ -107,6 +108,10 @@ the mapping from RyeOS captured snapshot/input hashes to Render Sandbox
 bootstrap content remains unresolved.
 The adapter therefore cannot start RyeOS's supervisor in a Sandbox and is not
 a usable external execution backend yet.
+The configured runtime `snapshotId` is not yet joined to an independently
+qualified, exact importer/build identity. Allocation fixtures do not establish
+that trust anchor; supervisor activation stays pending until that binding and
+the guest import path are qualified.
 
 The declared capabilities are exactly `authoritative_no_occurrence` and
 `exact_terminal_observation`. The first capability is limited to W1's
@@ -117,7 +122,7 @@ one-Terminate policy.
 ## Explicit settings
 
 `fixtures/settings.schema.json` defines the sealed settings payload. It carries
-an owner ID, plan, region, immutable snapshot ID and its admitted base digest,
+an owner ID, plan, region and immutable runtime snapshot ID,
 plus explicit DER roots used only for `api.render.com`. W2's lifecycle runner
 supplies resolver and hosts as sealed descriptors and supplies SHA-256 values
 for both byte strings plus the signed network-policy digest. W2 validates the

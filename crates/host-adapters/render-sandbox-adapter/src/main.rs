@@ -56,7 +56,6 @@ struct Settings {
     plan: RenderPlan,
     region: String,
     snapshot_id: String,
-    base_snapshot_hash: String,
     tls_roots_der_base64: Vec<String>,
 }
 
@@ -148,7 +147,7 @@ struct AllocationEvidence<'a> {
     binding_hash: &'a str,
     request_digest: &'a str,
     snapshot_id: &'a str,
-    base_snapshot_hash: &'a str,
+    guest_base_snapshot_hash: &'a str,
     sandbox_id: &'a str,
     response_sha256: &'a str,
 }
@@ -177,7 +176,7 @@ struct NoOccurrenceEvidence<'a> {
     binding_hash: &'a str,
     request_digest: &'a str,
     snapshot_id: &'a str,
-    base_snapshot_hash: &'a str,
+    guest_base_snapshot_hash: &'a str,
     basis: &'static str,
 }
 
@@ -454,11 +453,10 @@ fn allocate(
         operation_id: common.operation_id.clone(),
         request_digest: reservation.request_digest.clone(),
     };
-    if !provider_spec.allocation_requires_snapshot_match()
-        || reservation.base_snapshot_hash != settings.base_snapshot_hash
-    {
-        return pending();
-    }
+    let projection = match project_allocation(provider_spec, settings, reservation) {
+        Ok(value) => value,
+        Err(_) => return pending(),
+    };
     let Some(route) = provider_spec.allocation_route() else {
         return pending();
     };
@@ -477,21 +475,6 @@ fn allocate(
     if !provider_spec.allocation_bind_proof_enabled() {
         return pending();
     }
-    let settings_plan = match settings.plan {
-        RenderPlan::Starter => PlanValue::Starter,
-        RenderPlan::Standard => PlanValue::Standard,
-        RenderPlan::Pro => PlanValue::Pro,
-    };
-    let projection = match provider_spec.create_projection(
-        &settings.owner_id,
-        settings_plan,
-        &settings.region,
-        &settings.snapshot_id,
-        reservation.maximum_lifetime_seconds,
-    ) {
-        Ok(value) => value,
-        Err(_) => return pending(),
-    };
     let body = CreateSandboxBody {
         owner_id: projection.owner_id.clone(),
         plan: match projection.plan {
@@ -531,11 +514,7 @@ fn allocate(
                 .is_some_and(|error| error.contact_state() == ContactState::NoRequestSent)
             {
                 if provider_spec.allocation_no_occurrence_proof_enabled() {
-                    return allocation_no_occurrence(
-                        common,
-                        reservation,
-                        settings,
-                    );
+                    return allocation_no_occurrence(common, reservation, settings);
                 }
             }
             // The POST may have committed. Do not retry or search the broad list.
@@ -551,13 +530,13 @@ fn allocate(
     };
     let response_sha256 = lillux::sha256_hex(&response_body);
     let evidence = AllocationEvidence {
-        schema: 1,
+        schema: 2,
         provider: "render-sandbox-early-access",
         operation_id: &common.operation_id,
         binding_hash: &common.binding_hash,
         request_digest: &reservation.request_digest,
         snapshot_id: &projection.snapshot_id,
-        base_snapshot_hash: &reservation.base_snapshot_hash,
+        guest_base_snapshot_hash: &reservation.base_snapshot_hash,
         sandbox_id: &sandbox.id,
         response_sha256: &response_sha256,
     };
@@ -572,6 +551,32 @@ fn allocate(
     }
 }
 
+/// Render's configured runtime snapshot is a reusable importer image. The
+/// reservation's changing guest base snapshot is transported and verified at
+/// activation, not compared with this provider image selection.
+fn project_allocation(
+    provider_spec: &ProviderSpec,
+    settings: &Settings,
+    reservation: &ryeos_external_execution_contract::AllocationReservation,
+) -> Result<provider_spec::CreateProjection> {
+    ensure!(
+        provider_spec.allocation_requires_configured_runtime_snapshot(),
+        "provider spec does not select a configured runtime snapshot"
+    );
+    let settings_plan = match settings.plan {
+        RenderPlan::Starter => PlanValue::Starter,
+        RenderPlan::Standard => PlanValue::Standard,
+        RenderPlan::Pro => PlanValue::Pro,
+    };
+    provider_spec.create_projection(
+        &settings.owner_id,
+        settings_plan,
+        &settings.region,
+        &settings.snapshot_id,
+        reservation.maximum_lifetime_seconds,
+    )
+}
+
 fn allocation_no_occurrence(
     common: &ryeos_external_execution_contract::LifecycleOperationCommon,
     reservation: &ryeos_external_execution_contract::AllocationReservation,
@@ -582,13 +587,13 @@ fn allocation_no_occurrence(
         request_digest: reservation.request_digest.clone(),
     };
     let evidence = NoOccurrenceEvidence {
-        schema: 1,
+        schema: 2,
         provider: "render-sandbox-early-access",
         operation_id: &common.operation_id,
         binding_hash: &common.binding_hash,
         request_digest: &reservation.request_digest,
         snapshot_id: &settings.snapshot_id,
-        base_snapshot_hash: &reservation.base_snapshot_hash,
+        guest_base_snapshot_hash: &reservation.base_snapshot_hash,
         basis: "transport_no_request_sent",
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
@@ -901,7 +906,7 @@ fn network_context_from_captured_inputs() -> Result<NetworkContext> {
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
-    ensure!(settings.schema == 1, "unsupported settings schema");
+    ensure!(settings.schema == 2, "unsupported settings schema");
     ensure!(
         !settings.owner_id.is_empty()
             && settings.owner_id.len() <= 256
@@ -923,10 +928,6 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     ensure!(
         valid_snapshot_id(&settings.snapshot_id),
         "invalid immutable Render snapshot id"
-    );
-    ensure!(
-        lillux::valid_hash(&settings.base_snapshot_hash),
-        "invalid admitted base snapshot digest"
     );
     ensure!(
         !settings.tls_roots_der_base64.is_empty()
@@ -1204,6 +1205,72 @@ fn write_response<T: Serialize>(response: &T) -> Result<()> {
 mod offline_fixture_tests {
     use super::*;
 
+    #[test]
+    fn reusable_render_runtime_snapshot_is_distinct_from_each_guest_base() {
+        let settings = Settings {
+            schema: 2,
+            owner_id: "owner-fixture".into(),
+            plan: RenderPlan::Standard,
+            region: "oregon".into(),
+            snapshot_id: "snp-runtime-fixture".into(),
+            tls_roots_der_base64: vec!["AA==".into()],
+        };
+        validate_settings(&settings).unwrap();
+        let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &schema_digest,
+        )
+        .unwrap();
+        let first = ryeos_external_execution_contract::AllocationReservation {
+            placement_thread_id: "T-first".into(),
+            admitted_capsule_hash: "c".repeat(64),
+            base_snapshot_hash: "a".repeat(64),
+            request_digest: "d".repeat(64),
+            maximum_lifetime_seconds: 600,
+            contact_deadline_ms: 1_000,
+        };
+        let mut second = first.clone();
+        second.base_snapshot_hash = "b".repeat(64);
+        let first_projection = project_allocation(&spec, &settings, &first).unwrap();
+        let second_projection = project_allocation(&spec, &settings, &second).unwrap();
+        assert_eq!(first_projection, second_projection);
+        assert_eq!(first_projection.snapshot_id, settings.snapshot_id);
+
+        let evidence_digest =
+            |reservation: &ryeos_external_execution_contract::AllocationReservation| {
+                let binding_hash = "e".repeat(64);
+                let response_sha256 = "f".repeat(64);
+                let evidence = AllocationEvidence {
+                    schema: 2,
+                    provider: "render-sandbox-early-access",
+                    operation_id: "operation-fixture",
+                    binding_hash: &binding_hash,
+                    request_digest: &reservation.request_digest,
+                    snapshot_id: &settings.snapshot_id,
+                    guest_base_snapshot_hash: &reservation.base_snapshot_hash,
+                    sandbox_id: "sbx-fixture",
+                    response_sha256: &response_sha256,
+                };
+                lillux::sha256_hex(&canonical_json(&evidence).unwrap())
+            };
+        assert_ne!(evidence_digest(&first), evidence_digest(&second));
+
+        let mut old_settings: serde_json::Value = serde_json::to_value(&settings).unwrap();
+        old_settings["base_snapshot_hash"] = serde_json::Value::String(first.base_snapshot_hash);
+        assert!(serde_json::from_value::<Settings>(old_settings).is_err());
+
+        let mut missing_snapshot: serde_json::Value = serde_json::to_value(&settings).unwrap();
+        missing_snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_id");
+        assert!(serde_json::from_value::<Settings>(missing_snapshot).is_err());
+        let mut invalid_snapshot = settings;
+        invalid_snapshot.snapshot_id = "unbound-image".into();
+        assert!(validate_settings(&invalid_snapshot).is_err());
+    }
+
     fn create_projection() -> provider_spec::CreateProjection {
         provider_spec::CreateProjection {
             owner_id: "owner-fixture".into(),
@@ -1218,11 +1285,8 @@ mod offline_fixture_tests {
     #[test]
     fn create_fixture_binds_only_when_all_echoed_fields_match() {
         let create_body = include_bytes!("../fixtures/create-response.json");
-        let response: RenderSandbox = from_json_slice_strict(
-            create_body,
-            MAX_API_RESPONSE_BYTES as usize,
-        )
-        .unwrap();
+        let response: RenderSandbox =
+            from_json_slice_strict(create_body, MAX_API_RESPONSE_BYTES as usize).unwrap();
         assert!(create_response_matches(&response, &create_projection()));
         assert_eq!(
             accepted_create_response(201, create_body, &create_projection())

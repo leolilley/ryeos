@@ -170,7 +170,7 @@ struct CreateBodyMapping {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum PreconditionProfile {
-    RenderBaseSnapshotMatchV1,
+    RenderConfiguredRuntimeSnapshotV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -327,7 +327,7 @@ impl ProviderSpec {
             allocate.kind == OperationKind::CreateOnce
                 && allocate.route == Some(RouteName::SandboxCollection)
                 && allocate.precondition_profile
-                    == Some(PreconditionProfile::RenderBaseSnapshotMatchV1)
+                    == Some(PreconditionProfile::RenderConfiguredRuntimeSnapshotV1)
                 && allocate.body.as_ref() == Some(&expected_create_body_mapping())
                 && allocate.bind_proof_profile == Some(BindProofProfile::RenderSandboxCreate201V1)
                 && allocate.no_occurrence_proof_profile
@@ -407,8 +407,9 @@ impl ProviderSpec {
         self.operations.allocate.route
     }
 
-    pub(crate) fn allocation_requires_snapshot_match(&self) -> bool {
-        self.operations.allocate.precondition_profile.is_some()
+    pub(crate) fn allocation_requires_configured_runtime_snapshot(&self) -> bool {
+        self.operations.allocate.precondition_profile
+            == Some(PreconditionProfile::RenderConfiguredRuntimeSnapshotV1)
     }
 
     pub(crate) fn allocation_bind_proof_enabled(&self) -> bool {
@@ -623,7 +624,7 @@ mod tests {
     use super::*;
 
     const SETTINGS_SCHEMA_DIGEST: &str =
-        "12659bfc0c054e6192b3b42948f3e1c14d96dc9fe2bbc58856a42859eee97658";
+        "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172";
 
     fn fixture() -> Vec<u8> {
         include_bytes!("../fixtures/provider-spec.json").to_vec()

@@ -9,11 +9,10 @@
     "plan",
     "region",
     "snapshot_id",
-    "base_snapshot_hash",
     "tls_roots_der_base64"
   ],
   "properties": {
-    "schema": { "const": 1 },
+    "schema": { "const": 2 },
     "owner_id": {
       "type": "string",
       "minLength": 1,
@@ -32,10 +31,6 @@
       "minLength": 5,
       "maxLength": 256,
       "pattern": "^snp-[A-Za-z0-9-]+$"
-    },
-    "base_snapshot_hash": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
     },
     "tls_roots_der_base64": {
       "type": "array",
