@@ -4,6 +4,7 @@
 //! A failed transaction never retries the attempt; its durable row remains
 //! available for exact-scope recovery if immediate cleanup cannot prove death.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -134,6 +135,26 @@ pub fn start_scoped_producer(
         live.request_for_recipe(&selected.recipe, admitted_stdin, &admitted_command)?;
     let request = prepared_launch.request;
     let prepared_mounts = prepared_launch.prepared_mounts;
+    let prepared_immutable_sha256 = prepared_mounts
+        .iter()
+        .flat_map(|mount| mount.immutable_files())
+        .map(|file| {
+            (
+                file.destination().to_string_lossy().into_owned(),
+                file.content_sha256().to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let signed_destinations = selected
+        .recipe
+        .prepared_immutable_files
+        .iter()
+        .map(|file| file.destination().map(|path| path.to_string_lossy().into_owned()))
+        .collect::<Result<BTreeSet<_>>>()?;
+    ensure!(
+        prepared_immutable_sha256.keys().cloned().collect::<BTreeSet<_>>() == signed_destinations,
+        "sealed producer files differ from exact signed destinations"
+    );
     let workspace_view = live.workspace_view()?;
     let allocation = state
         .isolation
@@ -316,11 +337,12 @@ pub fn start_scoped_producer(
                     &attempt_id,
                     &identity,
                     &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
-                        schema: 1,
+                        schema: 2,
                         plan_digest: provenance.plan_digest.clone()
                             .context("compiled scoped producer has no exact plan digest")?,
                         expected: expected_mount_preparation.clone(),
                         observed: mount_preparation.clone(),
+                        prepared_immutable_sha256: prepared_immutable_sha256.clone(),
                     },
                 )?;
 

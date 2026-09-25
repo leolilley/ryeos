@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProducerPreparedImmutableFile,
     ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
 };
 use ryeos_state::external_execution::admission::{
@@ -763,6 +764,20 @@ impl Parameters {
                 ProducerEnvironmentBinding::Literal { value: "C".into() },
             ),
         ]);
+        let expected_immutable_files = vec![
+            ProducerPreparedImmutableFile {
+                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
+                leaf_name: "config.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: self.configuration.scripted_baseline_sha256.clone(),
+            },
+            ProducerPreparedImmutableFile {
+                prepared_directory_id: staging::DIRECT_HOME_ID.into(),
+                leaf_name: "environments.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: staging::direct_command_environment_sha256()?,
+            },
+        ];
         let expected_ingress = self
             .configuration
             .responses_origin
@@ -796,6 +811,7 @@ impl Parameters {
                     }
                 && direct.environment_sources == [ProducerEnvironmentSource::AdmittedRealizations]
                 && direct.environment_bindings == expected_bindings
+                && direct.prepared_immutable_files == expected_immutable_files
                 && direct
                     .loopback_ingress
                     .as_ref()
@@ -1316,8 +1332,9 @@ mod tests {
                     "LANG":{"kind":"literal","value":"C"},
                     "LC_ALL":{"kind":"literal","value":"C"}},
                 "prepared_immutable_files":[
-                    {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536},
-                    {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536}],
+                    {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536,"expected_sha256":"2".repeat(64)},
+                    {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536,
+                        "expected_sha256":staging::direct_command_environment_sha256().unwrap()}],
                 "loopback_ingress":{"address":"127.0.0.1:1234"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,
@@ -1755,6 +1772,8 @@ mod tests {
                 relative_path: "bin/codex".into(),
                 executable_sha256: scenario.codex_sha256.clone(),
             };
+        scenario.expected_producer_recipe.prepared_immutable_files[0].expected_sha256 =
+            scenario.scripted_baseline_sha256.clone();
         let mut production = scenario
             .execution_environment
             .realizations

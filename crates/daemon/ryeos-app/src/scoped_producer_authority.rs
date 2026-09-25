@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, bail, ensure};
 use ryeos_engine::isolation::{
     IsolationAdmittedCommand, IsolationCommandAuthority, IsolationDescriptorBoundCommand,
-    IsolationProducerPreparedDirectoryAuthority, IsolationReadOnlyMountAuthority,
+    IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
+    IsolationReadOnlyMountAuthority,
 };
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
@@ -297,13 +298,6 @@ impl ScopedProducerLiveAuthority {
         selected_command: &IsolationAdmittedCommand,
     ) -> Result<ScopedProducerLaunchRequest> {
         recipe.validate()?;
-        // A signed immutable leaf is not protection until the daemon seals
-        // its bytes and the engine proves the applied nested read-only mount.
-        // Keep direct-target qualification closed while that join is built.
-        ensure!(
-            recipe.prepared_immutable_files.is_empty(),
-            "signed producer immutable files are not yet mounted and evidenced"
-        );
         let mut prepared_ids = BTreeSet::new();
         if let ProducerCwdSource::PreparedDirectory { id } = &recipe.cwd_source {
             prepared_ids.insert(id.as_str());
@@ -325,11 +319,34 @@ impl ScopedProducerLiveAuthority {
             let source = workspace_view
                 .open_directory_descendant(Path::new(&relative))?
                 .ok_or_else(|| anyhow::anyhow!("signed producer prepared directory is absent: {id}"))?;
+            let directory = source.try_clone_pinned_directory(source.path().to_path_buf())?;
+            let mut immutable_files = Vec::new();
+            for declaration in recipe
+                .prepared_immutable_files
+                .iter()
+                .filter(|file| file.prepared_directory_id == id)
+            {
+                let file = directory
+                    .open_pinned_regular(std::ffi::OsStr::new(&declaration.leaf_name), false)?
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "signed producer immutable file is absent: {id}/{}",
+                        declaration.leaf_name
+                    ))?;
+                let observation = file.observation()?;
+                let captured = file.capture_sealed_bounded(
+                    &observation,
+                    declaration.maximum_bytes,
+                )?;
+                immutable_files.push(IsolationProducerPreparedImmutableFileAuthority::new(
+                    declaration,
+                    captured,
+                )?);
+            }
             prepared_mounts.push(IsolationProducerPreparedDirectoryAuthority::new(
                 id.to_owned(),
                 relative,
                 source,
-            )?);
+            )?.with_immutable_files(immutable_files)?);
         }
         let buffered_input = match (&recipe.executable_source, &recipe.stdin_source) {
             (
@@ -754,7 +771,7 @@ mod tests {
             .workspace()
             .create_child(std::ffi::OsStr::new("prepared"), 0o700)
             .unwrap();
-        prepared_root
+        let prepared_home = prepared_root
             .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
             .unwrap();
         unprepared.cwd_source = ProducerCwdSource::PreparedDirectory {
@@ -776,6 +793,15 @@ mod tests {
                 prepared_directory_id: "codex-home".into(),
                 leaf_name: "config.toml".into(),
                 maximum_bytes: 65536,
+                expected_sha256: lillux::sha256_hex(b"model = 'fixture'\n"),
+            },
+        );
+        immutable.prepared_immutable_files.push(
+            ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile {
+                prepared_directory_id: "codex-home".into(),
+                leaf_name: "environments.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: lillux::sha256_hex(b"[commands]\n"),
             },
         );
         assert!(authority
@@ -783,7 +809,58 @@ mod tests {
             .err()
             .unwrap()
             .to_string()
-            .contains("not yet mounted and evidenced"));
+            .contains("immutable file is absent"));
+        prepared_home
+            .atomic_create_regular(std::ffi::OsStr::new("config.toml"), b"model = 'fixture'\n", 0o600)
+            .unwrap()
+            .unwrap();
+        assert!(authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("immutable file is absent"));
+        prepared_home
+            .atomic_create_regular(std::ffi::OsStr::new("environments.toml"), b"[commands]\n", 0o600)
+            .unwrap()
+            .unwrap();
+        let immutable_request = authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .unwrap();
+        let file = &immutable_request.prepared_mounts[0].immutable_files()[0];
+        assert_eq!(immutable_request.prepared_mounts[0].immutable_files().len(), 2);
+        assert_eq!(
+            file.destination().to_str(),
+            Some("/ryeos/producer-prepared/codex-home/config.toml")
+        );
+        assert_eq!(file.content_sha256(), lillux::sha256_hex(b"model = 'fixture'\n"));
+        assert_eq!(
+            immutable_request.prepared_mounts[0].immutable_files()[1].content_sha256(),
+            lillux::sha256_hex(b"[commands]\n")
+        );
+        std::fs::write(prepared_home.path().join("config.toml"), b"changed after seal")
+            .unwrap();
+        immutable_request.prepared_mounts[0].immutable_files()[0]
+            .verify_sealed_content()
+            .unwrap();
+        assert_eq!(
+            immutable_request.prepared_mounts[0].immutable_files()[0].content_sha256(),
+            lillux::sha256_hex(b"model = 'fixture'\n")
+        );
+        assert!(authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("differs from signed content hash"));
+        std::fs::write(prepared_home.path().join("config.toml"), vec![b'x'; 65537]).unwrap();
+        assert!(authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .is_err());
+        std::fs::write(prepared_home.path().join("config.toml"), b"").unwrap();
+        assert!(authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .is_err());
         let mut maximum = recipe.clone();
         maximum.cwd_source = ProducerCwdSource::PreparedDirectory { id: "cwd".into() };
         prepared_root

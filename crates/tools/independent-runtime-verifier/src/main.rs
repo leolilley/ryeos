@@ -20,7 +20,7 @@ use ryeos_state::external_content::products::producer_recipe::ProductProducerRec
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use serde::Deserialize;
 use serde_json::json;
-use std::{ffi::OsStr, io::Read as _, path::Path};
+use std::{collections::BTreeMap, ffi::OsStr, io::Read as _, path::Path};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -206,6 +206,11 @@ async fn main() -> Result<()> {
         let locator: ScopedAttemptLocator = serde_json::from_value(value)
             .context("scoped child returned a noncanonical locator")?;
         check_scoped_locator_source(&locator, &expected_source)?;
+        check_scoped_prepared_immutable(
+            &locator,
+            &parameters.configuration.scripted_baseline_sha256,
+            direct_stage.environment_configuration_sha256(),
+        )?;
         if let Some(relay) = &running_relay {
             ensure!(
                 relay.handoff().attempt_id == locator.attempt_id,
@@ -792,6 +797,30 @@ fn check_scoped_locator_source(
     Ok(())
 }
 
+fn check_scoped_prepared_immutable(
+    locator: &ScopedAttemptLocator,
+    baseline_sha256: &str,
+    environment_sha256: &str,
+) -> Result<()> {
+    locator.validate()?;
+    ensure!(
+        lillux::valid_hash(baseline_sha256) && lillux::valid_hash(environment_sha256),
+        "verifier immutable input hashes are invalid"
+    );
+    let home = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
+        staging::DIRECT_HOME_ID,
+    )?;
+    let expected = BTreeMap::from([
+        (home.join("config.toml").to_string_lossy().into_owned(), baseline_sha256.to_owned()),
+        (home.join("environments.toml").to_string_lossy().into_owned(), environment_sha256.to_owned()),
+    ]);
+    ensure!(
+        locator.prepared_immutable_sha256 == expected,
+        "daemon-sealed producer config differs from verifier-derived exact bytes"
+    );
+    Ok(())
+}
+
 fn check_scoped_applied_target(
     locator: &ScopedAttemptLocator,
     receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
@@ -901,12 +930,13 @@ struct ScopedAttemptLocator {
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     held_mount_preparation: lillux::LinuxSandboxMountPreparationReceipt,
+    prepared_immutable_sha256: BTreeMap<String, String>,
 }
 
 impl ScopedAttemptLocator {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.scoped_producer_locator.v4"
+            self.schema == "ryeos.scoped_producer_locator.v5"
                 && self.attempt_id.starts_with("scoped-")
                 && self.attempt_id.len() == 71
                 && self.attempt_id[7..]
@@ -921,7 +951,10 @@ impl ScopedAttemptLocator {
                 && !self.recipe_generation.is_empty()
                 && self.recipe_generation.len() <= 256
                 && self.expected_mount_preparation.mount_count > 0
-                && self.held_mount_preparation.matches_commitments(&self.expected_mount_preparation),
+                && self.held_mount_preparation.matches_commitments(&self.expected_mount_preparation)
+                && self.prepared_immutable_sha256.len()
+                    <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES
+                && self.prepared_immutable_sha256.values().all(|digest| lillux::valid_hash(digest)),
             "scoped child attempt identity is invalid"
         );
         Ok(())
@@ -1188,7 +1221,7 @@ mod tests {
             recipe_digest: digest.clone(),
         };
         let locator = ScopedAttemptLocator {
-            schema: "ryeos.scoped_producer_locator.v4".into(),
+            schema: "ryeos.scoped_producer_locator.v5".into(),
             attempt_id: format!("scoped-{}", "d".repeat(64)),
             recipe_digest: digest.clone(),
             recipe_generation: source.bundle_generation_identity.clone(),
@@ -1211,6 +1244,7 @@ mod tests {
                 mount_count: 1,
                 destination_access_sha256: [0; 32],
             },
+            prepared_immutable_sha256: BTreeMap::new(),
         };
         assert!(
             check_admitted_producer_source(
@@ -1273,7 +1307,7 @@ mod tests {
     #[test]
     fn scoped_locator_binds_attempt_to_retained_recipe_coordinate() {
         let valid = json!({
-            "schema": "ryeos.scoped_producer_locator.v4",
+            "schema": "ryeos.scoped_producer_locator.v5",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
@@ -1296,9 +1330,54 @@ mod tests {
                 "mount_count": 1,
                 "destination_access_sha256": vec![0; 32],
             },
+            "prepared_immutable_sha256": {},
         });
         let locator: ScopedAttemptLocator = serde_json::from_value(valid.clone()).unwrap();
         locator.validate().unwrap();
+        let home = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
+            staging::DIRECT_HOME_ID,
+        )
+        .unwrap();
+        let mut exact_files = valid.clone();
+        exact_files["prepared_immutable_sha256"] = json!(BTreeMap::from([
+            (home.join("config.toml").to_string_lossy().into_owned(), "1".repeat(64)),
+            (home.join("environments.toml").to_string_lossy().into_owned(), "2".repeat(64)),
+        ]));
+        let exact: ScopedAttemptLocator = serde_json::from_value(exact_files.clone()).unwrap();
+        check_scoped_prepared_immutable(&exact, &"1".repeat(64), &"2".repeat(64)).unwrap();
+        let config_path = home.join("config.toml").to_string_lossy().into_owned();
+        let environment_path = home.join("environments.toml").to_string_lossy().into_owned();
+        for changed in [
+            {
+                let mut value = exact_files.clone();
+                value["prepared_immutable_sha256"][&config_path] = json!("3".repeat(64));
+                value
+            },
+            {
+                let mut value = exact_files.clone();
+                value["prepared_immutable_sha256"]
+                    .as_object_mut().unwrap().remove(&environment_path);
+                value
+            },
+            {
+                let mut value = exact_files.clone();
+                value["prepared_immutable_sha256"][home.join("extra.toml").to_string_lossy().as_ref()] =
+                    json!("4".repeat(64));
+                value
+            },
+            {
+                let mut value = exact_files.clone();
+                value["prepared_immutable_sha256"][&config_path] = json!("2".repeat(64));
+                value["prepared_immutable_sha256"][&environment_path] = json!("1".repeat(64));
+                value
+            },
+        ] {
+            let changed: ScopedAttemptLocator = serde_json::from_value(changed).unwrap();
+            assert!(check_scoped_prepared_immutable(&changed, &"1".repeat(64), &"2".repeat(64)).is_err());
+        }
+        exact_files["schema"] = json!("ryeos.scoped_producer_locator.v4");
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(exact_files)
+            .unwrap().validate().is_err());
         assert!(
             check_scoped_plan_coordinate(
                 &locator,
@@ -1409,7 +1488,7 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("recipe_digest");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(legacy).is_err());
         let mut no_prelaunch_target = json!({
-            "schema": "ryeos.scoped_producer_locator.v4",
+            "schema": "ryeos.scoped_producer_locator.v5",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",

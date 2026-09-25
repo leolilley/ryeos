@@ -1098,6 +1098,8 @@ fn native_unsigned_direct_configuration()
     )
     .replace("{ORIGIN}", origin);
     value["scripted_baseline_sha256"] = json!(lillux::sha256_hex(scripted.as_bytes()));
+    value["expected_producer_recipe"]["prepared_immutable_files"][0]["expected_sha256"] =
+        value["scripted_baseline_sha256"].clone();
     value["command_environment_template_sha256"] = json!(lillux::sha256_hex(
         include_str!(
             "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"

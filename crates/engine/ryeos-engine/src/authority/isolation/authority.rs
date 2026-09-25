@@ -341,6 +341,62 @@ pub struct IsolationProducerPreparedDirectoryAuthority {
     destination: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
     workspace_relative_path: String,
+    immutable_files: Vec<IsolationProducerPreparedImmutableFileAuthority>,
+}
+
+/// A sealed byte copy of one signed direct-child file. Its only admissible
+/// namespace destination is beneath the matching prepared directory mount.
+#[derive(Debug, Clone)]
+pub struct IsolationProducerPreparedImmutableFileAuthority {
+    destination: PathBuf,
+    source: lillux::InheritedDescriptorAuthority,
+    content_sha256: String,
+}
+
+impl IsolationProducerPreparedImmutableFileAuthority {
+    pub fn new(
+        declaration: &ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile,
+        captured: lillux::CapturedRegularFile,
+    ) -> anyhow::Result<Self> {
+        declaration.validate()?;
+        anyhow::ensure!(
+            !captured.bytes().is_empty()
+                && captured.bytes().len() as u64 <= declaration.maximum_bytes,
+            "captured producer immutable file is empty or exceeds its signed bound"
+        );
+        anyhow::ensure!(
+            captured.digest() == declaration.expected_sha256,
+            "captured producer immutable file differs from signed content hash"
+        );
+        Ok(Self {
+            destination: declaration.destination()?,
+            source: captured.authority().clone(),
+            content_sha256: captured.digest().to_owned(),
+        })
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    pub(crate) fn source(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.source
+    }
+
+    pub fn verify_sealed_content(&self) -> anyhow::Result<()> {
+        let (bytes, _) = self.source.read_regular_file_stable_bounded(
+            ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES,
+        )?;
+        anyhow::ensure!(
+            !bytes.is_empty() && lillux::sha256_hex(&bytes) == self.content_sha256,
+            "sealed producer immutable file content differs from captured digest"
+        );
+        Ok(())
+    }
 }
 
 impl IsolationProducerPreparedDirectoryAuthority {
@@ -365,7 +421,34 @@ impl IsolationProducerPreparedDirectoryAuthority {
             destination,
             source,
             workspace_relative_path,
+            immutable_files: Vec::new(),
         })
+    }
+
+    pub fn with_immutable_files(
+        mut self,
+        files: Vec<IsolationProducerPreparedImmutableFileAuthority>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            files.len()
+                <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES,
+            "prepared immutable file count exceeds signed structural bound"
+        );
+        let mut destinations = std::collections::BTreeSet::new();
+        for file in &files {
+            anyhow::ensure!(
+                file.destination.parent() == Some(self.destination.as_path())
+                    && destinations.insert(file.destination.clone()),
+                "immutable file must be a unique direct child of its prepared directory"
+            );
+            file.verify_sealed_content()?;
+        }
+        self.immutable_files = files;
+        Ok(self)
+    }
+
+    pub fn immutable_files(&self) -> &[IsolationProducerPreparedImmutableFileAuthority] {
+        &self.immutable_files
     }
 
     pub fn id(&self) -> &str {

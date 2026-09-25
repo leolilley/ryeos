@@ -381,8 +381,9 @@ pub(crate) mod tests {
                     "LANG":{"kind":"literal","value":"C"},
                     "LC_ALL":{"kind":"literal","value":"C"}},
                 "prepared_immutable_files":[
-                    {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536},
-                    {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536}],
+                    {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536,"expected_sha256":"2".repeat(64)},
+                    {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536,
+                        "expected_sha256":ryeos_independent_runtime_verifier::staging::direct_command_environment_sha256().unwrap()}],
                 "loopback_ingress":{"address":"127.0.0.1:18765"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,

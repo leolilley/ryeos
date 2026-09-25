@@ -111,6 +111,7 @@ pub struct ProducerPreparedImmutableFile {
     pub prepared_directory_id: String,
     pub leaf_name: String,
     pub maximum_bytes: u64,
+    pub expected_sha256: String,
 }
 
 impl ProducerPreparedImmutableFile {
@@ -134,6 +135,13 @@ impl ProducerPreparedImmutableFile {
         }
         if !(1..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES).contains(&self.maximum_bytes) {
             bail!("producer immutable file byte bound is invalid");
+        }
+        if self.expected_sha256.len() != 64
+            || !self.expected_sha256.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            })
+        {
+            bail!("producer immutable file expected content hash is not canonical");
         }
         Ok(())
     }
@@ -475,8 +483,8 @@ mod tests {
             "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"}
         });
         value["prepared_immutable_files"] = json!([
-            {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536},
-            {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536}
+            {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536,"expected_sha256":"a".repeat(64)},
+            {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536,"expected_sha256":"b".repeat(64)}
         ]);
         let recipe = ProductProducerRecipe::from_value(value.clone()).unwrap();
         assert_eq!(
@@ -490,6 +498,7 @@ mod tests {
             ("leaf_name", json!("..")),
             ("maximum_bytes", json!(0)),
             ("maximum_bytes", json!(MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES + 1)),
+            ("expected_sha256", json!("A".repeat(64))),
         ] {
             let mut invalid = value.clone();
             invalid["prepared_immutable_files"][0][field] = bad;
@@ -502,7 +511,8 @@ mod tests {
         let mut too_many = value;
         too_many["prepared_immutable_files"] = json!((0..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILES)
             .map(|index| json!({"prepared_directory_id":"codex-home",
-                "leaf_name":format!("file-{index}"),"maximum_bytes":1}))
+                "leaf_name":format!("file-{index}"),"maximum_bytes":1,
+                "expected_sha256":"a".repeat(64)}))
             .collect::<Vec<_>>());
         assert!(ProductProducerRecipe::from_value(too_many).is_err());
     }

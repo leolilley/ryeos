@@ -159,14 +159,44 @@ pub struct ScopedChildMountPreparationEvidence {
     pub plan_digest: String,
     pub expected: lillux::LinuxSandboxMountPreparationCommitments,
     pub observed: lillux::LinuxSandboxMountPreparationReceipt,
+    /// Daemon-sealed content at exact prepared namespace destinations. This
+    /// cannot be reconstructed from the writable workspace after release.
+    pub prepared_immutable_sha256: std::collections::BTreeMap<String, String>,
 }
 
 impl ScopedChildMountPreparationEvidence {
     fn validate_for(&self, identity: &ExecutionProcessIdentity) -> Result<()> {
         anyhow::ensure!(
-            self.schema == 1,
+            self.schema == 2,
             "scoped child mount evidence schema is unsupported"
         );
+        anyhow::ensure!(
+            self.prepared_immutable_sha256.len()
+                <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES,
+            "scoped child immutable file evidence exceeds signed bound"
+        );
+        for (destination, digest) in &self.prepared_immutable_sha256 {
+            let path = std::path::Path::new(destination);
+            let parent = path.parent().ok_or_else(|| anyhow!("immutable destination has no parent"))?;
+            let root = std::path::Path::new("/ryeos/producer-prepared");
+            anyhow::ensure!(
+                parent.parent() == Some(root)
+                    && parent.file_name().and_then(|name| name.to_str()).is_some_and(|id| {
+                        ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(id)
+                            .is_ok_and(|expected| expected == parent)
+                    })
+                    && path.file_name().and_then(|name| name.to_str()).is_some_and(|leaf| {
+                        ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile {
+                            prepared_directory_id: parent.file_name().unwrap().to_string_lossy().into_owned(),
+                            leaf_name: leaf.to_owned(),
+                            maximum_bytes: 1,
+                            expected_sha256: digest.clone(),
+                        }.validate().is_ok()
+                    }),
+                "scoped child immutable destination is not canonical"
+            );
+            require_hex_digest("scoped child immutable content", digest)?;
+        }
         let digest = self
             .plan_digest
             .strip_prefix("sha256:")
@@ -1461,7 +1491,7 @@ mod tests {
 
     fn mount_evidence(identity: &ExecutionProcessIdentity) -> ScopedChildMountPreparationEvidence {
         ScopedChildMountPreparationEvidence {
-            schema: 1,
+            schema: 2,
             plan_digest: format!("sha256:{}", "c".repeat(64)),
             expected: lillux::LinuxSandboxMountPreparationCommitments {
                 schema: 1,
@@ -1474,6 +1504,7 @@ mod tests {
                 mount_count: 1,
                 destination_access_sha256: [7; 32],
             },
+            prepared_immutable_sha256: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1486,6 +1517,23 @@ mod tests {
             &format!("sha256:{}", "d".repeat(64)),
             &identity,
         ).is_err());
+        let mut wrong = evidence.clone();
+        wrong.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/../config.toml".into(),
+            "a".repeat(64),
+        );
+        assert!(wrong.validate_for(&identity).is_err());
+        wrong.prepared_immutable_sha256.clear();
+        wrong.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/config.toml".into(),
+            "A".repeat(64),
+        );
+        assert!(wrong.validate_for(&identity).is_err());
+        wrong.prepared_immutable_sha256.insert(
+            "/ryeos/producer-prepared/codex-home/config.toml".into(),
+            "a".repeat(64),
+        );
+        wrong.validate_for(&identity).unwrap();
     }
 
     #[test]

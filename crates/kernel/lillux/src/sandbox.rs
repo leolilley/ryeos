@@ -6017,8 +6017,21 @@ mod imp {
                     Some(libc::EBADF)
                 );
             }
+            if stage == "alias-race" {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !std::path::Path::new("/work/host-mutated").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
             verify_target_namespace_capabilities().unwrap();
             assert_eq!(unsafe { libc::getuid() }, NAMESPACE_USER_ID);
+            assert_eq!(
+                std::fs::read("/mutable/config.toml").unwrap(),
+                b"sealed configuration"
+            );
+            assert!(std::fs::write("/mutable/config.toml", b"mutated").is_err());
+            assert!(std::fs::rename("/mutable/config.toml", "/mutable/replaced").is_err());
             // Exercise the device surface after the real private-root exec,
             // not merely the namespace probe's construction-time opens.
             {
@@ -6185,7 +6198,7 @@ mod imp {
                     ),)
                     .is_err()
             );
-            if stage == "root" {
+            if stage == "root" || stage == "alias-race" {
                 let source =
                     crate::secure_fs::PinnedDirectory::open(std::path::Path::new("/mutable/view"))
                         .unwrap()
@@ -6268,7 +6281,7 @@ mod imp {
                 std::io::Error::last_os_error().raw_os_error(),
                 Some(libc::EPERM)
             );
-            if stage == "root" {
+            if stage == "root" || stage == "alias-race" {
                 assert_eq!(unsafe { libc::getpid() }, 1);
                 // The launcher is outside this fresh PID namespace: inherited
                 // group/session leaders therefore appear as zero here. A
@@ -6493,19 +6506,25 @@ mod imp {
         #[test]
         #[ignore = "executes the test harness in real Linux namespaces"]
         fn pid_proc_supports_exact_realized_and_sealed_executable_after_exec() {
-            exercise_native_proc(false, false);
+            exercise_native_proc(false, false, false);
+        }
+
+        #[test]
+        #[ignore = "requires real native sandbox namespaces and host-alias mutation"]
+        fn native_nested_sealed_file_survives_host_mutation_and_refuses_replacement() {
+            exercise_native_proc(false, false, true);
         }
 
         #[test]
         #[ignore = "requires real native sandbox namespaces and pidfd support"]
         fn native_namespace_terminal_export_excludes_descendant_writers() {
-            exercise_native_proc(true, true);
+            exercise_native_proc(true, true, false);
         }
 
         #[test]
         #[ignore = "requires real native sandbox namespaces and pidfd support"]
         fn native_namespace_terminal_export_cancels_before_release() {
-            exercise_native_proc(true, false);
+            exercise_native_proc(true, false, false);
         }
 
         #[derive(Clone, Copy, Debug)]
@@ -6529,18 +6548,19 @@ mod imp {
                 TargetObservationCase::PendingThenCleanup,
                 TargetObservationCase::Descendant,
             ] {
-                exercise_native_proc_with_observation(true, true, Some(case));
+                exercise_native_proc_with_observation(true, true, Some(case), false);
             }
         }
 
-        fn exercise_native_proc(terminal_export: bool, release_target: bool) {
-            exercise_native_proc_with_observation(terminal_export, release_target, None);
+        fn exercise_native_proc(terminal_export: bool, release_target: bool, alias_race: bool) {
+            exercise_native_proc_with_observation(terminal_export, release_target, None, alias_race);
         }
 
         fn exercise_native_proc_with_observation(
             terminal_export: bool,
             release_target: bool,
             observation: Option<TargetObservationCase>,
+            alias_race: bool,
         ) {
             let executable = std::env::current_exe().unwrap();
             // Test-only inventory of this harness's exact loader/library
@@ -6571,7 +6591,9 @@ mod imp {
                 (false, true, false),
                 (false, true, true),
             ] {
-                if observation.is_some() && (sealed || nested || directory_executable) {
+                if (observation.is_some() || alias_race)
+                    && (sealed || nested || directory_executable)
+                {
                     continue;
                 }
                 let runtime_fixture = tempfile::tempdir().unwrap();
@@ -6593,6 +6615,15 @@ mod imp {
                     crate::secure_fs::pin_canonical_mount_source(runtime_fixture.path()).unwrap();
                 let writable_fixture = tempfile::tempdir().unwrap();
                 std::fs::create_dir(writable_fixture.path().join("view")).unwrap();
+                std::fs::write(writable_fixture.path().join("config.toml"), b"writable origin")
+                    .unwrap();
+                let host_alias_view = crate::secure_fs::PinnedDirectory::open(writable_fixture.path())
+                    .unwrap()
+                    .unwrap();
+                let host_signal_view = host_alias_view
+                    .open_child_directory(std::ffi::OsStr::new("view"))
+                    .unwrap()
+                    .unwrap();
                 let writable_parent =
                     crate::secure_fs::pin_canonical_mount_source(writable_fixture.path()).unwrap();
                 let writable_source = crate::secure_fs::pin_canonical_mount_source(
@@ -6618,6 +6649,9 @@ mod imp {
                     crate::sealed_memfd(c"native-channel-probe", b"native-target-channel").unwrap();
                 let configuration =
                     crate::sealed_memfd(c"native-configuration-probe", b"policy=[]\n").unwrap();
+                let nested_configuration =
+                    crate::sealed_memfd(c"native-nested-configuration", b"sealed configuration")
+                        .unwrap();
                 // A test coordinate above the unrelated sentinel, not a
                 // production workload-client descriptor allocation rule.
                 let channel_target = u32::try_from(high + 1).unwrap();
@@ -6745,6 +6779,12 @@ mod imp {
                         layer: 0,
                     },
                     LinuxSandboxMount {
+                        source_fd: nested_configuration.inherited_descriptor().unwrap(),
+                        destination: PathBuf::from("/mutable/config.toml"),
+                        access: LinuxSandboxMountAccess::ReadOnly,
+                        layer: 20,
+                    },
+                    LinuxSandboxMount {
                         source_fd: runtime_source.inherited_descriptor().unwrap(),
                         destination: PathBuf::from("/ryeos/realizations/runtime"),
                         access: LinuxSandboxMountAccess::ReadOnly,
@@ -6788,11 +6828,40 @@ mod imp {
                             OsString::from("LILLUX_PROC_EXEC_PROBE"),
                             OsString::from("terminal-writer"),
                         );
+                    } else if alias_race {
+                        request.environment.insert(
+                            OsString::from("LILLUX_PROC_EXEC_PROBE"),
+                            OsString::from("alias-race"),
+                        );
                     }
                     let result = (|| {
                         if !terminal_export {
                             let expected_launch = request.clone();
                             let mut process = launch(request)?;
+                            if alias_race {
+                                let mut original = host_alias_view
+                                    .open_regular(std::ffi::OsStr::new("config.toml"), true)
+                                    .map_err(|error| format!("open host alias: {error}"))?
+                                    .ok_or("host config alias disappeared")?;
+                                let replacement = host_alias_view.rename_regular_child_noreplace_atomic(
+                                    std::ffi::OsStr::new("config.toml"),
+                                    std::ffi::OsStr::new("prior-config.toml"),
+                                    &original,
+                                );
+                                if replacement.is_ok() {
+                                    return Err("host replacement unexpectedly displaced the mounted source".into());
+                                }
+                                original.set_len(0).map_err(|error| format!("truncate host alias: {error}"))?;
+                                use std::io::Write as _;
+                                original.write_all(b"host mutated origin")
+                                    .map_err(|error| format!("write host alias: {error}"))?;
+                                host_signal_view.atomic_create_regular(
+                                    std::ffi::OsStr::new("host-mutated"),
+                                    b"ready",
+                                    0o600,
+                                ).map_err(|error| format!("signal host mutation: {error}"))?
+                                    .ok_or("host mutation signal already exists")?;
+                            }
                             let preparation = process.mount_preparation_receipt()?;
                             if preparation.schema != 1
                                 || preparation.mount_count == 0
@@ -7125,6 +7194,13 @@ mod imp {
                     })();
                     if let Err(error) = &result {
                         eprintln!("proc exec qualification: {error}");
+                        if alias_race {
+                            let _ = writer_view.atomic_create_regular(
+                                std::ffi::OsStr::new("alias-error"),
+                                error.as_bytes(),
+                                0o600,
+                            );
+                        }
                     }
                     unsafe {
                         libc::_exit(if result == Ok(LinuxSandboxExit::Code(0)) {
@@ -7140,7 +7216,8 @@ mod imp {
                 assert_eq!(
                     libc::WEXITSTATUS(status),
                     0,
-                    "sealed={sealed}, nested={nested}, directory_executable={directory_executable}"
+                    "sealed={sealed}, nested={nested}, directory_executable={directory_executable}, alias_error={:?}",
+                    std::fs::read_to_string(writable_fixture.path().join("view/alias-error"))
                 );
             }
         }

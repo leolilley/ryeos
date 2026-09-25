@@ -197,6 +197,10 @@ fn materialize_command_environment(
         "signed command environment template has unplanned semantics"
     );
     configurations.ensure_path_binding()?;
+    render_command_environment(controller_executable, guest_cwd)
+}
+
+fn render_command_environment(controller_executable: &Path, guest_cwd: &Path) -> Result<Vec<u8>> {
     ensure!(
         controller_executable.is_absolute() && guest_cwd.is_absolute(),
         "verifier command environment paths must be absolute"
@@ -221,6 +225,17 @@ fn materialize_command_environment(
         "rendered command environment exceeds bound"
     );
     Ok(output)
+}
+
+/// Exact byte identity the signed direct recipe must bind before daemon
+/// START. The staged template is checked separately against its signed hash
+/// before these deterministic bytes are written into the prepared home.
+pub fn direct_command_environment_sha256() -> Result<String> {
+    let cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
+    Ok(lillux::sha256_hex(&render_command_environment(
+        Path::new(DIRECT_CONTROLLER_EXECUTABLE),
+        &cwd,
+    )?))
 }
 
 impl StagedNativeProbe {

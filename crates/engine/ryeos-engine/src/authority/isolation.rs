@@ -37,6 +37,7 @@ pub use authority::{
     IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
     IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
     IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
+    IsolationProducerPreparedImmutableFileAuthority,
     IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
     IsolationTargetChannelAuthority, IsolationVerifiedCode, IsolationWritableRuntimeViewMountAuthority,
 };
@@ -3987,6 +3988,8 @@ impl IsolationRuntime {
         let mut producer_prepared_mounts = context.producer_prepared_mounts.iter().collect::<Vec<_>>();
         producer_prepared_mounts.sort_by(|left, right| left.id().cmp(right.id()));
         let mut prepared_destinations: Vec<PathBuf> = Vec::with_capacity(producer_prepared_mounts.len());
+        let mut prepared_immutable_files = Vec::new();
+        let mut immutable_destinations = BTreeSet::new();
         let mut prepared_ids = BTreeSet::new();
         for mount in &producer_prepared_mounts {
             let destination = mount.destination();
@@ -4013,7 +4016,27 @@ impl IsolationRuntime {
                 )));
             }
             prepared_destinations.push(destination.to_path_buf());
+            for file in mount.immutable_files() {
+                if file.destination().parent() != Some(destination)
+                    || !immutable_destinations.insert(file.destination().to_path_buf())
+                {
+                    return Err(refused(
+                        "prepared immutable file is not a unique direct child".to_string(),
+                    ));
+                }
+                validate_namespace_destination("prepared immutable file", file.destination())?;
+                file.verify_sealed_content().map_err(|error| {
+                    refused(format!("prepared immutable file is not sealed exact content: {error}"))
+                })?;
+                prepared_immutable_files.push(file);
+            }
         }
+        if prepared_immutable_files.len()
+            > ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES
+        {
+            return Err(refused("prepared immutable file count exceeds signed bound".to_string()));
+        }
+        prepared_immutable_files.sort_by(|left, right| left.destination().cmp(right.destination()));
         readable_mounts.sort_by(|left, right| {
             // The protocol applies realization trees before their read-only
             // state overlays regardless of where the node lives. Sorting by
@@ -4265,6 +4288,17 @@ impl IsolationRuntime {
                     IsolationMountAccess::Writable,
                     IsolationAuthorityPurpose::WritableMount,
                     10,
+                )?;
+            }
+            for (index, file) in prepared_immutable_files.iter().enumerate() {
+                add_mount(
+                    "producer-prepared-immutable",
+                    index,
+                    file.source().clone(),
+                    file.destination(),
+                    IsolationMountAccess::ReadOnly,
+                    IsolationAuthorityPurpose::ReadOnlyMount,
+                    20,
                 )?;
             }
             for (index, mount) in readable_mounts
@@ -8781,12 +8815,35 @@ mod tests {
         let prepared_home = prepared_root
             .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
             .unwrap();
+        prepared_home
+            .atomic_create_regular(std::ffi::OsStr::new("config.toml"), b"model = 'fixture'\n", 0o600)
+            .unwrap()
+            .unwrap();
+        let prepared_config = prepared_home
+            .open_pinned_regular(std::ffi::OsStr::new("config.toml"), false)
+            .unwrap()
+            .unwrap();
+        let captured_config = prepared_config
+            .capture_sealed_bounded(&prepared_config.observation().unwrap(), 65536)
+            .unwrap();
+        let immutable_config = IsolationProducerPreparedImmutableFileAuthority::new(
+            &ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile {
+                prepared_directory_id: "codex-home".into(),
+                leaf_name: "config.toml".into(),
+                maximum_bytes: 65536,
+                expected_sha256: lillux::sha256_hex(b"model = 'fixture'\n"),
+            },
+            captured_config,
+        )
+        .unwrap();
         let workspace_view = project.inherited_descriptor_authority().unwrap();
         let prepared = IsolationProducerPreparedDirectoryAuthority::new(
             "codex-home".into(),
             "prepared/codex-home".into(),
             prepared_home.inherited_descriptor_authority().unwrap(),
         )
+        .unwrap()
+        .with_immutable_files(vec![immutable_config])
         .unwrap();
         let prepared_destination = prepared.destination().to_string_lossy().into_owned();
         let prepared_request = || {
@@ -8835,6 +8892,18 @@ mod tests {
         assert!(adapter_request.authorities.iter().any(|authority| {
             authority.id == prepared_mount.source
                 && authority.purpose == IsolationAuthorityPurpose::WritableMount
+        }));
+        let immutable_mount = adapter_request
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.destination.as_str() == format!("{prepared_destination}/config.toml"))
+            .unwrap();
+        assert_eq!(immutable_mount.access, IsolationMountAccess::ReadOnly);
+        assert_eq!(immutable_mount.layer, 20);
+        assert!(adapter_request.authorities.iter().any(|authority| {
+            authority.id == immutable_mount.source
+                && authority.purpose == IsolationAuthorityPurpose::ReadOnlyMount
         }));
         let duplicates = [prepared.clone(), prepared];
         assert!(runtime
