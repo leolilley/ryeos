@@ -1818,7 +1818,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             direct_environment["environments"][0]["program"].as_str(),
-            Some(relay.to_str().unwrap())
+            Some("/workspace/qualification/controller/bin/ryeos-synthetic-routed-guest")
         );
         assert_eq!(
             direct_environment["environments"][0]["cwd"].as_str(),
