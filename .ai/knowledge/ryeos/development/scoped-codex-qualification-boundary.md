@@ -53,19 +53,23 @@ or the enclosing root terminates before the evidence join is committed.
 
 ## Current implementation gate
 
-The daemon-side listener transfer and READY wait are present. The verifier now
-has a conditional receiver concurrent with START, but the current signed
-scenario still selects the historical driver and cannot activate direct Codex.
-The signed direct-Codex recipe and its exact environment, working-directory,
-and guest bindings are not yet admitted. No joined native direct-target test
-has exercised the new conditional path.
-Peer liveness is checked only at observation points, not through the complete
-root/commit fence. Consequently, current component tests and observation-v4
-parsing are not an external-runtime qualification. Do not enable a claim until
-a joined test proves exact pre-release ACK, app-server conversation, provider
-contact accounting, whole-scope/writer settlement, frozen candidate, and the
-negative cuts for wrong/lost ACK, verifier death, cancellation, restart, and
-replay.
+The signed fixture now selects the exact retained Codex executable as its
+direct scoped target. The daemon-side listener transfer, READY wait, prepared
+home/CWD and immutable configuration mounts are implemented; retained START
+and terminal observations carry their exact identities. The verifier derives
+the signed effective environment and CWD independently and compares the
+applied launch, then checks the app-server conversation, scripted provider
+contacts and frozen candidate. It still deliberately refuses to issue a
+qualification claim. Focused component tests and a real signed product
+capture pass, but the accepted direct qualification root refused before
+process launch: the local fixture node lacks qualified Lillux process-scope
+authority. Thus no joined native direct-target positive, malicious negative,
+or daemon-restart run has passed. Observation parsing and synthetic receipts
+are not external-runtime qualification. Do not enable a claim until a joined
+test proves exact pre-release ACK, target-namespace realization visibility,
+app-server conversation, provider contact accounting, whole-scope/writer
+settlement, frozen candidate, and the negative cuts for wrong/lost ACK,
+verifier death, cancellation, restart, and replay.
 
 The conditional START receiver also needs a complete failure owner. A
 root-authorized exact-attempt abort callback now claims cleanup-only retirement
@@ -175,7 +179,7 @@ proved the applied source, target chdir, or writer settlement. The Codex
 preparer must also prove exact configuration content and writer exclusion.
 Directory identity alone does not establish those claims.
 
-The Codex verifier now has a separate parent-owned direct-target preparer. It
+The Codex verifier has a separate parent-owned direct-target preparer. It
 stages the signed native request, exact command-tool tree and empty candidate
 under `prepared/codex-occurrence`, and the signed baseline plus rendered
 command environment under `prepared/codex-home`. The rendered guest CWD uses
@@ -184,9 +188,9 @@ descriptor path. Its executable points at the selected read-only controller
 realization member. The preparer rechecks signed input bytes before START and
 can inspect the candidate and guest observation after an independently proven
 whole-scope/writer-exclusion fence. Focused source-selection, staging,
-tamper-refusal and frozen-inspection tests pass. This preparer is not yet
-called by the verifier's direct branch, and the signed scenario still refuses
-direct Codex. In particular, a verifier-visible controller pathname does not
+tamper-refusal and frozen-inspection tests pass. The direct verifier branch now
+calls this preparer, and the signed scenario selects direct Codex. In
+particular, a verifier-visible controller pathname does not
 prove that the target saw the same read-only mount; that requires applied
 namespace evidence. Nor can post-scope byte equality prove what mutable home
 content Codex read during execution. The joined test must correlate Codex's
@@ -199,7 +203,7 @@ reopen its preparation under the same authority, or refuse. Until that
 reconciliation is implemented, this path remains a preflight component rather
 than an admitted qualification scenario.
 
-The fixture's signed producer recipe now selects the exact retained
+The fixture's signed producer recipe selects the exact retained
 `subject/bin/codex` realization member, finite app-server argv, interactive
 input budgets, the fixed prepared occurrence/home IDs, and one signed
 loopback ingress. The verifier stages before START, rechecks before release,
