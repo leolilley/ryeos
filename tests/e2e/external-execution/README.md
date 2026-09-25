@@ -2523,3 +2523,16 @@ This proves ordinary recorded external Tool execution and completed-work replay
 on the local synthetic lifecycle backend. It does not prove active-worker crash
 recovery, external B-owned candidate evaluation, installed Render qualification,
 or the Farm research loop. Those remain separate acceptance gates.
+
+### Guest-package budget authority
+
+Placement binding schema 10 signs separate `max_guest_package_regular_bytes`
+and `max_guest_package_framed_bytes` ceilings. The package includes B, runtime
+products and supervisor artifacts; neither `max_workspace_bytes` nor the
+execution-channel `max_transfer_bytes` authorizes that upload. Runtime-store
+epoch 69 refuses predecessor retained bindings before decoding them under the
+new contract. The producer and guest importer must both use the exact retained
+limits; the HTTP stream has its own matching 4 GiB hard ceiling. These signed
+fields do not yet connect the producer to the lifecycle adapter or authorize
+Render contact. A prepared package's exact bytes/digest must be durably bound
+to the existing one-shot activation and occurrence before upload.

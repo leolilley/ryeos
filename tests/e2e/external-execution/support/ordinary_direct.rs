@@ -155,7 +155,7 @@ pub fn install_before_start(
     write_signed_new(
         &state_path.join(format!(".ai/node/external_execution/{BINDING_ID}.yaml")),
         &json!({
-            "kind":"node", "schema":9,
+            "kind":"node", "schema":10,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "workload":{"kind":"direct_command"}, "backend":"synthetic-local",
             "account":"ordinary-fixture", "capacity_group":"ordinary-fixture",
@@ -175,6 +175,8 @@ pub fn install_before_start(
             "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
             "max_workspace_bytes":67_108_864, "max_export_bytes":0,
             "max_transfer_bytes":134_217_728,
+            "max_guest_package_regular_bytes":134_217_728,
+            "max_guest_package_framed_bytes":268_435_456,
         }),
         &fixture.node,
     )?;

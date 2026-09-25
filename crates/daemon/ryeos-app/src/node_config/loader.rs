@@ -775,7 +775,7 @@ mod tests {
         let settings = serde_json::json!({"region":"singapore", "plan":"standard"});
         let settings_digest =
             super::super::sections::external_execution::adapter_settings_digest(&settings).unwrap();
-        let mut body = serde_json::json!({"kind":"node", "schema":9,
+        let mut body = serde_json::json!({"kind":"node", "schema":10,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "workload": {
                 "kind":"structured_session",
@@ -824,7 +824,9 @@ mod tests {
             "max_active":2, "timeout_seconds":300, "contact_timeout_seconds":30,
             "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
             "max_workspace_bytes":1048576, "max_export_bytes":524288,
-            "max_transfer_bytes":2097152 });
+            "max_transfer_bytes":2097152,
+            "max_guest_package_regular_bytes":1048576,
+            "max_guest_package_framed_bytes":2097152 });
         let write = |body: &Value| {
             fs::write(
                 &path,
@@ -1112,6 +1114,10 @@ mod tests {
             ("max_export_bytes", 1_048_577),
             ("max_transfer_bytes", 524_287),
             ("max_transfer_bytes", (1_u64 << 40) + 1),
+            ("max_guest_package_regular_bytes", 0),
+            ("max_guest_package_regular_bytes", 2_097_152),
+            ("max_guest_package_framed_bytes", 1_048_576),
+            ("max_guest_package_framed_bytes", (4_u64 << 30) + 1),
         ] {
             let original = body[field].clone();
             body[field] = Value::from(invalid);
@@ -1119,6 +1125,29 @@ mod tests {
             assert!(load().is_err(), "invalid {field} budget was admitted");
             body[field] = original;
         }
+        for field in [
+            "max_guest_package_regular_bytes",
+            "max_guest_package_framed_bytes",
+        ] {
+            let original = body.as_object_mut().unwrap().remove(field).unwrap();
+            write(&body);
+            assert!(load().is_err(), "missing {field} budget was admitted");
+            body[field] = original;
+        }
+        for (regular, framed) in [
+            (1_048_576_u64, 2_097_152_u64),
+            ((4_u64 << 30) - 1, 4_u64 << 30),
+        ] {
+            body["max_guest_package_regular_bytes"] = Value::from(regular);
+            body["max_guest_package_framed_bytes"] = Value::from(framed);
+            write(&body);
+            let admitted = load().unwrap();
+            let contract = admitted.external_execution[0].backend_contract();
+            assert_eq!(contract.max_guest_package_regular_bytes, regular);
+            assert_eq!(contract.max_guest_package_framed_bytes, framed);
+        }
+        body["max_guest_package_regular_bytes"] = Value::from(1_048_576_u64);
+        body["max_guest_package_framed_bytes"] = Value::from(2_097_152_u64);
         for field in ["backend", "account", "capacity_group"] {
             let original = body[field].clone();
             body[field] = Value::String("other".into());

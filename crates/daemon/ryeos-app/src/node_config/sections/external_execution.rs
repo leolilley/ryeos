@@ -133,12 +133,14 @@ struct BindingDocument {
     max_workspace_bytes: u64,
     max_export_bytes: u64,
     max_transfer_bytes: u64,
+    max_guest_package_regular_bytes: u64,
+    max_guest_package_framed_bytes: u64,
 }
 
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 9,
+            self.kind == "node" && self.schema == 10,
             "unsupported external placement binding schema"
         );
         self.workload.validate()?;
@@ -201,6 +203,13 @@ impl BindingDocument {
                 && (1..=MAX_BYTES).contains(&self.max_transfer_bytes),
             "placement binding storage or transfer budgets exceed bounds"
         );
+        const MAX_GUEST_PACKAGE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+        ensure!(
+            (1..=MAX_GUEST_PACKAGE_BYTES).contains(&self.max_guest_package_regular_bytes)
+                && (1..=MAX_GUEST_PACKAGE_BYTES).contains(&self.max_guest_package_framed_bytes)
+                && self.max_guest_package_regular_bytes < self.max_guest_package_framed_bytes,
+            "placement binding guest package budgets exceed the upload bound"
+        );
         match &self.workload {
             ExternalWorkloadBinding::StructuredSession(_) => ensure!(
                 (1..=self.max_workspace_bytes).contains(&self.max_export_bytes)
@@ -252,6 +261,8 @@ impl BindingDocument {
             max_workspace_bytes: self.max_workspace_bytes,
             max_export_bytes: self.max_export_bytes,
             max_transfer_bytes: self.max_transfer_bytes,
+            max_guest_package_regular_bytes: self.max_guest_package_regular_bytes,
+            max_guest_package_framed_bytes: self.max_guest_package_framed_bytes,
         }
     }
 }
@@ -286,6 +297,8 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) max_workspace_bytes: u64,
     pub(crate) max_export_bytes: u64,
     pub(crate) max_transfer_bytes: u64,
+    pub(crate) max_guest_package_regular_bytes: u64,
+    pub(crate) max_guest_package_framed_bytes: u64,
 }
 
 impl ExternalPlacementBackendContract {
@@ -485,7 +498,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 9,
+            schema: 10,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
                 provider_declaration_id: "codex-hosted".into(),
@@ -553,6 +566,8 @@ impl RetainedExternalExecutionBinding {
             max_workspace_bytes: 1024,
             max_export_bytes: 512,
             max_transfer_bytes: 2048,
+            max_guest_package_regular_bytes: 1024 * 1024,
+            max_guest_package_framed_bytes: 2 * 1024 * 1024,
         };
         let id = "fixture".to_owned();
         let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
@@ -641,7 +656,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 9,
+            schema: 10,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -690,6 +705,8 @@ impl RetainedExternalExecutionBinding {
             max_workspace_bytes: 16 * 1024 * 1024,
             max_export_bytes: 8 * 1024 * 1024,
             max_transfer_bytes: 16 * 1024 * 1024,
+            max_guest_package_regular_bytes: 128 * 1024 * 1024,
+            max_guest_package_framed_bytes: 256 * 1024 * 1024,
         };
         document.validate()?;
         let id = "composed-test".to_owned();
@@ -1141,7 +1158,7 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 9);
+        assert_eq!(value["schema"], 10);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());

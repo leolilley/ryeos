@@ -2611,7 +2611,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // active-control operation against an intentionally absent resource.
 // Epoch 67 retains ordered scoped-child input reservations so uncertain local
 // delivery cannot be replayed as a fresh write or bypassed by a later close.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 68;
+// Epoch 69 refuses predecessor retained placement bindings: schema 10 adds
+// separately signed guest-package byte authorities that schema 9 lacked.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 69;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

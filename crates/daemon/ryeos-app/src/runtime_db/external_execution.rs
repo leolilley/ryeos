@@ -3443,15 +3443,72 @@ pub(crate) mod tests {
                 .phase,
             ExternalAllocationPhase::Terminated
         );
-        assert!(!db
-            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
-            .unwrap());
-        assert!(db
-            .external_supervisor_activation(&reservation.placement_thread_id)
+        assert!(
+            !db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
+        assert!(
+            db.external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .observation
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn predecessor_guest_package_binding_refuses_before_reopen_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.sqlite3");
+        let db = RuntimeDb::open(&path).unwrap();
+        let retained = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture();
+        let mut predecessor = serde_json::to_value(&retained).unwrap();
+        predecessor["document"]["schema"] = serde_json::Value::from(9);
+        predecessor["document"]
+            .as_object_mut()
             .unwrap()
+            .remove("max_guest_package_regular_bytes");
+        predecessor["document"]
+            .as_object_mut()
             .unwrap()
-            .observation
-            .is_none());
+            .remove("max_guest_package_framed_bytes");
+        let predecessor = lillux::canonical_json(&predecessor).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO external_execution_binding_generation
+                 (binding_hash,capacity_owner,binding_json,retained_at_ms)
+                 VALUES (?1,?2,?3,1)",
+                params![retained.digest(), retained.capacity_owner(), predecessor],
+            )
+            .unwrap();
+        db.conn
+            .pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("predecessor binding must require explicit reset");
+        let message = format!("{error:#}");
+        assert!(message.contains("explicit no-backcompat reset"));
+        assert!(message.contains(&format!(
+            "stored schema_epoch={}",
+            RUNTIME_OPERATOR_SCHEMA_EPOCH - 1
+        )));
+        assert!(!message.contains("decode retained external binding"));
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let preserved: String = conn
+            .query_row(
+                "SELECT binding_json FROM external_execution_binding_generation WHERE binding_hash=?1",
+                [retained.digest()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, predecessor);
     }
 
     #[test]
@@ -3541,6 +3598,14 @@ pub(crate) mod tests {
             (
                 "/document/max_workspace_bytes",
                 serde_json::Value::from(2048),
+            ),
+            (
+                "/document/max_guest_package_regular_bytes",
+                serde_json::Value::from(2048),
+            ),
+            (
+                "/document/max_guest_package_framed_bytes",
+                serde_json::Value::from(4096),
             ),
             ("/document/max_active", serde_json::Value::from(2)),
             ("/document/timeout_seconds", serde_json::Value::from(61)),
