@@ -66,6 +66,48 @@ The next joined fixture must use the existing public enrollment, original produc
 capture, independent qualification and composition services. Neither direct test
 state writes nor the synthetic claim emitter can substitute for these boundaries.
 
+## Render Sandbox activation qualification cut (September 26)
+
+The pinned Render CLI's generated schema describes two snapshot kinds. A
+`runtime` snapshot captures memory and CPU state and can be restored only to
+the source plan; a `filesystem` snapshot does not promise a running process.
+This makes a prestarted, authority-free supervisor waiter in an exact runtime
+snapshot a candidate for durable bootstrap. It is **not** proof that Render
+restores that process, its sockets, or its network route. The CLI's run API is
+streamed SSE and supplies no established detached-supervisor lifetime; a
+successful shell or stream exit cannot stand in for authenticated readiness.
+
+The first installed Render fixture must establish the following order, with
+exact IDs and contact counts retained at each cut:
+
+1. Produce and pin an available runtime snapshot with the expected source
+   plan, image/content identity and an inert waiter. No controller signer,
+   bootstrap capability, credential, project, or candidate may be in that
+   reusable snapshot.
+2. Create one Sandbox from its exact snapshot ID. Verify the returned
+   occurrence, plan and region; separately prove that the waiter actually
+   resumed inside this new occurrence. A configured snapshot digest sent in
+   the create request is not provider testimony about restored bytes.
+3. After RyeOS commits the activation intent, deliver its sealed per-occurrence
+   bootstrap and exact guest-input projection. Verify destination, byte digest,
+   length and occurrence binding inside the guest. A lost upload/token/stream
+   response is Pending, not permission to replay bytes or infer success.
+4. Require the guest's authenticated channel attachment and signed `Ready`
+   before Release. A provider-Pending activation may resolve through that
+   exact Ready; a provider `not_started`, wrong occurrence, stale capability,
+   wrong runtime or expired attachment must refuse. The focused generic tests
+   cover pending→signed Ready, not Render's restore or transfer.
+5. Prove one bounded target turn, whole-scope/writer settlement, frozen export,
+   authenticated return and exact Sandbox termination. Repeat with cancellation,
+   lost responses and daemon restart. Never reuse capacity on terminate ACK,
+   list absence or an unobserved provider state.
+
+Until that sequence and its malicious/negative counterparts pass on disposable
+Render Sandboxes, the adapter's `activate_supervisor` and reconciliation must
+remain `SupervisorPending`; this document grants no deployment or paid-provider
+contact authority. The generic activation, channel and cleanup owner must not
+be replaced with a Render-specific worker workflow.
+
 ## Historical implementation and acceptance chronology
 
 The entries below retain their dated scope. Earlier statements that a boundary
