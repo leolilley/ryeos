@@ -86,3 +86,39 @@ owners on the first timeout, attempt explicit bounded cancellation, and refuse
 qualification after cancellation. Their final interrupting Drop joins remain
 potentially unbounded, so this is not a bounded terminal proof. Merely dropping
 a local handle or repeating START is not recovery evidence.
+
+## Direct-target launch-profile cut
+
+The existing resolver can promote `subject/bin/codex` as an exact
+realization-member executable: the signed recipe must name the sealed subject
+declaration and manifest, the relative member `bin/codex`, and the verified
+member hash. That closes executable selection only. It does not make the
+current scenario-driver recipe a direct-Codex recipe. The verifier still
+rejects a direct recipe in its signed-parameter preflight, and the current
+producer request supplies only `RYEOS_EXTERNAL_REALIZATIONS` and the private
+workspace root as cwd.
+
+The old verifier-owned child had additional effective launch inputs:
+`--strict-config -c check_for_update_on_startup=false app-server`, a pinned
+Codex home containing the exact signed `config.toml` and rendered
+`environments.toml`, `CODEX_HOME`/`HOME` pointing to that home, closed
+`PATH`/locale values, and inherited authorities for the guest executable and
+guest cwd. Direct target must reproduce those conditions from a signed,
+bounded, generic preparation contract before release. The preparation owner
+must retain exact private workspace and source/config authorities, expose
+only path-free typed environment bindings, and join prepared content,
+effective environment, mount/descriptor identities, and applied launch in
+the observation. A callback-provided path, ambient home, or live project file
+is not a substitute. Codex-specific template rendering and app-server
+interpretation stay at the signed Codex verifier/product edge, not in the
+generic scoped-producer core.
+
+Existing session environment bindings are a useful pattern, but cannot be
+reused unchanged: their validator excludes `HOME` and `PATH`, and their
+runtime-view mount destination is not the historical private Codex home.
+The private workspace is already a retained descriptor and can contain a
+pre-staged child home; that permits structural preparation checks now. It
+does **not** by itself prove the old guest executable/cwd descriptor handoff
+or prevent pathname substitution of a mutable child directory. Qualification
+must remain disabled until the launch/isolation contract supplies and tests
+those exact authorities, including a joined native direct-target run.
