@@ -288,7 +288,7 @@ impl IndependentVerifierScenario {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     fn intended_requirement() -> ExternalCandidateRequirement {
         let mut requirement = crate::candidate_authoring::real_codex_requirement();
@@ -298,12 +298,9 @@ mod tests {
             .insert(LifecycleCapability::ExactTerminalObservation);
         requirement
     }
-    fn scenario() -> IndependentVerifierScenario {
+    pub(crate) fn scenario() -> IndependentVerifierScenario {
         let requirement = intended_requirement();
-        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(4)
-            .unwrap();
+        let repository = ryeos_engine::test_support::workspace_root();
         let environment_source = std::fs::read_to_string(
             repository.join("bundles/codex/.ai/config/codex/environments/external-authoring.yaml"),
         )

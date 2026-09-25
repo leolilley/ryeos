@@ -940,8 +940,11 @@ async fn bind_independent_verifier_tree(
 }
 
 fn stage_independent_verifier_inputs(
-    scenario: &independent_verifier_scenario::IndependentVerifierScenario,
-) -> anyhow::Result<tempfile::TempDir> {
+    configuration: &ryeos_independent_runtime_verifier::ExactScenario,
+) -> anyhow::Result<(
+    tempfile::TempDir,
+    admitted_worker_evidence::AdmittedWorkerEvidence,
+)> {
     use anyhow::{Context as _, ensure};
 
     let root = tempfile::tempdir()?;
@@ -986,13 +989,13 @@ fn stage_independent_verifier_inputs(
         "RYEOS_TEST_CODEX_0147_BIN",
         "subject/bin/codex",
         268_435_456,
-        Some(&scenario.codex_sha256),
+        Some(&configuration.codex_sha256),
     )?;
     link_binary(
         "RYEOS_TEST_ROUTED_GUEST_BIN",
         "controller/bin/ryeos-synthetic-routed-guest",
         64 * 1024 * 1024,
-        Some(&scenario.relay_sha256),
+        Some(&configuration.relay_sha256),
     )?;
     link_binary(
         "RYEOS_TEST_ZSH_BIN",
@@ -1004,75 +1007,165 @@ fn stage_independent_verifier_inputs(
     let scripted = include_str!(
         "../../../../tests/e2e/external-execution/fixtures/independent-scripted-config.toml.template"
     )
-    .replace("{ORIGIN}", &scenario.responses_origin);
+    .replace("{ORIGIN}", &configuration.responses_origin);
     ensure!(
-        lillux::sha256_hex(scripted.as_bytes()) == scenario.scripted_baseline_sha256,
-        "credential-free scripted baseline differs from signed scenario"
+        lillux::sha256_hex(scripted.as_bytes()) == configuration.scripted_baseline_sha256,
+        "credential-free scripted baseline differs from authored configuration"
     );
     let template = include_str!(
         "../../../../tests/e2e/external-execution/fixtures/independent-environments.toml.template"
     );
     ensure!(
-        lillux::sha256_hex(template.as_bytes()) == scenario.command_environment_template_sha256,
-        "command environment template differs from signed scenario"
+        lillux::sha256_hex(template.as_bytes())
+            == configuration.command_environment_template_sha256,
+        "command environment template differs from authored configuration"
     );
     let admitted = admit_signed_codex_worker()?;
-    let admitted_profile = admitted.profile;
-    let source_projection = admitted.source;
-    let profile = lillux::canonical_json(&admitted_profile.contract)?.into_bytes();
+    let profile = lillux::canonical_json(&admitted.profile.contract)?.into_bytes();
     ensure!(
         profile.len() <= 64 * 1024,
         "admitted profile exceeds fixture bound"
     );
-    let parsed = &admitted_profile.contract;
-    let mut configuration = serde_json::to_value(scenario)?;
-    configuration
-        .as_object_mut()
-        .context("scenario configuration is not an object")?
-        .remove("qualification_use");
-    let derived = independent_verifier_scenario::IndependentVerifierScenario::from_admitted_inputs(
-        serde_json::from_value(configuration)?,
-        &admitted_profile,
-        &source_projection,
-    )?;
+    let parsed = &admitted.profile.contract;
     ensure!(
-        derived.qualification_use == scenario.qualification_use
-            && lillux::sha256_hex(&profile) == scenario.qualification_use.profile_hash
-            && parsed["external_candidate"] == serde_json::to_value(&scenario.requirement)?
+        parsed["external_candidate"] == serde_json::to_value(&configuration.requirement)?
             && parsed["transport"] == "stdio_jsonrpc"
             && parsed["workload_client"].is_null()
             && parsed["workload_realization_id"] == "codex",
-        "exact compiled profile differs from signed qualification use"
+        "authored configuration differs from signed Codex Worker profile"
     );
     let configurations = root.path().join("configurations");
     std::fs::write(configurations.join("scripted.config.toml"), scripted)?;
     std::fs::write(configurations.join("environments.toml.template"), template)?;
     std::fs::write(configurations.join("admitted-profile.json"), &profile)?;
-    Ok(root)
+    Ok((root, admitted))
+}
+
+fn author_independent_verifier_scenario(
+    mut configuration: ryeos_independent_runtime_verifier::ExactScenario,
+    imports: &[Value; 4],
+    admitted: &admitted_worker_evidence::AdmittedWorkerEvidence,
+) -> anyhow::Result<independent_verifier_scenario::IndependentVerifierScenario> {
+    use anyhow::{Context as _, ensure};
+
+    // This fixes the test fixture's signed coordinates; it does not qualify
+    // the configured execution environment as a production Worker closure.
+    // The verifier must keep refusing claims until that independent join is
+    // proven alongside the effective native runtime and settlement evidence.
+    let placeholder = "0".repeat(64);
+    ensure!(
+        [
+            &configuration.subject_manifest_hash,
+            &configuration.controller_manifest_hash,
+            &configuration.tools_manifest_hash,
+            &configuration.configurations_manifest_hash,
+        ]
+        .into_iter()
+        .all(|hash| hash == &placeholder),
+        "unsigned direct configuration must leave import identities unbound"
+    );
+    let hashes = imports
+        .iter()
+        .map(|imported| {
+            imported["manifest_hash"]
+                .as_str()
+                .filter(|hash| lillux::valid_hash(hash))
+                .map(str::to_owned)
+                .context("public verifier import omitted a valid manifest identity")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    configuration.subject_manifest_hash = hashes[0].clone();
+    configuration.controller_manifest_hash = hashes[1].clone();
+    configuration.tools_manifest_hash = hashes[2].clone();
+    configuration.configurations_manifest_hash = hashes[3].clone();
+    let mut recipe = serde_json::to_value(&configuration.expected_producer_recipe)?;
+    let origin_address = configuration
+        .responses_origin
+        .strip_prefix("http://")
+        .context("direct scripted origin must be HTTP")?;
+    ensure!(
+        recipe["executable_source"]["kind"] == "admitted_realization_member"
+            && recipe["executable_source"]["realization_id"] == "subject"
+            && recipe["executable_source"]["relative_path"] == "bin/codex"
+            && recipe["executable_source"]["executable_sha256"] == configuration.codex_sha256
+            && recipe["loopback_ingress"]["address"] == origin_address,
+        "unsigned direct recipe differs from staged Codex or scripted provider route"
+    );
+    let source_hash = recipe
+        .pointer_mut("/executable_source/manifest_hash")
+        .context("direct producer recipe has no executable manifest field")?;
+    ensure!(
+        *source_hash == placeholder,
+        "unsigned direct producer recipe must leave executable import unbound"
+    );
+    *source_hash = json!(&configuration.subject_manifest_hash);
+    configuration.expected_producer_recipe =
+        ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
+            recipe,
+        )?;
+    let scenario =
+        independent_verifier_scenario::IndependentVerifierScenario::from_admitted_inputs(
+            configuration,
+            &admitted.profile,
+            &admitted.source,
+        )?;
+    require_independent_verifier_imports_match_scenario(imports, &scenario)?;
+    Ok(scenario)
+}
+
+#[test]
+fn direct_scenario_authors_import_identities_after_signed_worker_admission() -> anyhow::Result<()> {
+    let seed = independent_verifier_scenario::tests::scenario();
+    let mut configuration = serde_json::to_value(&seed)?;
+    configuration
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("test scenario has no configuration object"))?
+        .remove("qualification_use");
+    for key in [
+        "subject_manifest_hash",
+        "controller_manifest_hash",
+        "tools_manifest_hash",
+        "configurations_manifest_hash",
+    ] {
+        configuration[key] = json!("0".repeat(64));
+    }
+    configuration["expected_producer_recipe"]["executable_source"]["manifest_hash"] =
+        json!("0".repeat(64));
+    let configuration = serde_json::from_value(configuration)?;
+    let imports = ["a", "b", "c", "d"].map(|digit| json!({"manifest_hash": digit.repeat(64)}));
+    let admitted = admit_signed_codex_worker()?;
+    let authored = author_independent_verifier_scenario(configuration, &imports, &admitted)?;
+    anyhow::ensure!(
+        authored.subject_manifest_hash == "a".repeat(64)
+            && authored.controller_manifest_hash == "b".repeat(64)
+            && authored.tools_manifest_hash == "c".repeat(64)
+            && authored.configurations_manifest_hash == "d".repeat(64)
+            && authored.qualification_use.profile_hash == admitted.profile.profile_hash
+            && authored.qualification_use.source_binding_hash == admitted.source.binding_hash,
+        "direct scenario did not bind public imports and signed Worker admission"
+    );
+    Ok(())
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex and verifier binaries, four input trees, and authored admitted evidence; uses only a local scripted provider"]
+#[ignore = "requires exact Codex and verifier binaries plus an unsigned direct configuration; uses only a local scripted provider"]
 async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let scenario_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON is required")?,
+    let configuration_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON")
+            .context("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON is required")?,
     );
     let verifier_path = PathBuf::from(
         std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
             .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
     );
-    let scenario: independent_verifier_scenario::IndependentVerifierScenario =
-        serde_json::from_slice(&lillux::secure_fs::read_regular_file_bounded_no_follow(
-            &scenario_path,
-            16 * 1024,
-        )?)?;
-    let parameters = scenario.parameters()?;
-    let input_root = stage_independent_verifier_inputs(&scenario)?;
+    let configuration: ryeos_independent_runtime_verifier::ExactScenario = serde_json::from_slice(
+        &lillux::secure_fs::read_regular_file_bounded_no_follow(&configuration_path, 16 * 1024)?,
+    )?;
+    let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
     let verifier_bytes =
         lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
@@ -1085,7 +1178,8 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
     .await?;
     harness.retain_evidence_on_drop(true);
     let staged = import_independent_verifier_trees(&harness).await?;
-    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
+    let scenario = author_independent_verifier_scenario(configuration, &staged, &admitted)?;
+    let parameters = scenario.parameters()?;
     harness.kill_daemon().await?;
     install_signed_independent_verifier_fixture(
         &harness.state_path,
@@ -1178,25 +1272,24 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact verifier executable, four input trees and authored scenario; no provider credentials"]
+#[ignore = "requires exact verifier executable and unsigned direct configuration; no provider credentials"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let scenario_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON")
-            .context("RYEOS_TEST_INDEPENDENT_SCENARIO_JSON is required")?,
+    let configuration_path = PathBuf::from(
+        std::env::var_os("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON")
+            .context("RYEOS_TEST_INDEPENDENT_CONFIGURATION_JSON is required")?,
     );
     let verifier_path = PathBuf::from(
         std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
             .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
     );
-    let scenario_bytes =
-        lillux::secure_fs::read_regular_file_bounded_no_follow(&scenario_path, 16 * 1024)?;
-    let scenario: independent_verifier_scenario::IndependentVerifierScenario =
-        serde_json::from_slice(&scenario_bytes)?;
-    let parameters = scenario.parameters()?;
-    let input_root = stage_independent_verifier_inputs(&scenario)?;
+    let configuration_bytes =
+        lillux::secure_fs::read_regular_file_bounded_no_follow(&configuration_path, 16 * 1024)?;
+    let configuration: ryeos_independent_runtime_verifier::ExactScenario =
+        serde_json::from_slice(&configuration_bytes)?;
+    let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
     let verifier_bytes =
         lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
     let (mut harness, keys) = DaemonHarness::start_fast_with(
@@ -1209,7 +1302,8 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
     .await?;
     harness.retain_evidence_on_drop(true);
     let staged = import_independent_verifier_trees(&harness).await?;
-    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
+    let scenario = author_independent_verifier_scenario(configuration, &staged, &admitted)?;
+    let parameters = scenario.parameters()?;
     harness.kill_daemon().await?;
     install_signed_independent_verifier_fixture(
         &harness.state_path,
