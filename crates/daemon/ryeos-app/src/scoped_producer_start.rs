@@ -130,7 +130,10 @@ pub fn start_scoped_producer(
     let live = state.scoped_producer_authorities.consume_for_attempt(key)?;
     let admitted_command =
         live.admitted_command_for_recipe(scenario_id, &source, &selected.recipe.executable_source)?;
-    let request = live.request_for_recipe(&selected.recipe, admitted_stdin, &admitted_command)?;
+    let prepared_launch =
+        live.request_for_recipe(&selected.recipe, admitted_stdin, &admitted_command)?;
+    let request = prepared_launch.request;
+    let prepared_mounts = prepared_launch.prepared_mounts;
     let workspace_view = live.workspace_view()?;
     let allocation = state
         .isolation
@@ -212,7 +215,7 @@ pub fn start_scoped_producer(
             verified_command: Some(&admitted_command),
             external_read_only_mounts: live.read_only_mounts(),
             writable_runtime_view_mounts: &[],
-            producer_prepared_mounts: &[],
+            producer_prepared_mounts: &prepared_mounts,
             target_channels: &target_channels,
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,

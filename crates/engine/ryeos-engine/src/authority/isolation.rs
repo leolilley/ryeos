@@ -3055,8 +3055,38 @@ impl IsolationRuntime {
         };
         let retained_read_only_project =
             immutable_project_handle.is_some() || retained_live_project_handle.is_some();
-        let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+        let prepared_cwd = context
+            .producer_prepared_mounts
+            .iter()
+            .find(|mount| mount.destination() == cwd_destination);
+        if prepared_cwd.is_some()
+            && self
+                .inspection
+                .filesystem
+                .readable
+                .iter()
+                .chain(&self.inspection.filesystem.writable)
+                .any(|configured| configured == "{cwd}")
+        {
+            return Err(refused(
+                "prepared producer cwd cannot resolve pathname-based {cwd} policy authority"
+                    .to_string(),
+            ));
+        }
+        let canonical_cwd = if prepared_cwd.is_some() {
+            // The adapter's host-side cwd remains the already-pinned scratch
+            // root. Only the sealed target plan uses the mounted destination.
+            canonical_project.clone()
+        } else {
+            canonicalize_context_mount("working directory", &cwd_destination)?
+        };
         if !context.producer_prepared_mounts.is_empty() {
+            if context.project_authority != IsolationProjectAuthority::EphemeralScratch {
+                return Err(refused(
+                    "scoped producer prepared directories require projectless scratch authority"
+                        .to_string(),
+                ));
+            }
             let workspace = context.workspace_view.ok_or_else(|| {
                 refused("prepared directories lack retained workspace authority".to_string())
             })?;
@@ -3065,10 +3095,6 @@ impl IsolationRuntime {
                     refused(format!("prepared directory is not the retained descendant: {error}"))
                 })?;
             }
-            return Err(refused(
-                "scoped producer prepared directories lack joined mount and cwd authority"
-                    .to_string(),
-            ));
         }
         let mount_namespace = MountNamespace {
             project_destination: &project_destination,
@@ -3945,6 +3971,41 @@ impl IsolationRuntime {
             }
             runtime_view_destinations.push(destination.to_path_buf());
         }
+        if context.producer_prepared_mounts.len()
+            > ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES
+        {
+            return Err(refused("prepared producer directory count exceeds its bound".to_string()));
+        }
+        let mut producer_prepared_mounts = context.producer_prepared_mounts.iter().collect::<Vec<_>>();
+        producer_prepared_mounts.sort_by(|left, right| left.id().cmp(right.id()));
+        let mut prepared_destinations: Vec<PathBuf> = Vec::with_capacity(producer_prepared_mounts.len());
+        let mut prepared_ids = BTreeSet::new();
+        for mount in &producer_prepared_mounts {
+            let destination = mount.destination();
+            if !prepared_ids.insert(mount.id()) {
+                return Err(refused("prepared producer directory ID is duplicated".to_string()));
+            }
+            let expected = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(mount.id())
+                .map_err(|error| refused(format!("invalid prepared producer directory: {error}")))?;
+            if destination != expected {
+                return Err(refused("prepared producer destination differs from signed ID".to_string()));
+            }
+            validate_namespace_destination("prepared producer directory", destination)?;
+            if paths_overlap(destination, &project_destination)
+                || writable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
+                || readable_mounts.iter().any(|other| paths_overlap(destination, &other.destination))
+                || runtime_view_destinations.iter().any(|other| paths_overlap(destination, other))
+                || prepared_destinations.iter().any(|other| paths_overlap(destination, other))
+                || context.state_root.is_some_and(|path| paths_overlap(destination, path))
+                || context.checkpoint_dir.is_some_and(|path| paths_overlap(destination, path))
+            {
+                return Err(refused(format!(
+                    "prepared producer directory {} overlaps another launch authority",
+                    destination.display()
+                )));
+            }
+            prepared_destinations.push(destination.to_path_buf());
+        }
         readable_mounts.sort_by(|left, right| {
             // The protocol applies realization trees before their read-only
             // state overlays regardless of where the node lives. Sorting by
@@ -4018,7 +4079,9 @@ impl IsolationRuntime {
         }) || readable_mounts.iter().any(|mount| {
             canonical_cwd.starts_with(&mount.source)
                 && cwd_destination.starts_with(&mount.destination)
-        });
+        }) || producer_prepared_mounts
+            .iter()
+            .any(|mount| cwd_destination == mount.destination());
         if !cwd_is_visible {
             return Err(refused(format!(
                 "working directory {} is not visible through a readable or writable node-policy mount",
@@ -4184,6 +4247,17 @@ impl IsolationRuntime {
                         10,
                     )?;
                 }
+            }
+            for (index, mount) in producer_prepared_mounts.iter().enumerate() {
+                add_mount(
+                    "producer-prepared",
+                    index,
+                    mount.source().clone(),
+                    mount.destination(),
+                    IsolationMountAccess::Writable,
+                    IsolationAuthorityPurpose::WritableMount,
+                    10,
+                )?;
             }
             for (index, mount) in readable_mounts
                 .iter()
@@ -8642,6 +8716,78 @@ mod tests {
                 .to_string()
                 .contains("overlaps another launch mount or workspace")
         );
+
+        let prepared_root = project
+            .create_child(std::ffi::OsStr::new("prepared"), 0o700)
+            .unwrap();
+        let prepared_home = prepared_root
+            .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
+            .unwrap();
+        let workspace_view = project.inherited_descriptor_authority().unwrap();
+        let prepared = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            prepared_home.inherited_descriptor_authority().unwrap(),
+        )
+        .unwrap();
+        let prepared_destination = prepared.destination().to_string_lossy().into_owned();
+        let prepared_request = || {
+            let mut selected = request();
+            selected.cwd = Some(prepared_destination.clone());
+            selected.envs = vec![
+                ("CODEX_HOME".into(), prepared_destination.clone()),
+                ("HOME".into(), prepared_destination.clone()),
+            ];
+            selected
+        };
+        let prepared_mounts = [prepared.clone()];
+        let prepared_context = IsolationLaunchContext {
+            workspace_view: Some(&workspace_view),
+            writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &prepared_mounts,
+            ..context
+        };
+        let applied = runtime
+            .apply_with_provenance(prepared_request(), prepared_context)
+            .unwrap();
+        let (request_bytes, _) = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .read_regular_file_stable_bounded(ryeos_isolation_protocol::MAX_REQUEST_BYTES as u64)
+            .unwrap();
+        let adapter_request: AdapterLaunchRequest = serde_json::from_slice(&request_bytes).unwrap();
+        assert_eq!(adapter_request.plan.target.cwd.as_str(), prepared_destination);
+        assert_eq!(
+            adapter_request.plan.environment.values.get("CODEX_HOME"),
+            Some(&prepared_destination)
+        );
+        assert_eq!(
+            adapter_request.plan.environment.values.get("HOME"),
+            Some(&prepared_destination)
+        );
+        let prepared_mount = adapter_request
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.destination.as_str() == prepared_destination)
+            .unwrap();
+        assert_eq!(prepared_mount.access, IsolationMountAccess::Writable);
+        assert!(adapter_request.authorities.iter().any(|authority| {
+            authority.id == prepared_mount.source
+                && authority.purpose == IsolationAuthorityPurpose::WritableMount
+        }));
+        let duplicates = [prepared.clone(), prepared];
+        assert!(runtime
+            .apply_with_provenance(
+                prepared_request(),
+                IsolationLaunchContext {
+                    producer_prepared_mounts: &duplicates,
+                    ..prepared_context
+                },
+            )
+            .is_err());
     }
 
     #[cfg(target_os = "linux")]

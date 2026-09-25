@@ -357,6 +357,9 @@ impl IsolationProducerPreparedDirectoryAuthority {
         source
             .directory_identity()
             .map_err(|error| anyhow::anyhow!("prepared source is not a directory: {error}"))?;
+        source
+            .try_clone_pinned_directory(source.path().to_path_buf())?
+            .require_owner_private_directory()?;
         Ok(Self {
             id,
             destination,
@@ -371,6 +374,10 @@ impl IsolationProducerPreparedDirectoryAuthority {
 
     pub fn destination(&self) -> &Path {
         &self.destination
+    }
+
+    pub(crate) fn source(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.source
     }
 
     pub(crate) fn workspace_relative_path(&self) -> &str {
@@ -388,6 +395,9 @@ impl IsolationProducerPreparedDirectoryAuthority {
             expected.same_file_identity(&self.source)?,
             "prepared directory differs from retained workspace descendant"
         );
+        self.source
+            .try_clone_pinned_directory(self.source.path().to_path_buf())?
+            .require_owner_private_directory()?;
         Ok(())
     }
 }
@@ -662,6 +672,8 @@ pub struct IsolationLaunchContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[cfg(unix)]
     #[test]
@@ -727,6 +739,11 @@ mod tests {
     fn producer_prepared_directory_requires_pinned_directory_and_canonical_coordinate() {
         let source = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(source.path().join("prepared/codex-home")).unwrap();
+        std::fs::set_permissions(
+            source.path().join("prepared/codex-home"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let source = lillux::PinnedDirectory::open(source.path())
             .unwrap()
             .unwrap();

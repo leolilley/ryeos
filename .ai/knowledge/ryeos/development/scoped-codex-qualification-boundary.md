@@ -155,14 +155,22 @@ IDs must resolve before launch reservation; disabled or non-enforced isolation
 must refuse these bindings. Mount identity alone does not attest prepared file
 content, concurrent writers, or final frozen output.
 
-The first generic authority cut is implemented: Lillux can open an existing
+The generic mount-plan cut is implemented: Lillux can open an existing
 canonical directory descendant from a retained descriptor without creating or
 chmodding it. RyeOS has a distinct producer-prepared authority that compares
-its source descriptor with that exact workspace descendant. Isolation context
-now carries these authorities explicitly and refuses a nonempty set until the
-mount plan and CWD mapping are joined. This cut has a passing focused Lillux
-test and cross-crate compile check; it is not a producer-launch acceptance test.
-Before accepting a nonempty prepared set, plan admission must reject duplicate
-IDs and overlapping destinations, and the Codex preparer must prove exact
-configuration content and writer exclusion. Directory identity by itself does
-not establish any of those claims.
+its source descriptor with that exact workspace descendant. For enforced
+projectless scratch, isolation now rejects duplicate IDs and overlapping
+destinations, mounts the pinned descriptor at the ID-derived destination, and
+commits the target CWD and environment in its existing sealed launch plan.
+Prepared CWD explicitly refuses pathname-based `{cwd}` policy placeholders;
+the adapter starts from the pinned scratch root, while only the target changes
+to the prepared destination. The daemon now opens each signed ID only below
+the retained private workspace's fixed `prepared/<id>` coordinate, refuses
+an absent or non-private directory before reservation, and passes the pinned
+set to isolation. Focused plan-inspection and request-construction tests pass.
+The shared prepared-directory bound allows sixteen environment bindings plus
+one distinct CWD ID; request compilation checks that bound before reservation.
+This is not a producer-launch acceptance test: no adapter execution has yet
+proved the applied source, target chdir, or writer settlement. The Codex
+preparer must also prove exact configuration content and writer exclusion.
+Directory identity alone does not establish those claims.

@@ -5,13 +5,14 @@
 //! Losing this registry on daemon restart therefore fails closed. It is not a
 //! cache of paths and never carries callback, vault, or provider credentials.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail, ensure};
 use ryeos_engine::isolation::{
     IsolationAdmittedCommand, IsolationCommandAuthority, IsolationDescriptorBoundCommand,
-    IsolationReadOnlyMountAuthority,
+    IsolationProducerPreparedDirectoryAuthority, IsolationReadOnlyMountAuthority,
 };
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
@@ -156,6 +157,11 @@ pub struct ScopedProducerLiveAuthority {
     _lifelines: Arc<dyn Send + Sync>,
 }
 
+pub struct ScopedProducerLaunchRequest {
+    pub request: lillux::SubprocessRequest,
+    pub prepared_mounts: Vec<IsolationProducerPreparedDirectoryAuthority>,
+}
+
 impl ScopedProducerLiveAuthority {
     pub fn new(
         command: IsolationDescriptorBoundCommand,
@@ -289,15 +295,35 @@ impl ScopedProducerLiveAuthority {
         recipe: &ProductProducerRecipe,
         admitted_stdin: &str,
         selected_command: &IsolationAdmittedCommand,
-    ) -> Result<lillux::SubprocessRequest> {
+    ) -> Result<ScopedProducerLaunchRequest> {
         recipe.validate()?;
+        let mut prepared_ids = BTreeSet::new();
+        if let ProducerCwdSource::PreparedDirectory { id } = &recipe.cwd_source {
+            prepared_ids.insert(id.as_str());
+        }
+        for binding in recipe.environment_bindings.values() {
+            if let ProducerEnvironmentBinding::PreparedDirectory { id } = binding {
+                prepared_ids.insert(id.as_str());
+            }
+        }
         ensure!(
-            matches!(recipe.cwd_source, ProducerCwdSource::VerifierPrivateWorkspace)
-                && !recipe.environment_bindings.values().any(|binding| {
-                    !matches!(binding, ProducerEnvironmentBinding::Literal { .. })
-                }),
-            "signed producer prepared launch bindings lack retained directory authority"
+            prepared_ids.len()
+                <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES,
+            "signed producer prepared directory count exceeds its bound"
         );
+        let workspace_view = self.workspace_view()?;
+        let mut prepared_mounts = Vec::with_capacity(prepared_ids.len());
+        for id in prepared_ids {
+            let relative = format!("prepared/{id}");
+            let source = workspace_view
+                .open_directory_descendant(Path::new(&relative))?
+                .ok_or_else(|| anyhow::anyhow!("signed producer prepared directory is absent: {id}"))?;
+            prepared_mounts.push(IsolationProducerPreparedDirectoryAuthority::new(
+                id.to_owned(),
+                relative,
+                source,
+            )?);
+        }
         let buffered_input = match (&recipe.executable_source, &recipe.stdin_source) {
             (
                 ProducerExecutableSource::AdmittedVerifierExecutable,
@@ -347,17 +373,23 @@ impl ScopedProducerLiveAuthority {
         }
         let workspace_path = self
             .workspace
-            .descriptor_path()?
+            .path()
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("scoped producer pinned cwd is not UTF-8"))?
             .to_owned();
+        let prepared_destination = |id: &str| -> Result<String> {
+            prepared_mounts
+                .iter()
+                .find(|mount| mount.id() == id)
+                .and_then(|mount| mount.destination().to_str())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("signed producer prepared directory is not bound: {id}"))
+        };
         for (name, binding) in &recipe.environment_bindings {
             let value = match binding {
                 ProducerEnvironmentBinding::Literal { value } => value.clone(),
-                ProducerEnvironmentBinding::VerifierPrivateWorkspace
-                | ProducerEnvironmentBinding::PreparedDirectory { .. } => {
-                    bail!("signed producer prepared launch bindings lack retained directory authority")
-                }
+                ProducerEnvironmentBinding::VerifierPrivateWorkspace => workspace_path.clone(),
+                ProducerEnvironmentBinding::PreparedDirectory { id } => prepared_destination(id)?,
             };
             envs.push((name.clone(), value));
         }
@@ -368,11 +400,15 @@ impl ScopedProducerLiveAuthority {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("scoped producer command path is not UTF-8"))?
             .to_owned();
-        Ok(lillux::SubprocessRequest {
+        let cwd = match &recipe.cwd_source {
+            ProducerCwdSource::VerifierPrivateWorkspace => workspace_path,
+            ProducerCwdSource::PreparedDirectory { id } => prepared_destination(id)?,
+        };
+        let request = lillux::SubprocessRequest {
             cmd,
             argv0: None,
             args: recipe.argv.clone(),
-            cwd: Some(workspace_path),
+            cwd: Some(cwd),
             envs,
             stdin_data: buffered_input.then(|| admitted_stdin.to_owned()),
             timeout: recipe.bounds.maximum_wall_time_ms as f64 / 1000.0,
@@ -384,6 +420,10 @@ impl ScopedProducerLiveAuthority {
             inherited_fds: Vec::new(),
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
+        };
+        Ok(ScopedProducerLaunchRequest {
+            request,
+            prepared_mounts,
         })
     }
 }
@@ -632,11 +672,13 @@ mod tests {
         let request = authority
             .request_for_recipe(&recipe, "{\"sealed\":true}", &selected_command)
             .unwrap();
+        assert!(request.prepared_mounts.is_empty());
+        let request = request.request;
         assert_eq!(request.args, vec!["--scenario-driver"]);
         assert_eq!(request.stdin_data.as_deref(), Some("{\"sealed\":true}"));
         assert_eq!(
             request.cwd.as_deref(),
-            authority.workspace().descriptor_path().unwrap().to_str()
+            authority.workspace().path().to_str()
         );
         assert!(request.envs.is_empty());
         assert_eq!(request.timeout, 5.0);
@@ -650,19 +692,27 @@ mod tests {
         );
         let signed_request = authority
             .request_for_recipe(&signed_environment, "{\"sealed\":true}", &selected_command)
-            .unwrap();
+            .unwrap()
+            .request;
         assert_eq!(
             signed_request.envs,
             vec![("LANG".into(), "C".into())]
         );
-        let mut unmounted_workspace = recipe.clone();
-        unmounted_workspace.environment_bindings.insert(
+        let mut bound_workspace = recipe.clone();
+        bound_workspace.environment_bindings.insert(
             "PRODUCER_WORKSPACE".into(),
             ProducerEnvironmentBinding::VerifierPrivateWorkspace,
         );
-        assert!(authority
-            .request_for_recipe(&unmounted_workspace, "{\"sealed\":true}", &selected_command)
-            .is_err());
+        let workspace_request = authority
+            .request_for_recipe(&bound_workspace, "{\"sealed\":true}", &selected_command)
+            .unwrap();
+        assert_eq!(
+            workspace_request.request.envs,
+            vec![(
+                "PRODUCER_WORKSPACE".into(),
+                authority.workspace().path().to_str().unwrap().into()
+            )]
+        );
         let unrelated =
             IsolationAdmittedCommand::DescriptorBound(IsolationDescriptorBoundCommand::new(
                 ryeos_engine::isolation::IsolationVerifiedCode {
@@ -690,7 +740,49 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("lack retained directory authority")
+                .contains("prepared directory is absent")
+        );
+        let prepared_root = authority
+            .workspace()
+            .create_child(std::ffi::OsStr::new("prepared"), 0o700)
+            .unwrap();
+        prepared_root
+            .create_child(std::ffi::OsStr::new("codex-home"), 0o700)
+            .unwrap();
+        unprepared.cwd_source = ProducerCwdSource::PreparedDirectory {
+            id: "codex-home".into(),
+        };
+        let prepared_request = authority
+            .request_for_recipe(&unprepared, "{\"sealed\":true}", &selected_command)
+            .unwrap();
+        assert_eq!(prepared_request.prepared_mounts.len(), 1);
+        let destination = "/ryeos/producer-prepared/codex-home";
+        assert_eq!(prepared_request.request.cwd.as_deref(), Some(destination));
+        assert_eq!(
+            prepared_request.request.envs,
+            vec![("HOME".into(), destination.into())]
+        );
+        let mut maximum = recipe.clone();
+        maximum.cwd_source = ProducerCwdSource::PreparedDirectory { id: "cwd".into() };
+        prepared_root
+            .create_child(std::ffi::OsStr::new("cwd"), 0o700)
+            .unwrap();
+        for index in 0..16 {
+            let id = format!("env-{index:02}");
+            prepared_root
+                .create_child(std::ffi::OsStr::new(&id), 0o700)
+                .unwrap();
+            maximum.environment_bindings.insert(
+                format!("SLOT_{index:02}"),
+                ProducerEnvironmentBinding::PreparedDirectory { id },
+            );
+        }
+        let maximum_request = authority
+            .request_for_recipe(&maximum, "{\"sealed\":true}", &selected_command)
+            .unwrap();
+        assert_eq!(
+            maximum_request.prepared_mounts.len(),
+            ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES
         );
         let mut requires_realizations = recipe;
         requires_realizations.environment_sources =

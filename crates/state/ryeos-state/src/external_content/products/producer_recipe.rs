@@ -31,6 +31,9 @@ pub const MAX_PRODUCER_INTERACTIVE_FRAME_BYTES: u32 = 64 * 1024;
 pub const MAX_PRODUCER_INTERACTIVE_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_PRODUCER_INTERACTIVE_FRAMES: u32 = 512;
 pub const MAX_PRODUCER_ENVIRONMENT_BINDINGS: usize = 16;
+/// A recipe can reference one additional prepared CWD not named by any
+/// environment binding.
+pub const MAX_PRODUCER_PREPARED_DIRECTORIES: usize = MAX_PRODUCER_ENVIRONMENT_BINDINGS + 1;
 
 /// A signed executable selector, never a caller-supplied host path. The
 /// realization member still requires the root's retained admitted mount and
