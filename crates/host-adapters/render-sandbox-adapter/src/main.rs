@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod provider_spec;
+mod proxy_route;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};

@@ -68,6 +68,30 @@ support, signing, installation, or provider qualification.
   `pkg/sandbox/sse.go`, `pkg/client/client_gen.go`, and
   `pkg/client/sandboxes/sandboxes_gen.go`.
 
+`src/proxy_route.rs` now supplies a dormant fail-closed destination check for
+the CLI's example proxy routes. It accepts only the exact bound Sandbox ID and
+region under `<sandbox-id>.<region>.sandbox.onrender.com`, `PUT /files/upload`
+with the exact reserved path, or `POST /runs/stream`. It rejects arbitrary
+returned origins, methods, queries, fragments, credentials, ports and alternate
+encodings before a future bearer token could be forwarded. This is local
+policy/test evidence, **not** evidence that Render always returns that shape or
+that a proxy operation has been safely implemented.
+
+The intended first activation is one-shot. The controller durably commits its
+activation intent before any adapter contact. A single bounded adapter call
+may upload and invoke the run proxy at most once; after a crash or ambiguous
+mint/upload/run result, reconciliation must not mint, upload or run again.
+It remains pending and the exact bound Sandbox is quarantined and terminated.
+The existing channel owner can accept a separately authenticated supervisor
+`Ready` while provider activation is still pending, so no provider run exit is
+treated as startup proof. This trades retry/liveness for a smaller, exact
+first-candidate path; it does not require a parallel worker or lifecycle
+checkpoint system. Before enabling it, the guest must verify every transferred
+input byte against the retained projection and bind that verification to
+`Ready`; Render must also be shown to keep the supervisor alive independently
+of the run-proxy stream. Provider terminal status alone is not guest-writer
+exclusion or hard-isolation qualification.
+
 ## Provider operation and uncertainty matrix
 
 | Operation | Stable identity and pre-contact record | Positive evidence and reconciliation | Lost response, negative evidence, and spend |
@@ -78,8 +102,9 @@ support, signing, installation, or provider qualification.
 | Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID with `status: terminated` and a valid `terminatedAt` is terminal observation. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
 | Provider Sandbox death and writer exclusion | Bound to the exact Sandbox occurrence, but distinct from the termination request coordinate. | The current adapter does not establish guest descendant settlement, writer exclusion, or a frozen export. | Provider `terminated` status is not installed qualification or proof of RyeOS guest-writer death. No candidate execution or export is enabled by this adapter. |
 
-The exact proxy URL origin/path policy and the mapping from RyeOS captured
-snapshot/input hashes to Render Sandbox bootstrap content remain unresolved.
+The dormant proxy URL check still needs a live provider-shape qualification;
+the mapping from RyeOS captured snapshot/input hashes to Render Sandbox
+bootstrap content remains unresolved.
 The adapter therefore cannot start RyeOS's supervisor in a Sandbox and is not
 a usable external execution backend yet.
 
@@ -147,8 +172,8 @@ boundary before another provider is added. The integrated v2 seam carries the
 signed, digest-checked provider spec over a sealed descriptor. The Render
 profile cannot introduce
 an origin, credential placement, HTTP method, retry rule, or proof behavior.
-The Sandbox proxy stays disabled until its URL policy and RyeOS bootstrap
-mapping are established.
+The Sandbox proxy stays disabled until its observed URL shape, token handling,
+bounded transfer, and RyeOS bootstrap mapping are qualified.
 
 ## Build and qualification gates
 
