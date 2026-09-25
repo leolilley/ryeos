@@ -8,6 +8,7 @@ pub mod guest_observation;
 pub mod native_guest;
 pub mod routing_observation;
 pub mod scoped_app_server;
+pub mod scoped_relay;
 pub mod scripted_peer;
 pub mod scripted_provider;
 pub mod scripted_relay;
