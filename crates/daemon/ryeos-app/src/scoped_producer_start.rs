@@ -212,6 +212,7 @@ pub fn start_scoped_producer(
             verified_command: Some(&admitted_command),
             external_read_only_mounts: live.read_only_mounts(),
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &target_channels,
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,

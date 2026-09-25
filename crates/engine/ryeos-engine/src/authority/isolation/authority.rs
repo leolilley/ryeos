@@ -331,6 +331,67 @@ impl IsolationWritableRuntimeViewMountAuthority {
     }
 }
 
+/// One producer-owned, workspace-descendant directory admitted for a scoped
+/// launch. The signed ID selects only its fixed isolated destination; the
+/// descriptor and relative coordinate must still be checked against the
+/// retained workspace view when the launch plan is compiled.
+#[derive(Debug, Clone)]
+pub struct IsolationProducerPreparedDirectoryAuthority {
+    id: String,
+    destination: PathBuf,
+    source: lillux::InheritedDescriptorAuthority,
+    workspace_relative_path: String,
+}
+
+impl IsolationProducerPreparedDirectoryAuthority {
+    pub fn new(
+        id: String,
+        workspace_relative_path: String,
+        source: lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<Self> {
+        let destination = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
+            &id,
+        )?;
+        ryeos_state::objects::validate_canonical_project_relative_path(&workspace_relative_path)
+            .map_err(|error| anyhow::anyhow!("invalid prepared workspace path: {error}"))?;
+        source
+            .directory_identity()
+            .map_err(|error| anyhow::anyhow!("prepared source is not a directory: {error}"))?;
+        Ok(Self {
+            id,
+            destination,
+            source,
+            workspace_relative_path,
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    pub(crate) fn workspace_relative_path(&self) -> &str {
+        &self.workspace_relative_path
+    }
+
+    pub(crate) fn verify_retained_descendant(
+        &self,
+        workspace: &lillux::InheritedDescriptorAuthority,
+    ) -> anyhow::Result<()> {
+        let expected = workspace
+            .open_directory_descendant(Path::new(self.workspace_relative_path()))?
+            .ok_or_else(|| anyhow::anyhow!("prepared workspace descendant is absent"))?;
+        anyhow::ensure!(
+            expected.same_file_identity(&self.source)?,
+            "prepared directory differs from retained workspace descendant"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IsolationReadOnlyMountScope {
     ProjectRealization,
@@ -590,6 +651,9 @@ pub struct IsolationLaunchContext<'a> {
     /// Exact daemon-prepared writable runtime-view directories. These are
     /// descriptor authority, not external content and not node-policy paths.
     pub writable_runtime_view_mounts: &'a [IsolationWritableRuntimeViewMountAuthority],
+    /// Exact scoped-producer prepared descendants of the retained private
+    /// workspace. Their destinations derive only from signed logical IDs.
+    pub producer_prepared_mounts: &'a [IsolationProducerPreparedDirectoryAuthority],
     pub target_channels: &'a [IsolationTargetChannelAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
@@ -656,6 +720,53 @@ mod tests {
             IsolationWritableRuntimeViewMountAuthority::new("XDG_CACHE_HOME".to_string(), file)
                 .unwrap_err();
         assert!(invalid.to_string().contains("not a directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn producer_prepared_directory_requires_pinned_directory_and_canonical_coordinate() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("prepared/codex-home")).unwrap();
+        let source = lillux::PinnedDirectory::open(source.path())
+            .unwrap()
+            .unwrap();
+        let workspace = source.inherited_descriptor_authority().unwrap();
+        let descendant = workspace
+            .open_directory_descendant(Path::new("prepared/codex-home"))
+            .unwrap()
+            .unwrap();
+        let valid = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            descendant,
+        )
+        .unwrap();
+        valid.verify_retained_descendant(&workspace).unwrap();
+        let wrong = IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/codex-home".into(),
+            workspace.clone(),
+        )
+        .unwrap();
+        assert!(wrong.verify_retained_descendant(&workspace).is_err());
+        assert_eq!(valid.id(), "codex-home");
+        assert_eq!(valid.workspace_relative_path(), "prepared/codex-home");
+        assert_eq!(
+            valid.destination(),
+            Path::new("/ryeos/producer-prepared/codex-home")
+        );
+        assert!(IsolationProducerPreparedDirectoryAuthority::new(
+            "../escape".into(),
+            "prepared/codex-home".into(),
+            source.inherited_descriptor_authority().unwrap(),
+        )
+        .is_err());
+        assert!(IsolationProducerPreparedDirectoryAuthority::new(
+            "codex-home".into(),
+            "prepared/../escape".into(),
+            source.inherited_descriptor_authority().unwrap(),
+        )
+        .is_err());
     }
 
     #[test]

@@ -154,3 +154,15 @@ retained prepared descendant and commit its effective destination. All signed
 IDs must resolve before launch reservation; disabled or non-enforced isolation
 must refuse these bindings. Mount identity alone does not attest prepared file
 content, concurrent writers, or final frozen output.
+
+The first generic authority cut is implemented: Lillux can open an existing
+canonical directory descendant from a retained descriptor without creating or
+chmodding it. RyeOS has a distinct producer-prepared authority that compares
+its source descriptor with that exact workspace descendant. Isolation context
+now carries these authorities explicitly and refuses a nonempty set until the
+mount plan and CWD mapping are joined. This cut has a passing focused Lillux
+test and cross-crate compile check; it is not a producer-launch acceptance test.
+Before accepting a nonempty prepared set, plan admission must reject duplicate
+IDs and overlapping destinations, and the Codex preparer must prove exact
+configuration content and writer exclusion. Directory identity by itself does
+not establish any of those claims.

@@ -230,6 +230,7 @@ pub async fn handle(
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: &isolation_item_ref,
                     thread_id: "tool-env-check",

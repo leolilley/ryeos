@@ -36,9 +36,9 @@ pub use authority::{
     IsolationAdmittedCommand, IsolationCommandAuthority, IsolationCommandAuthorityRef,
     IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
     IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationNetworkAuthorityCeiling, IsolationProjectAuthority, IsolationReadOnlyMountAuthority,
-    IsolationRealizationMemberCommand, IsolationTargetChannelAuthority, IsolationVerifiedCode,
-    IsolationWritableRuntimeViewMountAuthority,
+    IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    IsolationTargetChannelAuthority, IsolationVerifiedCode, IsolationWritableRuntimeViewMountAuthority,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{
@@ -2609,6 +2609,12 @@ impl IsolationRuntime {
             _ => {}
         }
         if self.state == IsolationRuntimeState::Disabled {
+            if !context.producer_prepared_mounts.is_empty() {
+                return Err(refused(
+                    "scoped producer prepared directories require enforced isolation"
+                        .to_string(),
+                ));
+            }
             if context.filesystem_authority_ceiling
                 == IsolationFilesystemAuthorityCeiling::CapturedExecution
                 || context.network_authority_ceiling == IsolationNetworkAuthorityCeiling::Isolated
@@ -3050,6 +3056,20 @@ impl IsolationRuntime {
         let retained_read_only_project =
             immutable_project_handle.is_some() || retained_live_project_handle.is_some();
         let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+        if !context.producer_prepared_mounts.is_empty() {
+            let workspace = context.workspace_view.ok_or_else(|| {
+                refused("prepared directories lack retained workspace authority".to_string())
+            })?;
+            for mount in context.producer_prepared_mounts {
+                mount.verify_retained_descendant(workspace).map_err(|error| {
+                    refused(format!("prepared directory is not the retained descendant: {error}"))
+                })?;
+            }
+            return Err(refused(
+                "scoped producer prepared directories lack joined mount and cwd authority"
+                    .to_string(),
+            ));
+        }
         let mount_namespace = MountNamespace {
             project_destination: &project_destination,
             canonical_project: &canonical_project,
@@ -7212,6 +7232,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/descriptor-bound-disabled",
                     thread_id: "T-descriptor-bound-disabled",
@@ -7297,6 +7318,7 @@ mod tests {
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/verified-command",
                     thread_id: "T-verified-command",
@@ -7364,6 +7386,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/sealed-code",
                     thread_id: "T-sealed-code",
@@ -7493,6 +7516,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: std::slice::from_ref(&admitted_mount),
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/enforced-handoff",
                     thread_id: "T-enforced-handoff",
@@ -7904,6 +7928,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/immutable-project",
                     thread_id: "T-immutable-project",
@@ -8043,6 +8068,7 @@ mod tests {
                 verified_command: Some(&command),
                 external_read_only_mounts: &external_mounts,
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "worker:tests/captured-plan",
                 thread_id: "T-captured-plan",
@@ -8289,6 +8315,7 @@ mod tests {
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/mutated-command",
                     thread_id: "T-mutated-command",
@@ -8409,6 +8436,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: std::slice::from_ref(&external),
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "tool:tests/external-mount",
                 thread_id: "T-external-mount",
@@ -8472,6 +8500,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: std::slice::from_ref(&runtime_view),
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-disabled",
                     thread_id: "T-runtime-view-disabled",
@@ -8567,6 +8596,7 @@ mod tests {
             verified_command: Some(&command),
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &views,
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "worker:tests/runtime-view",
             thread_id: "T-runtime-view",
@@ -8601,6 +8631,7 @@ mod tests {
                 request(),
                 IsolationLaunchContext {
                     writable_runtime_view_mounts: &duplicates,
+                    producer_prepared_mounts: &[],
                     ..context
                 },
             )
@@ -8705,6 +8736,7 @@ mod tests {
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &views,
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "worker:tests/runtime-view-workspace",
                     thread_id: "T-runtime-view-workspace",
@@ -8766,6 +8798,7 @@ mod tests {
                 IsolationLaunchContext {
                     immutable_project: None,
                     writable_runtime_view_mounts: std::slice::from_ref(&direct),
+                    producer_prepared_mounts: &[],
                     workspace_view: Some(&workspace_view),
                     project_path: project.path(),
                     project_authority: IsolationProjectAuthority::RuntimeWorkspace,
@@ -8839,6 +8872,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: &[],
                 item_ref: "worker:tests/captured",
                 thread_id: "T-captured",
@@ -8894,6 +8928,7 @@ mod tests {
                 verified_command: None,
                 external_read_only_mounts: &[],
                 writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
                 target_channels: std::slice::from_ref(&channel),
                 item_ref: "worker:tests/channel",
                 thread_id: "T-channel",
@@ -9000,6 +9035,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "graph:tests/native-cow",
                     thread_id: "T-native-cow",
@@ -9048,6 +9084,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
@@ -9107,6 +9144,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
@@ -9157,6 +9195,7 @@ mod tests {
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref: "tool:tests/live",
             thread_id: "T-live",
@@ -9235,6 +9274,7 @@ mod tests {
                     verified_command: None,
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",

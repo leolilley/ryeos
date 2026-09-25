@@ -841,6 +841,7 @@ pub async fn run(
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
                     writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
                     target_channels: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,

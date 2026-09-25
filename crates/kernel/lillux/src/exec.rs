@@ -1187,6 +1187,45 @@ impl InheritedDescriptorAuthority {
         Ok(result)
     }
 
+    /// Open an existing canonical directory descendant under this held root.
+    /// Missing entries return `None`; no directory is created or chmodded.
+    #[cfg(unix)]
+    pub fn open_directory_descendant(
+        &self,
+        relative: &std::path::Path,
+    ) -> anyhow::Result<Option<Self>> {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::path::Component;
+
+        let bytes = relative.as_os_str().as_bytes();
+        if bytes.is_empty()
+            || bytes.len() >= libc::PATH_MAX as usize
+            || bytes.contains(&0)
+            || relative.is_absolute()
+            || relative.components().collect::<std::path::PathBuf>().as_os_str().as_bytes()
+                != bytes
+            || relative.components().any(|component| {
+                !matches!(component, Component::Normal(name) if name.as_bytes().len() <= 255)
+            })
+        {
+            anyhow::bail!("directory descendant must have bounded canonical relative components");
+        }
+        let lease = retain_fork_sensitive_descriptors();
+        let mut directory = self.try_clone_pinned_directory(self.path.clone())?;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                unreachable!("relative components validated before traversal")
+            };
+            directory = match directory.open_child_directory(name)? {
+                Some(child) => child,
+                None => return Ok(None),
+            };
+        }
+        let result = directory.into_inherited_descriptor_path()?;
+        drop(lease);
+        Ok(Some(result))
+    }
+
     #[cfg(unix)]
     pub fn set_regular_file_mode(&self, mode: u32) -> anyhow::Result<()> {
         crate::secure_fs::set_open_regular_file_mode(self.file(), mode)
@@ -1475,6 +1514,46 @@ mod inherited_directory_traversal_tests {
         );
         assert!(!parent.path().join("new").exists());
     }
+
+    #[test]
+    fn existing_directory_descendant_is_exact_and_read_only_traversal() {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(parent.path().join("prepared/home")).unwrap();
+        let root = crate::secure_fs::PinnedDirectory::open(parent.path())
+            .unwrap()
+            .unwrap()
+            .into_inherited_descriptor_path()
+            .unwrap();
+        let expected = root
+            .open_directory_descendant(Path::new("prepared/home"))
+            .unwrap()
+            .unwrap();
+        assert!(root
+            .open_directory_descendant(Path::new("prepared/absent"))
+            .unwrap()
+            .is_none());
+        assert!(!parent.path().join("prepared/absent").exists());
+        for path in ["", "prepared/../home", "prepared//home", "/absolute"] {
+            assert!(root.open_directory_descendant(Path::new(path)).is_err());
+        }
+        std::fs::rename(parent.path().join("prepared"), parent.path().join("moved")).unwrap();
+        let after_rename = root
+            .open_directory_descendant(Path::new("moved/home"))
+            .unwrap()
+            .unwrap();
+        assert!(expected.same_file_identity(&after_rename).unwrap());
+        std::fs::create_dir_all(parent.path().join("prepared/home")).unwrap();
+        let replacement = root
+            .open_directory_descendant(Path::new("prepared/home"))
+            .unwrap()
+            .unwrap();
+        assert!(!expected.same_file_identity(&replacement).unwrap());
+        std::os::unix::fs::symlink(parent.path().join("moved"), parent.path().join("link"))
+            .unwrap();
+        assert!(root
+            .open_directory_descendant(Path::new("link/home"))
+            .is_err());
+    }
 }
 
 // Keep the opaque inspection interface callable at the existing platform
@@ -1527,6 +1606,13 @@ impl InheritedDescriptorAuthority {
     }
 
     pub fn open_regular_descendant(
+        &self,
+        _relative: &std::path::Path,
+    ) -> anyhow::Result<Option<Self>> {
+        anyhow::bail!("inherited descriptor traversal is unavailable on this platform")
+    }
+
+    pub fn open_directory_descendant(
         &self,
         _relative: &std::path::Path,
     ) -> anyhow::Result<Option<Self>> {
