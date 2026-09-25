@@ -304,6 +304,7 @@ pub(crate) async fn dispatch_runtime_method(
             | "runtime.scoped_child_start"
             | "runtime.scoped_child_resume"
             | "runtime.scoped_child_observe"
+            | "runtime.scoped_child_abort"
             | "runtime.scoped_child_write"
             | "runtime.scoped_child_read"
             | "runtime.scoped_child_close_input"
@@ -393,6 +394,7 @@ pub(crate) async fn dispatch_runtime_method(
                 | "runtime.scoped_child_start"
                 | "runtime.scoped_child_resume"
                 | "runtime.scoped_child_observe"
+                | "runtime.scoped_child_abort"
                 | "runtime.scoped_child_write"
                 | "runtime.scoped_child_read"
                 | "runtime.scoped_child_close_input"
@@ -630,6 +632,7 @@ pub(crate) async fn dispatch_runtime_method(
         | "runtime.scoped_child_start"
         | "runtime.scoped_child_resume"
         | "runtime.scoped_child_observe"
+        | "runtime.scoped_child_abort"
         | "runtime.scoped_child_write"
         | "runtime.scoped_child_read"
         | "runtime.scoped_child_close_input" => {
@@ -801,6 +804,7 @@ fn is_stop_completion_method(method: &str) -> bool {
             | "runtime.provider_attempt_local_stream_control"
             | "runtime.scoped_child_resume"
             | "runtime.scoped_child_observe"
+            | "runtime.scoped_child_abort"
     )
 }
 
@@ -1853,6 +1857,11 @@ mod tests {
         assert!(!is_chain_read_method("runtime.scoped_child_observe"));
         assert!(!is_unrestricted_runtime_read_method(
             "runtime.scoped_child_observe"
+        ));
+        assert!(!is_running_runtime_mutation("runtime.scoped_child_abort"));
+        assert!(is_stop_completion_method("runtime.scoped_child_abort"));
+        assert!(!is_unrestricted_runtime_read_method(
+            "runtime.scoped_child_abort"
         ));
     }
 

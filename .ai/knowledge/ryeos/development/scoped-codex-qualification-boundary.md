@@ -67,10 +67,13 @@ contact accounting, whole-scope/writer settlement, frozen candidate, and the
 negative cuts for wrong/lost ACK, verifier death, cancellation, restart, and
 replay.
 
-The conditional START receiver also needs a complete failure owner. A failed
-conversation currently exits before explicit scoped observation; a failed
-receiver may leave START waiting for its deadline; and relay settlement timeout
-must not discard its still-live owner through an error conversion. The required
-generic correction is an exact scoped-abort/settlement path tied to the durable
-attempt and root stop fence, plus bounded relay/task termination. Merely
-dropping a local handle or repeating START is not recovery evidence.
+The conditional START receiver also needs a complete failure owner. A
+root-authorized exact-attempt abort callback now claims cleanup-only retirement
+before checked process/scope stop, and the verifier calls it on conversation
+or locator failure. The abort and natural-observation CAS are mutually
+exclusive; focused `ryeos-app` tests pass for both outcome orderings. This is
+not yet a complete failure proof: a failed receiver may
+leave START waiting for its deadline; an expired or failed abort still needs
+root-terminal recovery evidence; and relay settlement timeout must not discard
+its still-live owner through an error conversion. Merely dropping a local
+handle or repeating START is not recovery evidence.

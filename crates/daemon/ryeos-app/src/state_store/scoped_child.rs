@@ -194,6 +194,17 @@ impl StateStore {
             .claim_bound_scoped_child_retirement(attempt_id, recovery)
     }
 
+    pub fn claim_released_scoped_child_abort(
+        &self,
+        attempt_id: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .claim_released_scoped_child_abort(attempt_id, recovery)
+    }
+
     pub fn complete_bound_scoped_child_retirement(&self, attempt_id: &str) -> Result<()> {
         let record = self
             .scoped_child_attempt(attempt_id)?

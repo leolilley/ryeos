@@ -28,6 +28,13 @@ struct ScopedChildObserveRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ScopedChildAbortRequest {
+    thread_id: String,
+    attempt_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScopedChildResumeRequest {
     thread_id: String,
 }
@@ -86,6 +93,12 @@ fn parse_start_request(params: &Value) -> Result<ScopedChildStartRequest> {
 
 fn parse_observe_request(params: &Value) -> Result<ScopedChildObserveRequest> {
     let request: ScopedChildObserveRequest = serde_json::from_value(params.clone())?;
+    validate_attempt_id(&request.attempt_id)?;
+    Ok(request)
+}
+
+fn parse_abort_request(params: &Value) -> Result<ScopedChildAbortRequest> {
+    let request: ScopedChildAbortRequest = serde_json::from_value(params.clone())?;
     validate_attempt_id(&request.attempt_id)?;
     Ok(request)
 }
@@ -156,6 +169,7 @@ fn handle_blocking(
             | "runtime.scoped_child_start"
             | "runtime.scoped_child_resume"
             | "runtime.scoped_child_observe"
+            | "runtime.scoped_child_abort"
             | "runtime.scoped_child_write"
             | "runtime.scoped_child_read"
             | "runtime.scoped_child_close_input"
@@ -179,6 +193,11 @@ fn handle_blocking(
     };
     let observe = if method == "runtime.scoped_child_observe" {
         Some(parse_observe_request(params)?)
+    } else {
+        None
+    };
+    let abort = if method == "runtime.scoped_child_abort" {
+        Some(parse_abort_request(params)?)
     } else {
         None
     };
@@ -212,6 +231,7 @@ fn handle_blocking(
         })
         .or_else(|| start.as_ref().map(|request| request.thread_id.as_str()))
         .or_else(|| observe.as_ref().map(|request| request.thread_id.as_str()))
+        .or_else(|| abort.as_ref().map(|request| request.thread_id.as_str()))
         .or_else(|| resume.as_ref().map(|request| request.thread_id.as_str()))
         .or_else(|| write.as_ref().map(|request| request.thread_id.as_str()))
         .or_else(|| read.as_ref().map(|request| request.thread_id.as_str()))
@@ -233,6 +253,24 @@ fn handle_blocking(
         bail!("scoped child launch owner differs from protected admission");
     }
     state.state_store.assert_launch_owner(thread_id, owner)?;
+
+    if let Some(request) = abort.as_ref() {
+        let typed_owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(owner)?;
+        let key = ryeos_app::scoped_producer_process::ScopedProducerProcessKey::new(
+            request.attempt_id.clone(),
+            typed_owner,
+        )?;
+        ryeos_app::scoped_producer_stop::abort_scoped_producer_for_attempt(
+            state,
+            &key,
+            cap.expires_at.remaining().min(Duration::from_secs(60)),
+        )?;
+        return Ok(serde_json::json!({
+            "schema": "ryeos.scoped_child_abort.v1",
+            "attempt_id": request.attempt_id,
+            "settlement": "retired_cleanup_only",
+        }));
+    }
 
     if let Some(request) = write.as_ref() {
         let typed_owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(owner)?;
@@ -553,6 +591,29 @@ mod tests {
             .is_err()
         );
         assert!(parse_observe_request(&json!({"thread_id":"T-1", "attempt_id":format!("scoped-{}", "a".repeat(64)), "scenario_id":"smoke"})).is_err());
+    }
+
+    #[test]
+    fn abort_accepts_only_exact_attempt_and_no_launch_authority() {
+        let attempt_id = format!("scoped-{}", "a".repeat(64));
+        assert!(parse_abort_request(&json!({"thread_id":"T-1", "attempt_id":attempt_id})).is_ok());
+        for field in [
+            "scenario_id",
+            "recipe",
+            "executable",
+            "scope",
+            "process_identity",
+        ] {
+            let mut request = json!({"thread_id":"T-1", "attempt_id":attempt_id});
+            request[field] = json!("caller-controlled");
+            assert!(parse_abort_request(&request).is_err(), "accepted {field}");
+        }
+        assert!(
+            parse_abort_request(&json!({
+                "thread_id":"T-1", "attempt_id":format!("scoped-{}", "A".repeat(64))
+            }))
+            .is_err()
+        );
     }
 
     #[test]

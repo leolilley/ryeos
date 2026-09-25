@@ -58,6 +58,77 @@ pub fn stop_scoped_producer_for_root(
     Ok(())
 }
 
+/// Abort one exact released attempt while its verifier root remains live.
+/// The durable retirement CAS fences natural observation *before* process
+/// ownership is transferred to checked abort. A lost response may repeat
+/// only this same attempt; it can neither launch another child nor turn a
+/// cleanup-only retirement into a natural observation.
+pub fn abort_scoped_producer_for_attempt(
+    state: &AppState,
+    key: &ScopedProducerProcessKey,
+    maximum_wait: Duration,
+) -> Result<()> {
+    ensure!(
+        maximum_wait > Duration::ZERO,
+        "scoped abort requires a bounded wait"
+    );
+    let record = state
+        .state_store
+        .scoped_child_attempt(&key.attempt_id)?
+        .context("scoped abort attempt is not retained")?;
+    ensure!(
+        record.initial.owner == key.launch_owner
+            && record.initial.owner.thread_id == key.launch_owner.thread_id,
+        "scoped abort differs from exact root launch owner"
+    );
+    ensure!(
+        record.observation_object_hash.is_none() && record.natural_empty_receipt_digest.is_none(),
+        "scoped abort cannot revoke an already committed natural observation"
+    );
+    match record.phase {
+        ScopedChildPhase::ReleasePermitted => {
+            let recovery = record
+                .scope_recovery
+                .as_ref()
+                .context("released scoped abort has no exact scope")?;
+            if let Err(cas_error) = state
+                .state_store
+                .claim_released_scoped_child_abort(&key.attempt_id, recovery)
+            {
+                // Another exact cleanup actor may have won the CAS. A retry
+                // may join only its cleanup-only state, never a committed
+                // natural observation or a different scope/owner.
+                let current = state
+                    .state_store
+                    .scoped_child_attempt(&key.attempt_id)?
+                    .context("scoped abort attempt vanished after CAS race")?;
+                ensure!(
+                    current.initial.owner == key.launch_owner
+                        && current.scope_recovery.as_ref() == Some(recovery)
+                        && current.observation_object_hash.is_none()
+                        && current.natural_empty_receipt_digest.is_none()
+                        && matches!(
+                            current.phase,
+                            ScopedChildPhase::BoundRetirementPending
+                                | ScopedChildPhase::BoundDeathProven
+                                | ScopedChildPhase::Retired
+                        ),
+                    "scoped abort CAS lost to non-cleanup outcome: {cas_error}"
+                );
+            }
+        }
+        ScopedChildPhase::BoundRetirementPending
+        | ScopedChildPhase::BoundDeathProven
+        | ScopedChildPhase::Retired => {}
+        _ => bail!("scoped abort requires one released or cleanup-only attempt"),
+    }
+    stop_exact_attempt(
+        state,
+        &record,
+        &lillux::time::MonotonicDeadline::after(maximum_wait),
+    )
+}
+
 fn stop_exact_attempt(
     state: &AppState,
     record: &ScopedChildAttemptRecord,
@@ -116,8 +187,9 @@ fn stop_exact_attempt(
             ScopedProducerStopClaim::Observing(recovery) => {
                 if !observer_signalled {
                     // The observer owns the wrapper. Exact-scope termination
-                    // unblocks its natural wait; the root stop CAS prevents
-                    // any later natural observation publication. Only the
+                    // unblocks its natural wait. Either the root stop CAS or
+                    // the exact attempt's bound-retirement CAS prevents any
+                    // later natural observation publication. Only the
                     // observer may reap and retire this attempt.
                     let termination = recovery
                         .terminate_and_wait(deadline.remaining().min(recovery.control_timeout()))

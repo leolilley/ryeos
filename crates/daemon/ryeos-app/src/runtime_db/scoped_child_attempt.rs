@@ -585,9 +585,16 @@ impl RuntimeDb {
                    WHERE a.attempt_id=?1 AND a.launch_owner=?7
                      AND r.stop_requested_at_ms IS NULL
                      AND c.claimed_by=?7 AND c.claim_id=?8)",
-            params![attempt_id, operation.sequence, operation.kind.as_str(),
-                operation.payload_digest, operation.byte_count,
-                lillux::time::timestamp_millis(), encoded_owner, owner.unpredictable_nonce],
+            params![
+                attempt_id,
+                operation.sequence,
+                operation.kind.as_str(),
+                operation.payload_digest,
+                operation.byte_count,
+                lillux::time::timestamp_millis(),
+                encoded_owner,
+                owner.unpredictable_nonce
+            ],
         )?;
         if changed != 1 {
             bail!("scoped child input completion lost its exact live pending authority");
@@ -797,6 +804,32 @@ impl RuntimeDb {
         )?;
         if changed != 1 {
             bail!("natural scope-empty observation lost its one-shot CAS");
+        }
+        Ok(())
+    }
+
+    /// Exact verifier-requested abort of a released attempt. Unlike generic
+    /// retirement, this cannot win after natural observation has committed;
+    /// its single CAS fences the two outcomes against each other.
+    pub fn claim_released_scoped_child_abort(
+        &self,
+        attempt_id: &str,
+        recovery: &lillux::ProcessScopeRecovery,
+    ) -> Result<()> {
+        let encoded_recovery = lillux::canonical_json(&serde_json::to_value(recovery)?)?;
+        let changed = self.conn.execute(
+            "UPDATE scoped_child_attempt SET phase='bound_retirement_pending', updated_at_ms=?3
+             WHERE attempt_id=?1 AND phase='release_permitted' AND scope_recovery=?2
+               AND natural_empty_receipt_digest IS NULL AND observation_object_hash IS NULL
+               AND retirement_evidence_digest IS NULL",
+            params![
+                attempt_id,
+                encoded_recovery,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        if changed != 1 {
+            bail!("scoped abort lost its exact released-attempt retirement CAS");
         }
         Ok(())
     }
@@ -1454,9 +1487,10 @@ mod tests {
             payload_digest: lillux::sha256_hex(b"abcd"),
             byte_count: 4,
         };
-        assert!(!db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
-            .unwrap());
+        assert!(
+            !db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
+                .unwrap()
+        );
         let second = ScopedChildInputOperation {
             sequence: 1,
             kind: ScopedChildInputKind::Write,
@@ -1482,9 +1516,10 @@ mod tests {
             )
             .is_err()
         );
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
-            .is_err());
+        assert!(
+            db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
+                .is_err()
+        );
         assert!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -1544,12 +1579,14 @@ mod tests {
         );
         db.complete_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
             .unwrap();
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
-            .unwrap());
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &wrong_owner, &first)
-            .is_err());
+        assert!(
+            db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
+                .unwrap()
+        );
+        assert!(
+            db.delivered_scoped_child_input_operation(&initial.attempt_id, &wrong_owner, &first)
+                .is_err()
+        );
         assert_eq!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -1564,9 +1601,14 @@ mod tests {
             payload_digest: lillux::sha256_hex(b"wxyz"),
             ..first.clone()
         };
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &changed)
-            .is_err());
+        assert!(
+            db.delivered_scoped_child_input_operation(
+                &initial.attempt_id,
+                &initial.owner,
+                &changed
+            )
+            .is_err()
+        );
         assert!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -1747,15 +1789,18 @@ mod tests {
                 [&initial.owner.thread_id],
             )
             .unwrap();
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
-            .unwrap());
-        assert!(db
-            .complete_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &second)
-            .is_err());
-        assert!(db
-            .delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &second)
-            .is_err());
+        assert!(
+            db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &first)
+                .unwrap()
+        );
+        assert!(
+            db.complete_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &second)
+                .is_err()
+        );
+        assert!(
+            db.delivered_scoped_child_input_operation(&initial.attempt_id, &initial.owner, &second)
+                .is_err()
+        );
         assert!(
             db.reserve_scoped_child_input_operation(
                 &initial.attempt_id,
@@ -1825,6 +1870,47 @@ mod tests {
         assert!(retired.natural_empty_receipt_digest.is_none());
         assert!(db.unsettled_scoped_child_attempt_ids().unwrap().is_empty());
         assert!(db.reserve_scoped_child_attempt(&initial).is_err());
+    }
+
+    #[test]
+    fn exact_abort_retirement_fences_later_natural_observation() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let (initial, recovery, identity) = fixture();
+        seed_owner(&db, &initial.owner);
+        db.reserve_scoped_child_attempt(&initial).unwrap();
+        db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
+            .unwrap();
+        db.attach_scoped_child_process(&initial.attempt_id, &identity)
+            .unwrap();
+        db.permit_scoped_child_release(&initial.attempt_id, &identity)
+            .unwrap();
+        db.claim_released_scoped_child_abort(&initial.attempt_id, &recovery)
+            .unwrap();
+        let receipt = ScopedChildNaturalEmptyReceipt {
+            attempt_id: initial.attempt_id.clone(),
+            owner: initial.owner.clone(),
+            recipe_digest: initial.recipe_digest.clone(),
+            recipe_generation: initial.recipe_generation.clone(),
+            scenario_digest: initial.scenario_digest.clone(),
+            recovery: recovery.clone(),
+            process_identity: identity,
+            natural_result_success: true,
+            natural_result_exit_code: 0,
+            natural_result_timed_out: false,
+            natural_result_stdout_digest: "d".repeat(64),
+            natural_result_stderr_digest: "e".repeat(64),
+        };
+        assert!(
+            db.record_scoped_child_natural_empty(&receipt, &"c".repeat(64))
+                .is_err()
+        );
+        let retained = db
+            .get_scoped_child_attempt(&initial.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.phase, ScopedChildPhase::BoundRetirementPending);
+        assert!(retained.observation_object_hash.is_none());
+        assert!(retained.natural_empty_receipt_digest.is_none());
     }
 
     #[test]
@@ -1942,6 +2028,10 @@ mod tests {
         );
         db.record_scoped_child_natural_empty(&receipt, &"c".repeat(64))
             .unwrap();
+        assert!(
+            db.claim_released_scoped_child_abort(&initial.attempt_id, &recovery)
+                .is_err()
+        );
         assert!(
             db.record_scoped_child_natural_empty(&receipt, &"d".repeat(64))
                 .is_err()

@@ -151,6 +151,23 @@ impl UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    /// Cleanup-only retirement of one exact released attempt. The daemon
+    /// durably fences natural observation before checked process/scope abort.
+    /// Repeating the same coordinates after a lost response cannot relaunch
+    /// work or manufacture a clean producer observation.
+    pub async fn abort_scoped_child(
+        &self,
+        thread_id: &str,
+        attempt_id: &str,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({"thread_id": thread_id, "attempt_id": attempt_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request_dedicated("runtime.scoped_child_abort", params, None)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     /// Write one signed-bounded frame to the exact retained child. A lost
     /// response may repeat these same coordinates only to recover a durable
     /// delivered ACK; a pending write is never sent again.

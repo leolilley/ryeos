@@ -9,8 +9,9 @@ use ryeos_independent_runtime_verifier::{
     guest_observation::{GuestScenario, check_guest_observation},
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
+    scoped_relay,
     scripted_peer::ScriptedPeer,
-    scripted_provider, scripted_relay, scoped_relay, staging,
+    scripted_provider, scripted_relay, staging,
 };
 use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
@@ -87,7 +88,10 @@ async fn main() -> Result<()> {
         .loopback_ingress
         .as_ref()
     {
-        ensure!(!race_probe, "scoped race probe does not select direct Codex ingress");
+        ensure!(
+            !race_probe,
+            "scoped race probe does not select direct Codex ingress"
+        );
         let relay_thread = thread_id.clone();
         let relay_source = expected_source.clone();
         let relay_ingress = ingress.clone();
@@ -144,37 +148,77 @@ async fn main() -> Result<()> {
     };
     // A transport error after release is ambiguous. Resume is an exact
     // owner-bound point read, never a second launch or a new scenario choice.
-    let locator = match start {
-        Ok(locator) => locator,
-        Err(start_error @ CallbackError::Transport(_)) => client
-            .resume_scoped_child(&thread_id)
-            .await
-            .map_err(|resume_error| {
-                anyhow::anyhow!(
-                    "scoped start unsettled and exact resume refused: start={start_error}; resume={resume_error}"
-                )
-            })?,
-        Err(definite_refusal) => return Err(definite_refusal.into()),
-    };
-    let locator: ScopedAttemptLocator =
-        serde_json::from_value(locator).context("scoped child returned a noncanonical locator")?;
-    check_scoped_locator_source(&locator, &expected_source)?;
-    if let Some(relay) = &running_relay {
-        ensure!(
-            relay.handoff().attempt_id == locator.attempt_id,
-            "live scoped relay belongs to a different durable attempt"
-        );
+    let locator_result = async {
+        let value = match start {
+            Ok(locator) => locator,
+            Err(start_error @ CallbackError::Transport(_)) => client
+                .resume_scoped_child(&thread_id)
+                .await
+                .map_err(|resume_error| {
+                    anyhow::anyhow!(
+                        "scoped start unsettled and exact resume refused: start={start_error}; resume={resume_error}"
+                    )
+                })?,
+            Err(definite_refusal) => return Err(definite_refusal.into()),
+        };
+        let locator: ScopedAttemptLocator = serde_json::from_value(value)
+            .context("scoped child returned a noncanonical locator")?;
+        check_scoped_locator_source(&locator, &expected_source)?;
+        if let Some(relay) = &running_relay {
+            ensure!(
+                relay.handoff().attempt_id == locator.attempt_id,
+                "live scoped relay belongs to a different durable attempt"
+            );
+        }
+        Ok::<_, anyhow::Error>(locator)
     }
+    .await;
+    let locator = match locator_result {
+        Ok(locator) => locator,
+        Err(error) => {
+            if let Some(relay) = &running_relay {
+                let abort =
+                    abort_exact_scoped_child(&client, &thread_id, &relay.handoff().attempt_id)
+                        .await;
+                return Err(error.context(format!(
+                    "direct-target START/locator failed; exact scoped abort={abort:?}"
+                )));
+            }
+            return Err(error);
+        }
+    };
     let direct_conversation = if running_relay.is_some() {
-        let transport = ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(
-            &client,
-            &thread_id,
-            &locator.attempt_id,
-        );
-        let mut conversation = ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerConversation::new(transport);
-        let (codex_thread, codex_turn) = conversation.run_scripted_turn().await?;
-        conversation.close_input().await?;
-        Some((codex_thread, codex_turn, conversation.notifications().to_vec()))
+        let transport =
+            ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(
+                &client,
+                &thread_id,
+                &locator.attempt_id,
+            );
+        let mut conversation =
+            ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerConversation::new(
+                transport,
+            );
+        let result = async {
+            let ids = conversation.run_scripted_turn().await?;
+            conversation.close_input().await?;
+            Ok::<_, anyhow::Error>(ids)
+        }
+        .await;
+        let (codex_thread, codex_turn) = match result {
+            Ok(ids) => ids,
+            Err(error) => {
+                let abort =
+                    abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+                return Err(error.context(format!(
+                    "direct-target conversation failed; exact scoped abort={abort:?}"
+                )));
+            }
+        };
+        Some((
+            codex_thread,
+            codex_turn,
+            conversation.notifications().to_vec(),
+        ))
     } else {
         None
     };
@@ -193,13 +237,15 @@ async fn main() -> Result<()> {
             .finish_after_target_settlement(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_secs(5),
             ))
-            .map_err(|_| anyhow::anyhow!("direct-target relay did not settle after scope death"))??;
+            .map_err(|_| {
+                anyhow::anyhow!("direct-target relay did not settle after scope death")
+            })??;
         ensure!(
             contacts == scripted_provider::REQUEST_COUNT,
             "direct-target relay contact count differs from scripted provider"
         );
-        let (codex_thread, codex_turn, notifications) = direct_conversation
-            .context("direct-target Codex conversation was not collected")?;
+        let (codex_thread, codex_turn, notifications) =
+            direct_conversation.context("direct-target Codex conversation was not collected")?;
         ensure!(
             !codex_thread.is_empty() && !codex_turn.is_empty() && !notifications.is_empty(),
             "direct-target Codex conversation is incomplete"
@@ -312,7 +358,9 @@ async fn main() -> Result<()> {
             .finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_secs(10),
             ))
-            .map_err(|_| anyhow::anyhow!("scripted provider did not settle after direct target"))??;
+            .map_err(|_| {
+                anyhow::anyhow!("scripted provider did not settle after direct target")
+            })??;
         ensure!(
             requests.len() == contacts,
             "direct target relay and provider observed different contact counts"
@@ -336,10 +384,7 @@ async fn main() -> Result<()> {
             guest_command_script: guest_command.into(),
             secret_read_script: commands.guest_read.clone(),
             patch_input: scripted_provider::PATCH_INPUT.into(),
-            guest_command: format!(
-                "{} -c '{guest_command}'",
-                scripted_provider::GUEST_SHELL
-            ),
+            guest_command: format!("{} -c '{guest_command}'", scripted_provider::GUEST_SHELL),
             secret_read_command: format!(
                 "{} -c '{}'",
                 scripted_provider::GUEST_SHELL,
@@ -464,6 +509,25 @@ async fn main() -> Result<()> {
     bail!(
         "scoped producer and frozen files settled; Codex and guest records are internally checked, but collector identity, isolation, terminal and runtime provenance is incomplete; no qualification claims issued"
     )
+}
+
+async fn abort_exact_scoped_child(
+    client: &UdsRuntimeClient,
+    thread_id: &str,
+    attempt_id: &str,
+) -> Result<()> {
+    let mut response = client.abort_scoped_child(thread_id, attempt_id).await;
+    if matches!(response, Err(CallbackError::Transport(_))) {
+        response = client.abort_scoped_child(thread_id, attempt_id).await;
+    }
+    let response = response?;
+    ensure!(
+        response["schema"] == "ryeos.scoped_child_abort.v1"
+            && response["attempt_id"] == attempt_id
+            && response["settlement"] == "retired_cleanup_only",
+        "exact scoped abort returned an invalid settlement acknowledgment"
+    );
+    Ok(())
 }
 
 fn check_observed_recipe_coordinate(
