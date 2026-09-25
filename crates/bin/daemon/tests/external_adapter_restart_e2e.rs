@@ -1490,6 +1490,8 @@ async fn prepare_signed_direct_qualification_fixture(
     let producer_inputs =
         producer_inputs.context("signed Codex product fixture was not prepared")?;
     harness.retain_evidence_on_drop(true);
+    let status = production_service(&harness, "service:node/status", json!({})).await?;
+    require_direct_qualification_process_scope(&status)?;
     let captured_subject = capture_codex_subject_for_verifier(&harness, &producer_inputs).await?;
     ensure!(
         captured_subject["evidence"]["manifest_hash"] == scenario.subject_manifest_hash,
@@ -1528,6 +1530,42 @@ async fn prepare_signed_direct_qualification_fixture(
         })
         .await?;
     Ok((harness, scenario, captured_subject))
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+fn require_direct_qualification_process_scope(status: &Value) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        status.pointer("/isolation/process_scopes/authority") == Some(&json!("qualified"))
+            && status.pointer("/isolation/process_scopes/exclusive_session/ready")
+                == Some(&json!(true)),
+        "signed direct Codex qualification requires a genuinely bound, qualified host-runtime process scope before product capture; observed {}",
+        status.pointer("/isolation/process_scopes").unwrap_or(&Value::Null)
+    );
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+#[test]
+fn direct_qualification_preflight_requires_host_scope_not_trusted_process_group() {
+    assert!(require_direct_qualification_process_scope(&json!({
+        "isolation": {"process_scopes": {
+            "authority": "absent",
+            "exclusive_session": {"ready": false},
+            "trusted_exclusive_session": {"ready": true}
+        }}
+    })).is_err());
+    assert!(require_direct_qualification_process_scope(&json!({
+        "isolation": {"process_scopes": {
+            "authority": "present_unqualified",
+            "exclusive_session": {"ready": false}
+        }}
+    })).is_err());
+    require_direct_qualification_process_scope(&json!({
+        "isolation": {"process_scopes": {
+            "authority": "qualified",
+            "exclusive_session": {"ready": true}
+        }}
+    })).unwrap();
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
