@@ -10,7 +10,7 @@ use ryeos_independent_runtime_verifier::{
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
     scripted_peer::ScriptedPeer,
-    scripted_provider, scripted_relay, staging,
+    scripted_provider, scripted_relay, scoped_relay, staging,
 };
 use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
@@ -81,7 +81,42 @@ async fn main() -> Result<()> {
         .await
         .context("admitted isolation class point read refused")?;
     let race_probe = mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe"));
-    let start = if race_probe {
+    let (start, running_relay) = if let Some(ingress) = parameters
+        .configuration
+        .expected_producer_recipe
+        .loopback_ingress
+        .as_ref()
+    {
+        ensure!(!race_probe, "scoped race probe does not select direct Codex ingress");
+        let relay_thread = thread_id.clone();
+        let relay_source = expected_source.clone();
+        let relay_ingress = ingress.clone();
+        let relay_origin = parameters.configuration.responses_origin.clone();
+        let relay_directory = challenge.directory().try_clone()?;
+        let relay_name = socket_name.clone();
+        // START cannot acknowledge until the held target's listener is
+        // transferred and this verifier returns exact READY. A separate
+        // blocking task owns the inherited descriptor while the async UDS
+        // request waits; neither task may initiate a second START.
+        let receiver = tokio::task::spawn_blocking(move || {
+            scoped_relay::receive_and_ack(
+                &relay_thread,
+                PRODUCER_SCENARIO_ID,
+                &relay_source,
+                &relay_ingress,
+                &relay_origin,
+                relay_directory,
+                relay_name,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(130)),
+            )
+        });
+        let (started, relay) = tokio::join!(
+            client.start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID),
+            receiver,
+        );
+        let relay = relay.context("scoped relay receiver did not settle")??;
+        (started, Some(relay))
+    } else if race_probe {
         // Both requests use the same admitted root callback authority. RESUME
         // is an exact point read: it cannot choose a scenario or start work.
         // The daemon test gate reports only once RESUME has seen Reserved.
@@ -98,11 +133,14 @@ async fn main() -> Result<()> {
             started == resumed,
             "scoped race START and RESUME locators differ"
         );
-        Ok(started)
+        (Ok(started), None)
     } else {
-        client
-            .start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID)
-            .await
+        (
+            client
+                .start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID)
+                .await,
+            None,
+        )
     };
     // A transport error after release is ambiguous. Resume is an exact
     // owner-bound point read, never a second launch or a new scenario choice.
@@ -121,12 +159,55 @@ async fn main() -> Result<()> {
     let locator: ScopedAttemptLocator =
         serde_json::from_value(locator).context("scoped child returned a noncanonical locator")?;
     check_scoped_locator_source(&locator, &expected_source)?;
+    if let Some(relay) = &running_relay {
+        ensure!(
+            relay.handoff().attempt_id == locator.attempt_id,
+            "live scoped relay belongs to a different durable attempt"
+        );
+    }
+    let direct_conversation = if running_relay.is_some() {
+        let transport = ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(
+            &client,
+            &thread_id,
+            &locator.attempt_id,
+        );
+        let mut conversation = ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerConversation::new(transport);
+        let (codex_thread, codex_turn) = conversation.run_scripted_turn().await?;
+        conversation.close_input().await?;
+        Some((codex_thread, codex_turn, conversation.notifications().to_vec()))
+    } else {
+        None
+    };
     let observed = client
         .observe_scoped_child(&thread_id, &locator.attempt_id)
         .await
         .context("scoped producer observation refused")?;
     let observation: ScopedObservationCut = serde_json::from_value(observed)
         .context("scoped producer returned an invalid observation envelope")?;
+    let direct_evidence = if let Some(relay) = running_relay {
+        ensure!(
+            observation.relay_handoff.as_ref() == Some(relay.handoff()),
+            "live scoped relay handoff differs from settled daemon observation"
+        );
+        let contacts = relay
+            .finish_after_target_settlement(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(5),
+            ))
+            .map_err(|_| anyhow::anyhow!("direct-target relay did not settle after scope death"))??;
+        ensure!(
+            contacts == scripted_provider::REQUEST_COUNT,
+            "direct-target relay contact count differs from scripted provider"
+        );
+        let (codex_thread, codex_turn, notifications) = direct_conversation
+            .context("direct-target Codex conversation was not collected")?;
+        ensure!(
+            !codex_thread.is_empty() && !codex_turn.is_empty() && !notifications.is_empty(),
+            "direct-target Codex conversation is incomplete"
+        );
+        Some((codex_thread, codex_turn, notifications, contacts))
+    } else {
+        None
+    };
     check_observed_full_source(&expected_source, &observation.producer_source)?;
     check_observed_isolation_class(&expected_isolation_class, &observation.isolation_provenance)?;
     let expected_recipe = &parameters.configuration.expected_producer_recipe;
@@ -226,6 +307,55 @@ async fn main() -> Result<()> {
             && observation.stderr_sha256 == lillux::sha256_hex(observation.stderr.as_bytes()),
         "scoped producer did not prove an exact clean natural result"
     );
+    if let Some((codex_thread, codex_turn, notifications, contacts)) = direct_evidence {
+        let requests = provider
+            .finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(10),
+            ))
+            .map_err(|_| anyhow::anyhow!("scripted provider did not settle after direct target"))??;
+        ensure!(
+            requests.len() == contacts,
+            "direct target relay and provider observed different contact counts"
+        );
+        challenge.recheck()?;
+        provider_endpoint.recheck()?;
+        let expected_canary = format!("{}\n", challenge.value());
+        scripted_provider::check_requests(
+            &requests,
+            expected_canary.as_bytes(),
+            expected_canary.as_bytes(),
+            staging::CONTROLLER_CANARY_DENIAL,
+        )?;
+        let commands = challenge.scripted_canary_commands()?;
+        let guest_command = scripted_provider::GUEST_COMMAND_SCRIPT;
+        let routing = RoutingScenario {
+            thread_id: codex_thread,
+            turn_id: codex_turn,
+            guest_cwd: "/workspace".into(),
+            local_refusal_command: commands.forbidden_local_write,
+            guest_command_script: guest_command.into(),
+            secret_read_script: commands.guest_read.clone(),
+            patch_input: scripted_provider::PATCH_INPUT.into(),
+            guest_command: format!(
+                "{} -c '{guest_command}'",
+                scripted_provider::GUEST_SHELL
+            ),
+            secret_read_command: format!(
+                "{} -c '{}'",
+                scripted_provider::GUEST_SHELL,
+                commands.guest_read
+            ),
+            candidate_path: scripted_provider::CANDIDATE_PATH.into(),
+            candidate_added_content: scripted_provider::CANDIDATE_CONTENT.into(),
+            expected_command_output: parameters.configuration.expected_command_output.clone(),
+            secret_read_denial: staging::CONTROLLER_CANARY_DENIAL.into(),
+            controller_canary_value: challenge.value().to_owned(),
+        };
+        check_notifications(&routing, &notifications)?;
+        bail!(
+            "direct-target launch, relay and conversation joined, but effective environment, frozen candidate and complete qualification evidence remain unproven"
+        );
+    }
     let transcript: serde_json::Value = serde_json::from_str(&observation.stdout)
         .context("scoped producer stdout is not a bounded scenario transcript")?;
     ensure!(

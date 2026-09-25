@@ -53,10 +53,12 @@ or the enclosing root terminates before the evidence join is committed.
 
 ## Current implementation gate
 
-The daemon-side listener transfer and READY wait are present, but the verifier
-does not yet receive the listener or send READY; its historical scenario driver
-still binds a listener itself. The signed direct-Codex recipe and its exact
-environment, working-directory, and guest bindings are not yet admitted.
+The daemon-side listener transfer and READY wait are present. The verifier now
+has a conditional receiver concurrent with START, but the current signed
+scenario still selects the historical driver and cannot activate direct Codex.
+The signed direct-Codex recipe and its exact environment, working-directory,
+and guest bindings are not yet admitted. No joined native direct-target test
+has exercised the new conditional path.
 Peer liveness is checked only at observation points, not through the complete
 root/commit fence. Consequently, current component tests and observation-v4
 parsing are not an external-runtime qualification. Do not enable a claim until
