@@ -171,12 +171,28 @@ pub fn settle_released_scoped_producers_after_owned_root_wait(
                         .state_store
                         .scoped_child_attempt(&key.attempt_id)?
                         .context("scoped child disappeared after root cleanup race")?;
-                    if current.observation_object_hash.is_none()
-                        && current.natural_empty_receipt_digest.is_none()
+                    if current.observation_object_hash.is_some()
+                        && current.natural_empty_receipt_digest.is_some()
                     {
+                        wait_for_exact_retirement(state, &key.attempt_id, &deadline)?;
+                    } else if matches!(
+                        current.phase,
+                        ScopedChildPhase::BoundRetirementPending
+                            | ScopedChildPhase::BoundDeathProven
+                            | ScopedChildPhase::Retired
+                    ) {
+                        // A concurrent exact cleanup may have won the same
+                        // one-shot retirement CAS. Join only that retained
+                        // cleanup branch; do not promote it to natural exit.
+                        ensure!(
+                            current.observation_object_hash.is_none()
+                                && current.natural_empty_receipt_digest.is_none(),
+                            "scoped cleanup race has partial natural observation"
+                        );
+                        stop_exact_attempt(state, &current, &deadline)?;
+                    } else {
                         return Err(error);
                     }
-                    wait_for_exact_retirement(state, &key.attempt_id, &deadline)?;
                 }
             }
             ScopedChildPhase::NaturalScopeEmpty => {
