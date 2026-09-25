@@ -414,7 +414,43 @@ mod tests {
         let config = b"cfg".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
-        let product_manifest = b"product-manifest".to_vec();
+        let product_manifest_object = ryeos_state::objects::ExternalContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA.into(),
+            kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            entries: vec![
+                ryeos_state::objects::ExternalContentManifestEntry {
+                    path: "bin".into(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::Dir,
+                    mode: None,
+                    blob_hash: None,
+                    size: None,
+                    target: None,
+                },
+                ryeos_state::objects::ExternalContentManifestEntry {
+                    path: "bin/tool".into(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(0o755),
+                    blob_hash: Some(lillux::sha256_hex(b"tool")),
+                    size: Some(4),
+                    target: None,
+                },
+                ryeos_state::objects::ExternalContentManifestEntry {
+                    path: "current".into(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::Symlink,
+                    mode: None,
+                    blob_hash: None,
+                    size: None,
+                    target: Some("bin/tool".into()),
+                },
+            ],
+            entry_count: 3,
+            total_bytes: 4,
+        };
+        product_manifest_object.validate().unwrap();
+        let product_manifest =
+            lillux::canonical_json(&serde_json::to_value(&product_manifest_object).unwrap())
+                .unwrap()
+                .into_bytes();
         for (path, mode, bytes) in [
             ("bootstrap", 0o600, &bootstrap),
             ("input-00", 0o644, &config),
@@ -600,6 +636,40 @@ mod tests {
         .unwrap();
         assert_eq!(staged.base(), &measurement);
         assert_eq!(staged.manifest(), &manifest);
+        crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        let config_source = staged
+            .root()
+            .open_pinned_regular(OsStr::new("input-00"), false)
+            .unwrap()
+            .unwrap();
+        config_source.set_mode(0o600).unwrap();
+        assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        config_source.set_mode(0o644).unwrap();
+        let mut writable_config = staged
+            .root()
+            .open_regular(OsStr::new("input-00"), true)
+            .unwrap()
+            .unwrap();
+        writable_config.write_all(b"bad").unwrap();
+        writable_config.sync_all().unwrap();
+        assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        use std::io::Seek as _;
+        writable_config.rewind().unwrap();
+        writable_config.write_all(&config).unwrap();
+        writable_config.sync_all().unwrap();
+        crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        let mut writable_record = staged
+            .root()
+            .open_regular(OsStr::new("record-00"), true)
+            .unwrap()
+            .unwrap();
+        writable_record.write_all(b"x").unwrap();
+        writable_record.sync_all().unwrap();
+        assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        writable_record.rewind().unwrap();
+        writable_record.write_all(&product_manifest).unwrap();
+        writable_record.sync_all().unwrap();
+        crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
         assert!(
             staged
                 .root()
@@ -619,6 +689,11 @@ mod tests {
                 .unwrap(),
             b"bin/tool"
         );
+        // Harness-only mutation: the observation cannot become a durable
+        // Ready claim while a same-UID writer still owns the staged tree.
+        std::fs::remove_file(product.path().join("current")).unwrap();
+        std::os::unix::fs::symlink("bin/other", product.path().join("current")).unwrap();
+        assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
         staged.discard().unwrap();
         assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
     }
