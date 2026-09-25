@@ -5,6 +5,7 @@
 
 pub mod backends;
 pub mod guest_inputs;
+pub mod guest_staging;
 pub mod launcher;
 pub mod launcher_protocol;
 pub mod lifecycle_adapter;

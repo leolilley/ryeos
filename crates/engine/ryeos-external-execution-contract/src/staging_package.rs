@@ -245,6 +245,12 @@ impl GuestStagingPackageManifest {
                         entry.is_directory() == matches!(expected, RootKind::Directory),
                         "guest staging root kind changed"
                     );
+                    if root == "base" {
+                        ensure!(
+                            matches!(entry, GuestStagingEntry::Directory { mode: 0o700, .. }),
+                            "guest base transfer root must remain owner-private"
+                        );
+                    }
                     if let (
                         RootKind::File { bytes, hash, mode },
                         GuestStagingEntry::RegularFile {
@@ -702,6 +708,12 @@ mod tests {
     #[test]
     fn refuses_unsafe_paths_order_and_budget() {
         let (inputs, mut package) = fixture();
+        package.entries[0] = GuestStagingEntry::Directory {
+            path: "base".to_owned(),
+            mode: 0o755,
+        };
+        assert!(!validates(&inputs, &package));
+        package = fixture().1;
         package.entries[1] = GuestStagingEntry::RegularFile {
             path: "base/../object".to_owned(),
             mode: 0o600,
