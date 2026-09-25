@@ -142,9 +142,26 @@ impl OutputLimitExceeded {
 pub struct SupervisedProcessStatus {
     state: SupervisedProcessStatusState,
     applied_receipt_schema: Option<String>,
+    mount_preparation_required: bool,
 }
 
 impl SupervisedProcessStatus {
+    /// Require a PID-bound native final-root preparation record in the first
+    /// supervised status document, before the target can be released.
+    pub fn require_mount_preparation_receipt(&mut self) -> Result<(), String> {
+        if !matches!(
+            &self.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        ) {
+            return Err("mount preparation requires held supervised attachment".into());
+        }
+        if self.mount_preparation_required {
+            return Err("mount preparation was already required".into());
+        }
+        self.mount_preparation_required = true;
+        Ok(())
+    }
+
     /// Require a second exact trusted-launcher status document after the
     /// target PID. The target must first be attached and released; a missing
     /// receipt is refusal, never implicit launch success.
@@ -259,6 +276,7 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
                 reader: InheritedDescriptorAuthority::from_owned_file(reader, &lease)?,
             },
             applied_receipt_schema: None,
+            mount_preparation_required: false,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(writer, &lease)?,
     })
@@ -322,6 +340,7 @@ pub fn supervised_launcher_attachment_status_pipe()
                 },
             },
             applied_receipt_schema: None,
+            mount_preparation_required: false,
         },
         writer: InheritedDescriptorAuthority::from_owned_file(status_writer, &lease)?,
         attachment_release_reader: InheritedDescriptorAuthority::from_owned_file(
@@ -488,7 +507,7 @@ pub struct SubprocessResult {
 
 #[derive(Debug)]
 enum InitialLauncherStatus {
-    Target(u32),
+    Target(u32, Option<crate::LinuxSandboxMountPreparationReceipt>),
     Refused(String),
 }
 
@@ -497,6 +516,8 @@ enum InitialLauncherStatus {
 struct LauncherTargetDocument {
     #[serde(rename = "child-pid")]
     child_pid: u32,
+    #[serde(rename = "mount-preparation")]
+    mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
     #[serde(rename = "cgroup-namespace")]
     _cgroup_namespace: Option<u64>,
     #[serde(rename = "ipc-namespace")]
@@ -3608,6 +3629,7 @@ pub struct RunningProcess {
     /// reported target exits before its same-group descendants.
     pub pid: u32,
     pub pgid: i64,
+    mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
     /// The outer process is retained separately so timeout/overflow cleanup
     /// always reaps the launcher as well as the target process group.
     wrapper_pid: u32,
@@ -3651,6 +3673,7 @@ pub struct ProcessAwaitingAttachment {
     process_scope: Option<crate::ProcessScope>,
     pid: u32,
     pgid: i64,
+    mount_preparation: Option<crate::LinuxSandboxMountPreparationReceipt>,
     owner: Option<AttachmentPendingOwner>,
     #[cfg(target_os = "linux")]
     pidfd: OwnedFd,
@@ -3751,6 +3774,11 @@ impl std::fmt::Display for AttachmentAbortError {
 impl std::error::Error for AttachmentAbortError {}
 
 impl ProcessAwaitingAttachment {
+    /// Final-root observation reported before the held target can execute.
+    /// The caller must join it with independent plan and source authority.
+    pub fn mount_preparation_receipt(&self) -> Option<&crate::LinuxSandboxMountPreparationReceipt> {
+        self.mount_preparation.as_ref()
+    }
     /// Bind this evidence into the same durable attachment as the target.
     /// Only the configured Lillux provider may interpret it during recovery.
     pub fn scope_recovery(&self) -> Option<&crate::ProcessScopeRecovery> {
@@ -5094,6 +5122,7 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
                 process_scope: attachment_scope,
                 pid: running.pid,
                 pgid: running.pgid,
+                mount_preparation: running.mount_preparation.clone(),
                 owner: Some(AttachmentPendingOwner::Supervised {
                     running: Box::new(running),
                 }),
@@ -5301,6 +5330,7 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
             process_scope: attachment_scope,
             pid: ready.pid,
             pgid: ready.pgid,
+            mount_preparation: None,
             owner: Some(AttachmentPendingOwner::Direct {
                 worker,
                 release_registration,
@@ -5922,25 +5952,34 @@ fn lib_spawn_with_stdio(
     let stderr_capture = Arc::new(OutputCapture::default());
     let drain_stop = Arc::new(AtomicBool::new(false));
     let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
-    let (status_reader, attachment_release, applied_receipt_schema) = match supervised_status {
-        Some(SupervisedProcessStatus {
-            state: SupervisedProcessStatusState::Run { reader },
-            applied_receipt_schema,
-        }) => (Some(reader), None, applied_receipt_schema),
-        Some(SupervisedProcessStatus {
-            state:
-                SupervisedProcessStatusState::AwaitingAttachment {
-                    reader,
-                    attachment_release,
-                },
-            applied_receipt_schema,
-        }) => (
-            Some(reader),
-            Some(attachment_release),
-            applied_receipt_schema,
-        ),
-        None => (None, None, None),
-    };
+    let (status_reader, attachment_release, applied_receipt_schema, mount_preparation_required) =
+        match supervised_status {
+            Some(SupervisedProcessStatus {
+                state: SupervisedProcessStatusState::Run { reader },
+                applied_receipt_schema,
+                mount_preparation_required,
+            }) => (
+                Some(reader),
+                None,
+                applied_receipt_schema,
+                mount_preparation_required,
+            ),
+            Some(SupervisedProcessStatus {
+                state:
+                    SupervisedProcessStatusState::AwaitingAttachment {
+                        reader,
+                        attachment_release,
+                    },
+                applied_receipt_schema,
+                mount_preparation_required,
+            }) => (
+                Some(reader),
+                Some(attachment_release),
+                applied_receipt_schema,
+                mount_preparation_required,
+            ),
+            None => (None, None, None, false),
+        };
     // The wrapper is already an owned process, even before its target report.
     // Reuse that owner for every subsequent setup failure instead of reaping
     // the wrapper first and losing the exact process-group cleanup fence.
@@ -5949,6 +5988,7 @@ fn lib_spawn_with_stdio(
         scope_cleanup_error: None,
         pid: wrapper_pid,
         pgid: wrapper_pgid,
+        mount_preparation: None,
         wrapper_pid,
         wrapper_pgid,
         child,
@@ -6075,7 +6115,16 @@ fn lib_spawn_with_stdio(
         let setup_deadline = supervised_setup_deadline(start, timeout);
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
         let reported_pid = match status_rx.recv_timeout(setup_wait) {
-            Ok(Ok(InitialLauncherStatus::Target(pid))) => pid,
+            Ok(Ok(InitialLauncherStatus::Target(pid, preparation))) => {
+                if mount_preparation_required && preparation.is_none() {
+                    return Err(running.into_spawn_failure(spawn_failure(
+                        start,
+                        "Failed to spawn: supervised target has no required mount preparation",
+                    )));
+                }
+                running.mount_preparation = preparation;
+                pid
+            }
             Ok(Ok(InitialLauncherStatus::Refused(diagnostic))) => {
                 return Err(running
                     .into_spawn_failure(spawn_failure_with_launcher_refusal(start, diagnostic)));
@@ -6387,7 +6436,20 @@ fn report_supervised_launcher_status_line(
     let result = match reject_duplicate_status_keys(line) {
         Err(error) => Err(format!("invalid JSON status document: {error}")),
         Ok(()) => match serde_json::from_slice::<LauncherTargetDocument>(line) {
-            Ok(document) => Ok(InitialLauncherStatus::Target(document.child_pid)),
+            Ok(document) => {
+                if document.mount_preparation.as_ref().is_some_and(|receipt| {
+                    receipt.schema != 1
+                        || receipt.owned_child_pid != document.child_pid
+                        || receipt.mount_count > 4096
+                }) {
+                    Err("mount preparation differs from supervised child PID or schema".into())
+                } else {
+                    Ok(InitialLauncherStatus::Target(
+                        document.child_pid,
+                        document.mount_preparation,
+                    ))
+                }
+            }
             Err(target_error) => match serde_json::from_slice::<LauncherRefusalDocument>(line) {
                 Ok(document) => Ok(InitialLauncherStatus::Refused(
                     document.refused.get().to_string(),
@@ -6399,7 +6461,7 @@ fn report_supervised_launcher_status_line(
         },
     };
     let target_pid = match &result {
-        Ok(InitialLauncherStatus::Target(pid)) => Some(*pid),
+        Ok(InitialLauncherStatus::Target(pid, _)) => Some(pid.to_owned()),
         _ => None,
     };
     if let Some(tx) = initial_tx.take() {
@@ -6441,6 +6503,15 @@ mod applied_status_tests {
     use super::*;
     const TEST_SCHEMA: &str = "test.applied-launch/v1";
 
+    #[test]
+    fn mount_preparation_requirement_is_held_only_and_single_use() {
+        let mut ordinary = supervised_launcher_status_pipe().unwrap();
+        assert!(ordinary.reader.require_mount_preparation_receipt().is_err());
+        let mut held = supervised_launcher_attachment_status_pipe().unwrap();
+        held.reader.require_mount_preparation_receipt().unwrap();
+        assert!(held.reader.require_mount_preparation_receipt().is_err());
+    }
+
     fn receipt(pid: u32) -> crate::LinuxSandboxAppliedLaunchReceipt {
         crate::LinuxSandboxAppliedLaunchReceipt {
             owned_child_pid: pid,
@@ -6454,6 +6525,43 @@ mod applied_status_tests {
             environment_sha256: [3; 32],
             cwd_sha256: [4; 32],
         }
+    }
+
+    #[test]
+    fn initial_status_binds_mount_preparation_to_exact_target_pid() {
+        let preparation = crate::LinuxSandboxMountPreparationReceipt {
+            schema: 1,
+            owned_child_pid: 42,
+            mount_count: 3,
+            destination_access_sha256: [0xA5; 32],
+        };
+        let parse = |value: serde_json::Value| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut sender = Some(tx);
+            let line = serde_json::to_vec(&value).unwrap();
+            let pid = report_supervised_launcher_status_line(&line, &mut sender);
+            (pid, rx.recv().unwrap())
+        };
+        let (pid, result) = parse(serde_json::json!({
+            "child-pid": 42,
+            "mount-preparation": preparation,
+        }));
+        assert_eq!(pid, Some(42));
+        assert!(matches!(
+            result,
+            Ok(InitialLauncherStatus::Target(42, Some(receipt)))
+                if receipt.owned_child_pid == 42 && receipt.mount_count == 3
+        ));
+        let (pid, result) = parse(serde_json::json!({
+            "child-pid": 43,
+            "mount-preparation": preparation,
+        }));
+        assert_eq!(pid, None);
+        assert!(
+            result
+                .unwrap_err()
+                .contains("differs from supervised child PID")
+        );
     }
 
     fn run(
@@ -6501,7 +6609,7 @@ mod applied_status_tests {
         )
         .into_bytes();
         let (initial, exact) = run(&[pid.clone(), applied.clone()]);
-        assert!(matches!(initial, InitialLauncherStatus::Target(42)));
+        assert!(matches!(initial, InitialLauncherStatus::Target(42, None)));
         assert_eq!(exact.unwrap(), receipt(42));
         assert!(run(&[pid.clone()]).1.is_err());
         assert!(run(&[pid.clone(), applied.clone(), applied]).1.is_err());

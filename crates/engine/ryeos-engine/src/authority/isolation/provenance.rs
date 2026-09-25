@@ -170,6 +170,9 @@ impl IsolationRequestAwaitingAttachment {
                 ryeos_isolation_protocol::ISOLATION_APPLIED_LAUNCH_STATUS_SCHEMA,
             )
             .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?;
+        status
+            .require_mount_preparation_receipt()
+            .map_err(|reason| EngineError::IsolationPolicyRefused { reason })?;
         Ok(self)
     }
 

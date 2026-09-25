@@ -145,7 +145,22 @@ fn launch(request_fd: u32) -> ! {
         Ok(process) => process,
         Err(error) => emit_refusal(status_fd, error),
     };
-    let target = serde_json::json!({ "child-pid": process.child_pid() });
+    let mount_preparation = process.mount_preparation_receipt().unwrap_or_else(|error| {
+        emit_refusal(status_fd, format!("final-root mount preparation missing: {error}"))
+    });
+    let expected_mounts = mount_preparation.matches_request(&native).unwrap_or_else(|error| {
+        emit_refusal(status_fd, format!("compare final-root mount preparation: {error}"))
+    });
+    if mount_preparation.owned_child_pid != process.child_pid() || !expected_mounts {
+        emit_refusal(
+            status_fd,
+            "final-root mount preparation differs from translated signed plan".into(),
+        );
+    }
+    let target = serde_json::json!({
+        "child-pid": process.child_pid(),
+        "mount-preparation": mount_preparation,
+    });
     let mut bytes = match serde_json::to_vec(&target) {
         Ok(bytes) => bytes,
         Err(error) => emit_refusal(status_fd, format!("serialize target status: {error}")),

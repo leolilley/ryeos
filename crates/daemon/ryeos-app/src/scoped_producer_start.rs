@@ -293,6 +293,17 @@ pub fn start_scoped_producer(
                 exact,
                 Some(recovery.clone()),
             )?;
+            let mount_preparation = held
+                .as_ref()
+                .expect("held producer is owned until release")
+                .mount_preparation_receipt()
+                .context("held producer has no final-root mount preparation")?;
+            ensure!(
+                mount_preparation.schema == 1
+                    && mount_preparation.owned_child_pid > 0
+                    && i64::from(mount_preparation.owned_child_pid) == identity.target_pid,
+                "final-root mount preparation differs from exact held process identity"
+            );
             state
                 .state_store
                 .attach_scoped_child_process(&attempt_id, &identity)?;

@@ -130,7 +130,7 @@ pub use sandbox::{
     LinuxSandboxAppliedLaunchCommitments, LinuxSandboxAppliedLaunchReceipt,
     LinuxSandboxAppliedLaunchTarget, LinuxSandboxCharacterDevice, LinuxSandboxExit,
     LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount,
-    LinuxSandboxMountAccess, LinuxSandboxNetwork, LinuxSandboxOverlay,
+    LinuxSandboxMountAccess, LinuxSandboxMountPreparationReceipt, LinuxSandboxNetwork, LinuxSandboxOverlay,
     LinuxSandboxOverlayDescendantMount, LinuxSandboxProcFilesystem, LinuxSandboxProcess,
     LinuxSandboxRequest, LinuxSandboxTermination, create_linux_overlay_template,
     exit_with_linux_sandbox_status, inspect_linux_sandbox, launch_linux_sandbox,
