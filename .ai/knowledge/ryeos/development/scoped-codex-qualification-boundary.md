@@ -103,7 +103,9 @@ prepared-directory IDs for cwd and environment. The runtime resolves signed
 literal values, but refuses path-valued workspace and prepared-directory
 environment bindings before reservation. A retained preparation owner must
 supply pinned directories, descendant-stable namespace paths, and effective
-launch evidence. The signed
+launch evidence. The signed ID now has a fixed isolated-namespace destination
+under `/ryeos/producer-prepared/`; deriving that path does not install a mount
+or authorize opening a host directory. The signed
 scenario-driver fixture moved to v4 with empty bindings; previously signed v3
 recipes require republishing and are not silently accepted. This is a schema
 cut, not a direct-target launch or qualification claim.

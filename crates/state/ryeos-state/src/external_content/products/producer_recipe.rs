@@ -90,6 +90,14 @@ fn validate_prepared_directory_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fixed isolated-namespace coordinate for one signed logical directory ID.
+/// This is not a host path or preparation authority: the launch must still
+/// supply a retained directory descriptor and prove its exact mount.
+pub fn prepared_directory_mount_destination(id: &str) -> anyhow::Result<std::path::PathBuf> {
+    validate_prepared_directory_id(id)?;
+    Ok(std::path::Path::new("/ryeos/producer-prepared").join(id))
+}
+
 fn validate_producer_environment_name(name: &str) -> anyhow::Result<()> {
     let mut bytes = name.bytes();
     if name.is_empty()
@@ -383,6 +391,13 @@ mod tests {
         let mut invalid = value;
         invalid["cwd_source"] = json!({"kind":"prepared_directory","id":""});
         assert!(ProductProducerRecipe::from_value(invalid).is_err());
+        assert_eq!(
+            prepared_directory_mount_destination("codex-home")
+                .unwrap()
+                .to_str(),
+            Some("/ryeos/producer-prepared/codex-home")
+        );
+        assert!(prepared_directory_mount_destination("../ambient").is_err());
     }
 
     #[test]
