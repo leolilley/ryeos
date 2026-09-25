@@ -75,8 +75,14 @@ fn signed_codex_worker_source_admits_direct_qualification_profile() -> anyhow::R
         .profile
         .external_candidate_requirement()?
         .ok_or_else(|| anyhow::anyhow!("admitted Codex Worker has no external candidate"))?;
+    let mut fixture_requirement = candidate_authoring::real_codex_requirement();
+    fixture_requirement.runtime_product_declaration_id = "guest-runtime".into();
+    fixture_requirement
+        .required_lifecycle_capabilities
+        .insert(ryeos_external_execution_contract::LifecycleCapability::ExactTerminalObservation);
     ensure!(
-        requirement.provider_declaration_id == "codex-hosted"
+        requirement == fixture_requirement
+            && requirement.provider_declaration_id == "codex-hosted"
             && requirement.runtime_product_declaration_id == "guest-runtime"
             && lillux::valid_hash(&admitted.source.binding_hash)
             && lillux::valid_hash(&admitted.source.content_manifest_hash)
