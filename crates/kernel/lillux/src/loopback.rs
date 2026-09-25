@@ -404,6 +404,14 @@ impl BoundedLoopbackStream {
     }
 
     pub fn read_chunk_until(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.read_chunk_until_after_pending(output, || {})
+    }
+
+    fn read_chunk_until_after_pending(
+        &mut self,
+        output: &mut [u8],
+        mut on_pending: impl FnMut(),
+    ) -> io::Result<usize> {
         if output.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -435,6 +443,9 @@ impl BoundedLoopbackStream {
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) =>
                 {
+                    if error.kind() == io::ErrorKind::WouldBlock {
+                        on_pending();
+                    }
                     crate::time::sleep(Duration::from_millis(1))
                 }
                 Err(error) => return Err(error),
@@ -604,6 +615,58 @@ mod tests {
             Err(task) => {
                 task.detach();
                 panic!("interrupted listener task did not settle");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires loopback socket binding on the host"]
+    fn interrupt_settles_partial_request_read_without_waiting_for_deadline() {
+        use std::io::Write as _;
+
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let listener = ExactLoopbackListener::bind_exact(address).unwrap();
+        let interrupt = listener.interrupt_handle();
+        let mut client = TcpStream::connect(address).unwrap();
+        client.write_all(b"POST /responses HTTP/1.1\r\n").unwrap();
+        let mut accepted = listener
+            .accept_until(MonotonicDeadline::after(Duration::from_secs(30)))
+            .unwrap();
+        let (ready, started) = std::sync::mpsc::sync_channel(0);
+        let task = crate::task::spawn_host_task("loopback-read-interrupt", move || {
+            let expected = b"POST /responses HTTP/1.1\r\n";
+            let mut first = [0u8; 128];
+            let mut count = 0;
+            while count < expected.len() {
+                count += accepted
+                    .read_chunk_until(&mut first[count..expected.len()])
+                    .unwrap();
+            }
+            assert_eq!(&first[..count], expected);
+            let mut pending = [0u8; 1];
+            let mut ready = Some(ready);
+            accepted
+                .read_chunk_until_after_pending(&mut pending, || {
+                    if let Some(sender) = ready.take() {
+                        sender.send(()).unwrap();
+                    }
+                })
+                .unwrap_err()
+                .kind()
+        })
+        .unwrap();
+        started
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        interrupt.interrupt();
+        match task.join_until(MonotonicDeadline::after(Duration::from_secs(2))) {
+            Ok(Ok(kind)) => assert_eq!(kind, io::ErrorKind::Interrupted),
+            Ok(Err(_)) => panic!("interrupted loopback reader task panicked"),
+            Err(task) => {
+                task.detach();
+                panic!("interrupted loopback reader task did not settle");
             }
         }
     }
