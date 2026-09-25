@@ -1631,7 +1631,7 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         .with_context(|| format!("failed direct verifier has no tool stderr: {terminal}"))?;
     ensure!(
         serde_json::to_string(error)?.contains(
-            "effective namespace environment and complete qualification evidence remain unproven"
+            "complete qualification evidence remains unproven"
         ),
         "direct run failed before its explicit no-claims boundary: {error}"
     );

@@ -16,11 +16,14 @@ use ryeos_independent_runtime_verifier::{
 use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
-use ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe;
+use ryeos_state::external_content::products::producer_recipe::{
+    ProductProducerRecipe, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    prepared_directory_mount_destination,
+};
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, ffi::OsStr, io::Read as _, path::Path};
+use std::{collections::BTreeMap, ffi::{OsStr, OsString}, io::Read as _, path::Path};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -398,6 +401,11 @@ async fn main() -> Result<()> {
         _ => bail!("scoped relay handoff presence differs from signed recipe"),
     }
     check_scoped_applied_target(&locator, &observation.applied_launch)?;
+    check_scoped_effective_environment(
+        expected_recipe,
+        &realizations,
+        &observation.applied_launch,
+    )?;
     ensure!(
         observation.schema == "ryeos.scoped_producer_observation.v6"
             && observation.attempt_id == locator.attempt_id
@@ -527,11 +535,11 @@ async fn main() -> Result<()> {
         check_guest_observation(&frozen.guest_observation, &guest)?;
         if race_probe {
             bail!(
-                "direct scoped START/RESUME exact locators matched and frozen candidate settled, but effective namespace environment and complete qualification evidence remain unproven"
+                "direct scoped START/RESUME locators, applied environment and frozen candidate joined, but complete qualification evidence remains unproven"
             );
         }
         bail!(
-            "direct-target launch, relay, conversation and frozen candidate joined, but effective namespace environment and complete qualification evidence remain unproven"
+            "direct-target launch, applied environment, relay, conversation and frozen candidate joined, but complete qualification evidence remains unproven"
         );
     }
     let transcript: serde_json::Value = serde_json::from_str(&observation.stdout)
@@ -840,6 +848,77 @@ fn check_scoped_applied_target(
     Ok(())
 }
 
+/// Derive the complete direct Codex environment from the signed finite recipe
+/// and the verifier's separately admitted realization set. The daemon's
+/// prelaunch commitment alone is not an independent expectation of its env.
+fn check_scoped_effective_environment(
+    recipe: &ProductProducerRecipe,
+    admitted_realizations: &str,
+    receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+) -> Result<()> {
+    let environment = signed_direct_environment(recipe, admitted_realizations)?;
+    // Lillux exposes the canonical applied-env commitment through the same
+    // target projection as its pre-exec receipt. Other target fields below are
+    // inert placeholders: compare only environment_sha256.
+    let executable = std::path::Path::new("/bin/true");
+    let argv0 = OsString::from("/bin/true");
+    let cwd = std::path::Path::new("/");
+    let expected = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+        lillux::LinuxSandboxAppliedLaunchTarget {
+            executable,
+            argv0: &argv0,
+            arguments: &[],
+            cwd,
+            environment: &environment,
+        },
+    ).map_err(anyhow::Error::msg)?;
+    ensure!(
+        receipt.environment_sha256 == expected.environment_sha256,
+        "direct Codex applied environment differs from signed recipe and admitted realizations"
+    );
+    Ok(())
+}
+
+fn signed_direct_environment(
+    recipe: &ProductProducerRecipe,
+    admitted_realizations: &str,
+) -> Result<BTreeMap<OsString, OsString>> {
+    recipe.validate()?;
+    ensure!(
+        recipe.environment_sources == [ProducerEnvironmentSource::AdmittedRealizations],
+        "direct Codex recipe has an unexpected environment source"
+    );
+    let mut environment = BTreeMap::<OsString, OsString>::new();
+    environment.insert(
+        OsString::from("RYEOS_EXTERNAL_REALIZATIONS"),
+        OsString::from(admitted_realizations),
+    );
+    for (name, binding) in &recipe.environment_bindings {
+        let value = match binding {
+            ProducerEnvironmentBinding::Literal { value } => OsString::from(value),
+            ProducerEnvironmentBinding::PreparedDirectory { id } => {
+                prepared_directory_mount_destination(id)?.into_os_string()
+            }
+            ProducerEnvironmentBinding::VerifierPrivateWorkspace => {
+                bail!("direct Codex recipe cannot inherit a verifier-private path")
+            }
+        };
+        ensure!(
+            environment.insert(OsString::from(name), value).is_none(),
+            "direct Codex environment binding is duplicated"
+        );
+    }
+    environment.insert(OsString::from("TMPDIR"), OsString::from("/tmp"));
+    ensure!(
+        environment.insert(
+            OsString::from("RYEOS_PRODUCER_STDIN_FD"),
+            OsString::from("0"),
+        ).is_none(),
+        "direct Codex recipe collides with its protected channel"
+    );
+    Ok(environment)
+}
+
 fn check_scoped_plan_coordinate(
     locator: &ScopedAttemptLocator,
     observed: &serde_json::Value,
@@ -1111,6 +1190,87 @@ fn require_clean_driver_stop(
 mod tests {
     use super::*;
     use lillux::subordinate_process::SubordinateProcessExit;
+
+    #[test]
+    fn signed_direct_environment_matches_only_the_complete_applied_environment() {
+        let recipe = ProductProducerRecipe::from_value(json!({
+            "schema":"ryeos.product_producer_recipe.v5",
+            "executable_source":{
+                "kind":"admitted_realization_member",
+                "realization_id":"subject",
+                "manifest_hash":"a".repeat(64),
+                "relative_path":"bin/codex",
+                "executable_sha256":"b".repeat(64)
+            },
+            "argv":["app-server"],
+            "stdin_source":{
+                "kind":"interactive_verifier_channel",
+                "maximum_frame_bytes":1024,
+                "maximum_total_bytes":4096,
+                "maximum_frames":4
+            },
+            "cwd_source":{"kind":"prepared_directory","id":"codex-occurrence"},
+            "environment_sources":["admitted_realizations"],
+            "environment_bindings":{
+                "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"},
+                "HOME":{"kind":"prepared_directory","id":"codex-home"},
+                "PATH":{"kind":"literal","value":""},
+                "LANG":{"kind":"literal","value":"C"},
+                "LC_ALL":{"kind":"literal","value":"C"}
+            },
+            "prepared_immutable_files":[],
+            "loopback_ingress":null,
+            "bounds":{
+                "maximum_wall_time_ms":1000,
+                "maximum_stdout_bytes":1024,
+                "maximum_stderr_bytes":1024,
+                "maximum_memory_bytes":1048576,
+                "maximum_processes":4
+            }
+        })).unwrap();
+        let admitted = "[{\"id\":\"signed\"}]";
+        let environment = signed_direct_environment(&recipe, admitted).unwrap();
+        assert_eq!(environment.len(), 8);
+        assert_eq!(environment.get(OsStr::new("RYEOS_EXTERNAL_REALIZATIONS")),
+            Some(&OsString::from(admitted)));
+        assert_eq!(environment.get(OsStr::new("CODEX_HOME")),
+            Some(&OsString::from("/ryeos/producer-prepared/codex-home")));
+        assert_eq!(environment.get(OsStr::new("RYEOS_PRODUCER_STDIN_FD")),
+            Some(&OsString::from("0")));
+        let executable = Path::new("/bin/true");
+        let argv0 = OsString::from("/bin/true");
+        let cwd = Path::new("/");
+        let commitment = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+            lillux::LinuxSandboxAppliedLaunchTarget {
+                executable,
+                argv0: &argv0,
+                arguments: &[],
+                cwd,
+                environment: &environment,
+            },
+        ).unwrap();
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid:42, namespace_pid:1, effective_uid:1, effective_gid:1,
+            no_new_privs:true, seccomp_mode:2,
+            executable_sha256:[1;32], argv_sha256:[2;32],
+            environment_sha256:commitment.environment_sha256, cwd_sha256:[3;32],
+            post_release_mount_view:lillux::LinuxSandboxMountPreparationCommitments {
+                schema:1, mount_count:1, destination_access_sha256:[0;32],
+            },
+        };
+        check_scoped_effective_environment(&recipe, admitted, &receipt).unwrap();
+        assert!(check_scoped_effective_environment(&recipe, "different", &receipt).is_err());
+        let mut changed = receipt.clone();
+        changed.environment_sha256[0] ^= 1;
+        assert!(check_scoped_effective_environment(&recipe, admitted, &changed).is_err());
+        let mut altered_recipe = recipe.clone();
+        altered_recipe.environment_bindings.insert(
+            "LANG".into(), ProducerEnvironmentBinding::Literal { value:"POSIX".into() }
+        );
+        assert!(check_scoped_effective_environment(&altered_recipe, admitted, &receipt).is_err());
+        altered_recipe.environment_sources.clear();
+        assert!(check_scoped_effective_environment(&altered_recipe, admitted, &receipt).is_err());
+    }
 
     #[test]
     fn race_reconciliation_accepts_only_one_exact_attempt_or_lost_ack() {
