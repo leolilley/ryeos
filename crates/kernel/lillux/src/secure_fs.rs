@@ -5998,6 +5998,83 @@ impl PinnedDirectory {
             )
         }
     }
+
+    /// Sync a bounded tree that may contain inert symlink entries. Unlike
+    /// `sync_tree_bounded`, this never follows a link: it re-observes each
+    /// target as bytes and syncs its containing directory. Product policy
+    /// must separately validate the complete symlink graph before execution.
+    pub fn sync_tree_with_symlinks_bounded(
+        &self,
+        budget: DirectoryTraversalBudget,
+        max_symlink_bytes: usize,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (budget, max_symlink_bytes);
+            anyhow::bail!("descriptor-relative symlink tree sync is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            anyhow::ensure!(max_symlink_bytes > 0, "symlink target bound is empty");
+            struct Frame {
+                directory: PinnedDirectory,
+                entries: std::vec::IntoIter<PinnedDirectoryEntryMetadata>,
+                depth: usize,
+            }
+            let mut remaining = budget.max_entries;
+            let entries = self.entries_no_follow_bounded(remaining)?;
+            remaining -= entries.len();
+            let mut frames = vec![Frame {
+                directory: self.try_clone()?,
+                entries: entries.into_iter(),
+                depth: 0,
+            }];
+            while let Some(frame) = frames.last_mut() {
+                let Some(entry) = frame.entries.next() else {
+                    frame.directory.sync()?;
+                    frames.pop();
+                    continue;
+                };
+                match entry.entry_type {
+                    PinnedEntryType::Directory => {
+                        anyhow::ensure!(
+                            frame.depth < budget.max_depth,
+                            "secure symlink tree sync exceeds its directory depth bound"
+                        );
+                        let child = frame
+                            .directory
+                            .open_child_directory(&entry.name)?
+                            .ok_or_else(|| anyhow::anyhow!("sync directory disappeared"))?;
+                        let entries = child.entries_no_follow_bounded(remaining)?;
+                        remaining = remaining
+                            .checked_sub(entries.len())
+                            .ok_or_else(|| anyhow::anyhow!("sync tree entry budget underflow"))?;
+                        let next_depth = frame.depth + 1;
+                        frames.push(Frame {
+                            directory: child,
+                            entries: entries.into_iter(),
+                            depth: next_depth,
+                        });
+                    }
+                    PinnedEntryType::Regular => {
+                        frame
+                            .directory
+                            .open_regular(&entry.name, false)?
+                            .ok_or_else(|| anyhow::anyhow!("sync regular file disappeared"))?
+                            .sync_all()?;
+                    }
+                    PinnedEntryType::Symlink => {
+                        frame
+                            .directory
+                            .read_symlink_target(&entry.name, max_symlink_bytes)?
+                            .ok_or_else(|| anyhow::anyhow!("sync symlink disappeared"))?;
+                    }
+                    _ => anyhow::bail!("secure symlink tree sync found unsupported entry"),
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7891,6 +7968,31 @@ mod tests {
         assert!(
             pinned
                 .read_symlink_target(OsStr::new("escaping"), 4)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_symlink_tree_sync_never_resolves_link_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        pinned
+            .create_symlink(OsStr::new("inert"), b"/not-an-admitted-target")
+            .unwrap();
+        assert!(
+            pinned
+                .sync_tree_with_symlinks_bounded(DirectoryTraversalBudget::new(1, 1), 32)
+                .is_ok()
+        );
+        assert!(
+            pinned
+                .sync_tree_bounded(DirectoryTraversalBudget::new(1, 1))
+                .is_err()
+        );
+        assert!(
+            pinned
+                .sync_tree_with_symlinks_bounded(DirectoryTraversalBudget::new(1, 1), 4)
                 .is_err()
         );
     }

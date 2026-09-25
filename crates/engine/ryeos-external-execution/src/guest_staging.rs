@@ -5,6 +5,7 @@
 //! private tree. Product/source authority and fixed-FD supervisor installation
 //! remain separate joined checks.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 
@@ -130,6 +131,21 @@ fn stage_guest_package_in_private_root<R: Read>(
     );
     let mut stream = GuestStagingStreamReader::new(reader, expected)?;
     let manifest = stream.manifest().clone();
+    let mut product_symlinks = BTreeMap::<&str, Vec<(&str, &str)>>::new();
+    for entry in &manifest.entries {
+        if let GuestStagingEntry::Symlink { path, target } = entry {
+            let (root, relative) = path
+                .split_once('/')
+                .context("guest product symlink has no relative path")?;
+            product_symlinks
+                .entry(root)
+                .or_default()
+                .push((relative, target));
+        }
+    }
+    for links in product_symlinks.values() {
+        ryeos_state::objects::validate_internal_symlink_graph(links.iter().copied())?;
+    }
     for entry in &manifest.entries {
         let path = entry.path();
         let (parent_path, child_name) = match path.rsplit_once('/') {
@@ -153,6 +169,9 @@ fn stage_guest_package_in_private_root<R: Read>(
                 lillux::set_open_regular_file_mode(&file, *mode)?;
                 file.sync_all()?;
             }
+            GuestStagingEntry::Symlink { target, .. } => {
+                directory.create_symlink(OsStr::new(child_name), target.as_bytes())?;
+            }
         }
     }
     stream.finish()?;
@@ -173,7 +192,7 @@ fn stage_guest_package_in_private_root<R: Read>(
             && base.total_bytes == admitted.total_bytes,
         "guest base transfer contradicts the retained snapshot measurement"
     );
-    stage.sync_tree_bounded(staging_budget())?;
+    stage.sync_tree_with_symlinks_bounded(staging_budget(), 4096)?;
     Ok((manifest, base))
 }
 
@@ -212,7 +231,7 @@ mod tests {
     use ryeos_external_execution_contract::{
         EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection,
         GuestBaseSnapshotInput, GuestMountAccess, GuestMountContentAuthority, GuestMountInput,
-        GuestMountKind, GuestMountRole,
+        GuestMountKind, GuestMountRole, GuestProductManifestKind,
     };
 
     #[test]
@@ -395,6 +414,7 @@ mod tests {
         let config = b"cfg".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
+        let product_manifest = b"product-manifest".to_vec();
         for (path, mode, bytes) in [
             ("bootstrap", 0o600, &bootstrap),
             ("input-00", 0o644, &config),
@@ -409,6 +429,34 @@ mod tests {
             });
             files.insert(path.into(), bytes.clone());
         }
+        entries.extend([
+            GuestStagingEntry::Directory {
+                path: "input-01".into(),
+                mode: 0o700,
+            },
+            GuestStagingEntry::Directory {
+                path: "input-01/bin".into(),
+                mode: 0o755,
+            },
+            GuestStagingEntry::RegularFile {
+                path: "input-01/bin/tool".into(),
+                mode: 0o755,
+                bytes: 4,
+                sha256: lillux::sha256_hex(b"tool"),
+            },
+            GuestStagingEntry::Symlink {
+                path: "input-01/current".into(),
+                target: "bin/tool".into(),
+            },
+            GuestStagingEntry::RegularFile {
+                path: "record-00".into(),
+                mode: 0o600,
+                bytes: product_manifest.len() as u64,
+                sha256: lillux::sha256_hex(&product_manifest),
+            },
+        ]);
+        files.insert("input-01/bin/tool".into(), b"tool".to_vec());
+        files.insert("record-00".into(), product_manifest.clone());
         entries.sort_by(|left, right| left.path().cmp(right.path()));
         let inputs = ExternalGuestInputProjection {
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
@@ -421,19 +469,37 @@ mod tests {
                 total_bytes: measurement.total_bytes,
             },
             workspace_outputs: None,
-            inputs: vec![GuestMountInput {
-                role: GuestMountRole::Configuration,
-                authority_id: "config".into(),
-                descriptor: 64,
-                destination: "/runtime/config".into(),
-                kind: GuestMountKind::RegularFile,
-                access: GuestMountAccess::ReadOnly,
-                normalized_mode: Some(0o644),
-                content_authority: GuestMountContentAuthority::RawFile {
-                    sha256: lillux::sha256_hex(&config),
+            inputs: vec![
+                GuestMountInput {
+                    role: GuestMountRole::Configuration,
+                    authority_id: "config".into(),
+                    descriptor: 64,
+                    destination: "/runtime/config".into(),
+                    kind: GuestMountKind::RegularFile,
+                    access: GuestMountAccess::ReadOnly,
+                    normalized_mode: Some(0o644),
+                    content_authority: GuestMountContentAuthority::RawFile {
+                        sha256: lillux::sha256_hex(&config),
+                    },
+                    bytes: config.len() as u64,
                 },
-                bytes: config.len() as u64,
-            }],
+                GuestMountInput {
+                    role: GuestMountRole::Product,
+                    authority_id: "product".into(),
+                    descriptor: 65,
+                    destination: "/runtime/product".into(),
+                    kind: GuestMountKind::Directory,
+                    access: GuestMountAccess::ReadOnly,
+                    normalized_mode: None,
+                    content_authority: GuestMountContentAuthority::ProductManifest {
+                        manifest_kind: GuestProductManifestKind::Content,
+                        manifest_hash: lillux::sha256_hex(&product_manifest),
+                        manifest_descriptor: 66,
+                        manifest_bytes: product_manifest.len() as u64,
+                    },
+                    bytes: 4,
+                },
+            ],
             executable_search: Vec::new(),
             environment: BTreeMap::new(),
         };
@@ -454,7 +520,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+            maximum_framed_bytes: manifest.framed_bytes().unwrap() + 128,
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -468,6 +534,26 @@ mod tests {
             .unwrap()
             .unwrap();
         parent.tighten_owner_private_directory().unwrap();
+        for unsafe_target in ["../../escape", "/etc/passwd", "current"] {
+            let mut invalid = manifest.clone();
+            for entry in &mut invalid.entries {
+                if let GuestStagingEntry::Symlink { target, .. } = entry {
+                    *target = unsafe_target.into();
+                }
+            }
+            let mut invalid_stream =
+                GuestStagingStreamWriter::new(Vec::new(), invalid, &expected).unwrap();
+            while let Some(entry) = invalid_stream.next_file() {
+                let mut source = files.get(entry.path()).unwrap().as_slice();
+                invalid_stream.copy_next_file(&mut source).unwrap();
+            }
+            let invalid_bytes = invalid_stream.finish().unwrap();
+            let error = stage_guest_package(invalid_bytes.as_slice(), &parent, &expected)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("symlink"));
+            assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
+        }
         let mut truncated = bytes.clone();
         truncated.pop();
         let mut tampered = bytes.clone();
@@ -520,6 +606,18 @@ mod tests {
                 .open_child_directory(OsStr::new("base"))
                 .unwrap()
                 .is_some()
+        );
+        let product = staged
+            .root()
+            .open_child_directory(OsStr::new("input-01"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            product
+                .read_symlink_target(OsStr::new("current"), 4096)
+                .unwrap()
+                .unwrap(),
+            b"bin/tool"
         );
         staged.discard().unwrap();
         assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());

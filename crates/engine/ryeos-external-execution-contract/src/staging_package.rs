@@ -66,12 +66,21 @@ pub enum GuestStagingEntry {
         bytes: u64,
         sha256: String,
     },
+    /// Inert target bytes for an admitted external product. They are never
+    /// followed while staging; product-manifest verification must prove the
+    /// complete internal symlink graph before this tree can be installed.
+    Symlink {
+        path: String,
+        target: String,
+    },
 }
 
 impl GuestStagingEntry {
     pub fn path(&self) -> &str {
         match self {
-            Self::Directory { path, .. } | Self::RegularFile { path, .. } => path,
+            Self::Directory { path, .. }
+            | Self::RegularFile { path, .. }
+            | Self::Symlink { path, .. } => path,
         }
     }
 
@@ -82,7 +91,9 @@ impl GuestStagingEntry {
 
 #[derive(Clone, Copy)]
 enum RootKind<'a> {
-    Directory,
+    Directory {
+        allows_symlinks: bool,
+    },
     File {
         bytes: Option<u64>,
         hash: Option<&'a str>,
@@ -152,7 +163,12 @@ impl GuestStagingPackageManifest {
         );
 
         let mut roots = BTreeMap::from([
-            ("base".to_owned(), RootKind::Directory),
+            (
+                "base".to_owned(),
+                RootKind::Directory {
+                    allows_symlinks: false,
+                },
+            ),
             (
                 "bootstrap".to_owned(),
                 RootKind::File {
@@ -196,7 +212,12 @@ impl GuestStagingPackageManifest {
                 continue;
             }
             let kind = match input.kind {
-                GuestMountKind::Directory => RootKind::Directory,
+                GuestMountKind::Directory => RootKind::Directory {
+                    allows_symlinks: matches!(
+                        &input.content_authority,
+                        GuestMountContentAuthority::ProductManifest { .. }
+                    ),
+                },
                 GuestMountKind::RegularFile => RootKind::File {
                     bytes: Some(input.bytes),
                     hash: match &input.content_authority {
@@ -242,7 +263,7 @@ impl GuestStagingPackageManifest {
                 None => {
                     observed_roots.insert(root);
                     ensure!(
-                        entry.is_directory() == matches!(expected, RootKind::Directory),
+                        entry.is_directory() == matches!(expected, RootKind::Directory { .. }),
                         "guest staging root kind changed"
                     );
                     if root == "base" {
@@ -271,7 +292,7 @@ impl GuestStagingPackageManifest {
                 }
                 Some(parent) => {
                     ensure!(
-                        matches!(expected, RootKind::Directory),
+                        matches!(expected, RootKind::Directory { .. }),
                         "guest staging descends through a file root"
                     );
                     ensure!(
@@ -305,6 +326,21 @@ impl GuestStagingPackageManifest {
                     ensure!(
                         total <= maximum_regular_bytes,
                         "guest staging transfer budget exceeded"
+                    );
+                }
+                GuestStagingEntry::Symlink { target, .. } => {
+                    ensure!(
+                        parent.is_some()
+                            && matches!(
+                                expected,
+                                RootKind::Directory {
+                                    allows_symlinks: true
+                                }
+                            )
+                            && !target.is_empty()
+                            && target.len() <= 4096
+                            && !target.as_bytes().contains(&0),
+                        "guest staging symlink is not an admitted product entry"
                     );
                 }
             }
@@ -408,7 +444,7 @@ fn copy_staging_file<R: Read, W: Write>(
     entry: &GuestStagingEntry,
 ) -> Result<()> {
     let GuestStagingEntry::RegularFile { bytes, sha256, .. } = entry else {
-        bail!("guest staging payload requested for a directory");
+        bail!("guest staging payload requested for a non-file entry");
     };
     let mut remaining = *bytes;
     let mut digest = Sha256::new();
@@ -447,7 +483,7 @@ fn next_regular_entry(
         .iter()
         .enumerate()
         .skip(start)
-        .find(|(_, entry)| !entry.is_directory())
+        .find(|(_, entry)| matches!(entry, GuestStagingEntry::RegularFile { .. }))
 }
 
 /// Sequential producer over a private package file. A failed copy permanently
@@ -583,7 +619,7 @@ mod tests {
     use super::*;
     use crate::{
         EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, GuestBaseSnapshotInput, GuestMountAccess,
-        GuestMountInput, GuestMountRole,
+        GuestMountInput, GuestMountRole, GuestProductManifestKind,
     };
 
     fn hash(byte: char) -> String {
@@ -739,6 +775,91 @@ mod tests {
                 .validate_for(&inputs, &hash('1'), &hash('d'), &hash('0'), &hash('f'), 20)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn product_symlinks_have_no_payload_and_cannot_enter_other_roots() {
+        let (mut inputs, mut package) = fixture();
+        let input = &mut inputs.inputs[0];
+        input.role = GuestMountRole::Product;
+        input.kind = GuestMountKind::Directory;
+        input.normalized_mode = None;
+        input.bytes = 2;
+        input.content_authority = GuestMountContentAuthority::ProductManifest {
+            manifest_kind: GuestProductManifestKind::Content,
+            manifest_hash: hash('4'),
+            manifest_descriptor: 65,
+            manifest_bytes: 3,
+        };
+        package.guest_input_identity = inputs.identity_digest().unwrap();
+        package.entries.splice(
+            3..4,
+            [
+                GuestStagingEntry::Directory {
+                    path: "input-00".to_owned(),
+                    mode: 0o700,
+                },
+                GuestStagingEntry::Directory {
+                    path: "input-00/bin".to_owned(),
+                    mode: 0o755,
+                },
+                GuestStagingEntry::RegularFile {
+                    path: "input-00/bin/tool".to_owned(),
+                    mode: 0o755,
+                    bytes: 2,
+                    sha256: hash('d'),
+                },
+                GuestStagingEntry::Symlink {
+                    path: "input-00/current".to_owned(),
+                    target: "bin/tool".to_owned(),
+                },
+            ],
+        );
+        package.entries.insert(
+            package.entries.len() - 1,
+            GuestStagingEntry::RegularFile {
+                path: "record-00".to_owned(),
+                mode: 0o600,
+                bytes: 3,
+                sha256: hash('4'),
+            },
+        );
+        package.total_regular_bytes = 22;
+        let valid = |package: &GuestStagingPackageManifest| {
+            package
+                .validate_for(&inputs, &hash('1'), &hash('e'), &hash('0'), &hash('f'), 22)
+                .is_ok()
+        };
+        assert!(valid(&package));
+        assert_eq!(
+            package
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, GuestStagingEntry::RegularFile { .. }))
+                .count(),
+            6
+        );
+        let mut changed = package.clone();
+        changed.entries[6] = GuestStagingEntry::Symlink {
+            path: "input-00/current".to_owned(),
+            target: "".to_owned(),
+        };
+        assert!(!valid(&changed));
+        let mut changed = package.clone();
+        changed.entries[6] = GuestStagingEntry::Symlink {
+            path: "input-00/current".to_owned(),
+            target: "x".repeat(4097),
+        };
+        assert!(!valid(&changed));
+        let (ordinary, mut nonproduct) = fixture();
+        nonproduct.entries.insert(
+            2,
+            GuestStagingEntry::Symlink {
+                path: "base/link".to_owned(),
+                target: "object".to_owned(),
+            },
+        );
+        assert!(!validates(&ordinary, &nonproduct));
     }
 
     #[test]
