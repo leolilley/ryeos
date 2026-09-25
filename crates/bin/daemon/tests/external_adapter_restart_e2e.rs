@@ -1065,12 +1065,40 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         "direct run failed before its explicit no-claims boundary: {error}"
     );
     let scoped = exact_scoped_producer_observation(&harness.state_path, root)?;
+    let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
         scoped["launch_owner"]["thread_id"] == root
+            && scoped["recipe_digest"] == recipe_digest
+            && scoped["producer_source"]["recipe_digest"] == recipe_digest
             && scoped["relay_handoff"].is_object()
+            && scoped["relay_handoff"]["attempt_id"] == scoped["attempt_id"]
             && scoped["applied_launch"].is_object()
             && scoped["process_identity"].is_object(),
         "direct scoped attempt lacks joined daemon execution evidence"
+    );
+    let output = scoped["stdout"]
+        .as_str()
+        .context("direct Codex target has no daemon-retained app-server output")?;
+    let mut response_ids = std::collections::BTreeSet::new();
+    let mut completed_turns = 0usize;
+    for line in output.lines() {
+        let frame: Value = serde_json::from_str(line)
+            .context("daemon-retained direct Codex output contains a non-JSON frame")?;
+        ensure!(frame.is_object(), "direct Codex emitted a non-object frame");
+        if let Some(id) = frame["id"].as_u64() {
+            response_ids.insert(id);
+        }
+        if frame["method"] == "turn/completed"
+            && frame["params"]["turn"]["status"] == "completed"
+            && frame["params"]["threadId"].as_str().is_some()
+            && frame["params"]["turn"]["id"].as_str().is_some()
+        {
+            completed_turns += 1;
+        }
+    }
+    ensure!(
+        response_ids == [1, 2, 3].into() && completed_turns == 1,
+        "daemon-retained direct target did not exchange the exact scripted app-server turn"
     );
     eprintln!(
         "signed direct verifier fail-closed evidence: {}",
