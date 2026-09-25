@@ -297,6 +297,13 @@ impl ScopedProducerLiveAuthority {
         selected_command: &IsolationAdmittedCommand,
     ) -> Result<ScopedProducerLaunchRequest> {
         recipe.validate()?;
+        // A signed immutable leaf is not protection until the daemon seals
+        // its bytes and the engine proves the applied nested read-only mount.
+        // Keep direct-target qualification closed while that join is built.
+        ensure!(
+            recipe.prepared_immutable_files.is_empty(),
+            "signed producer immutable files are not yet mounted and evidenced"
+        );
         let mut prepared_ids = BTreeSet::new();
         if let ProducerCwdSource::PreparedDirectory { id } = &recipe.cwd_source {
             prepared_ids.insert(id.as_str());
@@ -649,13 +656,14 @@ mod tests {
     fn recipe_request_has_only_signed_arguments_input_and_environment() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v4",
+            "schema": "ryeos.product_producer_recipe.v5",
             "executable_source": {"kind":"admitted_verifier_executable"},
             "argv": ["--scenario-driver"],
             "stdin_source": {"kind":"signed_verifier_parameters"},
             "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": [],
             "environment_bindings": {},
+            "prepared_immutable_files": [],
             "loopback_ingress": null,
             "bounds": {
                 "maximum_wall_time_ms": 5000,
@@ -762,6 +770,20 @@ mod tests {
             prepared_request.request.envs,
             vec![("HOME".into(), destination.into())]
         );
+        let mut immutable = unprepared.clone();
+        immutable.prepared_immutable_files.push(
+            ryeos_state::external_content::products::producer_recipe::ProducerPreparedImmutableFile {
+                prepared_directory_id: "codex-home".into(),
+                leaf_name: "config.toml".into(),
+                maximum_bytes: 65536,
+            },
+        );
+        assert!(authority
+            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("not yet mounted and evidenced"));
         let mut maximum = recipe.clone();
         maximum.cwd_source = ProducerCwdSource::PreparedDirectory { id: "cwd".into() };
         prepared_root
@@ -802,7 +824,7 @@ mod tests {
     fn interactive_realization_recipe_refuses_a_verifier_command() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v4",
+            "schema": "ryeos.product_producer_recipe.v5",
             "executable_source": {
                 "kind": "admitted_realization_member",
                 "realization_id": "codex_runtime",
@@ -820,6 +842,7 @@ mod tests {
             "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": [],
             "environment_bindings": {},
+            "prepared_immutable_files": [],
             "loopback_ingress": null,
             "bounds": {
                 "maximum_wall_time_ms": 5000,

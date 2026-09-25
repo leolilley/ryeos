@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::objects::canonical_value_digest;
 
-pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v4";
+pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v5";
 pub const MAX_PRODUCER_RECIPE_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCER_ARGV: usize = 32;
 pub const MAX_PRODUCER_ARG_BYTES: usize = 1024;
@@ -34,6 +34,8 @@ pub const MAX_PRODUCER_ENVIRONMENT_BINDINGS: usize = 16;
 /// A recipe can reference one additional prepared CWD not named by any
 /// environment binding.
 pub const MAX_PRODUCER_PREPARED_DIRECTORIES: usize = MAX_PRODUCER_ENVIRONMENT_BINDINGS + 1;
+pub const MAX_PRODUCER_PREPARED_IMMUTABLE_FILES: usize = 8;
+pub const MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES: u64 = 1024 * 1024;
 
 /// A signed executable selector, never a caller-supplied host path. The
 /// realization member still requires the root's retained admitted mount and
@@ -99,6 +101,42 @@ fn validate_prepared_directory_id(id: &str) -> anyhow::Result<()> {
 pub fn prepared_directory_mount_destination(id: &str) -> anyhow::Result<std::path::PathBuf> {
     validate_prepared_directory_id(id)?;
     Ok(std::path::Path::new("/ryeos/producer-prepared").join(id))
+}
+
+/// One sealed file placed above a writable prepared directory. The signed
+/// recipe names only a direct leaf, never a caller-selected namespace path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProducerPreparedImmutableFile {
+    pub prepared_directory_id: String,
+    pub leaf_name: String,
+    pub maximum_bytes: u64,
+}
+
+impl ProducerPreparedImmutableFile {
+    pub fn destination(&self) -> anyhow::Result<std::path::PathBuf> {
+        self.validate()?;
+        Ok(prepared_directory_mount_destination(&self.prepared_directory_id)?
+            .join(&self.leaf_name))
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_prepared_directory_id(&self.prepared_directory_id)?;
+        if self.leaf_name.is_empty()
+            || self.leaf_name.len() > 128
+            || self.leaf_name == "."
+            || self.leaf_name == ".."
+            || !self.leaf_name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+            })
+        {
+            bail!("producer immutable file leaf is not canonical");
+        }
+        if !(1..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES).contains(&self.maximum_bytes) {
+            bail!("producer immutable file byte bound is invalid");
+        }
+        Ok(())
+    }
 }
 
 fn validate_producer_environment_name(name: &str) -> anyhow::Result<()> {
@@ -205,6 +243,7 @@ pub struct ProductProducerRecipe {
     pub cwd_source: ProducerCwdSource,
     pub environment_sources: Vec<ProducerEnvironmentSource>,
     pub environment_bindings: BTreeMap<String, ProducerEnvironmentBinding>,
+    pub prepared_immutable_files: Vec<ProducerPreparedImmutableFile>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub loopback_ingress: Option<ProducerLoopbackIngress>,
     pub bounds: ProducerResourceBounds,
@@ -245,6 +284,9 @@ impl ProductProducerRecipe {
         if self.environment_bindings.len() > MAX_PRODUCER_ENVIRONMENT_BINDINGS {
             bail!("producer environment bindings exceed count bound");
         }
+        if self.prepared_immutable_files.len() > MAX_PRODUCER_PREPARED_IMMUTABLE_FILES {
+            bail!("producer immutable file count exceeds bound");
+        }
         if let ProducerCwdSource::PreparedDirectory { id } = &self.cwd_source {
             validate_prepared_directory_id(id)?;
         }
@@ -264,6 +306,28 @@ impl ProductProducerRecipe {
                 ProducerEnvironmentBinding::PreparedDirectory { id } => {
                     validate_prepared_directory_id(id)?;
                 }
+            }
+        }
+        let mut prepared_ids = BTreeSet::new();
+        if let ProducerCwdSource::PreparedDirectory { id } = &self.cwd_source {
+            prepared_ids.insert(id.as_str());
+        }
+        for binding in self.environment_bindings.values() {
+            if let ProducerEnvironmentBinding::PreparedDirectory { id } = binding {
+                prepared_ids.insert(id.as_str());
+            }
+        }
+        let mut immutable_destinations = BTreeSet::new();
+        for file in &self.prepared_immutable_files {
+            file.validate()?;
+            if !prepared_ids.contains(file.prepared_directory_id.as_str()) {
+                bail!("producer immutable file requires a used prepared directory");
+            }
+            if !immutable_destinations.insert((
+                file.prepared_directory_id.as_str(),
+                file.leaf_name.as_str(),
+            )) {
+                bail!("producer immutable file destination is duplicated");
             }
         }
         if let ProducerExecutableSource::AdmittedRealizationMember {
@@ -349,6 +413,7 @@ mod tests {
             "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": ["admitted_realizations"],
             "environment_bindings": {},
+            "prepared_immutable_files": [],
             "loopback_ingress": null,
             "bounds": {"maximum_wall_time_ms": 1000, "maximum_stdout_bytes": 1024,
                 "maximum_stderr_bytes": 1024, "maximum_memory_bytes": 1048576,
@@ -404,6 +469,45 @@ mod tests {
     }
 
     #[test]
+    fn immutable_prepared_files_are_bounded_direct_leaves_of_used_directories() {
+        let mut value = valid();
+        value["environment_bindings"] = json!({
+            "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"}
+        });
+        value["prepared_immutable_files"] = json!([
+            {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536},
+            {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536}
+        ]);
+        let recipe = ProductProducerRecipe::from_value(value.clone()).unwrap();
+        assert_eq!(
+            recipe.prepared_immutable_files[0].destination().unwrap().to_str(),
+            Some("/ryeos/producer-prepared/codex-home/config.toml")
+        );
+        for (field, bad) in [
+            ("prepared_directory_id", json!("unbound")),
+            ("leaf_name", json!("../config.toml")),
+            ("leaf_name", json!(".config/config.toml")),
+            ("leaf_name", json!("..")),
+            ("maximum_bytes", json!(0)),
+            ("maximum_bytes", json!(MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES + 1)),
+        ] {
+            let mut invalid = value.clone();
+            invalid["prepared_immutable_files"][0][field] = bad;
+            assert!(ProductProducerRecipe::from_value(invalid).is_err(), "{field}");
+        }
+        let mut duplicate = value.clone();
+        duplicate["prepared_immutable_files"][1] =
+            duplicate["prepared_immutable_files"][0].clone();
+        assert!(ProductProducerRecipe::from_value(duplicate).is_err());
+        let mut too_many = value;
+        too_many["prepared_immutable_files"] = json!((0..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILES)
+            .map(|index| json!({"prepared_directory_id":"codex-home",
+                "leaf_name":format!("file-{index}"),"maximum_bytes":1}))
+            .collect::<Vec<_>>());
+        assert!(ProductProducerRecipe::from_value(too_many).is_err());
+    }
+
+    #[test]
     fn authority_fields_are_required_and_closed() {
         for field in [
             "executable_source",
@@ -412,6 +516,7 @@ mod tests {
             "cwd_source",
             "environment_sources",
             "environment_bindings",
+            "prepared_immutable_files",
             "loopback_ingress",
             "bounds",
         ] {

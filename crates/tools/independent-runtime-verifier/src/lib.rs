@@ -1300,7 +1300,7 @@ mod tests {
             },
             expected_producer_recipe_ref: DIRECT_PRODUCER_RECIPE_REF.into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(serde_json::json!({
-                "schema":"ryeos.product_producer_recipe.v4",
+                "schema":"ryeos.product_producer_recipe.v5",
                 "executable_source":{"kind":"admitted_realization_member",
                     "realization_id":"subject", "manifest_hash":"a".repeat(64),
                     "relative_path":"bin/codex", "executable_sha256":"e".repeat(64)},
@@ -1315,6 +1315,9 @@ mod tests {
                     "PATH":{"kind":"literal","value":""},
                     "LANG":{"kind":"literal","value":"C"},
                     "LC_ALL":{"kind":"literal","value":"C"}},
+                "prepared_immutable_files":[
+                    {"prepared_directory_id":"codex-home","leaf_name":"config.toml","maximum_bytes":65536},
+                    {"prepared_directory_id":"codex-home","leaf_name":"environments.toml","maximum_bytes":65536}],
                 "loopback_ingress":{"address":"127.0.0.1:1234"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,
