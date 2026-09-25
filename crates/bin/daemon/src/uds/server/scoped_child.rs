@@ -518,16 +518,17 @@ fn scoped_attempt_locator(
     state: &AppState,
     record: &ryeos_app::runtime_db::scoped_child_attempt::ScopedChildAttemptRecord,
 ) -> Result<Value> {
-    let expected = state
+    let (expected, isolation_plan_digest) = state
         .scoped_producer_processes
-        .expected_applied_launch_exact(record)?
+        .prelaunch_evidence_exact(record)?
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no exact live prelaunch target"))?;
     Ok(serde_json::json!({
-        "schema": "ryeos.scoped_producer_locator.v2",
+        "schema": "ryeos.scoped_producer_locator.v3",
         "attempt_id": record.initial.attempt_id,
         "recipe_digest": record.initial.recipe_digest,
         "recipe_generation": record.initial.recipe_generation,
         "scenario_digest": record.initial.scenario_digest,
+        "isolation_plan_digest": isolation_plan_digest,
         "expected_applied_launch": expected,
     }))
 }

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 
 use crate::runtime_db::LaunchOwner;
 use crate::runtime_db::scoped_child_attempt::{ScopedChildAttemptRecord, ScopedChildPhase};
@@ -177,16 +177,16 @@ impl ScopedProducerProcessRegistry {
     /// Read-only lost-ACK lookup. A retained journal row by itself is not a
     /// live child: after restart the registry is empty and this refuses.
     pub fn contains_exact(&self, record: &ScopedChildAttemptRecord) -> Result<bool> {
-        Ok(self.expected_applied_launch_exact(record)?.is_some())
+        Ok(self.prelaunch_evidence_exact(record)?.is_some())
     }
 
-    /// Return only the engine-compiled pre-adapter target expectation for the
+    /// Return the engine-compiled target and concrete isolation plan for the
     /// exact live, owner-bound attempt. Neither the journal nor a later child
-    /// observation can manufacture this after process ownership is gone.
-    pub fn expected_applied_launch_exact(
+    /// observation can manufacture these after process ownership is gone.
+    pub fn prelaunch_evidence_exact(
         &self,
         record: &ScopedChildAttemptRecord,
-    ) -> Result<Option<lillux::LinuxSandboxAppliedLaunchCommitments>> {
+    ) -> Result<Option<(lillux::LinuxSandboxAppliedLaunchCommitments, String)>> {
         let key = ScopedProducerProcessKey::new(
             record.initial.attempt_id.clone(),
             record.initial.owner.clone(),
@@ -212,7 +212,15 @@ impl ScopedProducerProcessRegistry {
             && child.process.pgid == identity.group_leader_pid
             && identity.process_scope.as_ref() == record.scope_recovery.as_ref()
             && child.authority.workspace().ensure_path_binding().is_ok();
-        Ok(exact.then(|| child.expected_applied_launch.clone()))
+        if !exact {
+            return Ok(None);
+        }
+        let plan_digest = child
+            .isolation_provenance
+            .plan_digest
+            .clone()
+            .context("exact scoped producer has no concrete isolation plan")?;
+        Ok(Some((child.expected_applied_launch.clone(), plan_digest)))
     }
 
     /// Register the in-flight attempt before allocating a scope. A stop that

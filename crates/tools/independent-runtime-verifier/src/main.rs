@@ -353,6 +353,7 @@ async fn main() -> Result<()> {
     };
     check_observed_full_source(&expected_source, &observation.producer_source)?;
     check_observed_isolation_class(&expected_isolation_class, &observation.isolation_provenance)?;
+    check_scoped_plan_coordinate(&locator, &observation.isolation_provenance)?;
     let expected_recipe = &parameters.configuration.expected_producer_recipe;
     check_observed_recipe_coordinate(
         expected_recipe,
@@ -803,6 +804,18 @@ fn check_scoped_applied_target(
     Ok(())
 }
 
+fn check_scoped_plan_coordinate(
+    locator: &ScopedAttemptLocator,
+    observed: &serde_json::Value,
+) -> Result<()> {
+    locator.validate()?;
+    ensure!(
+        observed["plan_digest"].as_str() == Some(locator.isolation_plan_digest.as_str()),
+        "scoped isolation plan differs from exact prelaunch locator"
+    );
+    Ok(())
+}
+
 fn check_observed_full_source(
     expected: &ProductProducerRecipeSourceIdentity,
     observed: &ProductProducerRecipeSourceIdentity,
@@ -878,13 +891,14 @@ struct ScopedAttemptLocator {
     recipe_digest: String,
     recipe_generation: String,
     scenario_digest: String,
+    isolation_plan_digest: String,
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
 }
 
 impl ScopedAttemptLocator {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.scoped_producer_locator.v2"
+            self.schema == "ryeos.scoped_producer_locator.v3"
                 && self.attempt_id.starts_with("scoped-")
                 && self.attempt_id.len() == 71
                 && self.attempt_id[7..]
@@ -892,6 +906,10 @@ impl ScopedAttemptLocator {
                     .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
                 && self.scenario_digest == self.attempt_id[7..]
                 && lillux::valid_hash(&self.recipe_digest)
+                && self
+                    .isolation_plan_digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(lillux::valid_hash)
                 && !self.recipe_generation.is_empty()
                 && self.recipe_generation.len() <= 256,
             "scoped child attempt identity is invalid"
@@ -1159,11 +1177,12 @@ mod tests {
             recipe_digest: digest.clone(),
         };
         let locator = ScopedAttemptLocator {
-            schema: "ryeos.scoped_producer_locator.v2".into(),
+            schema: "ryeos.scoped_producer_locator.v3".into(),
             attempt_id: format!("scoped-{}", "d".repeat(64)),
             recipe_digest: digest.clone(),
             recipe_generation: source.bundle_generation_identity.clone(),
             scenario_digest: "d".repeat(64),
+            isolation_plan_digest: format!("sha256:{}", "e".repeat(64)),
             expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments {
                 executable_sha256: [1; 32],
                 argv_sha256: [2; 32],
@@ -1232,11 +1251,12 @@ mod tests {
     #[test]
     fn scoped_locator_binds_attempt_to_retained_recipe_coordinate() {
         let valid = json!({
-            "schema": "ryeos.scoped_producer_locator.v2",
+            "schema": "ryeos.scoped_producer_locator.v3",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
             "scenario_digest": "a".repeat(64),
+            "isolation_plan_digest": format!("sha256:{}", "c".repeat(64)),
             "expected_applied_launch": {
                 "executable_sha256": vec![1; 32],
                 "argv_sha256": vec![2; 32],
@@ -1246,6 +1266,21 @@ mod tests {
         });
         let locator: ScopedAttemptLocator = serde_json::from_value(valid.clone()).unwrap();
         locator.validate().unwrap();
+        assert!(
+            check_scoped_plan_coordinate(
+                &locator,
+                &json!({"plan_digest": locator.isolation_plan_digest.clone()})
+            )
+            .is_ok()
+        );
+        assert!(
+            check_scoped_plan_coordinate(
+                &locator,
+                &json!({"plan_digest": format!("sha256:{}", "d".repeat(64))})
+            )
+            .is_err()
+        );
+        assert!(check_scoped_plan_coordinate(&locator, &json!({})).is_err());
         let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
             owned_child_pid: 42,
             namespace_pid: 1,
@@ -1285,7 +1320,7 @@ mod tests {
             altered.owned_child_pid = 0;
             assert!(check_scoped_applied_target(&locator, &altered).is_err());
         }
-        for field in ["recipe_digest", "scenario_digest"] {
+        for field in ["recipe_digest", "scenario_digest", "isolation_plan_digest"] {
             let mut changed = valid.clone();
             changed[field] = json!("wrong");
             assert!(
@@ -1308,11 +1343,12 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("recipe_digest");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(legacy).is_err());
         let mut no_prelaunch_target = json!({
-            "schema": "ryeos.scoped_producer_locator.v2",
+            "schema": "ryeos.scoped_producer_locator.v3",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
             "scenario_digest": "a".repeat(64),
+            "isolation_plan_digest": format!("sha256:{}", "c".repeat(64)),
         });
         assert!(
             serde_json::from_value::<ScopedAttemptLocator>(no_prelaunch_target.clone()).is_err()
