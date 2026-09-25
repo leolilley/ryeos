@@ -806,7 +806,10 @@ fn admit_independent_verifier_input_root(
     let mut policy: ExternalContentImportPolicyRecord =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&source))?;
     ensure!(
-        policy.roots.keys().all(|id| id == codex_runtime_producer::IMPORT_ROOT),
+        policy
+            .roots
+            .keys()
+            .all(|id| id == codex_runtime_producer::IMPORT_ROOT),
         "fixture has unrelated ambient import roots"
     );
     ensure!(
@@ -1301,20 +1304,28 @@ async fn capture_codex_subject_for_verifier(
             "maximum_bytes":inputs.maximum_bytes,
             "expected_file_sha256":inputs.file_sha256,
         }),
-    ).await?;
+    )
+    .await?;
     ensure!(
         imported["manifest_hash"] == inputs.input_manifest_hash,
         "Codex producer input import changed exact identity"
     );
-    let bound = production_service(harness, "service:external-content/bind", json!({
-        "staging_id":imported["staging_id"],
-        "request_digest":imported["request_digest"],
-        "manifest_hash":imported["manifest_hash"],
-        "consumer_ref":codex_runtime_producer::CONSUMER_REF,
-        "consumer_kind":"installed_bundle",
-    })).await?;
-    ensure!(bound["manifest_hash"] == imported["manifest_hash"],
-        "Codex producer input binding changed identity");
+    let bound = production_service(
+        harness,
+        "service:external-content/bind",
+        json!({
+            "staging_id":imported["staging_id"],
+            "request_digest":imported["request_digest"],
+            "manifest_hash":imported["manifest_hash"],
+            "consumer_ref":codex_runtime_producer::CONSUMER_REF,
+            "consumer_kind":"installed_bundle",
+        }),
+    )
+    .await?;
+    ensure!(
+        bound["manifest_hash"] == imported["manifest_hash"],
+        "Codex producer input binding changed identity"
+    );
 
     let mut project = tempfile::tempdir()?;
     project.disable_cleanup(true);
@@ -1333,33 +1344,49 @@ async fn capture_codex_subject_for_verifier(
         }),
         launch_id,
         std::time::Duration::from_secs(420),
-    ).await?;
+    )
+    .await?;
     ensure!(
         terminal.pointer("/thread/status") == Some(&json!("completed")),
         "Codex runtime product producer failed: {terminal}"
     );
-    let root = accepted["thread_id"].as_str().context("Codex product root absent")?;
-    let captured = production_service(harness, "service:external-content/capture-product", json!({
-        "chain_root_id":root,
-        "thread_id":root,
-        "recipe_binding":"product_recipe",
-        "product_name":"runtime",
-    })).await?;
+    let root = accepted["thread_id"]
+        .as_str()
+        .context("Codex product root absent")?;
+    let captured = production_service(
+        harness,
+        "service:external-content/capture-product",
+        json!({
+            "chain_root_id":root,
+            "thread_id":root,
+            "recipe_binding":"product_recipe",
+            "product_name":"runtime",
+        }),
+    )
+    .await?;
     ensure!(
         captured["state"] == "captured"
-            && captured["witness_hash"].as_str().is_some_and(lillux::valid_hash),
+            && captured["witness_hash"]
+                .as_str()
+                .is_some_and(lillux::valid_hash),
         "Codex product capture did not return a node-signed witness: {captured}"
     );
-    eprintln!("direct verifier subject producer root={root} witness={}",
-        captured["witness_hash"]);
+    eprintln!(
+        "direct verifier subject producer root={root} witness={}",
+        captured["witness_hash"]
+    );
     Ok(captured)
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact Codex, static producer, and verifier binaries; local scripted provider only"]
-async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
--> anyhow::Result<()> {
+async fn prepare_signed_direct_qualification_fixture(
+    reserved_resume_race: bool,
+    gate_child: Option<lillux::InheritedDuplexChannelChildAuthority>,
+) -> anyhow::Result<(
+    DaemonHarness,
+    independent_verifier_scenario::IndependentVerifierScenario,
+    Value,
+)> {
     use anyhow::{Context as _, ensure};
 
     let verifier_path = PathBuf::from(
@@ -1390,14 +1417,12 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
     let (mut harness, keys) = DaemonHarness::start_fast_with(
         |state, _, fixture| {
             common::fast_fixture::register_standard_bundle(state, fixture)?;
-            // The fast node defaults to the 64 MiB full-profile command
-            // ceiling. This fixture admits an exact 258 MiB Codex member, so
-            // use the bounded development-profile ceiling before node seal.
+            // The exact Codex member exceeds the fast node's 64 MiB command
+            // ceiling. Sign only this disposable fixture's bounded limits.
             let policy_path = state.join(".ai/node/policies/isolation.yaml");
             let raw = std::fs::read_to_string(&policy_path)?;
-            let mut policy: Value = serde_yaml::from_str(
-                &lillux::signature::strip_signature_lines(&raw),
-            )?;
+            let mut policy: Value =
+                serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))?;
             ensure!(
                 policy.pointer("/policy/limits/verified_artifact_file_bytes")
                     == Some(&json!(67_108_864))
@@ -1438,13 +1463,14 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
                 fixture,
                 &scenario,
                 &verifier_bytes,
-                false,
+                reserved_resume_race,
             )
         },
         |_| {},
     )
     .await?;
-    let producer_inputs = producer_inputs.context("signed Codex product fixture was not prepared")?;
+    let producer_inputs =
+        producer_inputs.context("signed Codex product fixture was not prepared")?;
     harness.retain_evidence_on_drop(true);
     let captured_subject = capture_codex_subject_for_verifier(&harness, &producer_inputs).await?;
     ensure!(
@@ -1460,19 +1486,41 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
             "witness_source":{"kind":"local_capture"},
             "maximum_bytes":268_435_456,
         }),
-    ).await?;
+    )
+    .await?;
     let staged = [
         subject,
-        import_independent_verifier_tree(&harness, "controller", "content", 64 * 1024 * 1024).await?,
+        import_independent_verifier_tree(&harness, "controller", "content", 64 * 1024 * 1024)
+            .await?,
         import_independent_verifier_tree(&harness, "tools", "content", 64 * 1024 * 1024).await?,
-        import_independent_verifier_tree(&harness, "configurations", "content", 1024 * 1024).await?,
+        import_independent_verifier_tree(&harness, "configurations", "content", 1024 * 1024)
+            .await?,
     ];
     require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
     for imported in &staged {
         bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
     }
     harness.kill_daemon().await?;
-    harness.respawn_with(|_| {}).await?;
+    harness
+        .respawn_with(move |command| {
+            if let Some(child) = gate_child {
+                common::ScopedReservedAttemptGate::attach(command, child)
+                    .expect("bind signed scoped race gate");
+            }
+        })
+        .await?;
+    Ok((harness, scenario, captured_subject))
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exact Codex, static producer, and verifier binaries; local scripted provider only"]
+async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_claims()
+-> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+
+    let (harness, scenario, captured_subject) =
+        prepare_signed_direct_qualification_fixture(false, None).await?;
     let launch_id = "L-771adc873ac744bd89f1cac896098f51";
     let accepted = production_service(
         &harness,
@@ -1483,7 +1531,8 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
             "witness_source":{"kind":"local_capture"},
             "relationship_name":"runtime_to_external_authoring_worker",
         }),
-    ).await?;
+    )
+    .await?;
     ensure!(
         accepted["status"] == "accepted" && accepted["launch_id"] == launch_id,
         "qualification launch did not return an exact accepted coordinate: {accepted}"
@@ -1494,16 +1543,15 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         .to_owned();
     let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
         loop {
-            let detail = production_service(
-                &harness,
-                "service:threads/get",
-                json!({"thread_id":root}),
-            ).await?;
+            let detail =
+                production_service(&harness, "service:threads/get", json!({"thread_id":root}))
+                    .await?;
             ensure!(
                 detail.pointer("/thread/thread_id") == Some(&json!(root)),
                 "qualification point read changed root identity"
             );
-            let status = detail.pointer("/thread/status")
+            let status = detail
+                .pointer("/thread/status")
                 .and_then(Value::as_str)
                 .context("qualification root status absent")?;
             if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
@@ -1513,7 +1561,9 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-    }).await.context("accepted qualification observation timed out; do not relaunch")??;
+    })
+    .await
+    .context("accepted qualification observation timed out; do not relaunch")??;
     ensure!(
         terminal.pointer("/thread/status") == Some(&json!("failed")),
         "incomplete direct qualification incorrectly succeeded"
@@ -1578,90 +1628,96 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "pending migration to product-qualification admission and protected process scope; ordinary tool launch cannot grant the producer"]
+#[ignore = "requires exact Codex/producer/verifier binaries and a qualified protected process scope; local scripted provider only"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
-    let verifier_path = PathBuf::from(
-        std::env::var_os("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN")
-            .context("RYEOS_TEST_INDEPENDENT_VERIFIER_BIN is required")?,
-    );
-    let configuration = native_unsigned_direct_configuration()?;
-    let (input_root, admitted) = stage_independent_verifier_inputs(&configuration)?;
-    let verifier_bytes =
-        lillux::secure_fs::read_regular_file_bounded_no_follow(&verifier_path, 64 * 1024 * 1024)?;
-    let scenario = author_independent_verifier_scenario_from_public_import(
-        input_root.path(),
-        configuration,
-        &admitted,
-    )
-    .await?;
-    let parameters = scenario.parameters()?;
-    let (mut harness, keys) = DaemonHarness::start_fast_with(
-        |state, _, fixture| {
-            common::fast_fixture::register_standard_bundle(state, fixture)?;
-            admit_independent_verifier_input_root(state, fixture, input_root.path())?;
-            install_signed_independent_verifier_fixture(
-                state,
-                fixture,
-                &scenario,
-                &verifier_bytes,
-                true,
-            )
-        },
-        |_| {},
-    )
-    .await?;
-    harness.retain_evidence_on_drop(true);
-    let staged = import_independent_verifier_trees(&harness).await?;
-    require_independent_verifier_imports_match_scenario(&staged, &scenario)?;
-    for imported in &staged {
-        bind_independent_verifier_tree(&harness, imported, &keys.publisher_fp()).await?;
-    }
-    harness.kill_daemon().await?;
     let (mut gate, child) = common::ScopedReservedAttemptGate::pair()?;
-    harness
-        .respawn_with(move |command| {
-            common::ScopedReservedAttemptGate::attach(command, child)
-                .expect("bind signed scoped race gate");
-        })
-        .await?;
+    let (harness, scenario, captured_subject) =
+        prepare_signed_direct_qualification_fixture(true, Some(child)).await?;
     let launch_id = "L-45e7fd8950c6f85790be5301dcd066cb";
-    let (launched, held) = tokio::join!(
-        public_launch::terminal_launch(
-            &harness,
-            json!({
-                "item_ref":independent_verifier_scenario::TOOL_REF,
-                "launch_id":launch_id,"ref_bindings":{},"parameters":parameters,
-                "execution_policy":ExecutionPolicy::projectless(ExecutionResponse::Accepted)
-                    .exclude_operator_vault(),
-            }),
-            launch_id,
-            std::time::Duration::from_secs(330),
-        ),
-        async {
-            let evidence = gate.wait_reached().await?;
-            gate.release()?;
-            anyhow::Ok(evidence)
-        },
+    let accepted = production_service(
+        &harness,
+        "service:external-content/launch-product-qualification",
+        json!({
+            "launch_id":launch_id,
+            "witness_hash":captured_subject["witness_hash"],
+            "witness_source":{"kind":"local_capture"},
+            "relationship_name":"runtime_to_external_authoring_worker",
+        }),
+    )
+    .await?;
+    ensure!(
+        accepted["status"] == "accepted" && accepted["launch_id"] == launch_id,
+        "race qualification launch did not return an exact accepted coordinate: {accepted}"
     );
-    let (accepted, terminal) = launched?;
-    let held = held?;
+    let root = accepted["thread_id"]
+        .as_str()
+        .context("accepted race verifier root absent")?
+        .to_owned();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(330), async {
+        loop {
+            let detail =
+                production_service(&harness, "service:threads/get", json!({"thread_id":root}))
+                    .await?;
+            ensure!(
+                detail.pointer("/thread/thread_id") == Some(&json!(root)),
+                "race qualification point read changed root identity"
+            );
+            let status = detail
+                .pointer("/thread/status")
+                .and_then(Value::as_str)
+                .context("race qualification root status absent")?;
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+                .is_some_and(|status| status.is_terminal())
+            {
+                return Ok::<_, anyhow::Error>(detail);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    });
+    tokio::pin!(terminal);
+    let reached_result = {
+        let reached = gate.wait_reached();
+        tokio::pin!(reached);
+        tokio::select! {
+            evidence = &mut reached => evidence,
+            result = &mut terminal => {
+                anyhow::bail!("race root terminated before reserved RESUME gate: {}", result??);
+            }
+        }
+    };
+    let held = match reached_result {
+        Ok(held) => held,
+        Err(error) => {
+            // The accepted root may still be parked at Reserved. Settle the
+            // test gate, then point-read that exact root instead of leaving
+            // a live accepted qualification behind an observation timeout.
+            let release = gate.release();
+            let observed = terminal.await;
+            return Err(error.context(format!(
+                "reserved RESUME gate observation failed for {root}; release={release:?}; exact terminal={observed:?}"
+            )));
+        }
+    };
+    gate.release()?;
+    let terminal = terminal
+        .await
+        .context("accepted race qualification observation timed out; do not relaunch")??;
     ensure!(
         terminal.pointer("/thread/status") == Some(&json!("failed")),
         "incomplete verifier incorrectly qualified or failed to terminate"
     );
     let error = terminal
-        .pointer("/thread/error")
-        .context("failed verifier has no authoritative terminal error")?;
+        .pointer("/result/error/stderr")
+        .with_context(|| format!("failed race verifier has no tool stderr: {terminal}"))?;
     ensure!(
-        serde_json::to_string(error)?.contains("no qualification claims issued"),
+        serde_json::to_string(error)?.contains(
+            "direct scoped START/RESUME exact locators matched and frozen candidate settled"
+        ),
         "verifier failed for a reason other than its explicit no-claims gate"
     );
-    let root = accepted["thread_id"]
-        .as_str()
-        .context("accepted verifier root absent")?;
     ensure!(
         held["root_thread_id"] == root
             && held["attempt_id"]
@@ -1670,14 +1726,16 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
             && held["launch_owner"]["thread_id"] == root,
         "reserved RESUME gate differs from accepted verifier root"
     );
-    ensure!(
-        serde_json::to_string(error)?.contains("scoped race START/RESUME exact locators matched"),
-        "signed verifier did not report exact START/RESUME equality"
-    );
-    let scoped = exact_scoped_producer_observation(&harness.state_path, root)?;
+    let scoped = exact_scoped_producer_observation(&harness.state_path, &root)?;
+    let recipe_digest = scenario.expected_producer_recipe.digest()?;
     ensure!(
         held["attempt_id"] == scoped["attempt_id"]
-            && held["launch_owner"] == scoped["launch_owner"],
+            && held["launch_owner"] == scoped["launch_owner"]
+            && scoped["recipe_digest"] == recipe_digest
+            && scoped["producer_source"]["recipe_digest"] == recipe_digest
+            && scoped["relay_handoff"]["attempt_id"] == scoped["attempt_id"]
+            && scoped["applied_launch"].is_object()
+            && scoped["process_identity"].is_object(),
         "reserved gate does not match the sole observed scoped attempt"
     );
     eprintln!(
@@ -1689,7 +1747,7 @@ async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_close
             "scoped_success":scoped["producer_exit_clean"],
             "resume_observed_at_reserved_before_release":true,
             "provider_contact_kind":"credential-free scripted local peer",
-            "explicit_no_claims_gate_observed":true,
+            "verifier_no_claims_error_observed":true,
         })
     );
     Ok(())
