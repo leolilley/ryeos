@@ -7105,38 +7105,74 @@ mod tests {
         let guest_root = tempfile::tempdir().unwrap();
 
         let ExternalPlacementContactDecision::Contact(contact) = prepared_fixture(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate.clone(), controller_lifetime.clone(),
-        ).claim().unwrap() else {
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
             panic!("fresh reservation lost its contact permit");
         };
         assert!(contact.contact(test_startup_deadline()).is_err());
         let ExternalPlacementContactDecision::Reconcile(allocation) = prepared_fixture(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate.clone(), controller_lifetime.clone(),
-        ).claim().unwrap() else {
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
             panic!("ambiguous allocation lost reconciliation authority");
         };
         assert_eq!(
-            allocation.reconcile_with_deadline(test_startup_deadline(), test_observation_timing())
-                .unwrap().value.phase,
+            allocation
+                .reconcile_with_deadline(test_startup_deadline(), test_observation_timing())
+                .unwrap()
+                .value
+                .phase,
             ExternalAllocationPhase::Bound,
         );
 
-        let ExternalPlacementContactDecision::Reconcile(activation) = prepared_fixture_with_guest_inputs(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate.clone(), controller_lifetime.clone(), guest_root.path(),
-        ).claim().unwrap() else {
+        let ExternalPlacementContactDecision::Reconcile(activation) =
+            prepared_fixture_with_guest_inputs(
+                store.clone(),
+                backend.clone(),
+                &reservation,
+                &binding,
+                gate.clone(),
+                controller_lifetime.clone(),
+                guest_root.path(),
+            )
+            .claim()
+            .unwrap()
+        else {
             panic!("bound occurrence lost activation authority");
         };
         assert!(activation.activate_or_reconcile().is_err());
         let ExternalPlacementContactDecision::Reconcile(reconcile) = prepared_fixture(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate.clone(), controller_lifetime.clone(),
-        ).claim().unwrap() else {
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
             panic!("ambiguous activation lost reconciliation authority");
         };
-        assert!(reconcile.activate_or_reconcile().unwrap().observation.is_none());
+        assert!(
+            reconcile
+                .activate_or_reconcile()
+                .unwrap()
+                .observation
+                .is_none()
+        );
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.activation_observations.load(Ordering::SeqCst), 1);
 
@@ -7145,28 +7181,155 @@ mod tests {
         state.state_store = store.clone();
         request_external_candidate_cleanup(&state, &reservation.placement_thread_id).unwrap();
         assert_eq!(
-            store.external_allocation(&reservation.placement_thread_id)
-                .unwrap().unwrap().phase,
+            store
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
             ExternalAllocationPhase::Quarantined,
         );
 
         let ExternalPlacementContactDecision::Reconcile(cleanup) = prepared_fixture(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate.clone(), controller_lifetime.clone(),
-        ).claim().unwrap() else {
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            controller_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
             panic!("unresolved activation lost exact cleanup authority");
         };
         assert!(cleanup.terminate_or_reconcile().is_err());
         let ExternalPlacementContactDecision::Reconcile(reconcile) = prepared_fixture(
-            store.clone(), backend.clone(), &reservation, &binding,
-            gate, controller_lifetime,
-        ).claim().unwrap() else {
+            store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate,
+            controller_lifetime,
+        )
+        .claim()
+        .unwrap() else {
             panic!("uncertain termination lost exact reconciliation authority");
         };
         assert_eq!(
             reconcile.terminate_or_reconcile().unwrap().phase,
             ExternalAllocationPhase::Terminated,
         );
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn replacement_controller_fences_uncertain_activation_and_reconciles_exact_occurrence() {
+        let (predecessor, reservation, binding, predecessor_lifetime, lock_path) =
+            placement_store_fixture();
+        let backend = Arc::new(FaultBackend::with_reconciled_activation("pending"));
+        let gate = Arc::new(AtomicBool::new(false));
+        let guest_root = tempfile::tempdir().unwrap();
+
+        let ExternalPlacementContactDecision::Contact(contact) = prepared_fixture(
+            predecessor.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            predecessor_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
+            panic!("fresh reservation lost its contact permit");
+        };
+        assert!(contact.contact(test_startup_deadline()).is_err());
+        let ExternalPlacementContactDecision::Reconcile(allocation) = prepared_fixture(
+            predecessor.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            predecessor_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
+            panic!("ambiguous allocation lost reconciliation authority");
+        };
+        assert_eq!(
+            allocation
+                .reconcile_with_deadline(test_startup_deadline(), test_observation_timing())
+                .unwrap()
+                .value
+                .phase,
+            ExternalAllocationPhase::Bound,
+        );
+        let ExternalPlacementContactDecision::Reconcile(activation) =
+            prepared_fixture_with_guest_inputs(
+                predecessor.clone(),
+                backend.clone(),
+                &reservation,
+                &binding,
+                gate.clone(),
+                predecessor_lifetime.clone(),
+                guest_root.path(),
+            )
+            .claim()
+            .unwrap()
+        else {
+            panic!("bound occurrence lost activation authority");
+        };
+        assert!(activation.activate_or_reconcile().is_err());
+        assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
+        drop(predecessor);
+        drop(predecessor_lifetime);
+
+        let (replacement_store, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let app_root = tempfile::tempdir().unwrap();
+        let mut replacement = crate::state::test_support::build(app_root.path()).unwrap();
+        replacement.state_store = replacement_store.clone();
+        assert_eq!(
+            fence_external_candidates_after_controller_restart(&replacement).unwrap(),
+            1
+        );
+        assert_eq!(
+            replacement_store
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Quarantined,
+        );
+        let ExternalPlacementContactDecision::Reconcile(cleanup) = prepared_fixture(
+            replacement_store.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            replacement_lifetime.clone(),
+        )
+        .claim()
+        .unwrap() else {
+            panic!("replacement controller lost exact cleanup authority");
+        };
+        assert!(cleanup.terminate_or_reconcile().is_err());
+        let ExternalPlacementContactDecision::Reconcile(reconcile) = prepared_fixture(
+            replacement_store,
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate,
+            replacement_lifetime,
+        )
+        .claim()
+        .unwrap() else {
+            panic!("replacement controller lost uncertain termination reconciliation");
+        };
+        assert_eq!(
+            reconcile.terminate_or_reconcile().unwrap().phase,
+            ExternalAllocationPhase::Terminated,
+        );
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 1);
         assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 1);
@@ -7481,7 +7644,9 @@ mod tests {
         before_channel: ExternalCandidateStartProgress,
     ) {
         let (store, reservation, retained, controller_lifetime, _) = placement_store_fixture();
-        let backend = Arc::new(FaultBackend::with_reconciled_activation(activation_resolution));
+        let backend = Arc::new(FaultBackend::with_reconciled_activation(
+            activation_resolution,
+        ));
         let gate = Arc::new(AtomicBool::new(false));
         let guest_root = tempfile::tempdir().unwrap();
 
