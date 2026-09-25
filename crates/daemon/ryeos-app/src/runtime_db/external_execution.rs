@@ -672,6 +672,9 @@ pub(crate) struct ExternalSupervisorActivationIntent {
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
     pub channel_max_bytes: u64,
+    /// Package identity is retained in this same immutable row, so the
+    /// supervisor-start contact claim can never outlive or change its upload.
+    pub delivery: ExternalGuestPackageDeliveryCommitment,
 }
 
 /// Claimed identity of a locally re-imported package selected for the *same*
@@ -726,13 +729,35 @@ impl ExternalGuestPackageDeliveryCommitment {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn fixture_guest_package_delivery(
+    binding_hash: &str,
+    request_digest: &str,
+    occurrence_id: &str,
+    activation_request_digest: &str,
+    guest_input_identity: &str,
+) -> ExternalGuestPackageDeliveryCommitment {
+    ExternalGuestPackageDeliveryCommitment {
+        schema: 1,
+        binding_hash: binding_hash.into(),
+        request_digest: request_digest.into(),
+        occurrence_id: occurrence_id.into(),
+        activation_request_digest: activation_request_digest.into(),
+        guest_input_identity: guest_input_identity.into(),
+        manifest_sha256: "1".repeat(64),
+        payload_sha256: "2".repeat(64),
+        regular_bytes: 1,
+        framed_bytes: 21,
+    }
+}
+
 impl ExternalSupervisorActivationIntent {
     fn validate(
         &self,
         reservation: &ExternalAllocationReservation,
         occurrence: &ExternalAllocationOccurrence,
     ) -> Result<()> {
-        if self.schema != 2
+        if self.schema != 3
             || self.binding_hash != reservation.binding_hash
             || self.request_digest != reservation.request_digest
             || self.occurrence_id != occurrence.occurrence_id
@@ -773,6 +798,7 @@ impl ExternalSupervisorActivationIntent {
         {
             bail!("external supervisor activation changed its retained binding contract");
         }
+        self.delivery.validate_for(self, contract)?;
         ensure!(
             self.activation_request_digest
                 == external_supervisor_activation_request_digest(
@@ -2697,8 +2723,15 @@ pub(crate) mod tests {
             &guest_input_identity,
         )
         .unwrap();
+        let delivery = fixture_guest_package_delivery(
+            &reservation.binding_hash,
+            &reservation.request_digest,
+            &occurrence.occurrence_id,
+            &activation_request_digest,
+            &guest_input_identity,
+        );
         ExternalSupervisorActivationIntent {
-            schema: 2,
+            schema: 3,
             binding_hash: reservation.binding_hash.clone(),
             request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -2714,6 +2747,7 @@ pub(crate) mod tests {
             execution_timeout_seconds: reservation.timeout_seconds,
             post_execution_timeout_seconds,
             channel_max_bytes,
+            delivery,
         }
     }
 
@@ -3195,12 +3229,30 @@ pub(crate) mod tests {
             db.begin_external_supervisor_activation("T-one", &changed)
                 .is_err()
         );
+        let mut changed = intent.clone();
+        changed.delivery.payload_sha256 = "7".repeat(64);
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &changed)
+                .is_err()
+        );
+        let mut changed = intent.clone();
+        changed.delivery.manifest_sha256 = "8".repeat(64);
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &changed)
+                .is_err()
+        );
         drop(db);
 
         let db = RuntimeDb::open(&path).unwrap();
         assert!(
             !db.begin_external_supervisor_activation("T-one", &intent)
                 .unwrap()
+        );
+        let mut changed = intent.clone();
+        changed.delivery.payload_sha256 = "7".repeat(64);
+        assert!(
+            db.begin_external_supervisor_activation("T-one", &changed)
+                .is_err()
         );
         let observation = ExternalSupervisorActivationObservation {
             schema: 1,
@@ -3320,6 +3372,9 @@ pub(crate) mod tests {
         validate_current(&db.conn).unwrap();
         let mut replaced_intent = intent;
         replaced_intent.activation_request_digest = "6".repeat(64);
+        // Keep the nested package commitment consistent with the forged row
+        // so recovery reaches the independent activation-request recomputation.
+        replaced_intent.delivery.activation_request_digest = "6".repeat(64);
         let mut replaced_observation = observation;
         replaced_observation.activation_request_digest = "6".repeat(64);
         db.conn
@@ -3514,21 +3569,24 @@ pub(crate) mod tests {
         )
         .unwrap();
         let activation = activation_intent(&reservation, &occurrence);
-        assert!(db
-            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
-            .unwrap());
-        assert!(db
-            .external_supervisor_activation(&reservation.placement_thread_id)
-            .unwrap()
-            .unwrap()
-            .observation
-            .is_none());
+        assert!(
+            db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
+        assert!(
+            db.external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .observation
+                .is_none()
+        );
         drop(db);
 
         let db = RuntimeDb::open(&path).unwrap();
-        assert!(!db
-            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
-            .unwrap());
+        assert!(
+            !db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
         let termination = ExternalTerminationIntent {
             schema: 1,
             binding_hash: reservation.binding_hash.clone(),
@@ -3536,12 +3594,14 @@ pub(crate) mod tests {
             occurrence_id: occurrence.occurrence_id.clone(),
             termination_request_digest: "1".repeat(64),
         };
-        assert!(db
-            .begin_external_termination(&reservation.placement_thread_id, &termination)
-            .unwrap());
-        assert!(!db
-            .begin_external_termination(&reservation.placement_thread_id, &termination)
-            .unwrap());
+        assert!(
+            db.begin_external_termination(&reservation.placement_thread_id, &termination)
+                .unwrap()
+        );
+        assert!(
+            !db.begin_external_termination(&reservation.placement_thread_id, &termination)
+                .unwrap()
+        );
         let terminal = ExternalTerminalObservation {
             schema: 1,
             binding_hash: reservation.binding_hash.clone(),

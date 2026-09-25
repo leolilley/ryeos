@@ -17,11 +17,12 @@ use ryeos_external_candidate_supervisor::runtime::{
 };
 use ryeos_external_execution_contract::{
     BoundOccurrence, LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL,
-    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_LAUNCHER_FD_ENV,
-    LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, from_json_slice_strict,
+    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
+    LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV,
+    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, from_json_slice_strict,
 };
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
@@ -505,7 +506,8 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
         LifecycleAdapterRequest::ActivateSupervisor {
             occurrence,
             activation,
-            guest_inputs,
+            guest_input_identity,
+            guest_package,
             ..
         } => activate(
             adapter_executable,
@@ -514,7 +516,8 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
             &request,
             occurrence,
             activation,
-            guest_inputs,
+            guest_input_identity,
+            guest_package,
         )?,
         LifecycleAdapterRequest::ReconcileSupervisorActivation {
             occurrence,
@@ -619,7 +622,8 @@ fn activate(
     request: &LifecycleAdapterRequest,
     occurrence: &BoundOccurrence,
     activation: &ryeos_external_execution_contract::SupervisorActivationIntent,
-    guest_inputs: &ryeos_external_execution_contract::ExternalGuestInputProjection,
+    guest_input_identity: &str,
+    guest_package: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
 ) -> Result<LifecycleAdapterResponse> {
     let occurrence_root = require_occurrence(root, request, occurrence)?;
     let Some(phase_lock) = occurrence_root.try_lock_exclusive()? else {
@@ -658,8 +662,8 @@ fn activate(
             && bootstrap.execution_binding_hash == request.common().binding_hash
             && bootstrap.supervisor_runtime_hash == activation.supervisor_runtime_hash
             && bootstrap.launcher_artifact_hash == activation.launcher_artifact_hash
-            && bootstrap.guest_inputs == *guest_inputs
-            && bootstrap.guest_input_identity == guest_inputs.identity_digest()?,
+            && bootstrap.guest_input_identity == *guest_input_identity
+            && bootstrap.guest_input_identity == bootstrap.guest_inputs.identity_digest()?,
         "synthetic activation changed its retained occurrence or guest authority"
     );
 
@@ -707,81 +711,167 @@ fn activate(
     );
     ensure_document_bytes(&occurrence_root, BOOTSTRAP_FILE, &bootstrap_bytes, 0o600)?;
 
-    let runtime = occurrence_root.create_child(OsStr::new(CANDIDATE_RUNTIME_DIR), 0o700)?;
-    let base = take_directory(guest_inputs.base_snapshot.descriptor, "base-snapshot")?;
-    ryeos_project_capture::install_project_snapshot_transfer(
-        &base,
-        &runtime,
-        &ryeos_project_capture::ProjectSnapshotTransferMeasurement {
-            snapshot_hash: guest_inputs.base_snapshot.snapshot_hash.clone(),
-            closure_digest: guest_inputs.base_snapshot.closure_digest.clone(),
-            object_count: guest_inputs.base_snapshot.object_count,
-            blob_count: guest_inputs.base_snapshot.blob_count,
-            total_bytes: guest_inputs.base_snapshot.total_bytes,
-        },
-    )?;
-    occurrence_root.create_child(OsStr::new(SUPERVISOR_STATE_DIR), 0o700)?;
-    occurrence_root.create_child(OsStr::new(CANDIDATE_PRIVATE_DIR), 0o700)?;
-    let mounts = occurrence_root.create_child(OsStr::new(MOUNTS_DIR), 0o700)?;
-    if let Some(outputs) = &guest_inputs.workspace_outputs {
-        let output = take_authority(outputs.descriptor)?;
-        stage_regular(
-            &occurrence_root,
-            WORKSPACE_OUTPUT_FILE,
-            &output,
-            outputs.bytes,
-            &outputs.authority_hash,
-            0o600,
-        )?;
+    // The request carries only semantic input identity. Descriptor numbers in
+    // the bootstrap were allocated in the controller and are never adopted as
+    // adapter-local authority. Import the one inherited package under its
+    // durable digest and independently retained bootstrap/artifact coordinates.
+    let package = unsafe {
+        lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_GUEST_PACKAGE_FD_ENV)
     }
-    let mut record_index = 0;
-    for (index, input) in guest_inputs.inputs.iter().enumerate() {
-        let name = mount_name(index);
-        let authority = take_authority(input.descriptor)?;
-        let records = stage_content_records(
-            &mounts,
-            &input.content_authority,
-            &mut record_index,
-            take_authority,
+    .map_err(anyhow::Error::msg)?;
+    ensure!(
+        package.inherited_descriptor().map_err(anyhow::Error::msg)? == guest_package.descriptor,
+        "synthetic guest package descriptor changed at handoff"
+    );
+    let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
+    let expected = ryeos_external_execution_contract::staging_package::GuestStagingExpected {
+        inputs: &bootstrap.guest_inputs,
+        activation_request_digest: &activation.activation_request_digest,
+        bootstrap_sha256: &bootstrap_sha256,
+        supervisor_sha256: &retained.supervisor_digest,
+        launcher_sha256: &retained.launcher_digest,
+        maximum_regular_bytes: guest_package.regular_bytes,
+        maximum_framed_bytes: guest_package.framed_bytes,
+    };
+    let mut reader = package.stable_regular_reader_exact(
+        guest_package.framed_bytes,
+        &guest_package.payload_sha256,
+        guest_package.framed_bytes,
+    )?;
+    let staged = ryeos_external_execution::guest_staging::stage_guest_package(
+        &mut reader,
+        &occurrence_root,
+        &expected,
+    )?;
+    if let Err(error) = reader.finish() {
+        staged
+            .discard()
+            .context("discard package after failed stable read")?;
+        return Err(error);
+    }
+    let installation = (|| -> Result<()> {
+        ensure!(
+            staged.manifest().total_regular_bytes == guest_package.regular_bytes
+                && lillux::sha256_hex(
+                    lillux::canonical_json(&serde_json::to_value(staged.manifest())?)?.as_bytes()
+                ) == guest_package.manifest_sha256,
+            "synthetic package manifest contradicts durable delivery commitment"
+        );
+        ryeos_external_execution::guest_content::recheck_staged_guest_content(
+            &staged,
+            &bootstrap.guest_inputs,
         )?;
-        match input.kind {
-            ryeos_external_execution_contract::GuestMountKind::Directory => {
-                let destination = mounts.create_child(OsStr::new(&name), 0o700)?;
-                let source = authority.try_clone_pinned_directory(PathBuf::from(format!(
-                    "<synthetic-input-{index}>"
-                )))?;
-                copy_directory(&source, &destination, settings)?;
+        let guest_inputs = &bootstrap.guest_inputs;
+        let staged_root = staged.root();
+        let runtime = occurrence_root.create_child(OsStr::new(CANDIDATE_RUNTIME_DIR), 0o700)?;
+        let base = staged_root
+            .open_child_directory(OsStr::new("base"))?
+            .context("staged guest base is absent")?;
+        ryeos_project_capture::install_project_snapshot_transfer(
+            &base,
+            &runtime,
+            &ryeos_project_capture::ProjectSnapshotTransferMeasurement {
+                snapshot_hash: guest_inputs.base_snapshot.snapshot_hash.clone(),
+                closure_digest: guest_inputs.base_snapshot.closure_digest.clone(),
+                object_count: guest_inputs.base_snapshot.object_count,
+                blob_count: guest_inputs.base_snapshot.blob_count,
+                total_bytes: guest_inputs.base_snapshot.total_bytes,
+            },
+        )?;
+        occurrence_root.create_child(OsStr::new(SUPERVISOR_STATE_DIR), 0o700)?;
+        occurrence_root.create_child(OsStr::new(CANDIDATE_PRIVATE_DIR), 0o700)?;
+        let mounts = occurrence_root.create_child(OsStr::new(MOUNTS_DIR), 0o700)?;
+        if let Some(outputs) = &guest_inputs.workspace_outputs {
+            let output = staged_root
+                .open_pinned_regular(OsStr::new("workspace_outputs"), false)?
+                .context("staged workspace-output authority is absent")?
+                .inherited_descriptor_authority()?;
+            stage_regular(
+                &occurrence_root,
+                WORKSPACE_OUTPUT_FILE,
+                &output,
+                outputs.bytes,
+                &outputs.authority_hash,
+                0o600,
+            )?;
+        }
+        let mut record_index = 0;
+        for (index, input) in guest_inputs.inputs.iter().enumerate() {
+            let name = mount_name(index);
+            for (_, digest, bytes) in input.content_authority.record_descriptors() {
+                let source = staged_root
+                    .open_pinned_regular(OsStr::new(&format!("record-{record_index:02}")), false)?
+                    .context("staged guest content record is absent")?
+                    .inherited_descriptor_authority()?;
+                stage_regular(
+                    &mounts,
+                    &content_record_name(record_index),
+                    &source,
+                    bytes,
+                    digest,
+                    0o600,
+                )?;
+                record_index += 1;
             }
-            ryeos_external_execution_contract::GuestMountKind::RegularFile => {
-                let mode = input
-                    .normalized_mode
-                    .context("synthetic regular input has no retained mode")?;
-                match (&input.content_authority, records.first()) {
-                    (ryeos_external_execution_contract::GuestMountContentAuthority::RawFile { sha256 }, None) =>
-                        stage_regular(&mounts, &name, &authority, input.bytes, sha256, mode)?,
-                    (ryeos_external_execution_contract::GuestMountContentAuthority::ProductManifest {
-                        manifest_kind, manifest_hash, manifest_bytes, ..
-                    }, Some(manifest)) => {
-                        ryeos_state::external_content::realization_verification::verify_staged_external_realization(
-                            &authority, manifest,
-                            match manifest_kind {
-                                ryeos_external_execution_contract::GuestProductManifestKind::Content =>
-                                    ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
-                                ryeos_external_execution_contract::GuestProductManifestKind::LargeContent =>
-                                    ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
-                            }, manifest_hash, *manifest_bytes,
-                            ryeos_state::objects::ExternalContentKind::File, input.bytes,
+            match input.kind {
+                ryeos_external_execution_contract::GuestMountKind::Directory => {
+                    if matches!(
+                        input.content_authority,
+                        ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }
+                    ) {
+                        mounts.create_child(OsStr::new(&name), 0o700)?;
+                    } else {
+                        let staged_name = format!("input-{index:02}");
+                        let observed = staged_root
+                            .entry_no_follow(OsStr::new(&staged_name))?
+                            .context("staged guest directory input is absent")?;
+                        ensure!(
+                            staged_root.move_child_if_same_noreplace_to(&observed, &mounts)?,
+                            "staged guest directory destination is occupied"
+                        );
+                        let moved = mounts
+                            .open_child_directory(OsStr::new(&staged_name))?
+                            .context("moved guest directory input is absent")?;
+                        mounts.rename_child_directory_noreplace(
+                            OsStr::new(&staged_name),
+                            OsStr::new(&name),
+                            &moved,
                         )?;
-                        ensure!(input.bytes <= MAX_ARTIFACT_BYTES,
-                            "synthetic product file exceeds admitted staging bound");
-                        let (bytes, after) = authority.read_regular_file_stable_bounded(MAX_ARTIFACT_BYTES)?;
-                        ensure!(after.size() == input.bytes,
-                            "synthetic product file changed while staging");
-                        ensure_document_bytes(&mounts, &name, &bytes, mode)?;
                     }
-                    _ => anyhow::bail!("synthetic regular input has no matching content authority"),
+                }
+                ryeos_external_execution_contract::GuestMountKind::RegularFile => {
+                    ensure!(
+                    !matches!(input.content_authority, ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }),
+                    "synthetic private scratch must be a directory"
+                );
+                    let staged_name = format!("input-{index:02}");
+                    let observed = staged_root
+                        .entry_no_follow(OsStr::new(&staged_name))?
+                        .context("staged guest regular input is absent")?;
+                    ensure!(
+                        staged_root.move_child_if_same_noreplace_to(&observed, &mounts)?,
+                        "staged guest regular destination is occupied"
+                    );
+                    let moved = mounts
+                        .open_regular(OsStr::new(&staged_name), false)?
+                        .context("moved guest regular input is absent")?;
+                    mounts.rename_regular_child_noreplace_atomic(
+                        OsStr::new(&staged_name),
+                        OsStr::new(&name),
+                        &moved,
+                    )?;
                 }
             }
+        }
+        Ok(())
+    })();
+    let cleanup = staged.discard();
+    match (installation, cleanup) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(error.context("guest package cleanup failed")),
+        (Err(error), Err(cleanup)) => {
+            return Err(error.context(format!("guest package cleanup also failed: {cleanup:#}")));
         }
     }
 
@@ -1363,6 +1453,7 @@ fn content_record_name(index: usize) -> String {
 /// Preserve the existing authority records, not a new attestation. The real
 /// supervisor verifies product manifests and source binding/manifest/tree joins
 /// before Ready. Slots are flattened across mounts, with source binding first.
+#[cfg(test)]
 fn stage_content_records(
     mounts: &lillux::PinnedDirectory,
     content: &ryeos_external_execution_contract::GuestMountContentAuthority,
@@ -1440,32 +1531,6 @@ fn stage_regular(
         "synthetic regular input changed during staging"
     );
     ensure_document_bytes(directory, name, &bytes, mode)
-}
-
-fn copy_directory(
-    source: &lillux::PinnedDirectory,
-    destination: &lillux::PinnedDirectory,
-    settings: &SyntheticSettings,
-) -> Result<()> {
-    source.copy_contents_to_filtered(
-        destination,
-        lillux::DirectoryTraversalBudget::new(
-            settings.maximum_copy_entries,
-            settings.maximum_copy_depth,
-        ),
-        |_| Ok(false),
-    )
-}
-
-fn take_directory(descriptor: u32, label: &str) -> Result<lillux::PinnedDirectory> {
-    let authority = take_authority(descriptor)?;
-    authority.try_clone_pinned_directory(PathBuf::from(format!("<synthetic-{label}>")))
-}
-
-fn take_authority(descriptor: u32) -> Result<lillux::InheritedDescriptorAuthority> {
-    // SAFETY: operation request descriptor coordinates are installed exactly
-    // once by the admitted runner and consumed during single-threaded startup.
-    unsafe { lillux::take_inherited_descriptor_authority(descriptor) }.map_err(anyhow::Error::msg)
 }
 
 fn verify_artifact(

@@ -19,12 +19,12 @@ use ryeos_external_execution::transport::ExternalExecutionChannelTransport as _;
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, ExternalGuestInputProjection, GuestBaseSnapshotInput,
     GuestMountAccess, GuestMountInput, GuestMountKind, GuestMountRole, LIFECYCLE_ADAPTER_PROTOCOL,
-    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_LAUNCHER_FD_ENV,
-    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleCapability,
-    LifecycleOperationCommon, MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent,
-    TerminationIntent, from_json_slice_strict,
+    LIFECYCLE_BOOTSTRAP_FD_ENV, LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV,
+    LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
+    LifecycleCapability, LifecycleOperationCommon, MAX_LIFECYCLE_RESPONSE_BYTES,
+    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 use ryeos_state::external_execution::admission::{
     AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
@@ -2471,6 +2471,12 @@ fn try_invoke_operation(
         ));
         inherited.push(handle);
     }
+    if let LifecycleAdapterRequest::ActivateSupervisor { guest_package, .. } = request {
+        environment.push((
+            LIFECYCLE_GUEST_PACKAGE_FD_ENV.into(),
+            guest_package.descriptor.to_string(),
+        ));
+    }
     let output = run_lifecycle_adapter(
         adapter,
         LifecycleAdapterInvocation::Operate,
@@ -2501,8 +2507,8 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
     let (_, _, supervisor_artifact) = artifact(&supervisor);
     let (_, _, launcher_artifact) = artifact(&launcher);
     let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
-    let provider_spec = lillux::sealed_memfd(c"synthetic-provider-spec", provider_spec_bytes)
-        .unwrap();
+    let provider_spec =
+        lillux::sealed_memfd(c"synthetic-provider-spec", provider_spec_bytes).unwrap();
     let provider_spec_artifact = LifecycleArtifactInspection {
         descriptor: provider_spec.inherited_descriptor().unwrap(),
         digest: lillux::sha256_hex(provider_spec_bytes),
@@ -5387,7 +5393,7 @@ fn exercise_activation_fault(fault: &str) {
         "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher"
     ));
     let (_, _, _) = artifact(&adapter);
-    let (_, _, _) = artifact(&supervisor);
+    let (supervisor_hash, _, _) = artifact(&supervisor);
     let (launcher_hash, _, _) = artifact(&launcher);
 
     let state = ActivationFixtureDirectory::new("provider_state");
@@ -5690,11 +5696,58 @@ fn exercise_activation_fault(fault: &str) {
         post_execution_timeout_seconds: bootstrap.post_execution_timeout_seconds,
         channel_max_bytes: bootstrap.channel_max_bytes,
     };
+    let bootstrap_bytes = bootstrap.canonical_bytes().unwrap();
+    let bootstrap_handle =
+        lillux::sealed_memfd(c"synthetic-package-bootstrap", &bootstrap_bytes).unwrap();
+    let package_inputs = ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority::new(
+        guest_inputs.clone(),
+        base_authority.clone(),
+        None,
+        vec![runtime_authority.clone()],
+        vec![manifest_authority.clone()],
+        Vec::new(),
+    )
+    .unwrap();
+    let package_root = lillux::PinnedDirectory::open(state.path())
+        .unwrap()
+        .unwrap();
+    let package_parent = package_root
+        .open_or_create_child(std::ffi::OsStr::new("prepared-packages"), 0o700)
+        .unwrap();
+    let bootstrap_hash = lillux::sha256_hex(&bootstrap_bytes);
+    let package_expected =
+        ryeos_external_execution_contract::staging_package::GuestStagingExpected {
+            inputs: &guest_inputs,
+            activation_request_digest: &activation.activation_request_digest,
+            bootstrap_sha256: &bootstrap_hash,
+            supervisor_sha256: &supervisor_hash,
+            launcher_sha256: &activation.launcher_artifact_hash,
+            maximum_regular_bytes: 4 * 1024 * 1024 * 1024,
+            maximum_framed_bytes: 4 * 1024 * 1024 * 1024,
+        };
+    let package = ryeos_external_execution::guest_package_producer::prepare_private_guest_package(
+        &package_parent,
+        &package_inputs,
+        &bootstrap_handle,
+        &supervisor,
+        &launcher,
+        &package_expected,
+        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(120)),
+    )
+    .unwrap();
+    let package_authority = package.delivery_descriptor().unwrap();
     let activate = LifecycleAdapterRequest::ActivateSupervisor {
         common: common("activate"),
         occurrence: occurrence.clone(),
         activation: activation.clone(),
-        guest_inputs,
+        guest_input_identity: guest_inputs.identity_digest().unwrap(),
+        guest_package: ryeos_external_execution_contract::LifecycleGuestPackageDelivery {
+            descriptor: package_authority.inherited_descriptor().unwrap(),
+            payload_sha256: package.sha256().to_owned(),
+            manifest_sha256: package.manifest_sha256().to_owned(),
+            regular_bytes: package.manifest().total_regular_bytes,
+            framed_bytes: package.bytes(),
+        },
     };
     // This fixture stages unstripped debug supervisor/launcher binaries. It
     // hashes and reads over a gigabyte before the SpawnIntent fault boundary.
@@ -5708,10 +5761,11 @@ fn exercise_activation_fault(fault: &str) {
         credential,
         &activate,
         Some(&bootstrap),
-        vec![base_authority, runtime_authority, manifest_authority],
+        vec![package_authority],
         lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
     )
     .unwrap_err();
+    package.discard().unwrap();
     assert!(
         error
             .to_string()

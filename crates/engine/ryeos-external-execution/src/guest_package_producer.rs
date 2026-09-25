@@ -34,6 +34,7 @@ pub struct PreparedGuestPackage {
     manifest_sha256: String,
     bytes: u64,
     sha256: String,
+    discarded: bool,
 }
 
 impl PreparedGuestPackage {
@@ -77,8 +78,21 @@ impl PreparedGuestPackage {
     }
 
     /// Remove the exact private package generation after delivery settles.
-    pub fn discard(self) -> Result<()> {
-        remove_private_package(&self.parent, &self.name, &self.root)
+    pub fn discard(mut self) -> Result<()> {
+        remove_private_package(&self.parent, &self.name, &self.root)?;
+        self.discarded = true;
+        Ok(())
+    }
+}
+
+impl Drop for PreparedGuestPackage {
+    fn drop(&mut self) {
+        if !self.discarded {
+            // A failed early activation path must not retain a private copy of
+            // the bootstrap secret. Explicit discard still reports failures;
+            // Drop is only the final best-effort guard for error/unwind paths.
+            let _ = remove_private_package(&self.parent, &self.name, &self.root);
+        }
     }
 }
 
@@ -148,6 +162,7 @@ pub fn prepare_private_guest_package(
             manifest_sha256,
             bytes,
             sha256,
+            discarded: false,
         }),
         Err(error) => {
             if let Err(cleanup) = remove_private_package(&owner, &name, &root) {

@@ -6657,8 +6657,11 @@ mod imp {
                 )
                 .unwrap();
                 let entry = if sealed {
-                    crate::sealed_memfd(c"proc-exec-test", &std::fs::read(&executable).unwrap())
-                        .unwrap()
+                    crate::sealed_executable_memfd(
+                        c"proc-exec-test",
+                        &std::fs::read(&executable).unwrap(),
+                    )
+                    .unwrap()
                 } else {
                     crate::secure_fs::pin_canonical_mount_source(&executable).unwrap()
                 };
@@ -6693,7 +6696,7 @@ mod imp {
                             crate::sha256_hex(&bytes),
                             std::env::var("LILLUX_PROBE_GUEST_SHA256").unwrap()
                         );
-                        crate::sealed_memfd(c"exact-native-guest", &bytes).unwrap()
+                        crate::sealed_executable_memfd(c"exact-native-guest", &bytes).unwrap()
                     })
                 } else {
                     None

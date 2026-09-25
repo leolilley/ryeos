@@ -361,7 +361,7 @@ pub fn supervised_launcher_attachment_status_pipe()
 /// data.
 ///
 /// The returned descriptor is always above stdio, retains `FD_CLOEXEC`, and
-/// carries all four write-prevention seals. Callers explicitly inherit it only
+/// is owner-private (`0600`) with all four write-prevention seals. Callers explicitly inherit it only
 /// for the child exec that consumes the data.
 #[cfg(target_os = "linux")]
 pub fn sealed_memfd(
@@ -372,7 +372,7 @@ pub fn sealed_memfd(
         name,
         bytes,
         libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        None,
+        Some(0o600),
     )
 }
 
@@ -432,7 +432,7 @@ fn sealed_memfd_with_flags(
         && unsafe { libc::fchmod(file.as_raw_fd(), mode) } < 0
     {
         return Err(format!(
-            "restrict sealed executable memfd permissions: {}",
+            "restrict sealed memfd permissions: {}",
             std::io::Error::last_os_error()
         ));
     }

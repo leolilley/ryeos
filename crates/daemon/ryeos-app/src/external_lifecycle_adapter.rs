@@ -6,18 +6,18 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution::lifecycle_adapter::{
     LifecycleAdapterInvocation, run_lifecycle_adapter,
 };
+use ryeos_external_execution_contract::staging_package::GuestStagingExpected;
 use ryeos_external_execution_contract::{
     AllocationReservation, BoundOccurrence, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
-    LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
+    LIFECYCLE_CREDENTIAL_FD_ENV, LIFECYCLE_GUEST_PACKAGE_FD_ENV, LIFECYCLE_HOSTS_FD_ENV,
+    LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
-    LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse,
-    LifecycleAdapterRequest, LifecycleAdapterResponse, LifecycleArtifactInspection,
-    LifecycleArtifactRole, LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES,
-    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
-    from_json_slice_strict,
+    LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
+    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
+    LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 
 use crate::external_artifacts::{
@@ -26,12 +26,13 @@ use crate::external_artifacts::{
 use crate::external_placement::{
     ExternalAllocationResolution, ExternalLifecycleObservation, ExternalPlacementBackend,
     ExternalSupervisorActivation, ExternalSupervisorActivationResolution,
-    ExternalTerminationResolution,
+    ExternalTerminationResolution, SupervisorGuestPackage,
 };
 use crate::node_config::sections::external_execution::ExternalPlacementBackendContract;
 use crate::runtime_db::external_execution::{
     ExternalAllocationOccurrence, ExternalAllocationReservation,
-    ExternalSupervisorActivationIntent, ExternalTerminationIntent,
+    ExternalGuestPackageDeliveryCommitment, ExternalSupervisorActivationIntent,
+    ExternalTerminationIntent,
 };
 use crate::vault::placement::PlacementCredential;
 
@@ -75,11 +76,8 @@ fn capture_lifecycle_network_inputs(
     let hosts = capture(&policy.hosts)?;
     lillux::network::NetworkContext::from_config_bytes(resolver.bytes(), hosts.bytes())
         .context("validate captured lifecycle network inputs")?;
-    let captured = ExternalCapturedNetworkInputs::from_bytes(
-        policy,
-        resolver.bytes(),
-        hosts.bytes(),
-    )?;
+    let captured =
+        ExternalCapturedNetworkInputs::from_bytes(policy, resolver.bytes(), hosts.bytes())?;
     captured.validate_for(policy)?;
     let policy_sha256 = policy.digest()?;
 
@@ -209,6 +207,7 @@ impl ExecutableExternalPlacementBackend {
         request: &LifecycleAdapterRequest,
         bootstrap: Option<&ryeos_state::external_execution::transport::ExternalSupervisorBootstrap>,
         guest_inputs: Option<&ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
+        guest_package: Option<&lillux::InheritedDescriptorAuthority>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -223,9 +222,8 @@ impl ExecutableExternalPlacementBackend {
         // cannot queue behind a new exclusive fork after budget admission.
         let descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)?;
         self.qualify_offline(contract, credential)?;
-        let network_inputs = capture_lifecycle_network_inputs(
-            &contract.controller_transport.network_inputs,
-        )?;
+        let network_inputs =
+            capture_lifecycle_network_inputs(&contract.controller_transport.network_inputs)?;
         let request_handle = lillux::sealed_memfd(
             c"ryeos-lifecycle-operation-request",
             &request.canonical_bytes()?,
@@ -340,7 +338,26 @@ impl ExecutableExternalPlacementBackend {
                 guest_inputs.projection().identity_digest()? == guest_inputs.identity_digest()?,
                 "external guest input identity changed before adapter launch"
             );
-            inherited.extend(guest_inputs.retained_descriptors());
+            if let LifecycleAdapterRequest::ActivateSupervisor {
+                guest_input_identity,
+                ..
+            } = request
+            {
+                ensure!(
+                    guest_inputs.identity_digest()? == *guest_input_identity,
+                    "external guest input identity changed at package handoff"
+                );
+            }
+        }
+        if let Some(package) = guest_package {
+            envs.push((
+                LIFECYCLE_GUEST_PACKAGE_FD_ENV.into(),
+                package
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ));
+            inherited.push(package.clone());
         }
         drop(descriptors);
         let remaining_timeout_ms = deadline.remaining().as_millis();
@@ -422,6 +439,61 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             "signed external lifecycle generation contradicts the protected placement binding"
         );
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_guest_package(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        activation_request_digest: &str,
+        parent: &lillux::PinnedDirectory,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<SupervisorGuestPackage> {
+        let bootstrap_bytes = bootstrap.canonical_bytes()?;
+        let guest_input_identity = guest_inputs.identity_digest()?;
+        let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
+        let bootstrap_file =
+            lillux::sealed_memfd(c"ryeos-external-guest-bootstrap", &bootstrap_bytes)
+                .map_err(anyhow::Error::msg)?;
+        let expected = GuestStagingExpected {
+            inputs: guest_inputs.projection(),
+            activation_request_digest,
+            bootstrap_sha256: &bootstrap_sha256,
+            supervisor_sha256: &self.supervisor_hash,
+            launcher_sha256: &self.launcher_hash,
+            maximum_regular_bytes: contract.max_guest_package_regular_bytes,
+            maximum_framed_bytes: contract.max_guest_package_framed_bytes,
+        };
+        let package =
+            ryeos_external_execution::guest_package_producer::prepare_private_guest_package(
+                parent,
+                guest_inputs,
+                &bootstrap_file,
+                &self.supervisor,
+                &self.launcher,
+                &expected,
+                deadline,
+            )?;
+        let commitment = ExternalGuestPackageDeliveryCommitment {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: activation_request_digest.to_owned(),
+            guest_input_identity,
+            manifest_sha256: package.manifest_sha256().to_owned(),
+            payload_sha256: package.sha256().to_owned(),
+            regular_bytes: package.manifest().total_regular_bytes,
+            framed_bytes: package.bytes(),
+        };
+        Ok(SupervisorGuestPackage::Prepared {
+            package,
+            commitment,
+        })
     }
 
     fn allocate(
@@ -557,7 +629,7 @@ impl ExecutableExternalPlacementBackend {
                 reservation: reservation_wire,
             }
         };
-        let response = self.invoke(contract, credential, &request, None, None, deadline)?;
+        let response = self.invoke(contract, credential, &request, None, None, None, deadline)?;
         let value = match response.value {
             LifecycleAdapterResponse::AllocationBound {
                 occurrence_id,
@@ -614,6 +686,21 @@ impl ExecutableExternalPlacementBackend {
             &reservation.binding_hash,
             &intent.activation_request_digest,
         );
+        let package_authority = if reconcile {
+            None
+        } else {
+            let package = activation_authority
+                .context("first lifecycle activation has no guest package authority")?
+                .prepared_guest_package()?;
+            ensure!(
+                package.sha256() == intent.delivery.payload_sha256
+                    && package.manifest_sha256() == intent.delivery.manifest_sha256
+                    && package.bytes() == intent.delivery.framed_bytes
+                    && package.manifest().total_regular_bytes == intent.delivery.regular_bytes,
+                "prepared guest package changed after durable activation claim"
+            );
+            Some(package.delivery_descriptor()?)
+        };
         let request = if reconcile {
             LifecycleAdapterRequest::ReconcileSupervisorActivation {
                 common,
@@ -625,11 +712,18 @@ impl ExecutableExternalPlacementBackend {
                 common,
                 occurrence: occurrence_wire,
                 activation,
-                guest_inputs: activation_authority
-                    .context("first lifecycle activation has no guest input authority")?
-                    .guest_inputs()
-                    .projection()
-                    .clone(),
+                guest_input_identity: intent.guest_input_identity.clone(),
+                guest_package: LifecycleGuestPackageDelivery {
+                    descriptor: package_authority
+                        .as_ref()
+                        .expect("first activation owns a prepared package")
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
+                    payload_sha256: intent.delivery.payload_sha256.clone(),
+                    manifest_sha256: intent.delivery.manifest_sha256.clone(),
+                    regular_bytes: intent.delivery.regular_bytes,
+                    framed_bytes: intent.delivery.framed_bytes,
+                },
             }
         };
         let bootstrap = activation_authority.map(ExternalSupervisorActivation::bootstrap);
@@ -640,6 +734,7 @@ impl ExecutableExternalPlacementBackend {
             &request,
             bootstrap,
             guest_inputs,
+            package_authority.as_ref(),
             deadline,
         )?;
         let value = match response.value {
@@ -705,7 +800,7 @@ impl ExecutableExternalPlacementBackend {
         ));
         // Late terminal evidence may settle cleanup, never start execution.
         match self
-            .invoke(contract, credential, &request, None, None, deadline)?
+            .invoke(contract, credential, &request, None, None, None, deadline)?
             .value
         {
             LifecycleAdapterResponse::OccurrenceTerminal {

@@ -27,7 +27,8 @@ use crate::runtime_db::external_execution::{
     EXTERNAL_ALLOCATION_RESERVATION_SCHEMA, ExternalAllocationContactClaim,
     ExternalAllocationOccurrence, ExternalAllocationOwner, ExternalAllocationPhase,
     ExternalAllocationRecord, ExternalAllocationReservation, ExternalDedicatedSessionOwner,
-    ExternalNoOccurrenceEvidence, ExternalObservationTiming, ExternalSupervisorActivationIntent,
+    ExternalGuestPackageDeliveryCommitment, ExternalNoOccurrenceEvidence,
+    ExternalObservationTiming, ExternalSupervisorActivationIntent,
     ExternalSupervisorActivationObservation, ExternalSupervisorActivationRecord,
     ExternalTerminalObservation, ExternalTerminationIntent,
 };
@@ -60,6 +61,22 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
     ) -> Result<()>;
+
+    /// Prepare and locally re-import the exact secret-bearing guest package
+    /// before the durable activation/contact claim. No provider contact is
+    /// permitted here. The returned commitment is inserted with that claim.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_guest_package(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+        guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        activation_request_digest: &str,
+        parent: &lillux::PinnedDirectory,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<SupervisorGuestPackage>;
 
     /// The only allocator mutation. It is reachable solely by consuming the
     /// process-local contact permit after the durable contact CAS.
@@ -172,6 +189,36 @@ pub(crate) enum ExternalSupervisorActivationResolution {
 pub(crate) struct ExternalSupervisorActivation {
     bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+    guest_package: Option<SupervisorGuestPackage>,
+}
+
+pub(crate) enum SupervisorGuestPackage {
+    Prepared {
+        package: ryeos_external_execution::guest_package_producer::PreparedGuestPackage,
+        commitment: ExternalGuestPackageDeliveryCommitment,
+    },
+    /// Pure in-process fault fixtures exercise the journal without a provider.
+    /// Installed adapters always use the prepared package variant.
+    #[cfg(test)]
+    Fixture(ExternalGuestPackageDeliveryCommitment),
+}
+
+impl SupervisorGuestPackage {
+    fn commitment(&self) -> &ExternalGuestPackageDeliveryCommitment {
+        match self {
+            Self::Prepared { commitment, .. } => commitment,
+            #[cfg(test)]
+            Self::Fixture(commitment) => commitment,
+        }
+    }
+
+    fn discard(self) -> Result<()> {
+        match self {
+            Self::Prepared { package, .. } => package.discard(),
+            #[cfg(test)]
+            Self::Fixture(_) => Ok(()),
+        }
+    }
 }
 
 /// Non-secret result of occurrence/bootstrap authentication.  The raw
@@ -721,6 +768,26 @@ impl ExternalSupervisorActivation {
         &self,
     ) -> &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority {
         &self.guest_inputs
+    }
+
+    pub(crate) fn prepared_guest_package(
+        &self,
+    ) -> Result<&ryeos_external_execution::guest_package_producer::PreparedGuestPackage> {
+        match self.guest_package.as_ref() {
+            Some(SupervisorGuestPackage::Prepared { package, .. }) => Ok(package),
+            #[cfg(test)]
+            Some(SupervisorGuestPackage::Fixture(_)) => {
+                bail!("in-process fixture has no provider guest package")
+            }
+            None => bail!("external guest package already discarded"),
+        }
+    }
+
+    fn discard_guest_package(&mut self) -> Result<()> {
+        self.guest_package
+            .take()
+            .context("external activation lost its prepared guest package")?
+            .discard()
     }
 }
 
@@ -3351,7 +3418,7 @@ impl ExternalPlacementReconciliation {
             );
         }
         let retained = self.state_store.external_supervisor_activation(placement)?;
-        let (intent, activation, owns_contact, deadline) = if let Some(record) = retained {
+        let (intent, mut activation, owns_contact, deadline) = if let Some(record) = retained {
             record
                 .intent
                 .validate_contract(&current.reservation, occurrence, &self.contract)?;
@@ -3378,40 +3445,74 @@ impl ExternalPlacementReconciliation {
                 .guest_inputs
                 .take()
                 .context("first supervisor activation has no exact guest input authority")?;
-            let (intent, activation) = supervisor_activation(
+            let package_parent = self.state_store.external_guest_package_parent()?;
+            let (intent, mut activation) = supervisor_activation(
                 &self.contract,
                 &current.reservation,
                 occurrence,
                 &self.channel_authority,
                 &self.program,
                 guest_inputs,
+                self.backend.as_ref(),
+                &package_parent,
+                deadline,
             )?;
-            ensure!(
-                self.state_store
-                    .begin_external_supervisor_activation(placement, &intent)?,
-                "fresh external activation lost its unique contact claim"
-            );
+            let claim = self
+                .state_store
+                .begin_external_supervisor_activation(placement, &intent);
+            if !matches!(claim.as_ref(), Ok(true)) {
+                let cleanup = activation.discard_guest_package();
+                if let Err(cleanup) = cleanup {
+                    return Err(anyhow::anyhow!(
+                        "external activation claim failed and guest package cleanup failed: {claim:?}; {cleanup:#}"
+                    ));
+                }
+                ensure!(
+                    claim?,
+                    "fresh external activation lost its unique contact claim"
+                );
+            }
             (intent, Some(activation), true, deadline)
         };
-        ensure!(
-            !deadline.has_elapsed(),
-            "external activation deadline expired before contact"
-        );
+        if deadline.has_elapsed() {
+            if let Some(activation) = activation.as_mut() {
+                activation.discard_guest_package().context(
+                    "external activation deadline expired and guest package cleanup failed",
+                )?;
+            }
+            bail!("external activation deadline expired before contact");
+        }
         let ExternalLifecycleObservation {
             value: resolution,
             deadline_exceeded,
         } = if owns_contact {
-            self.backend.activate_supervisor(
+            let activation = activation
+                .as_mut()
+                .expect("fresh activation retains its guest authority");
+            let result = self.backend.activate_supervisor(
                 &self.contract,
                 &self.credential,
                 &current.reservation,
                 occurrence,
                 &intent,
-                activation
-                    .as_ref()
-                    .expect("fresh activation retains its guest authority"),
+                activation,
                 deadline,
-            )?
+            );
+            let cleanup = activation.discard_guest_package();
+            match (result, cleanup) {
+                (Ok(result), Ok(())) => result,
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(_), Err(error)) => {
+                    return Err(error.context(
+                        "external guest package cleanup failed after activation contact",
+                    ));
+                }
+                (Err(error), Err(cleanup)) => {
+                    return Err(error.context(format!(
+                        "external guest package cleanup also failed after activation contact: {cleanup:#}"
+                    )));
+                }
+            }
         } else {
             self.backend.reconcile_supervisor_activation(
                 &self.contract,
@@ -3563,6 +3664,9 @@ fn supervisor_activation(
     authority: &ExternalChannelAuthority,
     program: &AdmittedExternalExecutionProgram,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+    backend: &dyn ExternalPlacementBackend,
+    package_parent: &lillux::PinnedDirectory,
+    deadline: lillux::time::MonotonicDeadline,
 ) -> Result<(
     ExternalSupervisorActivationIntent,
     ExternalSupervisorActivation,
@@ -3585,6 +3689,7 @@ fn supervisor_activation(
         .context("external supervisor post-execution timeout overflow")?;
     validate_external_placement_program(program, reservation, contract)?;
     program.validate_guest_inputs(guest_inputs.projection())?;
+    let supervisor_runtime_hash = program.runtime_manifest_hash()?.to_owned();
     let guest_input_identity = guest_inputs.identity_digest()?;
     ensure!(
         guest_inputs.projection().base_snapshot.snapshot_hash == reservation.base_snapshot_hash,
@@ -3602,7 +3707,7 @@ fn supervisor_activation(
         admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
         base_snapshot_hash: reservation.base_snapshot_hash.clone(),
         execution_binding_hash: reservation.binding_hash.clone(),
-        supervisor_runtime_hash: program.runtime_manifest_hash()?.to_owned(),
+        supervisor_runtime_hash: supervisor_runtime_hash.clone(),
         launcher_artifact_hash: contract.launcher_artifact_hash.clone(),
         candidate_program: program.clone(),
         guest_input_identity: guest_input_identity.clone(),
@@ -3626,24 +3731,45 @@ fn supervisor_activation(
             channel_max_bytes,
             &guest_input_identity,
         )?;
+    let guest_package = backend.prepare_guest_package(
+        contract,
+        reservation,
+        occurrence,
+        &bootstrap,
+        &guest_inputs,
+        &activation_request_digest,
+        package_parent,
+        deadline,
+    )?;
+    let delivery = guest_package.commitment().clone();
     let intent = ExternalSupervisorActivationIntent {
-        schema: 2,
+        schema: 3,
         binding_hash: reservation.binding_hash.clone(),
         request_digest: reservation.request_digest.clone(),
         occurrence_id: occurrence.occurrence_id.clone(),
-        supervisor_runtime_hash: program.runtime_manifest_hash()?.to_owned(),
+        supervisor_runtime_hash,
         guest_input_identity,
         activation_request_digest,
         attachment_deadline_ms,
         execution_timeout_seconds: reservation.timeout_seconds,
         post_execution_timeout_seconds,
         channel_max_bytes,
+        delivery,
     };
+    if let Err(error) = intent.validate_contract(reservation, occurrence, contract) {
+        if let Err(cleanup) = guest_package.discard() {
+            return Err(error.context(format!(
+                "prepared guest package cleanup also failed after intent refusal: {cleanup:#}"
+            )));
+        }
+        return Err(error);
+    }
     Ok((
         intent,
         ExternalSupervisorActivation {
             bootstrap,
             guest_inputs,
+            guest_package: Some(guest_package),
         },
     ))
 }
@@ -4460,8 +4586,24 @@ pub mod test_support {
             .context("composed fixture post-execution timeout overflow")?;
         let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
         let guest_input_identity = guest_inputs.identity_digest()?;
+        let activation_request_digest = external_supervisor_activation_request_digest(
+            &reservation,
+            &occurrence,
+            &contract,
+            attachment_deadline_ms,
+            post_execution_timeout_seconds,
+            channel_max_bytes,
+            &guest_input_identity,
+        )?;
+        let delivery = crate::runtime_db::external_execution::fixture_guest_package_delivery(
+            &reservation.binding_hash,
+            &reservation.request_digest,
+            &occurrence.occurrence_id,
+            &activation_request_digest,
+            &guest_input_identity,
+        );
         let activation = ExternalSupervisorActivationIntent {
-            schema: 2,
+            schema: 3,
             binding_hash: reservation.binding_hash.clone(),
             request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -4471,19 +4613,12 @@ pub mod test_support {
                 .runtime_manifest_hash
                 .clone(),
             guest_input_identity: guest_input_identity.clone(),
-            activation_request_digest: external_supervisor_activation_request_digest(
-                &reservation,
-                &occurrence,
-                &contract,
-                attachment_deadline_ms,
-                post_execution_timeout_seconds,
-                channel_max_bytes,
-                &guest_input_identity,
-            )?,
+            activation_request_digest,
             attachment_deadline_ms,
             execution_timeout_seconds: reservation.timeout_seconds,
             post_execution_timeout_seconds,
             channel_max_bytes,
+            delivery,
         };
         ensure!(
             state
@@ -4720,6 +4855,32 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    fn fixture_guest_package(
+        contract: &ExternalPlacementBackendContract,
+        reservation: &ExternalAllocationReservation,
+        occurrence: &ExternalAllocationOccurrence,
+        guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+        activation_request_digest: &str,
+    ) -> Result<SupervisorGuestPackage> {
+        let commitment = ExternalGuestPackageDeliveryCommitment {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: activation_request_digest.into(),
+            guest_input_identity: guest_inputs.identity_digest()?,
+            manifest_sha256: "1".repeat(64),
+            payload_sha256: "2".repeat(64),
+            regular_bytes: 1,
+            framed_bytes: 21,
+        };
+        ensure!(
+            commitment.regular_bytes <= contract.max_guest_package_regular_bytes
+                && commitment.framed_bytes <= contract.max_guest_package_framed_bytes,
+            "fixture package exceeds signed budget"
+        );
+        Ok(SupervisorGuestPackage::Fixture(commitment))
+    }
     fn test_observation_timing() -> ExternalObservationTiming {
         ExternalObservationTiming::Startup {
             deadline_exceeded: false,
@@ -4933,6 +5094,26 @@ mod tests {
             Ok(())
         }
 
+        fn prepare_guest_package(
+            &self,
+            contract: &ExternalPlacementBackendContract,
+            reservation: &ExternalAllocationReservation,
+            occurrence: &ExternalAllocationOccurrence,
+            _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+            guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+            activation_request_digest: &str,
+            _parent: &lillux::PinnedDirectory,
+            _deadline: lillux::time::MonotonicDeadline,
+        ) -> Result<SupervisorGuestPackage> {
+            fixture_guest_package(
+                contract,
+                reservation,
+                occurrence,
+                guest_inputs,
+                activation_request_digest,
+            )
+        }
+
         fn allocate(
             &self,
             _contract: &ExternalPlacementBackendContract,
@@ -5116,6 +5297,26 @@ mod tests {
                 "fixture backend received widened or wrong authority"
             );
             Ok(())
+        }
+
+        fn prepare_guest_package(
+            &self,
+            contract: &ExternalPlacementBackendContract,
+            reservation: &ExternalAllocationReservation,
+            occurrence: &ExternalAllocationOccurrence,
+            _bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+            guest_inputs: &ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
+            activation_request_digest: &str,
+            _parent: &lillux::PinnedDirectory,
+            _deadline: lillux::time::MonotonicDeadline,
+        ) -> Result<SupervisorGuestPackage> {
+            fixture_guest_package(
+                contract,
+                reservation,
+                occurrence,
+                guest_inputs,
+                activation_request_digest,
+            )
         }
     }
 
@@ -6855,6 +7056,7 @@ mod tests {
             &dir.path().join("guest-inputs"),
             &reservation.base_snapshot_hash,
         );
+        let package_parent = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
         let (activation_intent, activation) = supervisor_activation(
             &contract,
             &reservation,
@@ -6862,6 +7064,9 @@ mod tests {
             &authority,
             &AdmittedExternalExecutionProgram::StructuredSession(program()),
             guest_inputs,
+            &backend,
+            &package_parent,
+            reservation.startup_deadline().unwrap(),
         )
         .unwrap();
         assert!(

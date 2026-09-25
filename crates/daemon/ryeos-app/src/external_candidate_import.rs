@@ -416,7 +416,8 @@ mod tests {
             let startup_deadline =
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(60));
             let reservation = ExternalAllocationReservation {
-                schema: crate::runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
+                schema:
+                    crate::runtime_db::external_execution::EXTERNAL_ALLOCATION_RESERVATION_SCHEMA,
                 placement_thread_id: "T-external-import-composed".into(),
                 admitted_capsule_hash: "a".repeat(64),
                 owner: ExternalAllocationOwner::DedicatedSession(ExternalDedicatedSessionOwner {
@@ -470,8 +471,25 @@ mod tests {
                 contract.observation_timeout_seconds + contract.cleanup_timeout_seconds;
             let channel_max_bytes = contract.max_transfer_bytes.min(64 * 1024 * 1024);
             let guest_input_identity = "9".repeat(64);
+            let activation_request_digest = external_supervisor_activation_request_digest(
+                &reservation,
+                &occurrence,
+                &contract,
+                attachment_deadline_ms,
+                post_execution_timeout_seconds,
+                channel_max_bytes,
+                &guest_input_identity,
+            )
+            .unwrap();
+            let delivery = crate::runtime_db::external_execution::fixture_guest_package_delivery(
+                &reservation.binding_hash,
+                &reservation.request_digest,
+                &occurrence.occurrence_id,
+                &activation_request_digest,
+                &guest_input_identity,
+            );
             let activation = ExternalSupervisorActivationIntent {
-                schema: 2,
+                schema: 3,
                 binding_hash: reservation.binding_hash.clone(),
                 request_digest: reservation.request_digest.clone(),
                 occurrence_id: occurrence.occurrence_id.clone(),
@@ -482,20 +500,12 @@ mod tests {
                     .runtime_manifest_hash
                     .clone(),
                 guest_input_identity: guest_input_identity.clone(),
-                activation_request_digest: external_supervisor_activation_request_digest(
-                    &reservation,
-                    &occurrence,
-                    &contract,
-                    attachment_deadline_ms,
-                    post_execution_timeout_seconds,
-                    channel_max_bytes,
-                    &guest_input_identity,
-                )
-                .unwrap(),
+                activation_request_digest,
                 attachment_deadline_ms,
                 execution_timeout_seconds: reservation.timeout_seconds,
                 post_execution_timeout_seconds,
                 channel_max_bytes,
+                delivery,
             };
             assert!(
                 store

@@ -542,6 +542,7 @@ fn sealed_memfd_is_rewound_cloexec_and_immutable() {
     let file = sealed_memfd(c"lillux-test", b"sealed protocol bytes").expect("sealed memfd");
     let fd = file.inherited_descriptor().unwrap() as i32;
     assert!(fd > libc::STDERR_FILENO);
+    assert_eq!(file.file_identity().unwrap().mode() & 0o777, 0o600);
 
     let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     assert!(descriptor_flags >= 0);

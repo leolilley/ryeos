@@ -38,6 +38,69 @@ mod scoped_child;
 
 use projection_access::committed_value;
 
+/// A package is usable only by the live activation owner that prepared its
+/// inherited descriptor. After an exclusive runtime-state takeover, every
+/// remaining package is abandoned; never retain its bootstrap secret across
+/// daemon restart. Refuse unexpected shapes rather than sweeping unrelated
+/// state or following a replaced path.
+fn discard_abandoned_external_guest_packages(
+    runtime_state: &lillux::PinnedDirectory,
+) -> Result<()> {
+    use std::ffi::OsStr;
+
+    let Some(parent) = runtime_state.open_child_directory(OsStr::new("external-guest-packages"))?
+    else {
+        return Ok(());
+    };
+    parent.require_owner_private_directory()?;
+    const RECOVERY_BATCH_SIZE: usize = 1024;
+    const MAX_RECOVERY_BATCHES: usize = 16;
+    for _ in 0..MAX_RECOVERY_BATCHES {
+        let names = parent.entry_names_bounded(RECOVERY_BATCH_SIZE)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        for name in names {
+            let owned_name = name.to_str().context("non-UTF8 guest package generation")?;
+            let mut components = owned_name.split('.');
+            anyhow::ensure!(
+                components.next() == Some("guest-package")
+                    && components
+                        .next()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some()
+                    && components
+                        .next()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some()
+                    && components.next().is_none(),
+                "unexpected entry in external guest package namespace"
+            );
+            let child = parent
+                .open_child_directory(&name)?
+                .context("abandoned guest package is not a directory")?;
+            child.require_owner_private_directory()?;
+            anyhow::ensure!(
+                child
+                    .entry_names_bounded(2)?
+                    .iter()
+                    .all(|entry| entry == OsStr::new("payload")),
+                "abandoned guest package has an unexpected entry"
+            );
+            child.remove_contents_recursive_bounded(lillux::DirectoryTraversalBudget::new(1, 1))?;
+            anyhow::ensure!(
+                parent.remove_empty_child_if_same(&name, &child)?,
+                "abandoned guest package changed during recovery"
+            );
+        }
+    }
+    anyhow::ensure!(
+        parent.entry_names_bounded(1)?.is_empty(),
+        "abandoned external guest package recovery made bounded progress; retry startup to finish"
+    );
+    Ok(())
+}
+
 fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow::Error {
     if error
         .chain()
@@ -4453,6 +4516,8 @@ impl StateStore {
         let runtime_state_lock = runtime_state_directory
             .lock_exclusive()
             .context("lock live runtime-state namespace")?;
+        discard_abandoned_external_guest_packages(&runtime_state_directory)
+            .context("discard abandoned secret-bearing guest packages")?;
         let thread_runtime_authority =
             ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, true)?;
         ryeos_state::CasMutationGuard::ensure_anchor(&runtime_state_dir)
@@ -4927,6 +4992,23 @@ impl StateStore {
     /// StateStore mutex.
     pub fn pinned_state_authority(&self) -> Result<ryeos_state::PinnedStateAuthority> {
         self.state_authority.try_clone()
+    }
+
+    /// Private controller-owned staging root for secret-bearing external guest
+    /// packages. It is rooted in the already-pinned runtime state generation,
+    /// never in project content, a worker workspace, or ambient temporary
+    /// storage. Each package producer creates its own unique private child.
+    pub(crate) fn external_guest_package_parent(&self) -> Result<lillux::PinnedDirectory> {
+        anyhow::ensure!(
+            !self.read_only,
+            "read-only state cannot stage external guests"
+        );
+        let parent = self
+            .state_authority
+            .runtime_directory()
+            .open_or_create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)?;
+        parent.require_owner_private_directory()?;
+        Ok(parent)
     }
 
     /// Resolve current admitted persistent-session authority from the exact
@@ -19275,7 +19357,103 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 mod tests {
     use super::*;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+    use std::io::Write as _;
     use tempfile::tempdir;
+
+    #[test]
+    fn abandoned_external_guest_package_is_removed_under_pinned_state_authority() {
+        let temporary = tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+        let packages = state
+            .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
+            .unwrap();
+        let (name, package) = packages
+            .create_unique_child("guest-package", 0o700)
+            .unwrap();
+        let mut payload = package
+            .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
+            .unwrap();
+        payload.write_all(b"secret bootstrap").unwrap();
+        drop(payload);
+        discard_abandoned_external_guest_packages(&state).unwrap();
+        assert!(packages.open_child_directory(&name).unwrap().is_none());
+        discard_abandoned_external_guest_packages(&state).unwrap();
+    }
+
+    #[test]
+    fn abandoned_external_guest_package_sweep_refuses_foreign_entry() {
+        let temporary = tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+        let packages = state
+            .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
+            .unwrap();
+        packages
+            .create_child(std::ffi::OsStr::new("unrelated"), 0o700)
+            .unwrap();
+        assert!(discard_abandoned_external_guest_packages(&state).is_err());
+        assert!(
+            packages
+                .open_child_directory(std::ffi::OsStr::new("unrelated"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn abandoned_external_guest_package_sweep_progresses_beyond_one_batch() {
+        let temporary = tempdir().unwrap();
+        let state = lillux::PinnedDirectory::open_or_create(temporary.path()).unwrap();
+        let packages = state
+            .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
+            .unwrap();
+        for _ in 0..1025 {
+            packages.create_unique_child("guest-package", 0o700).unwrap();
+        }
+        discard_abandoned_external_guest_packages(&state).unwrap();
+        assert!(packages.entry_names_bounded(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn abandoned_external_guest_package_is_removed_on_state_store_reopen() {
+        let temporary = tempdir().unwrap();
+        let app_root = temporary.path().to_path_buf();
+        let runtime_state_dir = app_root.join(".ai/state");
+        let identity = crate::identity::NodeIdentity::create(&app_root.join("node-key.pem"))
+            .expect("test node identity");
+        let signer: Arc<dyn Signer> = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut trust = ryeos_state::refs::TrustStore::new();
+        trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
+        let trust = Arc::new(trust);
+        let open = || {
+            StateStore::new_with_head_trust(
+                app_root.clone(),
+                runtime_state_dir.clone(),
+                runtime_state_dir.join("runtime.sqlite3"),
+                Arc::clone(&signer),
+                WriteBarrier::new(),
+                Arc::clone(&trust),
+            )
+            .expect("state store")
+        };
+
+        let store = open();
+        let packages = store.external_guest_package_parent().unwrap();
+        let (name, package) = packages.create_unique_child("guest-package", 0o700).unwrap();
+        let mut payload = package
+            .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
+            .unwrap();
+        payload.write_all(b"secret bootstrap").unwrap();
+        drop(payload);
+        drop(package);
+        drop(store);
+
+        let reopened = open();
+        assert!(packages.open_child_directory(&name).unwrap().is_none());
+        drop(reopened);
+    }
 
     fn remote_follow_delivery_request()
     -> crate::federated_follow::RemoteFollowTerminalDeliveryRequest {

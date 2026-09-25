@@ -2425,8 +2425,15 @@ pub(super) mod tests {
             &guest_input_identity,
         )
         .unwrap();
+        let delivery = super::fixture_guest_package_delivery(
+            &reservation.binding_hash,
+            &reservation.request_digest,
+            &occurrence.occurrence_id,
+            &activation_request_digest,
+            &guest_input_identity,
+        );
         let intent = ExternalSupervisorActivationIntent {
-            schema: 2,
+            schema: 3,
             binding_hash: reservation.binding_hash.clone(),
             request_digest: reservation.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
@@ -2437,6 +2444,7 @@ pub(super) mod tests {
             execution_timeout_seconds: reservation.timeout_seconds,
             post_execution_timeout_seconds,
             channel_max_bytes,
+            delivery,
         };
         (allocation, binding, intent)
     }
@@ -4196,28 +4204,31 @@ pub(super) mod tests {
                 100,
                 1024 * 1024,
             );
-            assert!(db
-                .external_supervisor_activation(&reservation.placement_thread_id)
-                .unwrap()
-                .unwrap()
-                .observation
-                .is_none());
+            assert!(
+                db.external_supervisor_activation(&reservation.placement_thread_id)
+                    .unwrap()
+                    .unwrap()
+                    .observation
+                    .is_none()
+            );
             (reservation, activation, binding, owner, supervisor)
         };
 
         let db = RuntimeDb::open(&path).unwrap();
-        assert!(!db
-            .begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
-            .unwrap());
+        assert!(
+            !db.begin_external_supervisor_activation(&reservation.placement_thread_id, &activation)
+                .unwrap()
+        );
         db.register_external_execution_channel(&binding).unwrap();
-        assert!(db
-            .admit_external_ready_and_author_release(
+        assert!(
+            db.admit_external_ready_and_author_release(
                 &binding.placement_thread_id,
                 &owner,
                 test_startup_deadline(),
             )
             .unwrap()
-            .is_none());
+            .is_none()
+        );
         ready(&db, &binding, &supervisor);
         let release = db
             .admit_external_ready_and_author_release(
@@ -4228,12 +4239,13 @@ pub(super) mod tests {
             .unwrap()
             .expect("exact signed Ready must authorize one Release");
         assert_eq!(release.frame().payload, ExecutionChannelPayload::Release);
-        assert!(db
-            .external_supervisor_activation(&reservation.placement_thread_id)
-            .unwrap()
-            .unwrap()
-            .observation
-            .is_none());
+        assert!(
+            db.external_supervisor_activation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .observation
+                .is_none()
+        );
     }
 
     #[test]

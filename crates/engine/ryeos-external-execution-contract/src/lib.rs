@@ -35,6 +35,7 @@ pub const LIFECYCLE_REQUEST_FD_ENV: &str = "RYEOS_LIFECYCLE_REQUEST_FD";
 pub const LIFECYCLE_SETTINGS_FD_ENV: &str = "RYEOS_LIFECYCLE_SETTINGS_FD";
 pub const LIFECYCLE_CREDENTIAL_FD_ENV: &str = "RYEOS_LIFECYCLE_CREDENTIAL_FD";
 pub const LIFECYCLE_BOOTSTRAP_FD_ENV: &str = "RYEOS_LIFECYCLE_BOOTSTRAP_FD";
+pub const LIFECYCLE_GUEST_PACKAGE_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_PACKAGE_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
 pub const LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV: &str = "RYEOS_LIFECYCLE_ADAPTER_EXECUTABLE_FD";
@@ -963,7 +964,11 @@ pub enum LifecycleAdapterRequest {
         common: LifecycleOperationCommon,
         occurrence: BoundOccurrence,
         activation: SupervisorActivationIntent,
-        guest_inputs: ExternalGuestInputProjection,
+        /// Descriptor-free identity of the inputs inside the sealed package.
+        /// Projection descriptor numbers belong to the controller process and
+        /// must never be interpreted as adapter-local file descriptors.
+        guest_input_identity: String,
+        guest_package: LifecycleGuestPackageDelivery,
     },
     ReconcileSupervisorActivation {
         common: LifecycleOperationCommon,
@@ -1020,6 +1025,34 @@ pub struct SupervisorActivationIntent {
     pub execution_timeout_seconds: u32,
     pub post_execution_timeout_seconds: u32,
     pub channel_max_bytes: u64,
+}
+
+/// Process-local transport coordinate for the exact package already bound to
+/// the daemon's immutable activation intent. The descriptor is not durable
+/// identity or permission for another upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleGuestPackageDelivery {
+    pub descriptor: u32,
+    pub payload_sha256: String,
+    pub manifest_sha256: String,
+    pub regular_bytes: u64,
+    pub framed_bytes: u64,
+}
+
+impl LifecycleGuestPackageDelivery {
+    pub fn validate(&self) -> Result<()> {
+        digest(&self.payload_sha256, "guest package payload")?;
+        digest(&self.manifest_sha256, "guest package manifest")?;
+        ensure!(
+            self.descriptor > 2
+                && self.regular_bytes > 0
+                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes <= 4 * 1024 * 1024 * 1024,
+            "guest package delivery coordinate is invalid"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1164,12 +1197,14 @@ impl LifecycleAdapterRequest {
             Self::ActivateSupervisor {
                 occurrence,
                 activation,
-                guest_inputs,
+                guest_input_identity,
+                guest_package,
                 ..
             } => {
                 occurrence.validate()?;
                 activation.validate()?;
-                guest_inputs.validate()
+                digest(guest_input_identity, "lifecycle guest input identity")?;
+                guest_package.validate()
             }
             Self::ReconcileSupervisorActivation {
                 occurrence,
