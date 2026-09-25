@@ -674,6 +674,58 @@ pub(crate) struct ExternalSupervisorActivationIntent {
     pub channel_max_bytes: u64,
 }
 
+/// Claimed identity of a locally re-imported package selected for the *same*
+/// one-shot supervisor activation. Validation here does not prove package
+/// provenance or persist this claim; the caller must supply the prepared
+/// package and the retained activation/binding contract. This is a subordinate
+/// delivery coordinate, not a second contact permit. Its hashes must never
+/// enter activation_request_digest: the package manifest already commits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalGuestPackageDeliveryCommitment {
+    pub schema: u32,
+    pub binding_hash: String,
+    pub request_digest: String,
+    pub occurrence_id: String,
+    pub activation_request_digest: String,
+    pub guest_input_identity: String,
+    pub manifest_sha256: String,
+    pub payload_sha256: String,
+    pub regular_bytes: u64,
+    pub framed_bytes: u64,
+}
+
+impl ExternalGuestPackageDeliveryCommitment {
+    /// `activation` and `contract` must already have been validated against
+    /// the exact retained reservation and signed binding. The package producer
+    /// must separately prove these digests/lengths describe its pinned inode.
+    pub(crate) fn validate_for(
+        &self,
+        activation: &ExternalSupervisorActivationIntent,
+        contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
+    ) -> Result<()> {
+        ensure!(
+            self.schema == 1
+                && self.binding_hash == activation.binding_hash
+                && self.request_digest == activation.request_digest
+                && self.occurrence_id == activation.occurrence_id
+                && self.activation_request_digest == activation.activation_request_digest
+                && self.guest_input_identity == activation.guest_input_identity,
+            "external guest package delivery contradicts activation authority"
+        );
+        validate_sha256("external guest package manifest", &self.manifest_sha256)?;
+        validate_sha256("external guest package payload", &self.payload_sha256)?;
+        ensure!(
+            self.regular_bytes > 0
+                && self.regular_bytes <= contract.max_guest_package_regular_bytes
+                && self.framed_bytes <= contract.max_guest_package_framed_bytes
+                && self.framed_bytes >= self.regular_bytes.saturating_add(20),
+            "external guest package delivery exceeds retained binding budget"
+        );
+        Ok(())
+    }
+}
+
 impl ExternalSupervisorActivationIntent {
     fn validate(
         &self,
@@ -3038,6 +3090,71 @@ pub(crate) mod tests {
         );
         let second = reservation(&db, "two");
         assert!(reserve(&db, &second).is_err());
+    }
+
+    #[test]
+    fn guest_package_delivery_is_subordinate_to_exact_activation_and_signed_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "one");
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "fixture-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        let activation = activation_intent(&reservation, &occurrence);
+        let contract = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture().backend_contract();
+        let delivery = ExternalGuestPackageDeliveryCommitment {
+            schema: 1,
+            binding_hash: activation.binding_hash.clone(),
+            request_digest: activation.request_digest.clone(),
+            occurrence_id: activation.occurrence_id.clone(),
+            activation_request_digest: activation.activation_request_digest.clone(),
+            guest_input_identity: activation.guest_input_identity.clone(),
+            manifest_sha256: "1".repeat(64),
+            payload_sha256: "2".repeat(64),
+            regular_bytes: contract.max_guest_package_regular_bytes,
+            framed_bytes: contract.max_guest_package_framed_bytes,
+        };
+        delivery.validate_for(&activation, &contract).unwrap();
+        let mut changed = delivery.clone();
+        changed.schema = 2;
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.binding_hash = "4".repeat(64);
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.request_digest = "5".repeat(64);
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.occurrence_id = "other-occurrence".into();
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.activation_request_digest = "3".repeat(64);
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.guest_input_identity = "6".repeat(64);
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.manifest_sha256 = "not-a-digest".into();
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.payload_sha256 = "not-a-digest".into();
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.regular_bytes = 0;
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.regular_bytes += 1;
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery.clone();
+        changed.framed_bytes = changed.regular_bytes + 19;
+        assert!(changed.validate_for(&activation, &contract).is_err());
+        let mut changed = delivery;
+        changed.framed_bytes += 1;
+        assert!(changed.validate_for(&activation, &contract).is_err());
     }
 
     #[test]
