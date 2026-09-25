@@ -233,6 +233,7 @@ mod tests {
         GuestBaseSnapshotInput, GuestMountAccess, GuestMountContentAuthority, GuestMountInput,
         GuestMountKind, GuestMountRole, GuestProductManifestKind,
     };
+    use ryeos_state::objects::*;
 
     #[test]
     fn malformed_base_closure_never_escapes_private_staging() {
@@ -451,6 +452,84 @@ mod tests {
             lillux::canonical_json(&serde_json::to_value(&product_manifest_object).unwrap())
                 .unwrap()
                 .into_bytes();
+        let source_manifest = SourceClosureManifest::new(
+            vec![LogicalSourceRoot {
+                id: "source".into(),
+            }],
+            vec![SourceClosureFile {
+                root: "source".into(),
+                path: "run.py".into(),
+                blob_hash: lillux::sha256_hex(b"run"),
+                size: 3,
+                mode: SourceFileMode::ReadOnly,
+            }],
+        )
+        .unwrap();
+        let schema_body = "kind: kind\n".to_owned();
+        let source_binding = EffectiveSourceBinding {
+            schema: EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            kind: EFFECTIVE_SOURCE_BINDING_KIND.into(),
+            owner: SourceOwnerIdentity {
+                canonical_ref: "tool:test/run".into(),
+                item_kind: "tool".into(),
+                source_space: SourceSpaceIdentity::Project,
+                source_root: SourceRootIdentity::Project,
+                root_source_content_digest: "a".repeat(64),
+                root_raw_content_digest: "b".repeat(64),
+                signer_fingerprint: "c".repeat(64),
+                logical_item_key: "test/run".into(),
+            },
+            kind_ceiling: SignedKindSourceCeiling {
+                schema_ref: "kind:tool".into(),
+                source_content_digest: "d".repeat(64),
+                raw_content_digest: lillux::signature::content_hash(&schema_body),
+                signer_fingerprint: "f".repeat(64),
+                signature_header: "signed".into(),
+                schema_body,
+                schema_document: serde_json::json!({"kind": "kind", "location": {"directory": "tools"}}),
+                normalized_declaration: serde_json::json!({
+                    "derived": SOURCE_CLOSURE_DERIVED_KEY,
+                    "location": {"type": "item_namespace"}, "testimony": "owner_signed_files",
+                    "max_files": 8, "max_total_bytes": 1024, "max_file_bytes": 512, "max_depth": 8,
+                }),
+                root_kind_format: serde_json::json!({"extensions": ["yaml"]}),
+                root_signature_envelope: serde_json::json!({"style": "header"}),
+            },
+            content_manifest_hash: source_manifest.digest().unwrap(),
+            testimony: SourceTestimonyProof::OwnerSignedFiles {
+                signer_fingerprint: "c".repeat(64),
+                file_count: 1,
+                entries_digest: "2".repeat(64),
+            },
+            execution_policy: SourceExecutionPolicyIdentity::Executor {
+                declarer_ref: "tool:ryeos/core/runtimes/python/function".into(),
+                signer_fingerprint: "3".repeat(64),
+                source_content_digest: "4".repeat(64),
+                raw_content_digest: "5".repeat(64),
+                policy_digest: "6".repeat(64),
+                chain_digest: "7".repeat(64),
+            },
+            logical_binding: SourceLogicalBinding::Tool {
+                loader_roots: vec![SourceLoaderRoot::ItemDirectory],
+                root_entry: "run.py".into(),
+            },
+        };
+        let source_binding_bytes =
+            lillux::canonical_json(&serde_json::to_value(&source_binding).unwrap())
+                .unwrap()
+                .into_bytes();
+        let source_manifest_bytes =
+            lillux::canonical_json(&serde_json::to_value(&source_manifest).unwrap())
+                .unwrap()
+                .into_bytes();
+        let verified_source =
+            ryeos_state::source_verification::VerifiedAdmittedSourceRecords::from_canonical_bytes(
+                &lillux::sha256_hex(&source_binding_bytes),
+                &lillux::sha256_hex(&source_manifest_bytes),
+                &source_binding_bytes,
+                &source_manifest_bytes,
+            )
+            .unwrap();
         for (path, mode, bytes) in [
             ("bootstrap", 0o600, &bootstrap),
             ("input-00", 0o644, &config),
@@ -490,9 +569,32 @@ mod tests {
                 bytes: product_manifest.len() as u64,
                 sha256: lillux::sha256_hex(&product_manifest),
             },
+            GuestStagingEntry::Directory {
+                path: "input-02".into(),
+                mode: 0o700,
+            },
+            GuestStagingEntry::RegularFile {
+                path: "input-02/run.py".into(),
+                mode: 0o644,
+                bytes: 3,
+                sha256: lillux::sha256_hex(b"run"),
+            },
         ]);
         files.insert("input-01/bin/tool".into(), b"tool".to_vec());
         files.insert("record-00".into(), product_manifest.clone());
+        files.insert("input-02/run.py".into(), b"run".to_vec());
+        for (path, bytes) in [
+            ("record-01", &source_binding_bytes),
+            ("record-02", &source_manifest_bytes),
+        ] {
+            entries.push(GuestStagingEntry::RegularFile {
+                path: path.into(),
+                mode: 0o600,
+                bytes: bytes.len() as u64,
+                sha256: lillux::sha256_hex(bytes),
+            });
+            files.insert(path.into(), bytes.clone());
+        }
         entries.sort_by(|left, right| left.path().cmp(right.path()));
         let inputs = ExternalGuestInputProjection {
             schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
@@ -534,6 +636,28 @@ mod tests {
                         manifest_bytes: product_manifest.len() as u64,
                     },
                     bytes: 4,
+                },
+                GuestMountInput {
+                    role: GuestMountRole::Source,
+                    authority_id: verified_source.binding_hash().into(),
+                    descriptor: 67,
+                    destination: verified_source
+                        .runtime_destination()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    kind: GuestMountKind::Directory,
+                    access: GuestMountAccess::ReadOnly,
+                    normalized_mode: None,
+                    content_authority: GuestMountContentAuthority::SourceClosure {
+                        binding_descriptor: 68,
+                        binding_hash: lillux::sha256_hex(&source_binding_bytes),
+                        binding_bytes: source_binding_bytes.len() as u64,
+                        manifest_descriptor: 69,
+                        manifest_hash: lillux::sha256_hex(&source_manifest_bytes),
+                        manifest_bytes: source_manifest_bytes.len() as u64,
+                    },
+                    bytes: source_manifest.totals.total_bytes,
                 },
             ],
             executable_search: Vec::new(),
@@ -669,6 +793,21 @@ mod tests {
         writable_record.rewind().unwrap();
         writable_record.write_all(&product_manifest).unwrap();
         writable_record.sync_all().unwrap();
+        crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        let mut writable_source = staged
+            .root()
+            .open_child_directory(OsStr::new("input-02"))
+            .unwrap()
+            .unwrap()
+            .open_regular(OsStr::new("run.py"), true)
+            .unwrap()
+            .unwrap();
+        writable_source.write_all(b"bad").unwrap();
+        writable_source.sync_all().unwrap();
+        assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        writable_source.rewind().unwrap();
+        writable_source.write_all(b"run").unwrap();
+        writable_source.sync_all().unwrap();
         crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
         assert!(
             staged
