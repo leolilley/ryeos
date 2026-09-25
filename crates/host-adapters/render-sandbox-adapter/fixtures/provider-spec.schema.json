@@ -237,7 +237,7 @@
         "precondition_profile": { "const": "render_base_snapshot_match_v1" },
         "body": { "$ref": "#/$defs/create_body" },
         "bind_proof_profile": { "const": "render_sandbox_create_201_v1" },
-        "no_occurrence_proof_profile": { "const": "render_snapshot_rejections_v1" }
+        "no_occurrence_proof_profile": { "const": "render_no_request_sent_v1" }
       }
     },
     "terminate_operation": {

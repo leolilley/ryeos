@@ -178,20 +178,6 @@ struct NoOccurrenceEvidence<'a> {
     snapshot_id: &'a str,
     base_snapshot_hash: &'a str,
     basis: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    http_status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider_code: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_sha256: Option<&'a str>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RenderApiError {
-    code: Option<String>,
-    id: Option<String>,
-    message: Option<String>,
 }
 
 struct SignalCancellation {
@@ -548,10 +534,6 @@ fn allocate(
                         common,
                         reservation,
                         settings,
-                        "transport_no_request_sent",
-                        None,
-                        None,
-                        None,
                     );
                 }
             }
@@ -563,33 +545,9 @@ fn allocate(
         Ok(value) => value,
         Err(()) => return pending(),
     };
-    if status != 201 {
-        if provider_spec.allocation_no_occurrence_proof_enabled()
-            && let Some(code) = typed_snapshot_rejection(status, &response_body)
-        {
-            let response_sha256 = lillux::sha256_hex(&response_body);
-            return allocation_no_occurrence(
-                common,
-                reservation,
-                settings,
-                "render_snapshot_rejection",
-                Some(status),
-                Some(code),
-                Some(&response_sha256),
-            );
-        }
+    let Some(sandbox) = accepted_create_response(status, &response_body, &projection) else {
         return pending();
-    }
-    let sandbox: RenderSandbox = match from_json_slice_strict(
-        &response_body,
-        usize::try_from(MAX_API_RESPONSE_BYTES).unwrap_or(usize::MAX),
-    ) {
-        Ok(value) => value,
-        Err(_) => return pending(),
     };
-    if !create_response_matches(&sandbox, &projection) {
-        return pending();
-    }
     let response_sha256 = lillux::sha256_hex(&response_body);
     let evidence = AllocationEvidence {
         schema: 1,
@@ -617,10 +575,6 @@ fn allocation_no_occurrence(
     common: &ryeos_external_execution_contract::LifecycleOperationCommon,
     reservation: &ryeos_external_execution_contract::AllocationReservation,
     settings: &Settings,
-    basis: &'static str,
-    http_status: Option<u16>,
-    provider_code: Option<&str>,
-    response_sha256: Option<&str>,
 ) -> LifecycleAdapterResponse {
     let pending = || LifecycleAdapterResponse::AllocationPending {
         operation_id: common.operation_id.clone(),
@@ -634,10 +588,7 @@ fn allocation_no_occurrence(
         request_digest: &reservation.request_digest,
         snapshot_id: &settings.snapshot_id,
         base_snapshot_hash: &reservation.base_snapshot_hash,
-        basis,
-        http_status,
-        provider_code,
-        response_sha256,
+        basis: "transport_no_request_sent",
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
         return pending();
@@ -649,19 +600,20 @@ fn allocation_no_occurrence(
     }
 }
 
-fn typed_snapshot_rejection(status: u16, response_body: &[u8]) -> Option<&'static str> {
-    let error: RenderApiError = from_json_slice_strict(
+fn accepted_create_response(
+    status: u16,
+    response_body: &[u8],
+    projection: &provider_spec::CreateProjection,
+) -> Option<RenderSandbox> {
+    if status != 201 {
+        return None;
+    }
+    let sandbox: RenderSandbox = from_json_slice_strict(
         response_body,
         usize::try_from(MAX_API_RESPONSE_BYTES).unwrap_or(usize::MAX),
     )
     .ok()?;
-    let _non_authoritative = (&error.id, &error.message);
-    match (status, error.code.as_deref()) {
-        (404, Some("snapshot_not_found")) => Some("snapshot_not_found"),
-        (409, Some("snapshot_not_available")) => Some("snapshot_not_available"),
-        (409, Some("snapshot_plan_mismatch")) => Some("snapshot_plan_mismatch"),
-        _ => None,
-    }
+    create_response_matches(&sandbox, projection).then_some(sandbox)
 }
 
 fn create_response_matches(
@@ -1264,12 +1216,19 @@ mod offline_fixture_tests {
 
     #[test]
     fn create_fixture_binds_only_when_all_echoed_fields_match() {
+        let create_body = include_bytes!("../fixtures/create-response.json");
         let response: RenderSandbox = from_json_slice_strict(
-            include_bytes!("../fixtures/create-response.json"),
+            create_body,
             MAX_API_RESPONSE_BYTES as usize,
         )
         .unwrap();
         assert!(create_response_matches(&response, &create_projection()));
+        assert_eq!(
+            accepted_create_response(201, create_body, &create_projection())
+                .as_ref()
+                .map(|value| value.id.as_str()),
+            Some(response.id.as_str())
+        );
 
         let mut altered: serde_json::Value =
             serde_json::from_slice(include_bytes!("../fixtures/create-response.json")).unwrap();
@@ -1277,6 +1236,25 @@ mod offline_fixture_tests {
         let altered: RenderSandbox =
             serde_json::from_value(altered).expect("fixture remains a complete response");
         assert!(!create_response_matches(&altered, &create_projection()));
+    }
+
+    #[test]
+    fn snapshot_errors_and_malformed_success_remain_unbound() {
+        let snapshot_error = br#"{"code":"snapshot_not_available","message":"not available"}"#;
+        for status in [404, 409, 500] {
+            assert!(
+                accepted_create_response(status, snapshot_error, &create_projection()).is_none()
+            );
+        }
+        assert!(accepted_create_response(201, snapshot_error, &create_projection()).is_none());
+        assert!(
+            accepted_create_response(
+                409,
+                include_bytes!("../fixtures/create-response.json"),
+                &create_projection(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1291,16 +1269,5 @@ mod offline_fixture_tests {
             Some("2026-09-24T00:01:00Z")
         );
         assert_eq!(exact_terminal_timestamp(&response, "sbx-other"), None);
-    }
-
-    #[test]
-    fn snapshot_rejection_fixture_is_typed_to_its_status() {
-        let response = include_bytes!("../fixtures/snapshot-not-available-response.json");
-        assert_eq!(
-            typed_snapshot_rejection(409, response),
-            Some("snapshot_not_available")
-        );
-        assert_eq!(typed_snapshot_rejection(404, response), None);
-        assert_eq!(typed_snapshot_rejection(500, response), None);
     }
 }

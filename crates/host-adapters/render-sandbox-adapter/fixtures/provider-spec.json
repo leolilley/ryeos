@@ -48,7 +48,7 @@
         "snapshotId": { "source": "settings.snapshot_id" }
       },
       "bind_proof_profile": "render_sandbox_create_201_v1",
-      "no_occurrence_proof_profile": "render_snapshot_rejections_v1"
+      "no_occurrence_proof_profile": "render_no_request_sent_v1"
     },
     "reconcile_allocation": { "kind": "unsupported_pending" },
     "activate_supervisor": { "kind": "unsupported_pending" },

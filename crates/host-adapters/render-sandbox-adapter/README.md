@@ -29,16 +29,15 @@ support, signing, installation, or provider qualification.
   including the requested plan, region, lifetime and network policy, before
   its provider ID is returned as an occurrence.
 - `allocation_no_occurrence` is returned only when W1 classifies the create as
-  `NoRequestSent`, or when a complete JSON response matches one of the pinned
-  CLI source's immutable-snapshot rejection shapes: 404 `snapshot_not_found`,
-  or 409 `snapshot_not_available` / `snapshot_plan_mismatch`. These shapes
-  still need provider-authoritative protocol evidence before qualification.
-  Other transport failures, invalid responses, unexpected statuses and lost
-  create responses remain `allocation_pending`. The adapter never retries
-  create or scans the broad paginated Sandbox list to guess an occurrence. A
-  request that may have reached Render can leave a Sandbox and billable spend
-  with no safely bound occurrence; that state remains unknown and requires
-  operator quarantine or review.
+  `NoRequestSent`, which establishes locally that the request did not reach
+  Render. Every provider response other than a complete, valid `201` remains
+  `allocation_pending`, including the pinned CLI source's 404 `snapshot_not_found`
+  and 409 `snapshot_not_available` / `snapshot_plan_mismatch` shapes. Those
+  errors still need provider-authoritative evidence before they can prove no
+  occurrence. The adapter never retries create or scans the broad paginated
+  Sandbox list to guess an occurrence. A request that may have reached Render
+  can leave a Sandbox and billable spend with no safely bound occurrence; that
+  state remains unknown and requires operator quarantine or review.
 - Termination uses `POST /v1/sandboxes/{id}/terminate?ownerId=...` once, then
   requires an exact `GET /v1/sandboxes/{id}?ownerId=...` response with matching
   ID, `status: terminated`,
@@ -73,7 +72,7 @@ support, signing, installation, or provider qualification.
 
 | Operation | Stable identity and pre-contact record | Positive evidence and reconciliation | Lost response, negative evidence, and spend |
 | --- | --- | --- | --- |
-| Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative; the three typed snapshot rejection shapes are adapter evidence but still need provider-authoritative qualification. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
+| Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative. The three typed snapshot rejection shapes remain pending until provider-authoritative semantics are established. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
 | Allocation observation | The original allocation identity remains the coordinate; no Sandbox ID is invented. | Allocation reconciliation is unsupported without a retained provider ID. This adapter does not list or guess. | A list miss or `404` is not a negative proof. Unresolved occurrence and spend remain unknown under the original reservation. |
 | Bootstrap and readiness | W2's activation request identity remains authoritative; this adapter does not create a Render execution token. | No bootstrap/readiness proof is emitted. Activation and its reconciliation remain pending. | The pinned CLI's token-mint response would carry the execution ID and operation-scoped proxy URI; a lost response leaves no exact ID to query. This adapter does not mint, retry, invoke, or guess from a list. |
 | Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID with `status: terminated` and a valid `terminatedAt` is terminal observation. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
@@ -86,7 +85,7 @@ a usable external execution backend yet.
 
 The declared capabilities are exactly `authoritative_no_occurrence` and
 `exact_terminal_observation`. The first capability is limited to W1's
-`NoRequestSent` result and the three typed snapshot rejection responses above.
+`NoRequestSent` result; provider response errors do not currently establish it.
 The adapter does not declare `idempotent_termination` because it follows the
 one-Terminate policy.
 
@@ -134,8 +133,8 @@ fixed operation kinds, route segments, typed field sources, one reviewed
 snapshot precondition, and code-defined proof-profile identifiers. It rejects
 unknown fields, methods, origins, arbitrary expressions, capability claims,
 and proof values. The interpreter builds the create body and exact route from
-the signed data; Rust validates create binding, typed snapshot rejection, and
-terminal observations before deriving effective capabilities. Create remains
+the signed data; Rust validates create binding and terminal observations before
+deriving effective capabilities. Create remains
 one POST with no retry or listing-based reconciliation. Termination remains
 one POST followed by exact-ID GET. Activation and its reconciliation remain
 pending.
@@ -144,29 +143,27 @@ This is the Render reference profile for the data-driven lifecycle direction,
 not evidence that a multi-provider shared runtime is complete. The interpreter
 is still crate-local and Render-specific; extracting common parsing and
 execution logic into the shared host runtime requires a reviewed schema/runtime
-boundary before another provider is added. W2's current v2 seam carries opaque,
-digest-checked spec bytes; its owner still needs to accept or revise this
-proposed JSON shape before W2 integration. The Render profile cannot introduce
+boundary before another provider is added. The integrated v2 seam carries the
+signed, digest-checked provider spec over a sealed descriptor. The Render
+profile cannot introduce
 an origin, credential placement, HTTP method, retry rule, or proof behavior.
 The Sandbox proxy stays disabled until its URL policy and RyeOS bootstrap
 mapping are established.
 
 ## Build and qualification gates
 
-The adapter is a separate host-adapter package. W2 owns root workspace and
-lockfile changes. The source build command, pending explicit heavy-command
-approval, is:
+The adapter is a separate host-adapter package registered in this feature
+workspace. A source build command is:
 
 ```sh
 cargo build --release --manifest-path crates/host-adapters/render-sandbox-adapter/Cargo.toml
 ```
 
-The approved offline fixture/unit command
-`cargo test --locked --offline --manifest-path crates/host-adapters/render-sandbox-adapter/Cargo.toml`
-passed on 2026-09-24 (7 tests). No release build, signing, Render API call,
-provisioning, or installed qualification has been performed for this draft.
-Before use, W2 must accept the provider-spec data shape and coordinate its
-shared lockfile change; W1 must integrate the transport seam; and the
-integration thread must establish provider-authoritative lifecycle evidence,
-proxy validation, and RyeOS bootstrap semantics. Any authenticated Render call
-requires separate approval.
+The feature branch's focused offline serial package test passed all six
+remaining tests on 2026-09-26. The removed seventh test only recognized a
+snapshot-error shape; it never proved that a transmitted create had not made a
+Sandbox. No release build, signing, Render API call, provisioning, or installed
+qualification followed this correction. Before use, the integration must
+establish provider-authoritative lifecycle evidence, proxy validation, RyeOS
+bootstrap and network-route semantics, and joined cancellation behavior. Any
+authenticated Render call requires separate approval.

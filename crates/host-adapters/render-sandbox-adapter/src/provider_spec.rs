@@ -181,8 +181,8 @@ enum BindProofProfile {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 enum NoOccurrenceProofProfile {
-    #[serde(rename = "render_snapshot_rejections_v1")]
-    RenderSnapshotRejectionsV1,
+    #[serde(rename = "render_no_request_sent_v1")]
+    RenderNoRequestSentV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -331,7 +331,7 @@ impl ProviderSpec {
                 && allocate.body.as_ref() == Some(&expected_create_body_mapping())
                 && allocate.bind_proof_profile == Some(BindProofProfile::RenderSandboxCreate201V1)
                 && allocate.no_occurrence_proof_profile
-                    == Some(NoOccurrenceProofProfile::RenderSnapshotRejectionsV1)
+                    == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
                 && allocate.mutation_route.is_none()
                 && allocate.observation_route.is_none()
                 && allocate.terminal_proof_profile.is_none(),
@@ -381,7 +381,7 @@ impl ProviderSpec {
         let mut capabilities = BTreeSet::new();
         if self.operations.allocate.kind == OperationKind::CreateOnce
             && self.operations.allocate.no_occurrence_proof_profile
-                == Some(NoOccurrenceProofProfile::RenderSnapshotRejectionsV1)
+                == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
         {
             capabilities.insert(LifecycleCapability::AuthoritativeNoOccurrence);
         }
