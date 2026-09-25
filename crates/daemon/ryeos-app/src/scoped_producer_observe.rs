@@ -134,6 +134,12 @@ impl ScopedProducerObservation {
             self.isolation_provenance.plan_digest.is_some(),
             "observation has no concrete isolation plan"
         );
+        let mount_evidence = record.mount_preparation_evidence.as_ref()
+            .context("observation has no retained pre-release mount evidence")?;
+        mount_evidence.validate_observation_plan(
+            self.isolation_provenance.plan_digest.as_deref().unwrap(),
+            &self.process_identity,
+        )?;
         ensure!(
             i64::from(self.applied_launch.owned_child_pid) == self.process_identity.target_pid
                 && self.applied_launch.namespace_pid == 1

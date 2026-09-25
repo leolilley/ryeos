@@ -17,6 +17,7 @@ CREATE TABLE scoped_child_attempt (
     scope_allocation TEXT NOT NULL,
     scope_recovery TEXT,
     process_identity TEXT,
+    mount_preparation_evidence TEXT,
     natural_empty_receipt_digest TEXT,
     observation_object_hash TEXT,
     recovery_death_evidence_digest TEXT,
@@ -25,12 +26,13 @@ CREATE TABLE scoped_child_attempt (
         ('reserved','unbound_discard_pending','scope_bound','process_attached','release_permitted','natural_scope_empty','bound_retirement_pending','bound_death_proven','retired')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    CHECK ((phase IN ('reserved','unbound_discard_pending') AND scope_recovery IS NULL AND process_identity IS NULL)
-        OR (phase='scope_bound' AND scope_recovery IS NOT NULL AND process_identity IS NULL)
+    CHECK ((phase IN ('reserved','unbound_discard_pending') AND scope_recovery IS NULL AND process_identity IS NULL AND mount_preparation_evidence IS NULL)
+        OR (phase='scope_bound' AND scope_recovery IS NOT NULL AND process_identity IS NULL AND mount_preparation_evidence IS NULL)
         OR (phase IN ('process_attached','release_permitted','natural_scope_empty')
-            AND scope_recovery IS NOT NULL AND process_identity IS NOT NULL)
+            AND scope_recovery IS NOT NULL AND process_identity IS NOT NULL AND mount_preparation_evidence IS NOT NULL)
         OR (phase IN ('bound_retirement_pending','bound_death_proven') AND scope_recovery IS NOT NULL)
         OR (phase='retired' AND (scope_recovery IS NOT NULL OR process_identity IS NULL))),
+    CHECK ((process_identity IS NULL) = (mount_preparation_evidence IS NULL)),
     CHECK ((phase IN ('natural_scope_empty','bound_retirement_pending','bound_death_proven','retired') OR natural_empty_receipt_digest IS NULL)
         AND ((natural_empty_receipt_digest IS NULL AND observation_object_hash IS NULL)
              OR (natural_empty_receipt_digest IS NOT NULL AND observation_object_hash IS NOT NULL))
@@ -134,6 +136,8 @@ pub struct ScopedChildAttemptRecord {
     pub initial: NewScopedChildAttempt,
     pub scope_recovery: Option<lillux::ProcessScopeRecovery>,
     pub process_identity: Option<ExecutionProcessIdentity>,
+    /// Exact pre-release plan/target-view join committed with process attachment.
+    pub mount_preparation_evidence: Option<ScopedChildMountPreparationEvidence>,
     /// Digest of daemon-authored natural scope-empty testimony, not Tool text.
     pub natural_empty_receipt_digest: Option<String>,
     /// CAS object containing the complete bounded observed result and exact
@@ -146,6 +150,49 @@ pub struct ScopedChildAttemptRecord {
     pub phase: ScopedChildPhase,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedChildMountPreparationEvidence {
+    pub schema: u32,
+    pub plan_digest: String,
+    pub expected: lillux::LinuxSandboxMountPreparationCommitments,
+    pub observed: lillux::LinuxSandboxMountPreparationReceipt,
+}
+
+impl ScopedChildMountPreparationEvidence {
+    fn validate_for(&self, identity: &ExecutionProcessIdentity) -> Result<()> {
+        anyhow::ensure!(
+            self.schema == 1,
+            "scoped child mount evidence schema is unsupported"
+        );
+        let digest = self
+            .plan_digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow!("scoped child mount evidence lacks a plan digest"))?;
+        require_hex_digest("scoped child plan", digest)?;
+        anyhow::ensure!(
+            identity.target_pid > 0
+                && i64::from(self.observed.owned_child_pid) == identity.target_pid
+                && self.observed.matches_commitments(&self.expected),
+            "scoped child mount evidence contradicts held process or compiled plan"
+        );
+        Ok(())
+    }
+
+    pub fn validate_observation_plan(
+        &self,
+        plan_digest: &str,
+        identity: &ExecutionProcessIdentity,
+    ) -> Result<()> {
+        self.validate_for(identity)?;
+        anyhow::ensure!(
+            self.plan_digest == plan_digest,
+            "observed isolation plan differs from retained held mount preparation"
+        );
+        Ok(())
+    }
 }
 
 /// In-memory daemon testimony, constructed only by consuming the Lillux
@@ -692,8 +739,10 @@ impl RuntimeDb {
         &self,
         attempt_id: &str,
         identity: &ExecutionProcessIdentity,
+        mount_evidence: &ScopedChildMountPreparationEvidence,
     ) -> Result<()> {
         validate_execution_process_identity_shape(identity)?;
+        mount_evidence.validate_for(identity)?;
         let record = self
             .get_scoped_child_attempt(attempt_id)?
             .ok_or_else(|| anyhow!("unknown scoped child attempt"))?;
@@ -704,16 +753,19 @@ impl RuntimeDb {
             bail!("held scoped child identity contradicts its bound scope");
         }
         let encoded = lillux::canonical_json(&serde_json::to_value(identity)?)?;
+        let encoded_mount = lillux::canonical_json(&serde_json::to_value(mount_evidence)?)?;
         let recovery = lillux::canonical_json(&serde_json::to_value(
             record.scope_recovery.as_ref().unwrap(),
         )?)?;
         let owner = lillux::canonical_json(&serde_json::to_value(&record.initial.owner)?)?;
         let changed = self.conn.execute(
-            "UPDATE scoped_child_attempt SET process_identity=?3, phase='process_attached', updated_at_ms=?4
-             WHERE attempt_id=?1 AND phase='scope_bound' AND scope_recovery=?2 AND process_identity IS NULL
-               AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?5 AND claimed_by=?6)
-               AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?5 AND stop_requested_at_ms IS NULL)",
-            params![attempt_id, recovery, encoded, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
+            "UPDATE scoped_child_attempt SET process_identity=?3, mount_preparation_evidence=?4,
+                    phase='process_attached', updated_at_ms=?5
+             WHERE attempt_id=?1 AND phase='scope_bound' AND scope_recovery=?2
+               AND process_identity IS NULL AND mount_preparation_evidence IS NULL
+               AND EXISTS (SELECT 1 FROM thread_launch_claim WHERE thread_id=?6 AND claimed_by=?7)
+               AND EXISTS (SELECT 1 FROM thread_runtime WHERE thread_id=?6 AND stop_requested_at_ms IS NULL)",
+            params![attempt_id, recovery, encoded, encoded_mount, lillux::time::timestamp_millis(), record.initial.owner.thread_id, owner],
         )?;
         if changed != 1 {
             bail!("held scoped child attachment lost its one-shot CAS");
@@ -1108,6 +1160,7 @@ fn read_scoped_child_attempt(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
         i64,
         i64,
@@ -1115,6 +1168,7 @@ fn read_scoped_child_attempt(
         .query_row(
             "SELECT owner_thread_id, launch_owner, recipe_digest, recipe_generation,
                     scenario_digest, scope_allocation, scope_recovery, process_identity,
+                    mount_preparation_evidence,
                     natural_empty_receipt_digest, observation_object_hash, recovery_death_evidence_digest,
                     retirement_evidence_digest,
                     phase, created_at_ms, updated_at_ms
@@ -1137,6 +1191,7 @@ fn read_scoped_child_attempt(
                     row.get(12)?,
                     row.get(13)?,
                     row.get(14)?,
+                    row.get(15)?,
                 ))
             },
         )
@@ -1150,6 +1205,7 @@ fn read_scoped_child_attempt(
         allocation_json,
         recovery_json,
         identity_json,
+        mount_evidence_json,
         natural_empty_receipt_digest,
         observation_object_hash,
         recovery_death_evidence_digest,
@@ -1168,6 +1224,10 @@ fn read_scoped_child_attempt(
         .map(serde_json::from_str)
         .transpose()?;
     let identity: Option<ExecutionProcessIdentity> = identity_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
+    let mount_evidence: Option<ScopedChildMountPreparationEvidence> = mount_evidence_json
         .as_deref()
         .map(serde_json::from_str)
         .transpose()?;
@@ -1197,6 +1257,18 @@ fn read_scoped_child_attempt(
                 .as_ref()
                 != Some(json)
         })
+        || mount_evidence_json.as_ref().is_some_and(|json| {
+            lillux::canonical_json(&serde_json::to_value(mount_evidence.as_ref().unwrap()).unwrap())
+                .ok()
+                .as_ref()
+                != Some(json)
+        })
+        || mount_evidence.as_ref().is_some_and(|evidence| {
+            identity
+                .as_ref()
+                .is_none_or(|identity| evidence.validate_for(identity).is_err())
+        })
+        || identity.is_some() != mount_evidence.is_some()
         || recovery
             .as_ref()
             .is_some_and(|value| !value.matches_allocation(&initial.scope_allocation))
@@ -1225,14 +1297,16 @@ fn read_scoped_child_attempt(
     }
     let shape_ok = match phase {
         ScopedChildPhase::Reserved | ScopedChildPhase::UnboundDiscardPending => {
-            recovery.is_none() && identity.is_none()
+            recovery.is_none() && identity.is_none() && mount_evidence.is_none()
         }
-        ScopedChildPhase::ScopeBound => recovery.is_some() && identity.is_none(),
+        ScopedChildPhase::ScopeBound => {
+            recovery.is_some() && identity.is_none() && mount_evidence.is_none()
+        }
         ScopedChildPhase::BoundRetirementPending | ScopedChildPhase::BoundDeathProven => {
             recovery.is_some()
         }
         ScopedChildPhase::Retired => recovery.is_some() || identity.is_none(),
-        _ => recovery.is_some() && identity.is_some(),
+        _ => recovery.is_some() && identity.is_some() && mount_evidence.is_some(),
     };
     if !shape_ok {
         bail!("retained scoped child attempt has invalid phase fields");
@@ -1265,6 +1339,7 @@ fn read_scoped_child_attempt(
         initial,
         scope_recovery: recovery,
         process_identity: identity,
+        mount_preparation_evidence: mount_evidence,
         natural_empty_receipt_digest,
         observation_object_hash,
         recovery_death_evidence_digest,
@@ -1384,6 +1459,35 @@ mod tests {
         ).unwrap();
     }
 
+    fn mount_evidence(identity: &ExecutionProcessIdentity) -> ScopedChildMountPreparationEvidence {
+        ScopedChildMountPreparationEvidence {
+            schema: 1,
+            plan_digest: format!("sha256:{}", "c".repeat(64)),
+            expected: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [7; 32],
+            },
+            observed: lillux::LinuxSandboxMountPreparationReceipt {
+                schema: 1,
+                owned_child_pid: identity.target_pid as u32,
+                mount_count: 1,
+                destination_access_sha256: [7; 32],
+            },
+        }
+    }
+
+    #[test]
+    fn mount_evidence_requires_exact_observed_plan_digest() {
+        let (_, _, identity) = fixture();
+        let evidence = mount_evidence(&identity);
+        evidence.validate_observation_plan(&evidence.plan_digest, &identity).unwrap();
+        assert!(evidence.validate_observation_plan(
+            &format!("sha256:{}", "d".repeat(64)),
+            &identity,
+        ).is_err());
+    }
+
     #[test]
     fn duplicate_changed_and_wrong_owner_never_reopen_attempt() {
         let db = RuntimeDb::new_in_memory().unwrap();
@@ -1433,14 +1537,17 @@ mod tests {
         let mut wrong = identity.clone();
         wrong.target_pid = 999;
         wrong.process_scope = None;
+        let mut wrong_mount = mount_evidence(&identity);
+        wrong_mount.observed.destination_access_sha256[0] ^= 1;
+        assert!(db.attach_scoped_child_process(&initial.attempt_id, &identity, &wrong_mount).is_err());
         assert!(
-            db.attach_scoped_child_process(&initial.attempt_id, &wrong)
+            db.attach_scoped_child_process(&initial.attempt_id, &wrong, &mount_evidence(&identity))
                 .is_err()
         );
-        db.attach_scoped_child_process(&initial.attempt_id, &identity)
+        db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
             .unwrap();
         assert!(
-            db.attach_scoped_child_process(&initial.attempt_id, &identity)
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
                 .is_err()
         );
         assert!(
@@ -1472,7 +1579,7 @@ mod tests {
         db.reserve_scoped_child_attempt(&initial).unwrap();
         db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
             .unwrap();
-        db.attach_scoped_child_process(&initial.attempt_id, &identity)
+        db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
             .unwrap();
         db.permit_scoped_child_release(&initial.attempt_id, &identity)
             .unwrap();
@@ -1724,7 +1831,7 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity)
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
                 .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
@@ -1823,7 +1930,7 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity)
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
                 .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
@@ -1834,6 +1941,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(retained.phase, ScopedChildPhase::ReleasePermitted);
+        assert_eq!(
+            retained.mount_preparation_evidence,
+            Some(mount_evidence(&identity))
+        );
         assert!(retained.natural_empty_receipt_digest.is_none());
         assert_eq!(
             db.unsettled_scoped_child_attempt_ids().unwrap(),
@@ -1880,7 +1991,7 @@ mod tests {
         db.reserve_scoped_child_attempt(&initial).unwrap();
         db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
             .unwrap();
-        db.attach_scoped_child_process(&initial.attempt_id, &identity)
+        db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
             .unwrap();
         db.permit_scoped_child_release(&initial.attempt_id, &identity)
             .unwrap();
@@ -1924,7 +2035,7 @@ mod tests {
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.bind_scoped_child_scope(&initial.attempt_id, &recovery)
                 .unwrap();
-            db.attach_scoped_child_process(&initial.attempt_id, &identity)
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
                 .unwrap();
             db.permit_scoped_child_release(&initial.attempt_id, &identity)
                 .unwrap();
@@ -2008,7 +2119,7 @@ mod tests {
             db.record_scoped_child_natural_empty(&receipt, &"c".repeat(64))
                 .is_err()
         );
-        db.attach_scoped_child_process(&initial.attempt_id, &identity)
+        db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
             .unwrap();
         db.permit_scoped_child_release(&initial.attempt_id, &identity)
             .unwrap();
@@ -2149,6 +2260,28 @@ mod tests {
             seed_owner(&db, &initial.owner);
             db.reserve_scoped_child_attempt(&initial).unwrap();
             db.conn.execute("UPDATE scoped_child_attempt SET recipe_digest='not-a-digest' WHERE attempt_id=?1", [&initial.attempt_id]).unwrap();
+        }
+        assert!(RuntimeDb::open_existing_current(&path).is_err());
+    }
+
+    #[test]
+    fn restart_rejects_mount_evidence_that_no_longer_matches_held_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.sqlite3");
+        let (initial, recovery, identity) = fixture();
+        {
+            let db = RuntimeDb::open(&path).unwrap();
+            seed_owner(&db, &initial.owner);
+            db.reserve_scoped_child_attempt(&initial).unwrap();
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity)).unwrap();
+            let mut tampered = mount_evidence(&identity);
+            tampered.observed.destination_access_sha256[0] ^= 1;
+            let encoded = lillux::canonical_json(&serde_json::to_value(tampered).unwrap()).unwrap();
+            db.conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, encoded],
+            ).unwrap();
         }
         assert!(RuntimeDb::open_existing_current(&path).is_err());
     }

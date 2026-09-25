@@ -104,11 +104,12 @@ impl StateStore {
         &self,
         attempt_id: &str,
         identity: &ExecutionProcessIdentity,
+        mount_evidence: &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         self.lock()?
             .runtime_db
-            .attach_scoped_child_process(attempt_id, identity)
+            .attach_scoped_child_process(attempt_id, identity, mount_evidence)
     }
 
     pub fn permit_scoped_child_release(

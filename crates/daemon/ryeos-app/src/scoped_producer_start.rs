@@ -312,7 +312,17 @@ pub fn start_scoped_producer(
             );
             state
                 .state_store
-                .attach_scoped_child_process(&attempt_id, &identity)?;
+                .attach_scoped_child_process(
+                    &attempt_id,
+                    &identity,
+                    &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
+                        schema: 1,
+                        plan_digest: provenance.plan_digest.clone()
+                            .context("compiled scoped producer has no exact plan digest")?,
+                        expected: expected_mount_preparation.clone(),
+                        observed: mount_preparation.clone(),
+                    },
+                )?;
 
             if let Some(validated) = validated_listener.take() {
                 let mut channel = live.take_ingress_handoff()?;

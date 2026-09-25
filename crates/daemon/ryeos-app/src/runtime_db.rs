@@ -2611,7 +2611,7 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // active-control operation against an intentionally absent resource.
 // Epoch 67 retains ordered scoped-child input reservations so uncertain local
 // delivery cannot be replayed as a fresh write or bypassed by a later close.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 67;
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 68;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -2636,6 +2636,7 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "scope_allocation", col_type: "TEXT", pk: false, not_null: true },
                     sqlite_schema::ColumnSpec { name: "scope_recovery", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "process_identity", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "mount_preparation_evidence", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "natural_empty_receipt_digest", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "observation_object_hash", col_type: "TEXT", pk: false, not_null: false },
                     sqlite_schema::ColumnSpec { name: "recovery_death_evidence_digest", col_type: "TEXT", pk: false, not_null: false },
