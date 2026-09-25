@@ -399,7 +399,7 @@ async fn main() -> Result<()> {
     }
     check_scoped_applied_target(&locator, &observation.applied_launch)?;
     ensure!(
-        observation.schema == "ryeos.scoped_producer_observation.v5"
+        observation.schema == "ryeos.scoped_producer_observation.v6"
             && observation.attempt_id == locator.attempt_id
             && observation.launch_owner["thread_id"] == thread_id
             && observation.launch_owner["monotonic_launch_epoch"]
@@ -413,6 +413,7 @@ async fn main() -> Result<()> {
                 .is_some_and(|generation| !generation.is_empty() && generation.len() <= 256)
             && observation.recipe_digest == locator.recipe_digest
             && observation.recipe_generation == locator.recipe_generation
+            && observation.prepared_immutable_sha256 == locator.prepared_immutable_sha256
             && observation.recipe_generation == expected_source.bundle_generation_identity
             && observation.scenario_digest == locator.scenario_digest
             && observation.process_identity["schema_version"] == 5
@@ -976,6 +977,7 @@ struct ScopedObservationCut {
     scope_recovery: lillux::ProcessScopeRecovery,
     isolation_provenance: serde_json::Value,
     applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
+    prepared_immutable_sha256: BTreeMap<String, String>,
     producer_exit_clean: bool,
     natural_empty_receipt_digest: String,
     subprocess_success: bool,

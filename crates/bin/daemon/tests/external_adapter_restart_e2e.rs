@@ -712,7 +712,7 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         .get_object(object)?
         .context("retained scoped observation absent")?;
     ensure!(
-        observation["schema"] == "ryeos.scoped_producer_observation.v5"
+        observation["schema"] == "ryeos.scoped_producer_observation.v6"
             && observation["attempt_id"] == *attempt
             && observation["recipe_digest"] == *recipe
             && observation["recipe_generation"] == *generation
@@ -731,7 +731,9 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
             && mount_evidence["observed"]["owned_child_pid"]
                 == observation["process_identity"]["target_pid"]
             && observation["applied_launch"]["post_release_mount_view"]
-                == mount_evidence["expected"],
+                == mount_evidence["expected"]
+            && observation["prepared_immutable_sha256"]
+                == mount_evidence["prepared_immutable_sha256"],
         "scoped observation mount echo differs from exact retained held preparation"
     );
     ensure!(

@@ -5,6 +5,7 @@
 //! runtime-qualification claim. An uncertain wait or failed publication only
 //! moves toward cleanup; it cannot turn into natural-exit testimony.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,7 +21,7 @@ use crate::state::AppState;
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 
-const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v5";
+const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v6";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
@@ -52,6 +53,7 @@ struct ScopedProducerObservation {
     scope_recovery: lillux::ProcessScopeRecovery,
     isolation_provenance: ryeos_engine::isolation::IsolationLaunchProvenance,
     applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
+    prepared_immutable_sha256: BTreeMap<String, String>,
     natural_empty_receipt_digest: String,
     subprocess_success: bool,
     producer_exit_clean: bool,
@@ -140,6 +142,10 @@ impl ScopedProducerObservation {
             self.isolation_provenance.plan_digest.as_deref().unwrap(),
             &self.process_identity,
         )?;
+        validate_prepared_immutable_join(
+            &self.prepared_immutable_sha256,
+            &mount_evidence.prepared_immutable_sha256,
+        )?;
         ensure!(
             self.applied_launch.matches_post_release_mounts(&mount_evidence.expected),
             "observation post-release target mounts differ from retained held preparation"
@@ -196,6 +202,46 @@ impl ScopedProducerObservation {
             "observation misclassifies producer exit"
         );
         Ok(())
+    }
+}
+
+fn validate_prepared_immutable_join(
+    observed: &BTreeMap<String, String>,
+    held: &BTreeMap<String, String>,
+) -> Result<()> {
+    ensure!(
+        observed == held,
+        "observation sealed prepared content differs from retained held mount evidence"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod prepared_immutable_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_content_map_must_match_the_held_attempt_exactly() {
+        let expected = BTreeMap::from([
+            ("/ryeos/producer-prepared/codex-home/config.toml".into(), "a".repeat(64)),
+            ("/ryeos/producer-prepared/codex-home/environments.toml".into(), "b".repeat(64)),
+        ]);
+        validate_prepared_immutable_join(&expected, &expected).unwrap();
+        let mut missing = expected.clone();
+        missing.remove("/ryeos/producer-prepared/codex-home/config.toml");
+        assert!(validate_prepared_immutable_join(&missing, &expected).is_err());
+        let mut changed = expected.clone();
+        changed.insert(
+            "/ryeos/producer-prepared/codex-home/config.toml".into(),
+            "c".repeat(64),
+        );
+        assert!(validate_prepared_immutable_join(&changed, &expected).is_err());
+        let mut extra = expected.clone();
+        extra.insert(
+            "/ryeos/producer-prepared/codex-home/extra.toml".into(),
+            "d".repeat(64),
+        );
+        assert!(validate_prepared_immutable_join(&extra, &expected).is_err());
     }
 }
 
@@ -366,6 +412,12 @@ fn observe_owned_scoped_producer(
                 .context("released scoped child has no scope recovery")?,
             isolation_provenance: provenance,
             applied_launch,
+            prepared_immutable_sha256: record
+                .mount_preparation_evidence
+                .as_ref()
+                .context("released scoped child has no retained mount evidence")?
+                .prepared_immutable_sha256
+                .clone(),
             natural_empty_receipt_digest: receipt_digest,
             subprocess_success: result.success,
             producer_exit_clean: result.success
