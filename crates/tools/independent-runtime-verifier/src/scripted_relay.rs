@@ -41,14 +41,34 @@ impl Drop for RunningScriptedRelay {
 }
 
 impl RunningScriptedRelay {
+    /// Interrupt a pending accept or local provider exchange and join only
+    /// within the caller's deadline. Cancellation never supplies a successful
+    /// scripted-contact result; expiry returns the same live owner.
+    pub fn cancel_until(
+        self,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<Result<usize>, Self> {
+        self.interrupt.interrupt();
+        self.local_interrupt.interrupt();
+        self.finish.store(true, Ordering::Release);
+        self.join_until(deadline)
+    }
+
     /// Call only after the direct Codex child and its diagnostic reader have
     /// settled. A clean result proves no sixth connection or pipelined bytes
     /// were visible on any retained socket at that terminal fence.
     pub fn finish_after_codex_stop(
-        mut self,
+        self,
         deadline: MonotonicDeadline,
     ) -> std::result::Result<Result<usize>, Self> {
         self.finish.store(true, Ordering::Release);
+        self.join_until(deadline)
+    }
+
+    fn join_until(
+        mut self,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<Result<usize>, Self> {
         let task = self.task.take().expect("running relay owns task");
         match task.join_until(deadline) {
             Ok(Ok(result)) => Ok(result),
@@ -397,6 +417,30 @@ mod tests {
     use super::*;
     use crate::scripted_peer::ScriptedPeer;
     use std::net::{TcpListener, TcpStream};
+
+    #[test]
+    #[ignore = "requires native loopback socket authority"]
+    fn cancellation_joins_pending_accept_without_provider_contact() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let origin = format!("http://{address}");
+        let listener = ExactLoopbackListener::bind_exact(address).unwrap();
+        let relay = start_from_transferred(
+            &origin,
+            listener,
+            directory,
+            OsString::from("absent-provider"),
+            MonotonicDeadline::after(Duration::from_secs(10)),
+        )
+        .unwrap();
+        let outcome = relay
+            .cancel_until(MonotonicDeadline::after(Duration::from_secs(2)))
+            .unwrap_or_else(|_| panic!("interrupted relay accept did not join"));
+        assert!(outcome.is_err());
+    }
 
     #[test]
     #[ignore = "requires native loopback and Unix socket authority"]

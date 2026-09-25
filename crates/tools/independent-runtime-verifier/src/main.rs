@@ -10,7 +10,7 @@ use ryeos_independent_runtime_verifier::{
     native_guest,
     routing_observation::{RoutingScenario, check_notifications},
     scoped_relay,
-    scripted_peer::ScriptedPeer,
+    scripted_peer::{RunningScriptedPeer, ScriptedPeer},
     scripted_provider, scripted_relay, staging,
 };
 use ryeos_runtime::callback::CallbackError;
@@ -233,13 +233,29 @@ async fn main() -> Result<()> {
             observation.relay_handoff.as_ref() == Some(relay.handoff()),
             "live scoped relay handoff differs from settled daemon observation"
         );
-        let contacts = relay
-            .finish_after_target_settlement(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(5),
-            ))
-            .map_err(|_| {
-                anyhow::anyhow!("direct-target relay did not settle after scope death")
-            })??;
+        let contacts = match relay.finish_after_target_settlement(
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        ) {
+            Ok(result) => result?,
+            Err(relay) => {
+                // The first timeout retains the live task and authenticated
+                // channel. Interrupt and join explicitly; even a successful
+                // cancellation is not contact or qualification evidence.
+                let cancelled = relay.cancel_until(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(5),
+                ));
+                match cancelled {
+                    Ok(_) => bail!("direct-target relay needed cancellation after scope death"),
+                    Err(unsettled) => {
+                        // Drop remains a last-resort interrupting join, not a
+                        // clean result. The verifier must not return while a
+                        // provider relay task can still own its sockets.
+                        drop(unsettled);
+                        bail!("direct-target relay remained unsettled after cancellation")
+                    }
+                }
+            }
+        };
         ensure!(
             contacts == scripted_provider::REQUEST_COUNT,
             "direct-target relay contact count differs from scripted provider"
@@ -354,13 +370,7 @@ async fn main() -> Result<()> {
         "scoped producer did not prove an exact clean natural result"
     );
     if let Some((codex_thread, codex_turn, notifications, contacts)) = direct_evidence {
-        let requests = provider
-            .finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(10),
-            ))
-            .map_err(|_| {
-                anyhow::anyhow!("scripted provider did not settle after direct target")
-            })??;
+        let requests = finish_scripted_provider(provider)?;
         ensure!(
             requests.len() == contacts,
             "direct target relay and provider observed different contact counts"
@@ -409,13 +419,7 @@ async fn main() -> Result<()> {
             && transcript["relay_contacts"] == scripted_provider::REQUEST_COUNT,
         "scoped producer returned a different scenario transcript"
     );
-    let requests = provider
-        .finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_secs(10),
-        ))
-        .map_err(|_| {
-            anyhow::anyhow!("scripted provider did not settle after child scope death")
-        })??;
+    let requests = finish_scripted_provider(provider)?;
     challenge.recheck()?;
     provider_endpoint.recheck()?;
     let expected_canary = format!("{}\n", challenge.value());
@@ -528,6 +532,28 @@ async fn abort_exact_scoped_child(
         "exact scoped abort returned an invalid settlement acknowledgment"
     );
     Ok(())
+}
+
+fn finish_scripted_provider(provider: RunningScriptedPeer) -> Result<Vec<serde_json::Value>> {
+    match provider.finish_after_producer_settlement(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(10),
+    )) {
+        Ok(result) => result,
+        Err(provider) => {
+            match provider.cancel_until(lillux::time::MonotonicDeadline::after(
+                lillux::time::Duration::from_secs(5),
+            )) {
+                Ok(_) => bail!("scripted provider needed cancellation after producer settlement"),
+                Err(unsettled) => {
+                    // Never promote an unfinished provider task to a contact
+                    // result. Its final interrupting Drop join retains the
+                    // socket owner until it actually stops.
+                    drop(unsettled);
+                    bail!("scripted provider remained unsettled after cancellation")
+                }
+            }
+        }
+    }
 }
 
 fn check_observed_recipe_coordinate(

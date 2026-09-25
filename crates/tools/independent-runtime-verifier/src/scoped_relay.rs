@@ -8,9 +8,7 @@ use anyhow::{Context as _, Result, ensure};
 use lillux::loopback::ExactLoopbackListener;
 use lillux::time::MonotonicDeadline;
 use lillux::{InheritedDuplexChannel, PinnedDirectory};
-use ryeos_runtime::scoped_relay_handoff::{
-    ScopedRelayHandoff, receive_handoff, send_ready,
-};
+use ryeos_runtime::scoped_relay_handoff::{ScopedRelayHandoff, receive_handoff, send_ready};
 use ryeos_state::external_content::products::ProducerLoopbackIngress;
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
 use std::ffi::OsString;
@@ -54,6 +52,28 @@ impl RunningScopedRelay {
             }),
         }
     }
+
+    /// No clean contact result follows cancellation. Preserve both the
+    /// authenticated channel and relay task when an interrupt does not join
+    /// within the deadline.
+    pub fn cancel_until(
+        self,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<Result<usize>, Self> {
+        let Self {
+            handoff,
+            channel,
+            relay,
+        } = self;
+        match relay.cancel_until(deadline) {
+            Ok(result) => Ok(result),
+            Err(relay) => Err(Self {
+                handoff,
+                channel,
+                relay,
+            }),
+        }
+    }
 }
 
 /// Called concurrently with the root's START point request: START waits for
@@ -72,11 +92,10 @@ pub fn receive_and_ack(
     // SAFETY: the daemon's admitted root launch assigns unique ownership of
     // this connected channel to this verifier process under this exact name.
     // Lillux adopts and validates the descriptor before returning it.
-    let mut channel = unsafe {
-        lillux::take_inherited_duplex_channel_from_env("RYEOS_SCOPED_RELAY_FD")
-    }
-    .map_err(anyhow::Error::msg)
-    .context("daemon-owned scoped relay channel absent")?;
+    let mut channel =
+        unsafe { lillux::take_inherited_duplex_channel_from_env("RYEOS_SCOPED_RELAY_FD") }
+            .map_err(anyhow::Error::msg)
+            .context("daemon-owned scoped relay channel absent")?;
     receive_and_ack_over_channel(
         &mut channel,
         root_thread_id,
@@ -113,9 +132,8 @@ fn receive_and_ack_over_channel(
         origin == format!("http://{address}") && origin == expected_origin,
         "signed scoped relay ingress differs from scripted provider origin"
     );
-    let listener =
-        ExactLoopbackListener::receive_over_inherited_duplex(channel, address, deadline)
-            .context("exact scoped relay listener was not transferred")?;
+    let listener = ExactLoopbackListener::receive_over_inherited_duplex(channel, address, deadline)
+        .context("exact scoped relay listener was not transferred")?;
     let handoff = receive_handoff(channel, deadline)?;
     handoff.validate_for_verifier(
         root_thread_id,
