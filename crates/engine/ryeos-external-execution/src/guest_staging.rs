@@ -1002,6 +1002,16 @@ mod tests {
         assert_eq!(prepared.manifest(), &produced_manifest);
         assert_eq!(prepared.bytes(), produced_bytes.len() as u64);
         assert_eq!(prepared.sha256(), lillux::sha256_hex(&produced_bytes));
+        let delivery = prepared.delivery_descriptor().unwrap();
+        let mut delivery_reader = delivery
+            .stable_regular_reader_exact(prepared.bytes(), prepared.sha256(), prepared.bytes())
+            .unwrap();
+        let mut delivered_bytes = Vec::new();
+        use std::io::Read as _;
+        delivery_reader.read_to_end(&mut delivered_bytes).unwrap();
+        delivery_reader.finish().unwrap();
+        assert_eq!(delivered_bytes, produced_bytes);
+        drop(delivery);
         prepared.discard().unwrap();
         assert!(
             crate::guest_package_producer::prepare_private_guest_package(

@@ -52,6 +52,21 @@ impl PreparedGuestPackage {
         &self.sha256
     }
 
+    /// Register the exact prepared inode for adapter delivery. The adapter
+    /// must stream it under `bytes` and `sha256` and finish its stable reader;
+    /// this does not authorize a pathname reopen. This descriptor can be
+    /// requested more than once: durable activation, not this getter, must
+    /// prevent a second provider upload after uncertain contact.
+    pub fn delivery_descriptor(&self) -> Result<lillux::InheritedDescriptorAuthority> {
+        let observation = self.payload.observation()?;
+        ensure!(
+            observation.size() == self.bytes
+                && self.payload.digest_stable_exact(&observation)? == self.sha256,
+            "prepared guest package changed before descriptor handoff"
+        );
+        self.payload.inherited_descriptor_authority()
+    }
+
     /// Remove the exact private package generation after delivery settles.
     pub fn discard(self) -> Result<()> {
         remove_private_package(&self.parent, &self.name, &self.root)
