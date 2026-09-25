@@ -68,7 +68,9 @@ state writes nor the synthetic claim emitter can substitute for these boundaries
 
 ## Render Sandbox activation qualification cut (September 26)
 
-The pinned Render CLI's generated schema describes two snapshot kinds. A
+The inspected Render CLI source is revision
+`de62fd1e2762ac25ad4ae11d086377c49fd4b299`. Its generated schema
+describes two snapshot kinds. A
 `runtime` snapshot captures memory and CPU state and can be restored only to
 the source plan; a `filesystem` snapshot does not promise a running process.
 This makes a prestarted, authority-free supervisor waiter in an exact runtime
@@ -97,14 +99,28 @@ exact IDs and contact counts retained at each cut:
    restart-safe transfer path for its sealed per-occurrence bootstrap and exact
    guest-input projection. Verify destination, byte digest, length and
    occurrence binding inside the guest, including restored network/socket
-   behavior. Neither Render's streamed run nor its connect-token response
-   supplies that transfer proof by itself. A lost upload/token/stream response
-   is Pending, not permission to resend uncertain bytes or infer success.
+   behavior. The pinned Render CLI provides a candidate transport: `files`
+   `upload` first mints a token for a requested remote path, then streams raw
+   bytes for a single file (directory uploads instead use gzip-compressed tar)
+   to the Sandbox proxy. Its 2xx response does not attest destination bytes,
+   and token minting does not attest an upload. Use an absolute reserved
+   staging path bound with the exact byte commitment to this occurrence and
+   activation intent. The resumed waiter must reject traversal, symlink or
+   partial-write substitution and verify the complete bytes before signed
+   `Ready`. A lost token, upload, or streamed-run response is Pending, not
+   permission to resend uncertain bytes or infer success. The CLI's default
+   HTTP client, broad 2xx acceptance and local-file source are not themselves
+   RyeOS's bounded sealed transport.
 4. Require the guest's authenticated channel attachment and signed `Ready`
    before Release. A provider-Pending activation may resolve through that
    exact Ready; a provider `not_started`, wrong occurrence, stale capability,
-   wrong runtime or expired attachment must refuse. The focused generic tests
-   cover pending→signed Ready, not Render's restore or transfer.
+   wrong runtime or expired attachment must refuse. The current Render create
+   spec selects `deny-all` outbound networking, while the supervisor protocol
+   posts to the controller. Prove a protected, reachable controller route under
+   the actual Sandbox network policy and controller region; do not infer one
+   from ordinary Render service private networking or from a successful file
+   upload. The focused generic tests cover pending→signed Ready, not Render's
+   restore, transfer or network route.
 5. Prove one bounded target turn, whole-scope/writer settlement, frozen export,
    authenticated return and exact Sandbox termination. Repeat with cancellation,
    lost responses and daemon restart. Never reuse capacity on terminate ACK,
