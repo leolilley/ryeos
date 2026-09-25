@@ -1276,6 +1276,24 @@ impl InheritedDescriptorAuthority {
         Ok((bytes, observation))
     }
 
+    /// Stream one exact inherited regular inode without reopening its
+    /// diagnostic pathname or sharing its descriptor cursor. The caller
+    /// supplies the admitted digest and byte ceiling and must call `finish`.
+    #[cfg(unix)]
+    pub fn stable_regular_reader_exact(
+        &self,
+        expected_bytes: u64,
+        expected_sha256: &str,
+        maximum_bytes: u64,
+    ) -> anyhow::Result<crate::secure_fs::StableInheritedRegularReader<'_>> {
+        crate::secure_fs::StableInheritedRegularReader::from_registered_file_exact(
+            self.file(),
+            expected_bytes,
+            expected_sha256,
+            maximum_bytes,
+        )
+    }
+
     /// Register a uniquely owned descriptor while the caller retains the lease
     /// acquired BEFORE its creation. Registration is not retrospective: never
     /// open or duplicate first and then acquire a lease to wrap the result.
@@ -1664,6 +1682,15 @@ impl InheritedDescriptorAuthority {
         _max_bytes: u64,
     ) -> anyhow::Result<(Vec<u8>, crate::secure_fs::OpenRegularFileObservation)> {
         anyhow::bail!("inherited descriptor reads are unavailable on this platform")
+    }
+
+    pub fn stable_regular_reader_exact(
+        &self,
+        _expected_bytes: u64,
+        _expected_sha256: &str,
+        _maximum_bytes: u64,
+    ) -> anyhow::Result<crate::secure_fs::StableInheritedRegularReader<'_>> {
+        anyhow::bail!("inherited descriptor streams are unavailable on this platform")
     }
 }
 

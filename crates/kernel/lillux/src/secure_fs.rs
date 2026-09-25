@@ -1127,58 +1127,191 @@ pub struct StablePinnedRegularReader {
     digest: sha2::Sha256,
 }
 
-impl StablePinnedRegularReader {
-    pub fn finish(self) -> Result<()> {
-        anyhow::ensure!(
-            self.offset == self.length,
-            "pinned regular stream was not fully consumed"
-        );
-        ensure_open_regular_file_unchanged(&self.file, &self.observation)?;
+/// Positional stream borrowing an already registered inherited descriptor.
+/// It creates no second descriptor that could escape the fork-child close
+/// registry while a protected child is held before exec.
+pub struct StableInheritedRegularReader<'a> {
+    file: &'a File,
+    observation: OpenRegularFileObservation,
+    length: u64,
+    offset: u64,
+    expected_sha256: String,
+    digest: sha2::Sha256,
+}
+
+fn validate_stable_stream_start(
+    file: &File,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    maximum_bytes: u64,
+) -> Result<OpenRegularFileObservation> {
+    anyhow::ensure!(
+        expected_bytes <= maximum_bytes,
+        "pinned regular stream exceeds admitted byte bound"
+    );
+    anyhow::ensure!(
+        expected_sha256.len() == 64
+            && expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "pinned regular stream digest is invalid"
+    );
+    let observation = observe_open_regular_file(file)?;
+    anyhow::ensure!(
+        observation.size() == expected_bytes,
+        "pinned regular stream length changed"
+    );
+    Ok(observation)
+}
+
+fn finish_stable_stream(
+    file: &File,
+    observation: &OpenRegularFileObservation,
+    length: u64,
+    offset: u64,
+    expected_sha256: &str,
+    digest: sha2::Sha256,
+) -> Result<()> {
+    anyhow::ensure!(
+        offset == length,
+        "pinned regular stream was not fully consumed"
+    );
+    ensure_open_regular_file_unchanged(file, observation)?;
+    let mut sentinel = [0_u8; 1];
+    anyhow::ensure!(
+        read_regular_file_at(file, &mut sentinel, length)? == 0,
+        "pinned regular stream grew during read"
+    );
+    use sha2::Digest as _;
+    anyhow::ensure!(
+        format!("{:x}", digest.finalize()) == expected_sha256,
+        "pinned regular stream digest changed"
+    );
+    Ok(())
+}
+
+fn read_stable_stream_chunk(
+    file: &File,
+    observation: &OpenRegularFileObservation,
+    length: u64,
+    offset: &mut u64,
+    digest: &mut sha2::Sha256,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    ensure_open_regular_file_unchanged(file, observation).map_err(std::io::Error::other)?;
+    if *offset == length {
         let mut sentinel = [0_u8; 1];
-        anyhow::ensure!(
-            read_regular_file_at(&self.file, &mut sentinel, self.length)? == 0,
-            "pinned regular stream grew during read"
-        );
-        use sha2::Digest as _;
-        anyhow::ensure!(
-            format!("{:x}", self.digest.finalize()) == self.expected_sha256,
-            "pinned regular stream digest changed"
-        );
-        Ok(())
+        if read_regular_file_at(file, &mut sentinel, length)? != 0 {
+            return Err(std::io::Error::other(
+                "pinned regular stream grew during read",
+            ));
+        }
+        return Ok(0);
+    }
+    let request = usize::try_from((length - *offset).min(buffer.len() as u64))
+        .expect("bounded buffer length fits usize");
+    let count = read_regular_file_at(file, &mut buffer[..request], *offset)?;
+    if count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "pinned regular stream ended before admitted size",
+        ));
+    }
+    ensure_open_regular_file_unchanged(file, observation).map_err(std::io::Error::other)?;
+    use sha2::Digest as _;
+    digest.update(&buffer[..count]);
+    *offset += count as u64;
+    Ok(count)
+}
+
+impl<'a> StableInheritedRegularReader<'a> {
+    pub(crate) fn from_registered_file_exact(
+        file: &'a File,
+        expected_bytes: u64,
+        expected_sha256: &str,
+        maximum_bytes: u64,
+    ) -> Result<Self> {
+        let observation =
+            validate_stable_stream_start(file, expected_bytes, expected_sha256, maximum_bytes)?;
+        Ok(Self {
+            file,
+            observation,
+            length: expected_bytes,
+            offset: 0,
+            expected_sha256: expected_sha256.to_owned(),
+            digest: sha2::Sha256::default(),
+        })
+    }
+
+    pub fn finish(self) -> Result<()> {
+        finish_stable_stream(
+            self.file,
+            &self.observation,
+            self.length,
+            self.offset,
+            &self.expected_sha256,
+            self.digest,
+        )
+    }
+}
+
+impl Read for StableInheritedRegularReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        read_stable_stream_chunk(
+            self.file,
+            &self.observation,
+            self.length,
+            &mut self.offset,
+            &mut self.digest,
+            buffer,
+        )
+    }
+}
+
+impl StablePinnedRegularReader {
+    pub(crate) fn from_open_file_exact(
+        file: File,
+        expected_bytes: u64,
+        expected_sha256: &str,
+        maximum_bytes: u64,
+    ) -> Result<Self> {
+        let observation =
+            validate_stable_stream_start(&file, expected_bytes, expected_sha256, maximum_bytes)?;
+        Ok(Self {
+            file,
+            observation,
+            length: expected_bytes,
+            offset: 0,
+            expected_sha256: expected_sha256.to_owned(),
+            digest: sha2::Sha256::default(),
+        })
+    }
+
+    pub fn finish(self) -> Result<()> {
+        finish_stable_stream(
+            &self.file,
+            &self.observation,
+            self.length,
+            self.offset,
+            &self.expected_sha256,
+            self.digest,
+        )
     }
 }
 
 impl Read for StablePinnedRegularReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        ensure_open_regular_file_unchanged(&self.file, &self.observation)
-            .map_err(std::io::Error::other)?;
-        if self.offset == self.length {
-            let mut sentinel = [0_u8; 1];
-            if read_regular_file_at(&self.file, &mut sentinel, self.length)? != 0 {
-                return Err(std::io::Error::other(
-                    "pinned regular stream grew during read",
-                ));
-            }
-            return Ok(0);
-        }
-        let request = usize::try_from((self.length - self.offset).min(buffer.len() as u64))
-            .expect("bounded buffer length fits usize");
-        let count = read_regular_file_at(&self.file, &mut buffer[..request], self.offset)?;
-        if count == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "pinned regular stream ended before admitted size",
-            ));
-        }
-        ensure_open_regular_file_unchanged(&self.file, &self.observation)
-            .map_err(std::io::Error::other)?;
-        use sha2::Digest as _;
-        self.digest.update(&buffer[..count]);
-        self.offset += count as u64;
-        Ok(count)
+        read_stable_stream_chunk(
+            &self.file,
+            &self.observation,
+            self.length,
+            &mut self.offset,
+            &mut self.digest,
+            buffer,
+        )
     }
 }
 
@@ -1510,30 +1643,12 @@ impl PinnedRegularFile {
         expected_sha256: &str,
         maximum_bytes: u64,
     ) -> Result<StablePinnedRegularReader> {
-        anyhow::ensure!(
-            expected_bytes <= maximum_bytes,
-            "pinned regular stream exceeds admitted byte bound"
-        );
-        anyhow::ensure!(
-            expected_sha256.len() == 64
-                && expected_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "pinned regular stream digest is invalid"
-        );
-        let observation = self.observation()?;
-        anyhow::ensure!(
-            observation.size() == expected_bytes,
-            "pinned regular stream length changed"
-        );
-        Ok(StablePinnedRegularReader {
-            file: self.try_clone_descriptor()?,
-            observation,
-            length: expected_bytes,
-            offset: 0,
-            expected_sha256: expected_sha256.to_owned(),
-            digest: sha2::Sha256::default(),
-        })
+        StablePinnedRegularReader::from_open_file_exact(
+            self.try_clone_descriptor()?,
+            expected_bytes,
+            expected_sha256,
+            maximum_bytes,
+        )
     }
 
     /// Require administrator-selected ownership of this exact file. Callers
@@ -7416,6 +7531,22 @@ mod tests {
             .unwrap()
             .unwrap();
         let expected = crate::sha256_hex(b"exact stream");
+        let inherited = parent
+            .open_inherited_regular(OsStr::new("upload"), false)
+            .unwrap()
+            .unwrap();
+        let mut inherited_reader = inherited
+            .stable_regular_reader_exact(12, &expected, 100)
+            .unwrap();
+        let mut inherited_bytes = Vec::new();
+        inherited_reader.read_to_end(&mut inherited_bytes).unwrap();
+        inherited_reader.finish().unwrap();
+        assert_eq!(inherited_bytes, b"exact stream");
+        assert!(
+            inherited
+                .stable_regular_reader_exact(1, &expected, 100)
+                .is_err()
+        );
         assert!(upload.stable_reader_exact(1, &expected, 100).is_err());
         assert!(upload.stable_reader_exact(12, &expected, 11).is_err());
         assert!(
