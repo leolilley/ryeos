@@ -30,6 +30,31 @@ pub struct StagedNativeProbe {
     controller_canary_observation: lillux::OpenRegularFileObservation,
 }
 
+/// Parent-owned inputs for the daemon's direct Codex target. These are placed
+/// at the fixed signed prepared-directory coordinates before START; unlike the
+/// scenario driver, no verifier-owned descriptor path is embedded in Codex's
+/// configuration. This object proves prepared bytes only, not their applied
+/// mount or the absence of a concurrent writer.
+pub struct StagedDirectTargetProbe {
+    prepared: PinnedDirectory,
+    occurrence: PinnedDirectory,
+    guest: PinnedDirectory,
+    home: PinnedDirectory,
+    controller: PinnedDirectory,
+    request_sha256: String,
+    environment_configuration_sha256: String,
+}
+
+pub const DIRECT_OCCURRENCE_ID: &str = "codex-occurrence";
+pub const DIRECT_HOME_ID: &str = "codex-home";
+
+fn direct_prepared_destination(id: &str) -> Result<PathBuf> {
+    ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
+        id,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 /// Parent-authored challenge in the fresh private verifier workspace. The
 /// independently joined provider uses this exact value and path; the scoped
 /// child may read it to construct its signed scenario but cannot choose a
@@ -612,6 +637,58 @@ fn target_parent(root: &PinnedDirectory, relative: &Path) -> Result<PinnedDirect
     Ok(parent)
 }
 
+fn stage_selected_tools(
+    selected: &PinnedDirectory,
+    target: &PinnedDirectory,
+    expected_manifest_hash: &str,
+) -> Result<()> {
+    let manifest = ryeos_state::observe_external_content_tree_exact(selected)?;
+    ensure!(
+        ryeos_state::external_content_manifest_digest(&manifest)? == expected_manifest_hash,
+        "selected tools changed before staging"
+    );
+    for entry in &manifest.entries {
+        match entry.kind {
+            ExternalContentManifestEntryKind::Dir => {
+                let relative = Path::new(&entry.path);
+                let parent = target_parent(target, relative)?;
+                parent.create_child(
+                    relative
+                        .file_name()
+                        .context("selected tool directory name absent")?,
+                    0o755,
+                )?;
+            }
+            ExternalContentManifestEntryKind::Symlink => {
+                anyhow::bail!("selected tools contain a symlink")
+            }
+            ExternalContentManifestEntryKind::File => {
+                let relative = Path::new(&entry.path);
+                let parent = target_parent(target, relative)?;
+                copy_exact_member(
+                    selected,
+                    relative,
+                    &parent,
+                    relative.file_name().context("selected tool name absent")?,
+                    entry
+                        .blob_hash
+                        .as_deref()
+                        .context("selected tool hash absent")?,
+                    entry.mode.context("selected tool mode absent")?,
+                    64 * 1024 * 1024,
+                )?;
+            }
+        }
+    }
+    ensure!(
+        ryeos_state::external_content_manifest_digest(
+            &ryeos_state::observe_external_content_tree_exact(target)?
+        )? == expected_manifest_hash,
+        "staged command tools differ from selected manifest"
+    );
+    Ok(())
+}
+
 /// Stage selected bytes without adopting an existing destination or deriving
 /// file identities from a mutable live path. A source drift refuses; it never
 /// yields a different admissible request or silently updates a pin.
@@ -795,6 +872,181 @@ pub fn inspect_frozen_scoped_occurrence(
     })
 }
 
+/// Prepare the direct target's two signed writable coordinates. The daemon
+/// must later resolve both IDs from this same retained workspace, mount their
+/// pinned descriptors, and attest the applied launch. This function does not
+/// authorize START or a qualification claim by itself.
+pub fn stage_direct_target_probe(
+    selected: &SelectedInput,
+    projectless_scratch: &PinnedDirectory,
+    parameters: &Parameters,
+) -> Result<StagedDirectTargetProbe> {
+    let (roots, request) =
+        selected.prepare_native_probe_request(projectless_scratch, parameters)?;
+    let scenario = &parameters.configuration;
+    let prepared = projectless_scratch.create_child(OsStr::new("prepared"), 0o700)?;
+    let occurrence = prepared.create_child(OsStr::new(DIRECT_OCCURRENCE_ID), 0o700)?;
+    let home = prepared.create_child(OsStr::new(DIRECT_HOME_ID), 0o700)?;
+    let guest = occurrence.create_child(OsStr::new("guest"), 0o700)?;
+    let tools = guest.create_child(OsStr::new("tools"), 0o700)?;
+    stage_selected_tools(&roots.tools, &tools, &scenario.tools_manifest_hash)?;
+    guest.create_child(OsStr::new("candidate"), 0o700)?;
+    let request_sha256 = lillux::sha256_hex(&request);
+    guest
+        .atomic_create_pinned_regular(OsStr::new("guest-request.json"), &request, 0o600)?
+        .context("direct guest request already exists")?;
+    copy_exact_member(
+        &roots.configurations,
+        Path::new("scripted.config.toml"),
+        &home,
+        OsStr::new("config.toml"),
+        &scenario.scripted_baseline_sha256,
+        0o644,
+        64 * 1024,
+    )?;
+    // The controller remains an exact read-only selected realization member.
+    // A verifier-owned memfd path cannot be used by the daemon-owned target.
+    let controller_executable = roots
+        .controller
+        .path()
+        .join("bin/ryeos-synthetic-routed-guest");
+    let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
+    let command_environment = materialize_command_environment(
+        &roots.configurations,
+        &controller_executable,
+        &guest_cwd,
+        &scenario.command_environment_template_sha256,
+    )?;
+    let environment_configuration_sha256 = lillux::sha256_hex(&command_environment);
+    home.atomic_create_pinned_regular(
+        OsStr::new("environments.toml"),
+        &command_environment,
+        0o644,
+    )?
+    .context("direct command environment already exists")?;
+    let staged = StagedDirectTargetProbe {
+        prepared,
+        occurrence,
+        guest,
+        home,
+        controller: roots.controller,
+        request_sha256,
+        environment_configuration_sha256,
+    };
+    staged.recheck_preflight(parameters)?;
+    Ok(staged)
+}
+
+impl StagedDirectTargetProbe {
+    pub fn recheck_preflight(&self, parameters: &Parameters) -> Result<()> {
+        self.recheck_sealed_inputs(parameters)?;
+        let candidate = self
+            .guest
+            .open_child_directory(OsStr::new("candidate"))?
+            .context("direct candidate disappeared")?;
+        ensure!(
+            candidate.entries_no_follow_bounded(1)?.is_empty(),
+            "direct candidate is not empty before START"
+        );
+        candidate.ensure_path_binding()?;
+        Ok(())
+    }
+
+    /// Caller must first join the daemon's whole-scope settlement and writer
+    /// exclusion. Matching bytes while a target can still write are not a
+    /// frozen candidate or an effective-environment claim.
+    pub fn inspect_frozen_after_scope_empty(
+        &self,
+        parameters: &Parameters,
+    ) -> Result<FrozenScopedOccurrence> {
+        self.recheck_sealed_inputs(parameters)?;
+        let candidate = self
+            .guest
+            .open_child_directory(OsStr::new("candidate"))?
+            .context("direct candidate disappeared")?;
+        let candidate_sha256 = check_exact_candidate(&candidate)?;
+        let guest_file = self
+            .guest
+            .open_pinned_regular(OsStr::new("guest-observation.json"), false)?
+            .context("direct guest observation disappeared")?;
+        let observed = guest_file.observation()?;
+        ensure!(
+            guest_file.permission_mode()? == 0o600 && observed.size() <= 4 * 1024 * 1024,
+            "direct guest observation changed shape"
+        );
+        let guest_observation =
+            serde_json::from_slice(&guest_file.read_stable_bounded(&observed, 4 * 1024 * 1024)?)?;
+        candidate.ensure_path_binding()?;
+        self.guest.ensure_path_binding()?;
+        Ok(FrozenScopedOccurrence {
+            guest_observation,
+            candidate_sha256,
+            environment_configuration_sha256: self.environment_configuration_sha256.clone(),
+        })
+    }
+
+    fn recheck_sealed_inputs(&self, parameters: &Parameters) -> Result<()> {
+        let scenario = &parameters.configuration;
+        self.prepared.ensure_path_binding()?;
+        self.occurrence.ensure_path_binding()?;
+        self.guest.ensure_path_binding()?;
+        self.home.ensure_path_binding()?;
+        self.controller.ensure_path_binding()?;
+        super::exact_member(
+            &self.controller,
+            "bin/ryeos-synthetic-routed-guest",
+            &scenario.relay_sha256,
+            0o755,
+            64 * 1024 * 1024,
+        )?;
+        let tools = self
+            .guest
+            .open_child_directory(OsStr::new("tools"))?
+            .context("direct command tools disappeared")?;
+        ensure!(
+            ryeos_state::external_content_manifest_digest(
+                &ryeos_state::observe_external_content_tree_exact(&tools)?
+            )? == scenario.tools_manifest_hash,
+            "direct command tools changed"
+        );
+        let request = self
+            .guest
+            .open_pinned_regular(OsStr::new("guest-request.json"), false)?
+            .context("direct native request disappeared")?;
+        let observation = request.observation()?;
+        ensure!(
+            request.permission_mode()? == 0o600
+                && (1..=64 * 1024).contains(&observation.size())
+                && request.digest_stable_exact(&observation)? == self.request_sha256,
+            "direct native request changed"
+        );
+        super::exact_member(
+            &self.home,
+            "config.toml",
+            &scenario.scripted_baseline_sha256,
+            0o644,
+            64 * 1024,
+        )?;
+        super::exact_member(
+            &self.home,
+            "environments.toml",
+            &self.environment_configuration_sha256,
+            0o644,
+            64 * 1024,
+        )?;
+        tools.ensure_path_binding()?;
+        Ok(())
+    }
+
+    pub fn environment_configuration_sha256(&self) -> &str {
+        &self.environment_configuration_sha256
+    }
+
+    pub fn request_sha256(&self) -> &str {
+        &self.request_sha256
+    }
+}
+
 /// Scoped driver variant: use only the parent-authored challenge already
 /// retained in this private workspace, while this process owns its own sealed
 /// guest executable and cwd descriptors for the Codex launch.
@@ -830,54 +1082,7 @@ fn stage_selected_probe_with_challenge(
         268_435_456,
     )?;
     let tools = guest.create_child(OsStr::new("tools"), 0o700)?;
-    let manifest = ryeos_state::observe_external_content_tree_exact(&roots.tools)?;
-    ensure!(
-        ryeos_state::external_content_manifest_digest(&manifest)? == scenario.tools_manifest_hash,
-        "selected tools changed before staging"
-    );
-    for entry in &manifest.entries {
-        match entry.kind {
-            ExternalContentManifestEntryKind::Dir => {
-                let relative = Path::new(&entry.path);
-                let parent = target_parent(&tools, relative)?;
-                // The external-content manifest binds directory membership,
-                // not a directory mode; use one closed staged mode.
-                parent.create_child(
-                    relative
-                        .file_name()
-                        .context("selected tool directory name absent")?,
-                    0o755,
-                )?;
-            }
-            ExternalContentManifestEntryKind::Symlink => {
-                anyhow::bail!("selected tools contain a symlink")
-            }
-            ExternalContentManifestEntryKind::File => {
-                let relative = Path::new(&entry.path);
-                let parent = target_parent(&tools, relative)?;
-                let mode = entry.mode.context("selected tool mode absent")?;
-                let hash = entry
-                    .blob_hash
-                    .as_deref()
-                    .context("selected tool hash absent")?;
-                copy_exact_member(
-                    &roots.tools,
-                    relative,
-                    &parent,
-                    relative.file_name().context("selected tool name absent")?,
-                    hash,
-                    mode,
-                    64 * 1024 * 1024,
-                )?;
-            }
-        }
-    }
-    let staged_manifest = ryeos_state::observe_external_content_tree_exact(&tools)?;
-    ensure!(
-        ryeos_state::external_content_manifest_digest(&staged_manifest)?
-            == scenario.tools_manifest_hash,
-        "staged command tools differ from selected manifest"
-    );
+    stage_selected_tools(&roots.tools, &tools, &scenario.tools_manifest_hash)?;
     let controller = occurrence.create_child(OsStr::new("controller"), 0o700)?;
     let (controller_canary_directory, controller_canary_value, controller_canary_observation) =
         if let Some(challenge) = challenge {
@@ -963,6 +1168,46 @@ fn stage_selected_probe_with_challenge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_prepared_paths_are_fixed_namespace_coordinates() {
+        assert_eq!(
+            direct_prepared_destination(DIRECT_HOME_ID).unwrap(),
+            Path::new("/ryeos/producer-prepared/codex-home")
+        );
+        assert_eq!(
+            direct_prepared_destination(DIRECT_OCCURRENCE_ID).unwrap(),
+            Path::new("/ryeos/producer-prepared/codex-occurrence")
+        );
+        assert!(direct_prepared_destination("../outside").is_err());
+    }
+
+    #[test]
+    fn selected_tools_stage_exact_manifest_and_refuse_drift() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let source = root.create_child(OsStr::new("source"), 0o700).unwrap();
+        let bin = source.create_child(OsStr::new("bin"), 0o755).unwrap();
+        bin.atomic_create_pinned_regular(OsStr::new("zsh"), b"signed-shell", 0o755)
+            .unwrap();
+        bin.atomic_create_pinned_regular(OsStr::new("rg"), b"signed-search", 0o755)
+            .unwrap();
+        let target = root.create_child(OsStr::new("target"), 0o700).unwrap();
+        let expected = ryeos_state::external_content_manifest_digest(
+            &ryeos_state::observe_external_content_tree_exact(&source).unwrap(),
+        )
+        .unwrap();
+        stage_selected_tools(&source, &target, &expected).unwrap();
+        assert_eq!(
+            ryeos_state::external_content_manifest_digest(
+                &ryeos_state::observe_external_content_tree_exact(&target).unwrap()
+            )
+            .unwrap(),
+            expected
+        );
+        assert!(stage_selected_tools(&source, &target, &expected).is_err());
+        assert!(stage_selected_tools(&source, &root, &"0".repeat(64)).is_err());
+    }
 
     #[test]
     fn parent_challenge_is_exact_shared_private_authority() {

@@ -174,3 +174,27 @@ This is not a producer-launch acceptance test: no adapter execution has yet
 proved the applied source, target chdir, or writer settlement. The Codex
 preparer must also prove exact configuration content and writer exclusion.
 Directory identity alone does not establish those claims.
+
+The Codex verifier now has a separate parent-owned direct-target preparer. It
+stages the signed native request, exact command-tool tree and empty candidate
+under `prepared/codex-occurrence`, and the signed baseline plus rendered
+command environment under `prepared/codex-home`. The rendered guest CWD uses
+the fixed target namespace coordinate, not the old verifier-owned inherited
+descriptor path. Its executable points at the selected read-only controller
+realization member. The preparer rechecks signed input bytes before START and
+can inspect the candidate and guest observation after an independently proven
+whole-scope/writer-exclusion fence. Focused source-selection, staging,
+tamper-refusal and frozen-inspection tests pass. This preparer is not yet
+called by the verifier's direct branch, and the signed scenario still refuses
+direct Codex. In particular, a verifier-visible controller pathname does not
+prove that the target saw the same read-only mount; that requires applied
+namespace evidence. Nor can post-scope byte equality prove what mutable home
+content Codex read during execution. The joined test must correlate Codex's
+effective behavior and the applied launch with those sealed inputs.
+
+The fixed preparation coordinates are intentionally create-once. After an
+uncertain START or verifier restart, an existing directory must not be deleted
+and blindly recreated. Recovery must resolve the exact retained attempt and
+reopen its preparation under the same authority, or refuse. Until that
+reconciliation is implemented, this path remains a preflight component rather
+than an admitted qualification scenario.

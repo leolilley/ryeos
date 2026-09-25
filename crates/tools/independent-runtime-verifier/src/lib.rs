@@ -1751,6 +1751,79 @@ mod tests {
             lillux::sha256_hex(b"tool-fixture")
         );
         assert_eq!(native_request["capture_limit"], 4096);
+        let direct = staging::stage_direct_target_probe(&selected, &root, &parameters).unwrap();
+        direct.recheck_preflight(&parameters).unwrap();
+        let direct_home = temp.path().join("prepared/codex-home");
+        let direct_guest = temp.path().join("prepared/codex-occurrence/guest");
+        let direct_environment: toml::Value =
+            std::fs::read_to_string(direct_home.join("environments.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        assert_eq!(
+            direct_environment["environments"][0]["program"].as_str(),
+            Some(relay.to_str().unwrap())
+        );
+        assert_eq!(
+            direct_environment["environments"][0]["cwd"].as_str(),
+            Some("/ryeos/producer-prepared/codex-occurrence/guest")
+        );
+        assert_eq!(
+            direct.environment_configuration_sha256(),
+            lillux::sha256_hex(&std::fs::read(direct_home.join("environments.toml")).unwrap())
+        );
+        assert_eq!(
+            direct.request_sha256(),
+            lillux::sha256_hex(&std::fs::read(direct_guest.join("guest-request.json")).unwrap())
+        );
+        std::fs::write(direct_guest.join("candidate/ambient"), b"not frozen").unwrap();
+        assert!(direct.recheck_preflight(&parameters).is_err());
+        std::fs::remove_file(direct_guest.join("candidate/ambient")).unwrap();
+        direct.recheck_preflight(&parameters).unwrap();
+        let direct_bytes = std::fs::read(direct_home.join("environments.toml")).unwrap();
+        std::fs::write(direct_home.join("environments.toml"), b"tampered").unwrap();
+        assert!(direct.recheck_preflight(&parameters).is_err());
+        std::fs::write(direct_home.join("environments.toml"), direct_bytes).unwrap();
+        direct.recheck_preflight(&parameters).unwrap();
+        std::fs::write(
+            direct_guest
+                .join("candidate")
+                .join(scripted_provider::CANDIDATE_RELATIVE_PATH),
+            scripted_provider::CANDIDATE_CONTENT,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            direct_guest
+                .join("candidate")
+                .join(scripted_provider::CANDIDATE_RELATIVE_PATH),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::write(
+            direct_guest.join("guest-observation.json"),
+            b"{\"schema\":\"fixture\"}",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            direct_guest.join("guest-observation.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(direct.recheck_preflight(&parameters).is_err());
+        let frozen = direct
+            .inspect_frozen_after_scope_empty(&parameters)
+            .unwrap();
+        assert_eq!(
+            frozen.candidate_sha256,
+            lillux::sha256_hex(scripted_provider::CANDIDATE_CONTENT.as_bytes())
+        );
+        assert_eq!(frozen.guest_observation["schema"], "fixture");
+        std::fs::write(direct_home.join("config.toml"), b"tampered").unwrap();
+        assert!(
+            direct
+                .inspect_frozen_after_scope_empty(&parameters)
+                .is_err()
+        );
         let staged = staging::stage_selected_probe(&selected, &root, &parameters).unwrap();
         assert_eq!(
             std::fs::read(staged.codex_executable()).unwrap(),
