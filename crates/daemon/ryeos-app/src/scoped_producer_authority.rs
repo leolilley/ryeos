@@ -290,14 +290,24 @@ impl ScopedProducerLiveAuthority {
         selected_command: &IsolationAdmittedCommand,
     ) -> Result<lillux::SubprocessRequest> {
         recipe.validate()?;
+        ensure!(
+            recipe.environment_bindings.is_empty()
+                && matches!(
+                    recipe.cwd_source,
+                    ryeos_state::external_content::products::producer_recipe::ProducerCwdSource::VerifierPrivateWorkspace
+                ),
+            "signed producer prepared launch bindings lack retained directory authority"
+        );
         let buffered_input = match (&recipe.executable_source, &recipe.stdin_source) {
             (
                 ProducerExecutableSource::AdmittedVerifierExecutable,
                 ProducerStdinSource::SignedVerifierParameters,
             ) => {
                 ensure!(
-                    matches!(selected_command, IsolationAdmittedCommand::DescriptorBound(_))
-                        && selected_command.authority().identity() == self.command.identity(),
+                    matches!(
+                        selected_command,
+                        IsolationAdmittedCommand::DescriptorBound(_)
+                    ) && selected_command.authority().identity() == self.command.identity(),
                     "scoped producer selected command differs from admitted verifier"
                 );
                 true
@@ -309,9 +319,10 @@ impl ScopedProducerLiveAuthority {
                 ProducerStdinSource::InteractiveVerifierChannel { .. },
             ) => {
                 ensure!(
-                    matches!(selected_command, IsolationAdmittedCommand::RealizationMember(_))
-                        && selected_command.authority().identity().content_hash
-                            == *executable_sha256,
+                    matches!(
+                        selected_command,
+                        IsolationAdmittedCommand::RealizationMember(_)
+                    ) && selected_command.authority().identity().content_hash == *executable_sha256,
                     "scoped producer selected command differs from signed realization member"
                 );
                 false
@@ -588,12 +599,13 @@ mod tests {
     fn recipe_request_has_only_signed_arguments_input_and_environment() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v3",
+            "schema": "ryeos.product_producer_recipe.v4",
             "executable_source": {"kind":"admitted_verifier_executable"},
             "argv": ["--scenario-driver"],
             "stdin_source": {"kind":"signed_verifier_parameters"},
-            "cwd_source": "verifier_private_workspace",
+            "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": [],
+            "environment_bindings": {},
             "loopback_ingress": null,
             "bounds": {
                 "maximum_wall_time_ms": 5000,
@@ -633,6 +645,21 @@ mod tests {
                 .request_for_recipe(&recipe, "{\"sealed\":true}", &unrelated)
                 .is_err()
         );
+        let mut unprepared = recipe.clone();
+        unprepared.environment_bindings.insert(
+            "HOME".into(),
+            ryeos_state::external_content::products::producer_recipe::ProducerEnvironmentBinding::PreparedDirectory {
+                id: "codex-home".into(),
+            },
+        );
+        assert!(
+            authority
+                .request_for_recipe(&unprepared, "{\"sealed\":true}", &selected_command)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("lack retained directory authority")
+        );
         let mut requires_realizations = recipe;
         requires_realizations.environment_sources =
             vec![ProducerEnvironmentSource::AdmittedRealizations];
@@ -651,7 +678,7 @@ mod tests {
     fn interactive_realization_recipe_refuses_a_verifier_command() {
         let authority = authority();
         let recipe = ProductProducerRecipe::from_value(serde_json::json!({
-            "schema": "ryeos.product_producer_recipe.v3",
+            "schema": "ryeos.product_producer_recipe.v4",
             "executable_source": {
                 "kind": "admitted_realization_member",
                 "realization_id": "codex_runtime",
@@ -666,8 +693,9 @@ mod tests {
                 "maximum_total_bytes": 4096,
                 "maximum_frames": 4
             },
-            "cwd_source": "verifier_private_workspace",
+            "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": [],
+            "environment_bindings": {},
             "loopback_ingress": null,
             "bounds": {
                 "maximum_wall_time_ms": 5000,

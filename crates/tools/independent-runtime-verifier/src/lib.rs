@@ -752,7 +752,12 @@ impl Parameters {
                     .configuration
                     .expected_producer_recipe
                     .environment_sources
-                    == [ProducerEnvironmentSource::AdmittedRealizations],
+                    == [ProducerEnvironmentSource::AdmittedRealizations]
+                && self
+                    .configuration
+                    .expected_producer_recipe
+                    .environment_bindings
+                    .is_empty(),
             "expected producer recipe differs from the finite scenario driver"
         );
         ensure!(
@@ -1254,12 +1259,13 @@ mod tests {
             expected_producer_recipe_ref: "config:fixtures/independent-runtime/scenario-driver"
                 .into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(serde_json::json!({
-                "schema":"ryeos.product_producer_recipe.v3",
+                "schema":"ryeos.product_producer_recipe.v4",
                 "executable_source":{"kind":"admitted_verifier_executable"},
                 "argv":["--scenario-driver"],
                 "stdin_source":{"kind":"signed_verifier_parameters"},
-                "cwd_source":"verifier_private_workspace",
+                "cwd_source":{"kind":"verifier_private_workspace"},
                 "environment_sources":["admitted_realizations"],
+                "environment_bindings":{},
                 "loopback_ingress":null,
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,

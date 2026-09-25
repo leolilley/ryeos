@@ -912,12 +912,13 @@ mod tests {
     #[test]
     fn observed_recipe_must_match_prelaunch_signed_bytes_and_stream_bounds() {
         let expected = ProductProducerRecipe::from_value(json!({
-            "schema":"ryeos.product_producer_recipe.v3",
+            "schema":"ryeos.product_producer_recipe.v4",
             "executable_source":{"kind":"admitted_verifier_executable"},
             "argv":["--scenario-driver"],
             "stdin_source":{"kind":"signed_verifier_parameters"},
-            "cwd_source":"verifier_private_workspace",
+            "cwd_source":{"kind":"verifier_private_workspace"},
             "environment_sources":["admitted_realizations"],
+            "environment_bindings":{},
             "loopback_ingress":null,
             "bounds":{"maximum_wall_time_ms":170000,
                 "maximum_stdout_bytes":6291456,

@@ -1,7 +1,7 @@
 //! Signed Config data describing a finite producer invocation. This module
 //! does not resolve, admit, or launch the selected verifier executable.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::objects::canonical_value_digest;
 
-pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v3";
+pub const PRODUCER_RECIPE_SCHEMA: &str = "ryeos.product_producer_recipe.v4";
 pub const MAX_PRODUCER_RECIPE_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCER_ARGV: usize = 32;
 pub const MAX_PRODUCER_ARG_BYTES: usize = 1024;
@@ -30,6 +30,7 @@ pub const MAX_PRODUCER_PROCESSES: u32 = 256;
 pub const MAX_PRODUCER_INTERACTIVE_FRAME_BYTES: u32 = 64 * 1024;
 pub const MAX_PRODUCER_INTERACTIVE_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_PRODUCER_INTERACTIVE_FRAMES: u32 = 512;
+pub const MAX_PRODUCER_ENVIRONMENT_BINDINGS: usize = 16;
 
 /// A signed executable selector, never a caller-supplied host path. The
 /// realization member still requires the root's retained admitted mount and
@@ -59,10 +60,47 @@ pub enum ProducerStdinSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProducerCwdSource {
     VerifierPrivateWorkspace,
+    PreparedDirectory { id: String },
+}
+
+/// Path-free signed process environment. Prepared directories must be
+/// resolved from retained pinned launch authority; a recipe alone never
+/// authorizes the daemon to open a host path or synthesize a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProducerEnvironmentBinding {
+    Literal { value: String },
+    VerifierPrivateWorkspace,
+    PreparedDirectory { id: String },
+}
+
+fn validate_prepared_directory_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        bail!("producer prepared directory id is not canonical");
+    }
+    Ok(())
+}
+
+fn validate_producer_environment_name(name: &str) -> anyhow::Result<()> {
+    let mut bytes = name.bytes();
+    if name.is_empty()
+        || name.len() > 64
+        || !bytes.next().is_some_and(|byte| byte.is_ascii_uppercase())
+        || !bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        || name == "RYEOS_EXTERNAL_REALIZATIONS"
+    {
+        bail!("producer environment name is not canonical or is reserved");
+    }
+    Ok(())
 }
 
 /// No host environment, caller value, or path lookup is an environment source.
@@ -155,6 +193,7 @@ pub struct ProductProducerRecipe {
     pub stdin_source: ProducerStdinSource,
     pub cwd_source: ProducerCwdSource,
     pub environment_sources: Vec<ProducerEnvironmentSource>,
+    pub environment_bindings: BTreeMap<String, ProducerEnvironmentBinding>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub loopback_ingress: Option<ProducerLoopbackIngress>,
     pub bounds: ProducerResourceBounds,
@@ -191,6 +230,30 @@ impl ProductProducerRecipe {
                 != self.environment_sources.len()
         {
             bail!("producer environment sources must be finite and unique");
+        }
+        if self.environment_bindings.len() > MAX_PRODUCER_ENVIRONMENT_BINDINGS {
+            bail!("producer environment bindings exceed count bound");
+        }
+        if let ProducerCwdSource::PreparedDirectory { id } = &self.cwd_source {
+            validate_prepared_directory_id(id)?;
+        }
+        for (name, binding) in &self.environment_bindings {
+            validate_producer_environment_name(name)?;
+            match binding {
+                ProducerEnvironmentBinding::Literal { value } => {
+                    if value.len() > 4096
+                        || value.chars().any(char::is_control)
+                        || value.contains('/')
+                        || value.contains('\\')
+                    {
+                        bail!("producer environment literal is not bounded or path-free");
+                    }
+                }
+                ProducerEnvironmentBinding::VerifierPrivateWorkspace => {}
+                ProducerEnvironmentBinding::PreparedDirectory { id } => {
+                    validate_prepared_directory_id(id)?;
+                }
+            }
         }
         if let ProducerExecutableSource::AdmittedRealizationMember {
             realization_id,
@@ -272,8 +335,9 @@ mod tests {
             "executable_source": {"kind":"admitted_verifier_executable"},
             "argv": ["--scenario-driver", "check"],
             "stdin_source": {"kind":"signed_verifier_parameters"},
-            "cwd_source": "verifier_private_workspace",
+            "cwd_source": {"kind":"verifier_private_workspace"},
             "environment_sources": ["admitted_realizations"],
+            "environment_bindings": {},
             "loopback_ingress": null,
             "bounds": {"maximum_wall_time_ms": 1000, "maximum_stdout_bytes": 1024,
                 "maximum_stderr_bytes": 1024, "maximum_memory_bytes": 1048576,
@@ -290,6 +354,38 @@ mod tests {
     }
 
     #[test]
+    fn prepared_environment_bindings_are_path_free_and_exact() {
+        let mut value = valid();
+        value["cwd_source"] = json!({"kind":"prepared_directory","id":"guest-cwd"});
+        value["environment_bindings"] = json!({
+            "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"},
+            "HOME":{"kind":"prepared_directory","id":"codex-home"},
+            "PATH":{"kind":"literal","value":""},
+            "LANG":{"kind":"literal","value":"C"}
+        });
+        let recipe = ProductProducerRecipe::from_value(value.clone()).unwrap();
+        assert_eq!(
+            recipe.digest().unwrap(),
+            canonical_value_digest(&value).unwrap()
+        );
+
+        let mut invalid = value.clone();
+        invalid["environment_bindings"]["HOME"] = json!({"kind":"literal","value":"/home/ambient"});
+        assert!(ProductProducerRecipe::from_value(invalid).is_err());
+        let mut invalid = value.clone();
+        invalid["environment_bindings"]["RYEOS_EXTERNAL_REALIZATIONS"] =
+            json!({"kind":"literal","value":"override"});
+        assert!(ProductProducerRecipe::from_value(invalid).is_err());
+        let mut invalid = value.clone();
+        invalid["environment_bindings"]["HOME"] =
+            json!({"kind":"prepared_directory","id":"../ambient"});
+        assert!(ProductProducerRecipe::from_value(invalid).is_err());
+        let mut invalid = value;
+        invalid["cwd_source"] = json!({"kind":"prepared_directory","id":""});
+        assert!(ProductProducerRecipe::from_value(invalid).is_err());
+    }
+
+    #[test]
     fn authority_fields_are_required_and_closed() {
         for field in [
             "executable_source",
@@ -297,6 +393,7 @@ mod tests {
             "stdin_source",
             "cwd_source",
             "environment_sources",
+            "environment_bindings",
             "loopback_ingress",
             "bounds",
         ] {
@@ -310,7 +407,7 @@ mod tests {
                 json!({"kind":"host_path","path":"/bin/sh"}),
             ),
             ("stdin_source", json!({"kind":"caller_input"})),
-            ("cwd_source", json!("host_workspace")),
+            ("cwd_source", json!({"kind":"host_workspace"})),
             ("environment_sources", json!(["host_environment"])),
         ] {
             let mut candidate = valid();

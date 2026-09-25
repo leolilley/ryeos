@@ -98,6 +98,14 @@ rejects a direct recipe in its signed-parameter preflight, and the current
 producer request supplies only `RYEOS_EXTERNAL_REALIZATIONS` and the private
 workspace root as cwd.
 
+Recipe v4 now parses bounded, path-free environment bindings and logical
+prepared-directory IDs for cwd and environment. The runtime explicitly
+refuses those new forms before reservation until a retained preparation owner
+can supply their pinned directories and effective launch evidence. The signed
+scenario-driver fixture moved to v4 with empty bindings; previously signed v3
+recipes require republishing and are not silently accepted. This is a schema
+cut, not a direct-target launch or qualification claim.
+
 The old verifier-owned child had additional effective launch inputs:
 `--strict-config -c check_for_update_on_startup=false app-server`, a pinned
 Codex home containing the exact signed `config.toml` and rendered
