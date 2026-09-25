@@ -198,3 +198,18 @@ and blindly recreated. Recovery must resolve the exact retained attempt and
 reopen its preparation under the same authority, or refuse. Until that
 reconciliation is implemented, this path remains a preflight component rather
 than an admitted qualification scenario.
+
+The fixture's signed producer recipe now selects the exact retained
+`subject/bin/codex` realization member, finite app-server argv, interactive
+input budgets, the fixed prepared occurrence/home IDs, and one signed
+loopback ingress. The verifier stages before START, rechecks before release,
+and joins transcript/provider/candidate observations only after the daemon's
+natural-empty scoped observation. It still refuses to issue qualification
+claims. Focused verifier-library, verifier-binary, and signed fixture-authoring
+tests pass. Those are not a joined native direct-target run. The old
+scenario-driver diagnostic branch and tests remain in source and must be
+removed as part of the direct-target clean cut; they are no longer selected
+by the signed fixture. Native execution must prove that the rendered
+controller executable is reachable as the same read-only realization member
+inside the target namespace and that the daemon's settlement excludes every
+candidate writer. Exact-attempt restart reconciliation remains open.

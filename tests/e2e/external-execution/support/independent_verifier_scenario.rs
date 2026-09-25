@@ -6,7 +6,9 @@
 use anyhow::{Result, ensure};
 use lillux::crypto::SigningKey;
 use ryeos_external_execution_contract::LifecycleCapability;
-use ryeos_independent_runtime_verifier::QualificationExecutionEnvironment;
+use ryeos_independent_runtime_verifier::{
+    DIRECT_PRODUCER_RECIPE_REF, QualificationExecutionEnvironment,
+};
 use ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe;
 use ryeos_state::external_execution::admission::{
     ExternalCandidateQualificationUse, ExternalCandidateRequirement,
@@ -19,7 +21,6 @@ use std::{collections::BTreeMap, net::SocketAddr};
 
 pub const TOOL_REF: &str = "tool:fixtures/independent-runtime/verify";
 pub const POLICY_REF: &str = "config:fixtures/independent-runtime/qualification";
-pub const PRODUCER_RECIPE_REF: &str = "config:fixtures/independent-runtime/scenario-driver";
 pub const PRODUCER_SCENARIO_ID: &str = ryeos_independent_runtime_verifier::PRODUCER_SCENARIO_ID;
 pub const VERIFIER_BIN: &str = "independent-runtime-verifier";
 const SCENARIO: &str = "test.independent_routed_runtime.v1";
@@ -131,7 +132,7 @@ impl IndependentVerifierScenario {
         self.requirement.validate()?;
         self.expected_producer_recipe.validate()?;
         ensure!(
-            self.expected_producer_recipe_ref == PRODUCER_RECIPE_REF,
+            self.expected_producer_recipe_ref == DIRECT_PRODUCER_RECIPE_REF,
             "scenario expected producer ref differs from signed Config"
         );
         ensure!(
@@ -223,7 +224,7 @@ impl IndependentVerifierScenario {
                 policy,
             ),
             (
-                ".ai/config/fixtures/independent-runtime/scenario-driver.yaml",
+                ".ai/config/fixtures/independent-runtime/direct-codex.yaml",
                 recipe,
             ),
         ]
@@ -273,10 +274,10 @@ impl IndependentVerifierScenario {
                 "allowed_claims":CLAIMS,
                 "minimum_verifier_process_settlement":"scope_empty",
                 "verifier_parameters":parameters,
-                "producer_scenarios":{(PRODUCER_SCENARIO_ID):{"recipe_ref":PRODUCER_RECIPE_REF}}}});
-        let recipe = json!({"category":"fixtures/independent-runtime","name":"scenario-driver",
+                "producer_scenarios":{(PRODUCER_SCENARIO_ID):{"recipe_ref":DIRECT_PRODUCER_RECIPE_REF}}}});
+        let recipe = json!({"category":"fixtures/independent-runtime","name":"direct-codex",
             "version":"1.0.0",
-            "description":"Exact bounded verifier-owned scripted scenario child",
+            "description":"Exact bounded daemon-owned direct Codex target",
             "product_producer_recipe":self.expected_producer_recipe});
         ryeos_state::external_content::products::qualification::ProductQualificationPolicy::from_value(&policy["product_qualification_policy"])?;
         ryeos_state::external_content::products::producer_recipe::ProductProducerRecipe::from_value(
@@ -365,16 +366,24 @@ mod tests {
             requirement: requirement.clone(),
             qualification_use,
             execution_environment,
-            expected_producer_recipe_ref: PRODUCER_RECIPE_REF.into(),
+            expected_producer_recipe_ref: DIRECT_PRODUCER_RECIPE_REF.into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(json!({
                 "schema":"ryeos.product_producer_recipe.v4",
-                "executable_source":{"kind":"admitted_verifier_executable"},
-                "argv":["--scenario-driver"],
-                "stdin_source":{"kind":"signed_verifier_parameters"},
-                "cwd_source":{"kind":"verifier_private_workspace"},
+                "executable_source":{"kind":"admitted_realization_member",
+                    "realization_id":"subject", "manifest_hash":"a".repeat(64),
+                    "relative_path":"bin/codex", "executable_sha256":"e".repeat(64)},
+                "argv":["--strict-config","-c","check_for_update_on_startup=false","app-server"],
+                "stdin_source":{"kind":"interactive_verifier_channel",
+                    "maximum_frame_bytes":65536,"maximum_total_bytes":1048576,"maximum_frames":128},
+                "cwd_source":{"kind":"prepared_directory","id":"codex-occurrence"},
                 "environment_sources":["admitted_realizations"],
-                "environment_bindings":{},
-                "loopback_ingress":null,
+                "environment_bindings":{
+                    "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"},
+                    "HOME":{"kind":"prepared_directory","id":"codex-home"},
+                    "PATH":{"kind":"literal","value":""},
+                    "LANG":{"kind":"literal","value":"C"},
+                    "LC_ALL":{"kind":"literal","value":"C"}},
+                "loopback_ingress":{"address":"127.0.0.1:18765"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,
                     "maximum_stderr_bytes":1048576,
@@ -498,11 +507,16 @@ mod tests {
         assert!(policy.get("claims").is_none());
         assert_eq!(
             policy["product_qualification_policy"]["producer_scenarios"][PRODUCER_SCENARIO_ID]["recipe_ref"],
-            PRODUCER_RECIPE_REF
+            DIRECT_PRODUCER_RECIPE_REF
         );
         assert_eq!(
             recipe["product_producer_recipe"]["argv"],
-            json!(["--scenario-driver"])
+            json!([
+                "--strict-config",
+                "-c",
+                "check_for_update_on_startup=false",
+                "app-server"
+            ])
         );
     }
     #[test]
@@ -510,6 +524,12 @@ mod tests {
         let original = scenario();
         let mut changed = original.clone();
         changed.responses_origin = "http://127.0.0.1:18766".into();
+        changed
+            .expected_producer_recipe
+            .loopback_ingress
+            .as_mut()
+            .unwrap()
+            .address = "127.0.0.1:18766".into();
         assert_ne!(
             original.parameters().unwrap(),
             changed.parameters().unwrap()

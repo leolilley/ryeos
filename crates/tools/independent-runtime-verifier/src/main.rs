@@ -51,6 +51,11 @@ async fn main() -> Result<()> {
     }
     let (_, expected_request) = selected.prepare_native_probe_request(&project, &parameters)?;
     let expected_request_sha256 = lillux::sha256_hex(&expected_request);
+    ensure!(
+        mode.as_deref() != Some(OsStr::new("--scoped-resume-race-probe")),
+        "direct Codex fixture does not select the old resume-race probe"
+    );
+    let direct_stage = staging::stage_direct_target_probe(&selected, &project, &parameters)?;
     let challenge = staging::create_parent_challenge(&project)?;
     let commands = challenge.scripted_canary_commands()?;
     let (provider, socket_name) = ScriptedPeer::bind_pinned(
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
             !race_probe,
             "scoped race probe does not select direct Codex ingress"
         );
+        direct_stage.recheck_preflight(&parameters)?;
         let relay_thread = thread_id.clone();
         let relay_source = expected_source.clone();
         let relay_ingress = ingress.clone();
@@ -450,8 +456,38 @@ async fn main() -> Result<()> {
             controller_canary_value: challenge.value().to_owned(),
         };
         check_notifications(&routing, &notifications)?;
+        ensure!(
+            direct_stage.request_sha256() == expected_request_sha256,
+            "direct prepared request differs from selected signed request"
+        );
+        let frozen = direct_stage.inspect_frozen_after_scope_empty(&parameters)?;
+        ensure!(
+            frozen.environment_configuration_sha256
+                == direct_stage.environment_configuration_sha256()
+                && frozen.candidate_sha256
+                    == lillux::sha256_hex(scripted_provider::CANDIDATE_CONTENT.as_bytes()),
+            "direct frozen configuration or candidate differs from prepared expectation"
+        );
+        native_guest::check_applied_receipt_against_signed_request(
+            &frozen.guest_observation,
+            &expected_request,
+        )?;
+        let guest = GuestScenario {
+            request_sha256: &expected_request_sha256,
+            shell: scripted_provider::GUEST_SHELL,
+            guest_cwd_uri: "file:///workspace",
+            guest_command: scripted_provider::GUEST_COMMAND_SCRIPT,
+            secret_read_command: &routing.secret_read_script,
+            expected_command_output: &routing.expected_command_output,
+            controller_canary_value: challenge.value(),
+            secret_read_denial: staging::CONTROLLER_CANARY_DENIAL,
+            candidate_uri: scripted_provider::CANDIDATE_URI,
+            candidate_relative_path: scripted_provider::CANDIDATE_RELATIVE_PATH,
+            candidate_content: scripted_provider::CANDIDATE_CONTENT.as_bytes(),
+        };
+        check_guest_observation(&frozen.guest_observation, &guest)?;
         bail!(
-            "direct-target launch, relay and conversation joined, but effective environment, frozen candidate and complete qualification evidence remain unproven"
+            "direct-target launch, relay, conversation and frozen candidate joined, but effective namespace environment and complete qualification evidence remain unproven"
         );
     }
     let transcript: serde_json::Value = serde_json::from_str(&observation.stdout)

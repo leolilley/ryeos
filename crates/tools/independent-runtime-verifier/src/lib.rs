@@ -17,8 +17,8 @@ pub mod staging;
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::{
-    ProducerCwdSource, ProducerEnvironmentSource, ProducerExecutableSource, ProducerStdinSource,
-    ProductProducerRecipe,
+    ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
 };
 use ryeos_state::external_execution::admission::{
     ExternalCandidateProcFilesystem, ExternalCandidateQualificationUse,
@@ -33,8 +33,9 @@ use std::collections::BTreeMap;
 use std::{ffi::OsStr, path::Path};
 
 pub const SCENARIO: &str = "test.independent_routed_runtime.v1";
-/// Signed policy selector for the one verifier-owned scenario producer.
+/// Signed policy selector for the one daemon-owned direct Codex producer.
 pub const PRODUCER_SCENARIO_ID: &str = "native_codex";
+pub const DIRECT_PRODUCER_RECIPE_REF: &str = "config:fixtures/independent-runtime/direct-codex";
 pub const INPUT_LIMIT: usize = 8 * 1024;
 pub const REALIZATIONS_LIMIT: usize = 64 * 1024;
 
@@ -733,32 +734,73 @@ impl Parameters {
         );
         self.configuration.requirement.validate()?;
         self.configuration.expected_producer_recipe.validate()?;
+        let direct = &self.configuration.expected_producer_recipe;
+        let expected_bindings = BTreeMap::from([
+            (
+                "CODEX_HOME".into(),
+                ProducerEnvironmentBinding::PreparedDirectory {
+                    id: staging::DIRECT_HOME_ID.into(),
+                },
+            ),
+            (
+                "HOME".into(),
+                ProducerEnvironmentBinding::PreparedDirectory {
+                    id: staging::DIRECT_HOME_ID.into(),
+                },
+            ),
+            (
+                "PATH".into(),
+                ProducerEnvironmentBinding::Literal {
+                    value: String::new(),
+                },
+            ),
+            (
+                "LANG".into(),
+                ProducerEnvironmentBinding::Literal { value: "C".into() },
+            ),
+            (
+                "LC_ALL".into(),
+                ProducerEnvironmentBinding::Literal { value: "C".into() },
+            ),
+        ]);
+        let expected_ingress = self
+            .configuration
+            .responses_origin
+            .strip_prefix("http://")
+            .context("direct producer origin is not HTTP")?;
         ensure!(
-            self.configuration.expected_producer_recipe_ref
-                == "config:fixtures/independent-runtime/scenario-driver",
-            "expected producer recipe ref differs from signed scenario"
-        );
-        ensure!(
-            self.configuration
-                .expected_producer_recipe
-                .executable_source
-                == ProducerExecutableSource::AdmittedVerifierExecutable
-                && self.configuration.expected_producer_recipe.argv == ["--scenario-driver"]
-                && self.configuration.expected_producer_recipe.stdin_source
-                    == ProducerStdinSource::SignedVerifierParameters
-                && self.configuration.expected_producer_recipe.cwd_source
-                    == ProducerCwdSource::VerifierPrivateWorkspace
-                && self
-                    .configuration
-                    .expected_producer_recipe
-                    .environment_sources
-                    == [ProducerEnvironmentSource::AdmittedRealizations]
-                && self
-                    .configuration
-                    .expected_producer_recipe
-                    .environment_bindings
-                    .is_empty(),
-            "expected producer recipe differs from the finite scenario driver"
+            self.configuration.expected_producer_recipe_ref == DIRECT_PRODUCER_RECIPE_REF
+                && direct.executable_source
+                    == ProducerExecutableSource::AdmittedRealizationMember {
+                        realization_id: "subject".into(),
+                        manifest_hash: self.configuration.subject_manifest_hash.clone(),
+                        relative_path: "bin/codex".into(),
+                        executable_sha256: self.configuration.codex_sha256.clone(),
+                    }
+                && direct.argv
+                    == [
+                        "--strict-config",
+                        "-c",
+                        "check_for_update_on_startup=false",
+                        "app-server"
+                    ]
+                && direct.stdin_source
+                    == ProducerStdinSource::InteractiveVerifierChannel {
+                        maximum_frame_bytes: 64 * 1024,
+                        maximum_total_bytes: 1024 * 1024,
+                        maximum_frames: 128,
+                    }
+                && direct.cwd_source
+                    == ProducerCwdSource::PreparedDirectory {
+                        id: staging::DIRECT_OCCURRENCE_ID.into(),
+                    }
+                && direct.environment_sources == [ProducerEnvironmentSource::AdmittedRealizations]
+                && direct.environment_bindings == expected_bindings
+                && direct
+                    .loopback_ingress
+                    .as_ref()
+                    .is_some_and(|ingress| ingress.address == expected_ingress),
+            "expected producer recipe differs from the finite direct Codex target"
         );
         ensure!(
             self.configuration.requirement.provider_declaration_id == "codex-hosted"
@@ -1256,17 +1298,24 @@ mod tests {
                 executable_search: Vec::new(),
                 process_environment: BTreeMap::new(),
             },
-            expected_producer_recipe_ref: "config:fixtures/independent-runtime/scenario-driver"
-                .into(),
+            expected_producer_recipe_ref: DIRECT_PRODUCER_RECIPE_REF.into(),
             expected_producer_recipe: ProductProducerRecipe::from_value(serde_json::json!({
                 "schema":"ryeos.product_producer_recipe.v4",
-                "executable_source":{"kind":"admitted_verifier_executable"},
-                "argv":["--scenario-driver"],
-                "stdin_source":{"kind":"signed_verifier_parameters"},
-                "cwd_source":{"kind":"verifier_private_workspace"},
+                "executable_source":{"kind":"admitted_realization_member",
+                    "realization_id":"subject", "manifest_hash":"a".repeat(64),
+                    "relative_path":"bin/codex", "executable_sha256":"e".repeat(64)},
+                "argv":["--strict-config","-c","check_for_update_on_startup=false","app-server"],
+                "stdin_source":{"kind":"interactive_verifier_channel",
+                    "maximum_frame_bytes":65536,"maximum_total_bytes":1048576,"maximum_frames":128},
+                "cwd_source":{"kind":"prepared_directory","id":"codex-occurrence"},
                 "environment_sources":["admitted_realizations"],
-                "environment_bindings":{},
-                "loopback_ingress":null,
+                "environment_bindings":{
+                    "CODEX_HOME":{"kind":"prepared_directory","id":"codex-home"},
+                    "HOME":{"kind":"prepared_directory","id":"codex-home"},
+                    "PATH":{"kind":"literal","value":""},
+                    "LANG":{"kind":"literal","value":"C"},
+                    "LC_ALL":{"kind":"literal","value":"C"}},
+                "loopback_ingress":{"address":"127.0.0.1:1234"},
                 "bounds":{"maximum_wall_time_ms":170000,
                     "maximum_stdout_bytes":6291456,
                     "maximum_stderr_bytes":1048576,
@@ -1696,6 +1745,13 @@ mod tests {
         scenario.subject_manifest_hash = capture("subject");
         scenario.controller_manifest_hash = capture("controller");
         scenario.tools_manifest_hash = capture("tools");
+        scenario.expected_producer_recipe.executable_source =
+            ProducerExecutableSource::AdmittedRealizationMember {
+                realization_id: "subject".into(),
+                manifest_hash: scenario.subject_manifest_hash.clone(),
+                relative_path: "bin/codex".into(),
+                executable_sha256: scenario.codex_sha256.clone(),
+            };
         let mut production = scenario
             .execution_environment
             .realizations

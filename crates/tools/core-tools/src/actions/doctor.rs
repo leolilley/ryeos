@@ -462,6 +462,7 @@ fn import_one(
             verified_command: None,
             external_read_only_mounts: &[],
             writable_runtime_view_mounts: &[],
+            producer_prepared_mounts: &[],
             target_channels: &[],
             item_ref,
             thread_id: "offline-doctor",
