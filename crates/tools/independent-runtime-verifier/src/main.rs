@@ -118,7 +118,36 @@ async fn main() -> Result<()> {
             client.start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID),
             receiver,
         );
-        let relay = relay.context("scoped relay receiver did not settle")??;
+        let relay = match relay
+            .context("scoped relay receiver did not settle")
+            .and_then(|result| result)
+        {
+            Ok(relay) => relay,
+            Err(receiver_error) => {
+                // START may have released and acknowledged an exact child
+                // before the receiver failed. Resolve only that retained
+                // attempt, then request cleanup; never issue another START.
+                let locator = match started {
+                    Ok(value) => Ok(value),
+                    Err(CallbackError::Transport(_)) => {
+                        client.resume_scoped_child(&thread_id).await
+                    }
+                    Err(error) => Err(error),
+                };
+                let cleanup = match locator {
+                    Ok(value) => match serde_json::from_value::<ScopedAttemptLocator>(value) {
+                        Ok(locator) => {
+                            abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await
+                        }
+                        Err(error) => Err(error.into()),
+                    },
+                    Err(error) => Err(error.into()),
+                };
+                return Err(receiver_error.context(format!(
+                    "direct-target relay receiver failed; exact scoped cleanup={cleanup:?}"
+                )));
+            }
+        };
         (started, Some(relay))
     } else if race_probe {
         // Both requests use the same admitted root callback authority. RESUME

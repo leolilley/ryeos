@@ -70,10 +70,14 @@ replay.
 The conditional START receiver also needs a complete failure owner. A
 root-authorized exact-attempt abort callback now claims cleanup-only retirement
 before checked process/scope stop, and the verifier calls it on conversation
-or locator failure. The abort and natural-observation CAS are mutually
+or locator failure. If the receiver fails after START, the verifier uses only
+the acknowledged locator or exact RESUME point read to request that same
+child's abort. The abort and natural-observation CAS are mutually
 exclusive; focused `ryeos-app` tests pass for both outcome orderings. This is
-not yet a complete failure proof: a failed receiver may
-leave START waiting for its deadline; an expired or failed abort still needs
-root-terminal recovery evidence; and relay settlement timeout must not discard
-its still-live owner through an error conversion. Merely dropping a local
-handle or repeating START is not recovery evidence.
+not yet a complete failure proof: a failed receiver may leave START waiting
+until its deadline; an expired or failed abort still needs root-terminal
+recovery evidence. Relay and scripted-provider settlement now retain their
+owners on the first timeout, attempt explicit bounded cancellation, and refuse
+qualification after cancellation. Their final interrupting Drop joins remain
+potentially unbounded, so this is not a bounded terminal proof. Merely dropping
+a local handle or repeating START is not recovery evidence.
