@@ -251,10 +251,24 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let observed = client
+    let observed = match client
         .observe_scoped_child(&thread_id, &locator.attempt_id)
         .await
-        .context("scoped producer observation refused")?;
+    {
+        Ok(observed) => observed,
+        Err(error) if running_relay.is_some() => {
+            // A lost observation response might already have committed a
+            // natural result. The exact abort CAS refuses in that case; it
+            // cannot turn the committed observation into cleanup evidence.
+            let abort = abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+            return Err(anyhow::Error::new(error).context(format!(
+                "direct-target observation failed; exact scoped abort={abort:?}"
+            )));
+        }
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context("scoped producer observation refused"));
+        }
+    };
     let observation: ScopedObservationCut = serde_json::from_value(observed)
         .context("scoped producer returned an invalid observation envelope")?;
     let direct_evidence = if let Some(relay) = running_relay {
