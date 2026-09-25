@@ -1460,6 +1460,9 @@ mod imp {
             .map_err(|error| format!("prepare mount {}: {error}", mount.destination.display()))?;
             bind_descriptor_mount(mount)
                 .map_err(|error| format!("mount {}: {error}", mount.destination.display()))?;
+            verify_descriptor_mount(mount).map_err(|error| {
+                format!("verify mounted {}: {error}", mount.destination.display())
+            })?;
             if let Some(view) = request
                 .fixed_parent_views
                 .iter()
@@ -2442,13 +2445,21 @@ mod imp {
                 &rooted(&PathBuf::from(destination))?,
                 descriptor_kind(source.as_raw_fd() as u32)?,
             )?;
-            bind_descriptor_mount(&LinuxSandboxMount {
+            let mount = LinuxSandboxMount {
                 source_fd: source.as_raw_fd() as u32,
                 destination: PathBuf::from(destination),
                 access: LinuxSandboxMountAccess::ReadOnly,
                 layer: 0,
-            })
-            .map_err(|error| format!("probe mount {destination}: {error}"))?;
+            };
+            bind_descriptor_mount(&mount)
+                .map_err(|error| format!("probe mount {destination}: {error}"))?;
+            verify_descriptor_mount(&mount)
+                .map_err(|error| format!("probe mounted {destination}: {error}"))?;
+            let mut wrong_access = mount.clone();
+            wrong_access.access = LinuxSandboxMountAccess::Writable;
+            if verify_descriptor_mount(&wrong_access).is_ok() {
+                return Err("sealed mount probe accepted wrong applied access".into());
+            }
         }
         let path = format!("{ROOT}/tmp/.sealed-bytes-probe");
         if std::fs::read(&path).map_err(|error| format!("read sealed mount probe: {error}"))?
@@ -2494,13 +2505,15 @@ mod imp {
             ));
         }
         let source = unsafe { File::from_raw_fd(source_fd) };
-        bind_descriptor_mount(&LinuxSandboxMount {
+        let mount = LinuxSandboxMount {
             source_fd: u32::try_from(source.as_raw_fd())
                 .map_err(|_| "descriptor probe source exceeds u32".to_string())?,
             destination: PathBuf::from("/.descriptor-probe-target"),
             access: LinuxSandboxMountAccess::ReadOnly,
             layer: 0,
-        })
+        };
+        bind_descriptor_mount(&mount)?;
+        verify_descriptor_mount(&mount)
     }
 
     fn mount_overlay(overlay: &LinuxSandboxOverlay) -> Result<(), String> {
@@ -2550,6 +2563,42 @@ mod imp {
             mount.access == LinuxSandboxMountAccess::ReadOnly,
             recursive,
         )
+    }
+
+    /// Reopen the mounted destination, not the pre-attach target handle, while
+    /// the private namespace still has no untrusted process. This checks
+    /// effective root access and kind; non-directory mounts also permit an
+    /// inode comparison. Directory source identity remains bound by the exact
+    /// open_tree/move_mount descriptor path, not this post-attach observation.
+    fn verify_descriptor_mount(mount: &LinuxSandboxMount) -> Result<(), String> {
+        let mounted = open_mount_target_no_symlinks(&mount.destination)?;
+        let source = mount_source_stat(raw_fd(mount.source_fd)?)?;
+        let observed = mount_source_stat(mounted.as_raw_fd())?;
+        let source_kind = source.st_mode & libc::S_IFMT;
+        let observed_kind = observed.st_mode & libc::S_IFMT;
+        // A recursive directory clone may contain a nested mount at its root.
+        // The effective destination then has that nested mount's inode, not
+        // the enclosing source descriptor's inode. The exact open_tree and
+        // move_mount calls retain source authority; compare inode identity
+        // only for non-directory mounts, which cannot contain nested mounts.
+        if source_kind != observed_kind
+            || (source_kind != libc::S_IFDIR
+                && (source.st_dev != observed.st_dev || source.st_ino != observed.st_ino))
+        {
+            return Err("mounted destination kind or non-directory inode differs".into());
+        }
+        let path = rooted(&mount.destination)?;
+        let path = c_string(path.as_os_str(), "mounted destination")?;
+        let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        syscall_zero(
+            unsafe { libc::statvfs(path.as_ptr(), filesystem.as_mut_ptr()) },
+            "observe mounted destination access",
+        )?;
+        let read_only = unsafe { filesystem.assume_init() }.f_flag & libc::ST_RDONLY != 0;
+        if read_only != (mount.access == LinuxSandboxMountAccess::ReadOnly) {
+            return Err("mounted destination access differs from admitted mount".into());
+        }
+        Ok(())
     }
 
     fn bind_fd_to_mount_target(
