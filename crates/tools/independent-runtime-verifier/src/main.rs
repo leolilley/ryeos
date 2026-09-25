@@ -51,10 +51,6 @@ async fn main() -> Result<()> {
     }
     let (_, expected_request) = selected.prepare_native_probe_request(&project, &parameters)?;
     let expected_request_sha256 = lillux::sha256_hex(&expected_request);
-    ensure!(
-        mode.as_deref() != Some(OsStr::new("--scoped-resume-race-probe")),
-        "direct Codex fixture does not select the old resume-race probe"
-    );
     let direct_stage = staging::stage_direct_target_probe(&selected, &project, &parameters)?;
     let challenge = staging::create_parent_challenge(&project)?;
     let commands = challenge.scripted_canary_commands()?;
@@ -87,16 +83,21 @@ async fn main() -> Result<()> {
         .await
         .context("admitted isolation class point read refused")?;
     let race_probe = mode.as_deref() == Some(OsStr::new("--scoped-resume-race-probe"));
+    ensure!(
+        !race_probe
+            || parameters
+                .configuration
+                .expected_producer_recipe
+                .loopback_ingress
+                .is_some(),
+        "direct scoped race requires the admitted Codex ingress"
+    );
     let (start, running_relay) = if let Some(ingress) = parameters
         .configuration
         .expected_producer_recipe
         .loopback_ingress
         .as_ref()
     {
-        ensure!(
-            !race_probe,
-            "scoped race probe does not select direct Codex ingress"
-        );
         direct_stage.recheck_preflight(&parameters)?;
         let relay_thread = thread_id.clone();
         let relay_source = expected_source.clone();
@@ -120,8 +121,22 @@ async fn main() -> Result<()> {
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(130)),
             )
         });
-        let (started, relay) = tokio::join!(
+        // RESUME is a point read of the same durable attempt. The reserved
+        // gate in the daemon test holds START until RESUME has observed that
+        // exact attempt; it never authorizes another producer launch.
+        let resume_client = if race_probe {
+            Some(UdsRuntimeClient::from_env()?)
+        } else {
+            None
+        };
+        let (started, resumed, relay) = tokio::join!(
             client.start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID),
+            async {
+                match resume_client {
+                    Some(client) => Some(client.resume_scoped_child(&thread_id).await),
+                    None => None,
+                }
+            },
             receiver,
         );
         let relay = match relay
@@ -131,14 +146,16 @@ async fn main() -> Result<()> {
             Ok(relay) => relay,
             Err(receiver_error) => {
                 // START may have released and acknowledged an exact child
-                // before the receiver failed. Resolve only that retained
-                // attempt, then request cleanup; never issue another START.
-                let locator = match started {
-                    Ok(value) => Ok(value),
-                    Err(CallbackError::Transport(_)) => {
+                // before the receiver failed. Prefer either exact locator
+                // already returned; only an unknown START with no successful
+                // RESUME needs another owner-bound point read. Never START
+                // another child to clean up an ambiguous attempt.
+                let locator = match (started, resumed) {
+                    (Ok(value), _) | (_, Some(Ok(value))) => Ok(value),
+                    (Err(CallbackError::Transport(_)), _) => {
                         client.resume_scoped_child(&thread_id).await
                     }
-                    Err(error) => Err(error),
+                    (Err(error), _) => Err(error),
                 };
                 let cleanup = match locator {
                     Ok(value) => match serde_json::from_value::<ScopedAttemptLocator>(value) {
@@ -154,25 +171,36 @@ async fn main() -> Result<()> {
                 )));
             }
         };
+        let started = if let Some(resumed) = resumed {
+            let (accepted, failure) = reconcile_race_locators(started, resumed);
+            if let Some(error) = failure {
+                let abort = match accepted {
+                    Some(value) => match serde_json::from_value::<ScopedAttemptLocator>(value) {
+                        Ok(locator) => {
+                            abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await
+                        }
+                        Err(error) => Err(error.into()),
+                    },
+                    None => Ok(()),
+                };
+                let relay_cancel = match relay.cancel_until(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(5),
+                )) {
+                    Ok(result) => format!("{result:?}"),
+                    Err(unsettled) => {
+                        drop(unsettled);
+                        "relay remained unsettled after cancellation".to_owned()
+                    }
+                };
+                return Err(error.context(format!(
+                    "direct scoped race failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
+                )));
+            }
+            Ok(accepted.context("direct scoped race lost its accepted locator")?)
+        } else {
+            started
+        };
         (started, Some(relay))
-    } else if race_probe {
-        // Both requests use the same admitted root callback authority. RESUME
-        // is an exact point read: it cannot choose a scenario or start work.
-        // The daemon test gate reports only once RESUME has seen Reserved.
-        // Each request needs its own UDS connection: one client serializes
-        // requests across the full response and START is deliberately held.
-        let resume_client = UdsRuntimeClient::from_env()?;
-        let (start, resumed) = tokio::join!(
-            client.start_scoped_child(&thread_id, PRODUCER_SCENARIO_ID),
-            resume_client.resume_scoped_child(&thread_id),
-        );
-        let started = start.context("scoped race START did not acknowledge")?;
-        let resumed = resumed.context("scoped race RESUME did not acknowledge")?;
-        ensure!(
-            started == resumed,
-            "scoped race START and RESUME locators differ"
-        );
-        (Ok(started), None)
     } else {
         (
             client
@@ -211,12 +239,21 @@ async fn main() -> Result<()> {
     let locator = match locator_result {
         Ok(locator) => locator,
         Err(error) => {
-            if let Some(relay) = &running_relay {
+            if let Some(relay) = running_relay {
                 let abort =
                     abort_exact_scoped_child(&client, &thread_id, &relay.handoff().attempt_id)
                         .await;
+                let relay_cancel = match relay.cancel_until(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(5),
+                )) {
+                    Ok(result) => format!("{result:?}"),
+                    Err(unsettled) => {
+                        drop(unsettled);
+                        "relay remained unsettled after cancellation".to_owned()
+                    }
+                };
                 return Err(error.context(format!(
-                    "direct-target START/locator failed; exact scoped abort={abort:?}"
+                    "direct-target START/locator failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
                 )));
             }
             return Err(error);
@@ -486,6 +523,11 @@ async fn main() -> Result<()> {
             candidate_content: scripted_provider::CANDIDATE_CONTENT.as_bytes(),
         };
         check_guest_observation(&frozen.guest_observation, &guest)?;
+        if race_probe {
+            bail!(
+                "direct scoped START/RESUME exact locators matched and frozen candidate settled, but effective namespace environment and complete qualification evidence remain unproven"
+            );
+        }
         bail!(
             "direct-target launch, relay, conversation and frozen candidate joined, but effective namespace environment and complete qualification evidence remain unproven"
         );
@@ -584,11 +626,6 @@ async fn main() -> Result<()> {
         candidate_content: scripted_provider::CANDIDATE_CONTENT.as_bytes(),
     };
     check_guest_observation(&frozen.guest_observation, &guest)?;
-    if race_probe {
-        bail!(
-            "scoped race START/RESUME exact locators matched and full child observation settled; collector identity, isolation, terminal and runtime provenance is incomplete; no qualification claims issued"
-        )
-    }
     bail!(
         "scoped producer and frozen files settled; Codex and guest records are internally checked, but collector identity, isolation, terminal and runtime provenance is incomplete; no qualification claims issued"
     )
@@ -740,6 +777,44 @@ fn check_observed_full_source(
         "scoped observation full source differs from pre-launch admitted source"
     );
     Ok(())
+}
+
+/// Reconcile only the exact point read with START. A lost START reply may use
+/// the already-retained RESUME locator; a definite START refusal or unequal
+/// locators cannot be converted into success.
+fn reconcile_race_locators(
+    started: std::result::Result<serde_json::Value, CallbackError>,
+    resumed: std::result::Result<serde_json::Value, CallbackError>,
+) -> (Option<serde_json::Value>, Option<anyhow::Error>) {
+    match (started, resumed) {
+        (Ok(started), Ok(resumed)) if started == resumed => (Some(started), None),
+        (Err(CallbackError::Transport(_)), Ok(resumed)) => (Some(resumed), None),
+        (Ok(started), Ok(_)) => (
+            Some(started),
+            Some(anyhow::anyhow!(
+                "direct scoped START and RESUME locators differ"
+            )),
+        ),
+        (Ok(started), Err(error)) => (
+            Some(started),
+            Some(
+                anyhow::Error::new(error)
+                    .context("direct scoped RESUME refused the reserved attempt"),
+            ),
+        ),
+        (Err(error), Ok(resumed)) => (
+            Some(resumed),
+            Some(anyhow::anyhow!(
+                "direct scoped START refused after exact RESUME: {error}"
+            )),
+        ),
+        (Err(start_error), Err(resume_error)) => (
+            None,
+            Some(anyhow::anyhow!(
+                "direct scoped START and RESUME both refused: start={start_error}; resume={resume_error}"
+            )),
+        ),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -920,6 +995,37 @@ fn require_clean_driver_stop(
 mod tests {
     use super::*;
     use lillux::subordinate_process::SubordinateProcessExit;
+
+    #[test]
+    fn race_reconciliation_accepts_only_one_exact_attempt_or_lost_ack() {
+        let locator = json!({"attempt_id":"scoped-exact"});
+        let other = json!({"attempt_id":"scoped-other"});
+        let (accepted, failure) = reconcile_race_locators(Ok(locator.clone()), Ok(locator.clone()));
+        assert_eq!(accepted, Some(locator.clone()));
+        assert!(failure.is_none());
+
+        let (accepted, failure) = reconcile_race_locators(
+            Err(CallbackError::Transport(anyhow::anyhow!("reply lost"))),
+            Ok(locator.clone()),
+        );
+        assert_eq!(accepted, Some(locator.clone()));
+        assert!(failure.is_none());
+
+        let (accepted, failure) = reconcile_race_locators(Ok(locator.clone()), Ok(other));
+        assert_eq!(accepted, Some(locator.clone()));
+        assert!(failure.unwrap().to_string().contains("locators differ"));
+
+        let (accepted, failure) = reconcile_race_locators(
+            Err(CallbackError::ActionFailed {
+                code: "refused".into(),
+                message: "definite".into(),
+                retryable: false,
+            }),
+            Ok(locator.clone()),
+        );
+        assert_eq!(accepted, Some(locator));
+        assert!(failure.unwrap().to_string().contains("START refused"));
+    }
 
     #[test]
     fn observed_isolation_requires_the_complete_prelaunch_class() {

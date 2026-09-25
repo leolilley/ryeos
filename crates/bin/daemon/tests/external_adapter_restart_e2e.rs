@@ -1578,7 +1578,7 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires exact verifier and Codex executables; no provider credentials"]
+#[ignore = "pending migration to product-qualification admission and protected process scope; ordinary tool launch cannot grant the producer"]
 async fn signed_independent_verifier_proves_reserved_resume_race_and_fails_closed()
 -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
