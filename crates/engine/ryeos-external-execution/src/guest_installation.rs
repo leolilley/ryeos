@@ -55,6 +55,9 @@ struct GuestSupervisorLaunchIntent {
     supervisor_sha256: String,
     launcher_sha256: String,
     guest_input_identity: String,
+    /// Exact IEEE-754 bits of the sole variable non-descriptor launch field.
+    /// All other request semantics are checked against the fixed profile.
+    request_timeout_bits: u64,
     inherited_descriptors: Vec<u32>,
 }
 
@@ -226,6 +229,37 @@ impl CommittedGuestSupervisorLaunchIntent {
 }
 
 impl PreparedGuestSupervisorRequest {
+    fn exact_request_timeout_bits(&self) -> Result<u64> {
+        let request = &self.request;
+        ensure!(
+            request.cmd == format!("/proc/self/fd/{SUPERVISOR_EXECUTABLE_FD}")
+                && request.argv0.as_deref() == Some("ryeos-external-candidate-supervisor")
+                && request.args.is_empty()
+                && request.cwd.is_none()
+                && request.envs.is_empty()
+                && request.stdin_data.is_none()
+                && request.timeout.is_finite()
+                && request.timeout > 0.0
+                && request.limits.is_none()
+                && request.inherited_fds.is_empty()
+                && request.supervised_status.is_none(),
+            "guest supervisor request differs from fixed execution profile"
+        );
+        let mut actual = request
+            .inherited_fd_mappings
+            .iter()
+            .map(lillux::InheritedDescriptorMapping::target_descriptor)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = self.plan.inherited_descriptors.clone();
+        expected.sort_unstable();
+        ensure!(
+            actual == expected,
+            "guest supervisor request differs from fixed descriptor inventory"
+        );
+        Ok(request.timeout.to_bits())
+    }
+
     fn planned_outer_launch_intent_bytes(
         &self,
         inputs: &ExternalGuestInputProjection,
@@ -254,6 +288,7 @@ impl PreparedGuestSupervisorRequest {
             supervisor_sha256: ticket.supervisor_sha256.clone(),
             launcher_sha256: ticket.launcher_sha256.clone(),
             guest_input_identity: inputs.identity_digest()?,
+            request_timeout_bits: self.exact_request_timeout_bits()?,
             inherited_descriptors: self.plan.inherited_descriptors.clone(),
         })
     }
@@ -1086,6 +1121,8 @@ pub fn recover_guest_occurrence(
                 && launch.supervisor_sha256 == ticket.supervisor_sha256
                 && launch.launcher_sha256 == ticket.launcher_sha256
                 && launch.guest_input_identity == inputs.identity_digest()?
+                && f64::from_bits(launch.request_timeout_bits).is_finite()
+                && f64::from_bits(launch.request_timeout_bits) > 0.0
                 && launch.inherited_descriptors == expected_descriptors.inherited_descriptors,
             "guest supervisor launch intent differs from retained authority"
         );

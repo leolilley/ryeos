@@ -1872,6 +1872,12 @@ mod tests {
         let synthetic_launch_intent = prepared
             .planned_outer_launch_intent_bytes_for_test(&inputs)
             .unwrap();
+        let launch_value: serde_json::Value =
+            serde_json::from_slice(&synthetic_launch_intent).unwrap();
+        assert_eq!(
+            launch_value["request_timeout_bits"].as_u64(),
+            Some(10.0_f64.to_bits())
+        );
         drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
