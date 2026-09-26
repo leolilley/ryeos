@@ -91,6 +91,9 @@ pub struct StagedGuestPackage {
     parent: lillux::PinnedDirectory,
     name: OsString,
     root: lillux::PinnedDirectory,
+    // Serializes cooperating import/recovery owners for this exact inode.
+    // It is not writer exclusion against an untrusted process in the guest.
+    _owner_lock: lillux::PinnedDirectoryLock,
     manifest: GuestStagingPackageManifest,
     base: ryeos_project_capture::ProjectSnapshotTransferMeasurement,
 }
@@ -244,6 +247,10 @@ pub fn stage_guest_package<R: Read>(
     parent.require_owner_private_directory()?;
     let owner = parent.try_clone()?;
     let (name, stage) = parent.create_unique_child("guest-input", 0o700)?;
+    let owner_lock = stage
+        .try_lock_exclusive()?
+        .context("new guest stage has a live owner; refusing to remove a contested generation")?;
+    owner_lock.ensure_protects(&stage)?;
     let result = stage
         .require_owner_private_directory()
         .and_then(|()| stage_guest_package_in_private_root(reader, &stage, expected));
@@ -252,6 +259,7 @@ pub fn stage_guest_package<R: Read>(
             parent: owner,
             name,
             root: stage,
+            _owner_lock: owner_lock,
             manifest,
             base,
         }),
@@ -371,6 +379,10 @@ pub fn recover_ticketed_guest_import(
         "retained guest stage and import ticket disagree"
     );
     let root = identity.resolve_under(parent)?;
+    let owner_lock = root
+        .try_lock_exclusive()?
+        .context("retained guest stage already has a live owner")?;
+    owner_lock.ensure_protects(&root)?;
     let manifest = read_stage_manifest(&root, &ticket.manifest_sha256)?;
     manifest.validate_for(
         inputs,
@@ -405,6 +417,7 @@ pub fn recover_ticketed_guest_import(
             parent: parent.try_clone()?,
             name: OsString::from(identity.name()),
             root,
+            _owner_lock: owner_lock,
             manifest,
             base,
         },
@@ -1183,12 +1196,17 @@ mod tests {
         wrong_stage_identity = stage_identity.clone();
         wrong_stage_identity.manifest_sha256 = "not-a-digest".into();
         assert!(wrong_stage_identity.resolve_under(&parent).is_err());
-        let recovered =
+        let contested =
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+                .err()
+                .expect("recovery must not acquire a generation with a live importer");
+        assert!(format!("{contested:#}").contains("already has a live owner"));
+        drop(imported);
+        let imported =
             recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
                 .unwrap();
-        assert_eq!(recovered.stage_identity().unwrap(), stage_identity);
-        assert_eq!(recovered.manifest(), &manifest);
-        drop(recovered);
+        assert_eq!(imported.stage_identity().unwrap(), stage_identity);
+        assert_eq!(imported.manifest(), &manifest);
         let mut wrong_ticket = ticket.clone();
         wrong_ticket.manifest_sha256 = "0".repeat(64);
         assert!(
@@ -1262,22 +1280,23 @@ mod tests {
             .unwrap()
             .set_mode(0o755)
             .unwrap();
-        recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
-            .unwrap();
+        imported.recheck_for_adoption(&context, &inputs).unwrap();
         let sidecar = imported
             .root()
             .open_pinned_regular(OsStr::new(STAGE_MANIFEST_FILE), false)
             .unwrap()
             .unwrap();
         sidecar.set_mode(0o644).unwrap();
+        drop(imported);
         assert!(
             recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
                 .is_err()
         );
         sidecar.set_mode(0o600).unwrap();
         drop(sidecar);
-        recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
-            .unwrap();
+        let imported =
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+                .unwrap();
         let mut changed_sidecar = imported
             .root()
             .open_regular_create(OsStr::new(STAGE_MANIFEST_FILE), true, false, 0o600)
@@ -1285,10 +1304,23 @@ mod tests {
         changed_sidecar.write_all(b"bad!").unwrap();
         changed_sidecar.sync_all().unwrap();
         drop(changed_sidecar);
+        drop(imported);
         assert!(
             recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs,)
                 .is_err()
         );
+        let root = stage_identity.resolve_under(&parent).unwrap();
+        let mut restored_sidecar = root
+            .open_regular_create(OsStr::new(STAGE_MANIFEST_FILE), true, false, 0o600)
+            .unwrap();
+        restored_sidecar
+            .write_all(&ryeos_external_execution_contract::canonical_json(&manifest).unwrap())
+            .unwrap();
+        restored_sidecar.sync_all().unwrap();
+        drop(restored_sidecar);
+        let imported =
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+                .unwrap();
         imported.discard().unwrap();
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",

@@ -146,9 +146,13 @@ canonical manifest sidecar; recovery reads that sidecar by pinned descriptor,
 checks it against the separately retained ticket, and rechecks the selected
 base, executable and input content. It never replays an upload or authorizes a
 new supervisor launch. The coordinate itself is not a recoverable launch or
-cleanup authority. In particular, the import-only, roughly 500,000-entry
-cleanup budget cannot retire a generation after the base CAS has
-been duplicated into the candidate runtime or candidate writers have run.
+cleanup authority. An imported stage now retains an exclusive Lillux directory
+lock, and exact recovery refuses while another cooperative importer owns that
+inode. This serializes import and recovery owners, but the advisory lock does
+not exclude an untrusted guest writer or prove descriptor adoption. In
+particular, the import-only, roughly 500,000-entry cleanup budget cannot
+retire a generation after the base CAS has been duplicated into the candidate
+runtime or candidate writers have run.
 The manifest sidecar also consumes disk beyond `regular_bytes`:
 `GuestImportTicket::minimum_upload_and_stage_bytes` accounts for the exact
 coexisting upload and staged regular bytes. Before activation, the guest
