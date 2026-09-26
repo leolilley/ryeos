@@ -1953,13 +1953,30 @@ mod tests {
             .is_err(),
             "an installed occurrence cannot be restaged after owner exit"
         );
-        owner_root
-            .atomic_create_regular(
-                OsStr::new("guest-supervisor-launch-intent.json"),
+        let (launch_file, launch_sha256) =
+            crate::guest_installation::create_launch_intent_record_for_test(
+                &owner_root,
                 &synthetic_launch_intent,
-                0o600,
             )
             .unwrap();
+        assert_eq!(launch_sha256, lillux::sha256_hex(&synthetic_launch_intent));
+        assert!(crate::guest_installation::create_launch_intent_record_for_test(
+            &owner_root,
+            &synthetic_launch_intent,
+        )
+        .is_err());
+        assert_eq!(
+            launch_file,
+            lillux::pinned_regular_file_identity(
+                &owner_root
+                    .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+                    .unwrap()
+                    .unwrap()
+                    .try_clone_descriptor()
+                    .unwrap(),
+            )
+            .unwrap()
+        );
         // A launched supervisor may legitimately have changed its runtime.
         // Recovery must quarantine the launch rather than demand pristine
         // prelaunch state or make another launch possible.

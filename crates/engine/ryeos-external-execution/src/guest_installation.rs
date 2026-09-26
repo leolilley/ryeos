@@ -10,20 +10,18 @@ use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
-    GuestSupervisorDescriptorPlan, SUPERVISOR_CANDIDATE_RUNTIME_FD,
-    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD,
-    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STATE_ROOT_FD,
-    fixed_guest_supervisor_descriptor_plan,
+    GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
+    SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_STATE_ROOT_FD, fixed_guest_supervisor_descriptor_plan,
 };
-use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::staging_package::{
     GuestImportContext, GuestImportTicket, GuestStagingEntry,
 };
+use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use serde::{Deserialize, Serialize};
 
 use crate::guest_staging::{
-    GuestStageIdentity, TicketedGuestImport,
-    stage_ticketed_uploaded_guest_package,
+    GuestStageIdentity, TicketedGuestImport, stage_ticketed_uploaded_guest_package,
 };
 
 const OWNER_DIRECTORY: &str = "guest-import-owner";
@@ -197,13 +195,105 @@ pub struct PreparedGuestLaunchArtifacts {
     pub(crate) observation: GuestLaunchArtifactObservation,
 }
 
-/// Full exact descriptor proposal. This cannot spawn: the owner must first
-/// establish writer exclusion and commit its durable outer launch intent.
+/// Full exact descriptor proposal. This cannot spawn: the owner must commit
+/// its durable outer intent, then join continuous writer exclusion and the
+/// exact process-scope launch before any guest execution is permitted.
 pub struct PreparedGuestSupervisorRequest {
     _artifacts: PreparedGuestLaunchArtifacts,
     request: lillux::SubprocessRequest,
     plan: GuestSupervisorDescriptorPlan,
     bootstrap_sha256: String,
+}
+
+/// One-way outer launch intent retained with the exact prepared descriptors.
+/// This deliberately has no spawn accessor: writer exclusion, process-scope
+/// ownership and installed Ready still require a separate joined transition.
+pub struct CommittedGuestSupervisorLaunchIntent {
+    _prepared: PreparedGuestSupervisorRequest,
+    record_file: lillux::PinnedRegularFileIdentity,
+    record_sha256: String,
+}
+
+impl CommittedGuestSupervisorLaunchIntent {
+    pub fn record_file(&self) -> &lillux::PinnedRegularFileIdentity {
+        &self.record_file
+    }
+
+    pub fn record_sha256(&self) -> &str {
+        &self.record_sha256
+    }
+}
+
+impl PreparedGuestSupervisorRequest {
+    fn planned_outer_launch_intent_bytes(
+        &self,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<Vec<u8>> {
+        let installed = &self._artifacts.private.content._installed;
+        let ticket = installed.imported.ticket();
+        let owner = &installed.owner;
+        ensure!(
+            self.plan == fixed_guest_supervisor_descriptor_plan(inputs)?,
+            "guest supervisor descriptor plan changed before outer intent"
+        );
+        canonical_launch_record(&GuestSupervisorLaunchIntent {
+            schema: 1,
+            ticket_sha256: digest_ticket(ticket)?,
+            occurrence_id: owner.record.occurrence_id.clone(),
+            occurrence_directory: owner.occurrence.identity()?,
+            owner_directory: owner.root.identity()?,
+            install_record_file: installed.intent_identity.record_file.clone(),
+            install_record_sha256: installed.intent_identity.record_sha256.clone(),
+            stage: installed.imported.stage_identity()?,
+            candidate_runtime: installed.runtime.identity()?,
+            private_parent: self._artifacts.private.observation.private_parent.clone(),
+            supervisor_state_root: self._artifacts.observation.state_root.clone(),
+            bootstrap_sha256: self.bootstrap_sha256.clone(),
+            supervisor_sha256: ticket.supervisor_sha256.clone(),
+            launcher_sha256: ticket.launcher_sha256.clone(),
+            guest_input_identity: inputs.identity_digest()?,
+            inherited_descriptors: self.plan.inherited_descriptors.clone(),
+        })
+    }
+
+    /// Commit exactly one durable pre-spawn intent. A failure after this cut
+    /// is `LaunchUncertain` on recovery, never permission to re-import, copy,
+    /// remint descriptors, or launch another supervisor.
+    pub fn commit_outer_launch_intent(
+        self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<CommittedGuestSupervisorLaunchIntent> {
+        let installed = &self._artifacts.private.content._installed;
+        installed.owner.recheck(context, inputs)?;
+        installed.recheck_for_adoption(context, inputs)?;
+        ensure!(
+            self._artifacts.private.private_parent.identity()?
+                == self._artifacts.private.observation.private_parent
+                && self._artifacts.state_root.identity()? == self._artifacts.observation.state_root
+                && self
+                    ._artifacts
+                    .state_root
+                    .entries_no_follow_bounded(0)?
+                    .is_empty(),
+            "guest launch private or state root changed before outer intent"
+        );
+        self._artifacts
+            .private
+            .private_parent
+            .require_owner_private_directory()?;
+        self._artifacts
+            .state_root
+            .require_owner_private_directory()?;
+        let bytes = self.planned_outer_launch_intent_bytes(inputs)?;
+        let (record_file, record_sha256) =
+            create_launch_intent_record(&installed.owner.root, &bytes)?;
+        Ok(CommittedGuestSupervisorLaunchIntent {
+            record_file,
+            record_sha256,
+            _prepared: self,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -232,28 +322,7 @@ impl PreparedGuestSupervisorRequest {
         &self,
         inputs: &ExternalGuestInputProjection,
     ) -> Result<Vec<u8>> {
-        let installed = &self._artifacts.private.content._installed;
-        let ticket = installed.imported.ticket();
-        let owner = &installed.owner;
-        ensure!(self.plan == fixed_guest_supervisor_descriptor_plan(inputs)?, "fixture descriptor plan changed");
-        canonical_launch_record(&GuestSupervisorLaunchIntent {
-            schema: 1,
-            ticket_sha256: digest_ticket(ticket)?,
-            occurrence_id: owner.record.occurrence_id.clone(),
-            occurrence_directory: owner.occurrence.identity()?,
-            owner_directory: owner.root.identity()?,
-            install_record_file: installed.intent_identity.record_file.clone(),
-            install_record_sha256: installed.intent_identity.record_sha256.clone(),
-            stage: installed.imported.stage_identity()?,
-            candidate_runtime: installed.runtime.identity()?,
-            private_parent: self._artifacts.private.observation.private_parent.clone(),
-            supervisor_state_root: self._artifacts.observation.state_root.clone(),
-            bootstrap_sha256: self.bootstrap_sha256.clone(),
-            supervisor_sha256: ticket.supervisor_sha256.clone(),
-            launcher_sha256: ticket.launcher_sha256.clone(),
-            guest_input_identity: inputs.identity_digest()?,
-            inherited_descriptors: self.plan.inherited_descriptors.clone(),
-        })
+        self.planned_outer_launch_intent_bytes(inputs)
     }
 }
 
@@ -328,7 +397,14 @@ impl PreparedGuestLaunchArtifacts {
             request.inherited_fds.is_empty() && actual == expected,
             "supervisor request differs from exact fixed descriptor plan"
         );
-        let bootstrap_sha256 = self.private.content._installed.imported.ticket().bootstrap_sha256.clone();
+        let bootstrap_sha256 = self
+            .private
+            .content
+            ._installed
+            .imported
+            .ticket()
+            .bootstrap_sha256
+            .clone();
         Ok(PreparedGuestSupervisorRequest {
             _artifacts: self,
             request,
@@ -390,7 +466,9 @@ impl PreparedGuestPrivateInputs {
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
     ) -> Result<PreparedGuestLaunchArtifacts> {
-        self.content._installed.recheck_for_adoption(context, inputs)?;
+        self.content
+            ._installed
+            .recheck_for_adoption(context, inputs)?;
         let imported = &self.content._installed.imported;
         let (bootstrap_source, bootstrap_identity) = open_verified_guest_artifact(
             imported,
@@ -447,7 +525,10 @@ fn open_verified_guest_artifact(
     name: &str,
     expected_hash: &str,
     executable: bool,
-) -> Result<(lillux::InheritedDescriptorAuthority, lillux::PinnedRegularFileIdentity)> {
+) -> Result<(
+    lillux::InheritedDescriptorAuthority,
+    lillux::PinnedRegularFileIdentity,
+)> {
     let (expected_bytes, expected_mode) = imported
         .manifest()
         .entries
@@ -497,7 +578,9 @@ impl PreparedGuestPrivateInputs {
             "guest content binding requires an unbound subprocess request"
         );
         ensure!(
-            self.content._installed.recheck_for_adoption(context, inputs)?
+            self.content
+                ._installed
+                .recheck_for_adoption(context, inputs)?
                 == self.content.observation,
             "installed guest base changed after content custody"
         );
@@ -901,7 +984,8 @@ pub fn recover_guest_occurrence(
     );
     let Some(record) = root.open_pinned_regular(OsStr::new(RECORD_NAME), false)? else {
         ensure!(
-            root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)?.is_none(),
+            root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)?
+                .is_none(),
             "guest supervisor launch intent exists without base installation intent"
         );
         ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
@@ -937,7 +1021,9 @@ pub fn recover_guest_occurrence(
         .context("committed guest installation has no retained runtime")?;
     runtime.require_owner_private_directory()?;
     root.require_disjoint_directory_tree(&runtime)?;
-    if let Some(launch_file) = root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)? {
+    if let Some(launch_file) =
+        root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)?
+    {
         let private_parent = occurrence
             .open_child_directory(OsStr::new(CANDIDATE_PRIVATE_DIRECTORY))?
             .context("committed guest launch has no retained private parent")?;
@@ -951,10 +1037,17 @@ pub fn recover_guest_occurrence(
         runtime.require_disjoint_directory_tree(&private_parent)?;
         runtime.require_disjoint_directory_tree(&state_root)?;
         private_parent.require_disjoint_directory_tree(&state_root)?;
-        ensure!(launch_file.permission_mode()? == 0o600, "guest supervisor launch intent mode changed");
+        ensure!(
+            launch_file.permission_mode()? == 0o600,
+            "guest supervisor launch intent mode changed"
+        );
         let launch_observation = launch_file.observation()?;
-        ensure!(launch_observation.size() <= MAX_RECORD_BYTES, "guest supervisor launch intent exceeds bound");
-        let launch_bytes = launch_file.read_stable_bounded(&launch_observation, MAX_RECORD_BYTES)?;
+        ensure!(
+            launch_observation.size() <= MAX_RECORD_BYTES,
+            "guest supervisor launch intent exceeds bound"
+        );
+        let launch_bytes =
+            launch_file.read_stable_bounded(&launch_observation, MAX_RECORD_BYTES)?;
         let launch: GuestSupervisorLaunchIntent = serde_json::from_slice(&launch_bytes)?;
         let expected_descriptors = fixed_guest_supervisor_descriptor_plan(inputs)?;
         ensure!(
@@ -964,7 +1057,8 @@ pub fn recover_guest_occurrence(
                 && launch.occurrence_id == owner.occurrence_id
                 && launch.occurrence_directory == owner.occurrence_directory
                 && launch.owner_directory == owner.owner_directory
-                && launch.install_record_file == lillux::pinned_regular_file_identity(&record.try_clone_descriptor()?)?
+                && launch.install_record_file
+                    == lillux::pinned_regular_file_identity(&record.try_clone_descriptor()?)?
                 && launch.install_record_sha256 == lillux::sha256_hex(&bytes)
                 && launch.stage == intent.stage
                 && launch.candidate_runtime == intent.candidate_runtime
@@ -1158,7 +1252,8 @@ impl GuestOccurrenceOwner {
             "guest occurrence already has staged or ambient content"
         );
         source_root.require_owner_private_directory()?;
-        self.occurrence.require_disjoint_directory_tree(source_root)?;
+        self.occurrence
+            .require_disjoint_directory_tree(source_root)?;
         let imported = stage_ticketed_uploaded_guest_package(
             upload,
             source_root,
@@ -1402,8 +1497,38 @@ fn canonical_owner_record(record: &GuestOccurrenceOwnerRecord) -> Result<Vec<u8>
 
 fn canonical_launch_record(record: &GuestSupervisorLaunchIntent) -> Result<Vec<u8>> {
     let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?.into_bytes();
-    ensure!(bytes.len() as u64 <= MAX_RECORD_BYTES, "guest supervisor launch intent exceeds bound");
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "guest supervisor launch intent exceeds bound"
+    );
     Ok(bytes)
+}
+
+fn create_launch_intent_record(
+    owner_root: &lillux::PinnedDirectory,
+    bytes: &[u8],
+) -> Result<(lillux::PinnedRegularFileIdentity, String)> {
+    owner_root.require_owner_private_directory()?;
+    let parsed: GuestSupervisorLaunchIntent = serde_json::from_slice(bytes)?;
+    ensure!(
+        canonical_launch_record(&parsed)? == bytes,
+        "guest supervisor launch intent is not canonical"
+    );
+    let record = owner_root
+        .atomic_create_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), bytes, 0o600)?
+        .context("guest supervisor launch intent already exists")?;
+    Ok((
+        lillux::pinned_regular_file_identity(&record)?,
+        lillux::sha256_hex(bytes),
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn create_launch_intent_record_for_test(
+    owner_root: &lillux::PinnedDirectory,
+    bytes: &[u8],
+) -> Result<(lillux::PinnedRegularFileIdentity, String)> {
+    create_launch_intent_record(owner_root, bytes)
 }
 
 #[cfg(test)]
