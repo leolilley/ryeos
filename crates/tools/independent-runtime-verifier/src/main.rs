@@ -68,8 +68,9 @@ async fn main() -> Result<()> {
             Err(_) => Vec::new(),
         };
         bail!(
-            "direct verifier preparation already exists; sealed reopen={:?}; exact resume={resumed:?}; cleanup={cleanup:?}",
-            reopened.map(|_| ())
+            "direct verifier preparation already exists; sealed reopen={:?}; exact resume={:?}; cleanup={cleanup:?}",
+            reopened.map(|_| ()),
+            resumed.map(|_| ())
         );
     }
     let (_, expected_request) = selected.prepare_native_probe_request(&project, &parameters)?;
