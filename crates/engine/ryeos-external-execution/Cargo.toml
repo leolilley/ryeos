@@ -19,3 +19,8 @@ serde_json = { workspace = true }
 libc = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+
+[[test]]
+name = "guest_occurrence_owner_native"
+path = "tests/guest_occurrence_owner_native.rs"
+harness = false
