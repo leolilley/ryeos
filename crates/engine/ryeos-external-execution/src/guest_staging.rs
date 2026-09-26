@@ -205,6 +205,33 @@ impl TicketedGuestImport {
         crate::guest_content::recheck_staged_guest_content(&self.staged, inputs)
     }
 
+    /// Install the verified base into an exact, empty private candidate
+    /// runtime while retaining this import generation. The caller must have
+    /// durably recorded the stage and runtime identities before this mutable
+    /// installation. This operation does not grant supervisor launch or Ready:
+    /// its caller still has to exclude untrusted writers, bind every checked
+    /// descriptor, and retain the generation through scope settlement.
+    pub fn install_base_into(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        candidate_runtime: &lillux::PinnedDirectory,
+    ) -> Result<()> {
+        candidate_runtime.require_owner_private_directory()?;
+        candidate_runtime.require_disjoint_directory_tree(self.staged.root())?;
+        self.recheck_for_adoption(context, inputs)?;
+        let base = self
+            .staged
+            .root()
+            .open_child_directory(OsStr::new("base"))?
+            .context("ticketed guest base transfer disappeared before installation")?;
+        ryeos_project_capture::install_project_snapshot_transfer(
+            &base,
+            candidate_runtime,
+            self.staged.base(),
+        )
+    }
+
     /// Discard an unadopted import after failed preparation. The future guest
     /// owner must retain an adopted generation until separately proved scope
     /// and writer settlement; this method does not prove either condition.
@@ -1207,6 +1234,32 @@ mod tests {
                 .unwrap();
         assert_eq!(imported.stage_identity().unwrap(), stage_identity);
         assert_eq!(imported.manifest(), &manifest);
+        let runtime_dir = tempfile::tempdir().unwrap();
+        let runtime = lillux::PinnedDirectory::open(runtime_dir.path())
+            .unwrap()
+            .unwrap();
+        runtime.tighten_owner_private_directory().unwrap();
+        imported
+            .install_base_into(&context, &inputs, &runtime)
+            .unwrap();
+        let installed_objects = runtime
+            .open_child_directory(OsStr::new("objects"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ryeos_project_capture::inspect_project_snapshot_transfer(
+                &installed_objects,
+                &inputs.base_snapshot.snapshot_hash,
+            )
+            .unwrap(),
+            measurement
+        );
+        assert!(
+            imported
+                .install_base_into(&context, &inputs, &runtime)
+                .is_err(),
+            "an installed runtime cannot be overwritten"
+        );
         let mut wrong_ticket = ticket.clone();
         wrong_ticket.manifest_sha256 = "0".repeat(64);
         assert!(
@@ -1241,6 +1294,23 @@ mod tests {
         changed.sync_all().unwrap();
         drop(changed);
         assert!(imported.recheck_for_adoption(&context, &inputs).is_err());
+        let rejected_runtime_dir = tempfile::tempdir().unwrap();
+        let rejected_runtime = lillux::PinnedDirectory::open(rejected_runtime_dir.path())
+            .unwrap()
+            .unwrap();
+        rejected_runtime.tighten_owner_private_directory().unwrap();
+        assert!(
+            imported
+                .install_base_into(&context, &inputs, &rejected_runtime)
+                .is_err(),
+            "changed admitted input must refuse base installation"
+        );
+        assert!(
+            rejected_runtime
+                .entries_no_follow_bounded(0)
+                .unwrap()
+                .is_empty()
+        );
         let mut restored = imported
             .root()
             .open_regular_create(OsStr::new("input-00"), true, false, 0o600)

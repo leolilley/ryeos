@@ -138,7 +138,11 @@ the type does not establish that provenance or exclusive custody. It is
 not an installed generation or a settlement witness. Its
 `recheck_for_adoption` method repeats the retained-context, base-transfer,
 bootstrap/executable and realized-input checks before descriptor binding, but
-its caller must exclude concurrent writers across that binding. The synthetic
+its caller must exclude concurrent writers across that binding. The
+`install_base_into` operation can install a rechecked ticketed base into an
+exact empty private runtime while retaining the stage; the guest owner must
+record both directory identities before invoking it. Neither operation
+records launch intent or proves immutable custody. The synthetic
 fixture currently copies/moves staged inputs into its occurrence and discards the
 staging directory before launching the supervisor. Its terminal path checks
 the supervisor/server process identities and exits, not an enclosing process
