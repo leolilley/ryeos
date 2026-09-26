@@ -2221,22 +2221,10 @@ fn admit_session_capsule(
         let captured = captured_source
             .as_ref()
             .ok_or_else(|| anyhow!("structured-session worker has no admitted source closure"))?;
-        let entry = match &captured.binding().logical_binding {
-            ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
-            _ => bail!("structured-session worker has a non-worker source binding"),
-        };
-        let mut source_files = BTreeMap::new();
-        for file in &captured.manifest().entries {
-            let bytes = cas
-                .get_blob(&file.blob_hash)?
-                .ok_or_else(|| anyhow!("captured structured-session source blob is absent"))?;
-            source_files.insert(file.path.clone(), bytes);
-        }
-        let profile_bytes = source_files.get(entry).ok_or_else(|| {
-            anyhow!("structured-session entry is absent from its captured source closure")
-        })?;
         let profile =
-            ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)?;
+            ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
+                captured, &guard,
+            )?;
         if (!profile.auxiliary_configs.is_empty() || !profile.runtime_configs.is_empty())
             && !state.isolation.is_enforced()
         {

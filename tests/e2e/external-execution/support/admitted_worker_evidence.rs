@@ -5,9 +5,7 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_engine::{canonical_ref::CanonicalRef, contracts::SubjectResolutionAuthority};
 use ryeos_state::objects::{
     AdmittedStructuredSessionProfile, EffectiveSourceClosureProjection, SOURCE_CLOSURE_DERIVED_KEY,
-    SourceLogicalBinding,
 };
-use std::collections::BTreeMap;
 
 pub struct AdmittedWorkerEvidence {
     pub source: EffectiveSourceClosureProjection,
@@ -53,34 +51,15 @@ pub fn admit_worker(
             && captured.manifest().digest()? == source.content_manifest_hash,
         "signed Worker source projection differs from its captured closure"
     );
-    let entry = match &captured.binding().logical_binding {
-        SourceLogicalBinding::Worker { entry, .. } => entry.clone(),
-        _ => anyhow::bail!("admitted Worker has a non-Worker logical binding"),
-    };
-    let manifest = captured.manifest().clone();
-    let publication = captured.into_publication();
-    let authority = publication
-        .as_ref()
-        .map(|pending| pending.authority().try_clone())
-        .transpose()?
-        .unwrap_or(state.state_store.pinned_state_authority()?);
-    let guard = authority.acquire_shared_guard()?;
-    authority.ensure_guard(&guard)?;
-    let cas = authority.cas_store()?;
-    let mut source_files = BTreeMap::new();
-    for file in &manifest.entries {
-        let bytes = cas
-            .get_blob(&file.blob_hash)?
-            .context("captured Worker source blob is absent from its CAS authority")?;
-        source_files.insert(file.path.clone(), bytes);
-    }
-    let profile_bytes = source_files
-        .get(&entry)
-        .context("Worker logical entry is absent from its captured source")?;
-    let profile = ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)?;
-    profile.validate()?;
-    drop(cas);
+    let profile_authority = captured.source_authority()?;
+    let guard = profile_authority.acquire_shared_guard()?;
+    profile_authority.ensure_guard(&guard)?;
+    let profile = ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
+        &captured, &guard,
+    )?;
     drop(guard);
+    let publication = captured.into_publication();
+    profile.validate()?;
     if let Some(publication) = publication {
         publication.publish()?;
     }

@@ -51,9 +51,42 @@ impl AdmittedSourceClosure {
         &self.manifest
     }
 
+    /// Exact CAS authority that retained this capture, including staged
+    /// source blobs before its pending publication is committed.
+    pub fn source_authority(&self) -> anyhow::Result<ryeos_state::PinnedStateAuthority> {
+        self.store.authority.try_clone()
+    }
+
     pub fn into_publication(mut self) -> Option<PendingCasPublication> {
         self.publication.take()
     }
+}
+
+/// Compile a structured-session Worker only from its admitted source blobs.
+/// The supplied guard must belong to the capture's retained CAS authority.
+/// This helper never reopens the live Bundle or treats a profile path as authority.
+pub fn compile_admitted_structured_worker_profile(
+    captured: &AdmittedSourceClosure,
+    guard: &ryeos_state::recovery::CasMutationGuard,
+) -> anyhow::Result<ryeos_state::objects::AdmittedStructuredSessionProfile> {
+    let authority = captured.source_authority()?;
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
+    let entry = match &captured.binding().logical_binding {
+        ryeos_state::objects::SourceLogicalBinding::Worker { entry, .. } => entry,
+        _ => anyhow::bail!("structured-session source has a non-Worker logical binding"),
+    };
+    let mut source_files = std::collections::BTreeMap::new();
+    for file in &captured.manifest().entries {
+        let bytes = cas
+            .get_blob(&file.blob_hash)?
+            .ok_or_else(|| anyhow::anyhow!("captured Worker source blob is absent"))?;
+        source_files.insert(file.path.clone(), bytes);
+    }
+    let profile_bytes = source_files.get(entry).ok_or_else(|| {
+        anyhow::anyhow!("structured-session entry is absent from captured source")
+    })?;
+    ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
 }
 
 pub fn admit_source_closure(
