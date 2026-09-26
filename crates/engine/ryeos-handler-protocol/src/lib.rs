@@ -279,16 +279,36 @@ pub struct ExecutionEvidenceCandidateCallWire {
     pub result_digest: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionEvidenceCandidateScopedAttemptWire {
+    pub attempt_id: String,
+    pub scenario_id: String,
+    pub observation_object_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionEvidenceProjectResponse {
     Projected {
         result: Value,
         calls: Vec<ExecutionEvidenceCandidateCallWire>,
+        /// Handler interpretation of one subordinate process coordinate.
+        /// The daemon must corroborate it against the exact attempt journal.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        scoped_attempt: Option<ExecutionEvidenceCandidateScopedAttemptWire>,
     },
     Refused {
         message: String,
     },
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Mandatory versioned request envelope. Handler ABI v2 has no decoder for
@@ -1297,5 +1317,28 @@ mod tests {
         let mut widened = value;
         widened["effective_program"]["hidden_hooks"] = serde_json::json!([]);
         assert!(serde_json::from_value::<HandlerRequest>(widened).is_err());
+    }
+
+    #[test]
+    fn execution_evidence_scoped_coordinate_is_required_nullable() {
+        let projected = serde_json::json!({
+            "status": "projected",
+            "result": {"accepted": true},
+            "calls": [],
+            "scoped_attempt": null,
+        });
+        assert!(
+            serde_json::from_value::<ExecutionEvidenceProjectResponse>(projected.clone()).is_ok()
+        );
+        let mut missing = projected.clone();
+        missing.as_object_mut().unwrap().remove("scoped_attempt");
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(missing).is_err());
+        let mut selected = projected;
+        selected["scoped_attempt"] = serde_json::json!({
+            "attempt_id": format!("scoped-{}", "a".repeat(64)),
+            "scenario_id": "native_codex",
+            "observation_object_hash": "b".repeat(64),
+        });
+        assert!(serde_json::from_value::<ExecutionEvidenceProjectResponse>(selected).is_ok());
     }
 }

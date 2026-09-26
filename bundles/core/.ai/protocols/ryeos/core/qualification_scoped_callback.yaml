@@ -1,0 +1,37 @@
+# ryeos:signed:2026-09-26T08:50:39Z:68ee75943aa01edf3a92a40cc97ac541ed3201ef6d2a8f3f55028d0d87c03fb6:79UqONttCcNPILYDb4WeoINOnfBNi1UHuLcRb+WWtb3Nx9fpF9qZBJOwIfLC2V482N+R0Ep3ixOb26Qt3sihDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: qualification_scoped_callback
+category: ryeos/core
+abi_version: v1
+description: Dedicated direct verifier callback protocol for one daemon-owned scoped producer.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: http
+requires_qualification_purpose: true
+execution_evidence:
+  handler: handler:ryeos/core/scoped-qualification-execution-evidence
+  config: {}
+  limits:
+    max_request_bytes: 2097152
+    max_response_bytes: 2097152
+    max_events: 128
+    max_event_bytes: 65536
+    max_calls: 1
+    max_call_bytes: 65536

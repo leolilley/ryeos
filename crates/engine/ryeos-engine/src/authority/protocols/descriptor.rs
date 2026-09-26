@@ -48,6 +48,12 @@ pub struct ProtocolDescriptor {
     /// Callback channel kind.
     pub callback_channel: CallbackChannel,
 
+    /// This callback protocol may launch only under an independently admitted
+    /// product-qualification purpose. The executor binds the purpose and
+    /// narrows its callback bearer before exposing either to the verifier.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_qualification_purpose: bool,
+
     /// Optional bidirectional request/response channel carried independently
     /// of stdio. Absence means this is an ordinary one-shot protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,6 +64,10 @@ pub struct ProtocolDescriptor {
     /// direct launch artifact identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_evidence: Option<ryeos_handler_protocol::ExecutionEvidenceProjectorDeclWire>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +343,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
+            requires_qualification_purpose: false,
             session: None,
             execution_evidence: None,
         }
@@ -365,6 +376,7 @@ mod tests {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
+            requires_qualification_purpose: false,
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,

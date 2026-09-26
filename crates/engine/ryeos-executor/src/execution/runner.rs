@@ -3020,6 +3020,9 @@ fn admitted_scoped_producer_grant(
     let Some(purpose) = sealed.product_qualification_purpose() else {
         return Ok(None);
     };
+    if purpose.policy_source.policy.producer_scenarios.is_empty() {
+        return Ok(None);
+    }
     if metadata.launch_driver
         != Some(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
         || protocol.descriptor.callback_channel != CallbackChannel::Http
@@ -3081,7 +3084,7 @@ fn promoted_scoped_producer_commands(
         ),
     >,
     bool,
-)> {
+)>{
     use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
 
     let mut commands = BTreeMap::new();
@@ -3177,10 +3180,13 @@ fn build_protocol_launch_env(
         .env_injections
         .iter()
         .any(|injection| injection.source == EnvInjectionSource::ThreadAuthToken);
-    if scoped_producer_grant.is_some()
-        && protocol.descriptor.callback_channel != CallbackChannel::Http
+    if protocol.descriptor.requires_qualification_purpose != scoped_producer_grant.is_some()
+        || (scoped_producer_grant.is_some()
+            && protocol.descriptor.callback_channel != CallbackChannel::Http)
     {
-        bail!("qualification verifier requires signed callback-capable protocol");
+        bail!(
+            "qualification verifier requires its signed scoped-only callback protocol and exact launch purpose"
+        );
     }
 
     // Complete every fallible non-credential input before registering transient
@@ -6642,10 +6648,11 @@ async fn dispatch_detached_bg_task(
             return;
         }
     };
-    let (_bg_scoped_producer_registration, bg_scoped_relay_channels) = if let Some(purpose) = admitted_launch_metadata
-        .sealed_root_request
-        .as_ref()
-        .and_then(|sealed| sealed.product_qualification_purpose())
+    let (_bg_scoped_producer_registration, bg_scoped_relay_channels) = if let Some(purpose) =
+        admitted_launch_metadata
+            .sealed_root_request
+            .as_ref()
+            .and_then(|sealed| sealed.product_qualification_purpose())
     {
         use ryeos_app::scoped_producer_authority::{
             ScopedProducerAuthorityKey, ScopedProducerLiveAuthority,
@@ -6660,8 +6667,8 @@ async fn dispatch_detached_bg_task(
                 bg_external_realizations.as_deref(),
             )?;
             let (ingress_handoff, target_channels) = if requires_ingress_handoff {
-                let (parent, child) = lillux::inherited_duplex_channel_pair()
-                    .map_err(anyhow::Error::msg)?;
+                let (parent, child) =
+                    lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
                 let target = ryeos_engine::isolation::IsolationTargetChannelAuthority::new(
                     child,
                     9,

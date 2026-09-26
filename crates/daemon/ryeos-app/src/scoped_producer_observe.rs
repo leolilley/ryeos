@@ -18,13 +18,19 @@ use crate::runtime_db::scoped_child_attempt::{
 };
 use crate::scoped_producer_process::ScopedProducerProcessKey;
 use crate::state::AppState;
-use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
+use ryeos_handler_protocol::ExecutionEvidenceCandidateScopedAttemptWire;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
+use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
+use ryeos_state::external_content::products::qualification::{
+    ProductQualificationLaunchPurpose, ProductQualificationScopedAttemptProof,
+};
 
 const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v6";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
 
-fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -136,7 +142,9 @@ impl ScopedProducerObservation {
             self.isolation_provenance.plan_digest.is_some(),
             "observation has no concrete isolation plan"
         );
-        let mount_evidence = record.mount_preparation_evidence.as_ref()
+        let mount_evidence = record
+            .mount_preparation_evidence
+            .as_ref()
             .context("observation has no retained pre-release mount evidence")?;
         mount_evidence.validate_observation_plan(
             self.isolation_provenance.plan_digest.as_deref().unwrap(),
@@ -147,7 +155,8 @@ impl ScopedProducerObservation {
             &mount_evidence.prepared_immutable_sha256,
         )?;
         ensure!(
-            self.applied_launch.matches_post_release_mounts(&mount_evidence.expected),
+            self.applied_launch
+                .matches_post_release_mounts(&mount_evidence.expected),
             "observation post-release target mounts differ from retained held preparation"
         );
         ensure!(
@@ -223,8 +232,14 @@ mod prepared_immutable_tests {
     #[test]
     fn terminal_content_map_must_match_the_held_attempt_exactly() {
         let expected = BTreeMap::from([
-            ("/ryeos/producer-prepared/codex-home/config.toml".into(), "a".repeat(64)),
-            ("/ryeos/producer-prepared/codex-home/environments.toml".into(), "b".repeat(64)),
+            (
+                "/ryeos/producer-prepared/codex-home/config.toml".into(),
+                "a".repeat(64),
+            ),
+            (
+                "/ryeos/producer-prepared/codex-home/environments.toml".into(),
+                "b".repeat(64),
+            ),
         ]);
         validate_prepared_immutable_join(&expected, &expected).unwrap();
         let mut missing = expected.clone();
@@ -274,10 +289,9 @@ pub fn observe_scoped_producer(
         .interactive_io_exact(&record)?
         .is_some()
     {
-        state.state_store.assert_scoped_child_input_closed(
-            &record.initial.attempt_id,
-            &record.initial.owner,
-        )?;
+        state
+            .state_store
+            .assert_scoped_child_input_closed(&record.initial.attempt_id, &record.initial.owner)?;
     }
     let child = state.scoped_producer_processes.take_for_observation(key)?;
     let result = observe_owned_scoped_producer(state, key, &record, child, callback_deadline);
@@ -340,7 +354,9 @@ fn observe_owned_scoped_producer(
             );
         }
     };
-    let retained_mounts = record.mount_preparation_evidence.as_ref()
+    let retained_mounts = record
+        .mount_preparation_evidence
+        .as_ref()
         .context("released scoped child has no retained mount preparation")?;
     if !applied_launch.matches_commitments(&expected_applied_launch)
         || !applied_launch.matches_post_release_mounts(&retained_mounts.expected)
@@ -589,4 +605,123 @@ fn replay_observation(
         "committed scoped observation exceeds bounded control response"
     );
     Ok(value)
+}
+
+/// Corroborate a signed projector's proposed subordinate coordinate using
+/// the exact daemon-owned attempt and its committed, validated CAS object.
+/// The projector interprets the verifier terminal; it cannot mint process,
+/// scope, or natural-exit testimony by naming an attempt.
+pub(crate) fn qualification_scoped_attempt_proof(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    _guard: &ryeos_state::CasMutationGuard,
+    owner: &LaunchOwner,
+    purpose: &ProductQualificationLaunchPurpose,
+    candidate: &ExecutionEvidenceCandidateScopedAttemptWire,
+) -> Result<ProductQualificationScopedAttemptProof> {
+    purpose.validate()?;
+    let scenario = purpose
+        .policy_source
+        .policy
+        .producer_scenarios
+        .get(&candidate.scenario_id)
+        .context("projected scoped attempt has no signed scenario")?;
+    let source = purpose
+        .producer_recipe_sources
+        .get(&candidate.scenario_id)
+        .context("projected scoped attempt has no pinned recipe source")?;
+    ensure!(
+        scenario.recipe_ref == source.canonical_ref,
+        "projected scoped scenario recipe differs from pinned source"
+    );
+    let current = crate::operator_external_content::product_qualification::resolve_current_bundle_producer_recipe_for_purpose(
+        state,
+        purpose,
+        &candidate.scenario_id,
+    )?;
+    ensure!(
+        current.source_identity()? == *source,
+        "projected scoped recipe source changed before qualification"
+    );
+    let record = state
+        .state_store
+        .scoped_child_attempt_for_owner(owner)?
+        .context("qualification verifier has no daemon-owned scoped attempt")?;
+    ensure!(
+        record.initial.attempt_id == candidate.attempt_id
+            && record.initial.owner == *owner
+            && record.initial.recipe_digest == source.recipe_digest
+            && record.initial.recipe_generation == source.bundle_generation_identity
+            && record.phase == ScopedChildPhase::Retired
+            && record.recovery_death_evidence_digest.is_some()
+            && record.retirement_evidence_digest.is_some(),
+        "projected scoped attempt differs from settled daemon journal"
+    );
+    let value = authority
+        .cas_store()?
+        .get_object(
+            record
+                .observation_object_hash
+                .as_deref()
+                .context("settled scoped attempt has no retained observation")?,
+        )?
+        .context("settled scoped observation CAS object is missing")?;
+    let observation: ScopedProducerObservation = serde_json::from_value(value)?;
+    observation.validate_against(&record)?;
+    ensure!(
+        observation.producer_exit_clean
+            && observation.producer_source == *source
+            && record.observation_object_hash.as_deref()
+                == Some(candidate.observation_object_hash.as_str()),
+        "projected scoped observation differs from clean retained producer"
+    );
+    let proof = ProductQualificationScopedAttemptProof {
+        attempt_id: record.initial.attempt_id.clone(),
+        launch_owner_digest: digest_json(owner)?,
+        scenario_id: candidate.scenario_id.clone(),
+        producer_source: source.clone(),
+        process_identity_digest: digest_json(
+            record
+                .process_identity
+                .as_ref()
+                .context("settled scoped attempt has no process")?,
+        )?,
+        scope_allocation_digest: digest_json(&record.initial.scope_allocation)?,
+        scope_recovery_digest: digest_json(
+            record
+                .scope_recovery
+                .as_ref()
+                .context("settled scoped attempt has no scope")?,
+        )?,
+        mount_preparation_digest: digest_json(
+            record
+                .mount_preparation_evidence
+                .as_ref()
+                .context("settled scoped attempt has no mount preparation")?,
+        )?,
+        natural_empty_receipt_digest: record
+            .natural_empty_receipt_digest
+            .clone()
+            .context("settled scoped attempt has no natural-empty receipt")?,
+        observation_object_hash: candidate.observation_object_hash.clone(),
+        recovery_death_evidence_digest: record
+            .recovery_death_evidence_digest
+            .clone()
+            .context("settled scoped attempt has no recovery-death evidence")?,
+        retirement_evidence_digest: record
+            .retirement_evidence_digest
+            .clone()
+            .context("settled scoped attempt has no retirement evidence")?,
+        callback_method_surface_digest:
+            crate::callback_token::CallbackRuntimeMethodSurface::qualification_scoped_producer()
+                .exact_surface_digest()?,
+    };
+    proof.validate()?;
+    Ok(proof)
+}
+
+fn digest_json(value: &impl Serialize) -> Result<String> {
+    Ok(lillux::sha256_hex(
+        lillux::canonical_json(&serde_json::to_value(value)?)?.as_bytes(),
+    ))
 }

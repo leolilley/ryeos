@@ -6,6 +6,7 @@ pub mod graph_execution_evidence;
 pub mod graph_launch;
 pub mod identity;
 pub mod regex_kv;
+pub mod scoped_qualification_execution_evidence;
 pub mod yaml_document;
 pub mod yaml_header_document;
 

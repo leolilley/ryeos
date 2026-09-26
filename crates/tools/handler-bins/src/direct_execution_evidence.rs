@@ -26,6 +26,7 @@ pub fn project(request: ExecutionEvidenceProjectRequest) -> HandlerResponse {
         Ok(result) => ExecutionEvidenceProjectResponse::Projected {
             result,
             calls: Vec::new(),
+            scoped_attempt: None,
         },
         Err(message) => ExecutionEvidenceProjectResponse::Refused { message },
     };
@@ -135,6 +136,7 @@ mod tests {
                 ExecutionEvidenceProjectResponse::Projected {
                     result: projected,
                     calls,
+                    scoped_attempt: None,
                 },
         } = project(ExecutionEvidenceProjectRequest {
             config: json!({}),

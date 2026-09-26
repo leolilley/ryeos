@@ -257,7 +257,7 @@ impl IndependentVerifierScenario {
         let tool = json!({
             "category":"fixtures/independent-runtime", "name":"verify", "version":"1.0.0",
             "description":"Independently check exact scripted runtime scenario; not production profile qualification",
-            "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/tool_callback",
+            "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/qualification_scoped_callback",
             "effects":"live", "filesystem_authority":"node_policy", "network_authority":"node_policy",
             "external_content":declarations,
             "config":{"command":format!("bin:{VERIFIER_BIN}"), "args":[], "input_data":"${params_json}", "timeout_secs":300},

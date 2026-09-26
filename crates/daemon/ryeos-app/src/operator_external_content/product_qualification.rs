@@ -415,6 +415,7 @@ fn prove_with_guard(
         &capsule,
         &admitted_resolution,
         &current_verifier,
+        purpose,
         &policy_source.policy.subject_declaration_id,
         product.evidence.manifest_hash.as_str(),
     )?;

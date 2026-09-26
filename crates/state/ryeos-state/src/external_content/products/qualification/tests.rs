@@ -269,10 +269,12 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
         scenario_id: "native_codex".into(),
         producer_source: source,
         process_identity_digest: "c".repeat(64),
+        scope_allocation_digest: "d".repeat(64),
         scope_recovery_digest: "d".repeat(64),
         mount_preparation_digest: "e".repeat(64),
         natural_empty_receipt_digest: "f".repeat(64),
         observation_object_hash: "1".repeat(64),
+        recovery_death_evidence_digest: "2".repeat(64),
         retirement_evidence_digest: "2".repeat(64),
         callback_method_surface_digest: "3".repeat(64),
     };

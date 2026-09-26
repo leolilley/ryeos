@@ -59,5 +59,9 @@ path = "src/bin/graph_execution_evidence.rs"
 name = "ryeos-direct-execution-evidence"
 path = "src/bin/direct_execution_evidence.rs"
 
+[[bin]]
+name = "ryeos-scoped-qualification-execution-evidence"
+path = "src/bin/scoped_qualification_execution_evidence.rs"
+
 [lib]
 path = "src/lib.rs"

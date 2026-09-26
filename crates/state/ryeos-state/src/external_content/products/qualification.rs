@@ -564,10 +564,12 @@ pub struct ProductQualificationScopedAttemptProof {
     pub scenario_id: String,
     pub producer_source: ProductProducerRecipeSourceIdentity,
     pub process_identity_digest: String,
+    pub scope_allocation_digest: String,
     pub scope_recovery_digest: String,
     pub mount_preparation_digest: String,
     pub natural_empty_receipt_digest: String,
     pub observation_object_hash: String,
+    pub recovery_death_evidence_digest: String,
     pub retirement_evidence_digest: String,
     pub callback_method_surface_digest: String,
 }
@@ -587,6 +589,7 @@ impl ProductQualificationScopedAttemptProof {
         for (label, digest) in [
             ("scoped launch owner", &self.launch_owner_digest),
             ("scoped process identity", &self.process_identity_digest),
+            ("scoped allocation", &self.scope_allocation_digest),
             ("scoped recovery", &self.scope_recovery_digest),
             ("scoped mount preparation", &self.mount_preparation_digest),
             (
@@ -594,6 +597,10 @@ impl ProductQualificationScopedAttemptProof {
                 &self.natural_empty_receipt_digest,
             ),
             ("scoped observation", &self.observation_object_hash),
+            (
+                "scoped recovery death",
+                &self.recovery_death_evidence_digest,
+            ),
             ("scoped retirement", &self.retirement_evidence_digest),
             (
                 "scoped callback method surface",

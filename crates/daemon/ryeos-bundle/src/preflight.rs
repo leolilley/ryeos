@@ -2673,6 +2673,33 @@ strict_fields: warn
         assert_eq!(report.warnings.len(), 1);
     }
 
+    /// Source-local admission check for the populated core bundle. It is
+    /// ignored by ordinary unit runs because fresh checkouts have no derived
+    /// bundle binaries; invoke it after targeted bundle population.
+    #[test]
+    #[ignore = "requires populated source-local core bundle"]
+    fn populated_core_bundle_admits_exact_signed_protocol_and_handler() {
+        let repository = ryeos_engine::test_support::workspace_root();
+        let core = repository.join("bundles/core");
+        let trust_document = ryeos_engine::trust::PublisherTrustDoc::parse(
+            &std::fs::read_to_string(core.join("PUBLISHER_TRUST.toml")).unwrap(),
+        )
+        .unwrap();
+        let key = trust_document.decode_verifying_key().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let trusted = config.path().join("keys/trusted");
+        std::fs::create_dir_all(&trusted).unwrap();
+        ryeos_engine::trust::pin_key(&key, "development-publisher", &trusted, None).unwrap();
+        let report = preflight_verify_bundle_report_in_context(
+            &core,
+            &[],
+            config.path(),
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
+        )
+        .expect("populated core bundle must pass exact signature and contract preflight");
+        assert!(report.is_clean(), "core bundle has contract warnings: {report:?}");
+    }
+
     // NOTE: Real preflight wiring tests (calling
     // `preflight_verify_bundle_in_context` directly with temp bundle
     // fixtures) require parser binaries installed in the worktree.

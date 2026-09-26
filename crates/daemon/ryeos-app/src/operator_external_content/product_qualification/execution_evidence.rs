@@ -15,8 +15,9 @@ use ryeos_handler_protocol::{
 };
 use ryeos_state::external_content::products::qualification::{
     ProductQualificationEvidence, ProductQualificationExecutionProof,
-    ProductQualificationParticipant, ProductQualificationProjectorIdentity,
-    ProductQualificationVerifier, VerifierProcessSettlementAuthority,
+    ProductQualificationLaunchPurpose, ProductQualificationParticipant,
+    ProductQualificationProjectorIdentity, ProductQualificationVerifier,
+    VerifierProcessSettlementAuthority,
 };
 use ryeos_state::objects::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, ExternalContentRealizationSet,
@@ -292,6 +293,7 @@ pub(super) fn prove(
     capsule: &AdmittedLaunchCapsule,
     admitted: &ResolutionOutput,
     current: &CurrentBundleVerifierIdentity,
+    purpose: &ProductQualificationLaunchPurpose,
     subject_id: &str,
     subject_hash: &str,
 ) -> anyhow::Result<(
@@ -347,11 +349,40 @@ pub(super) fn prove(
                 .collect(),
         },
     )?;
-    let (result, calls) = match response {
-        ExecutionEvidenceProjectResponse::Projected { result, calls } => (result, calls),
+    let (result, calls, scoped_attempt) = match response {
+        ExecutionEvidenceProjectResponse::Projected {
+            result,
+            calls,
+            scoped_attempt,
+        } => (result, calls, scoped_attempt),
         ExecutionEvidenceProjectResponse::Refused { message } => {
             bail!("execution evidence contract refused terminal: {message}")
         }
+    };
+    let scoped_proof = if let Some(candidate) = scoped_attempt.as_ref() {
+        let settlement = state
+            .state_store
+            .latest_thread_process_settlement(&terminal.thread_id)?
+            .context("scoped qualification verifier has no exact process settlement")?;
+        if root_settlement_digest
+            .as_ref()
+            .map(|(digest, _)| digest.as_str())
+            != Some(settlement.digest()?.as_str())
+        {
+            bail!("scoped qualification owner differs from signed verifier settlement");
+        }
+        Some(
+            crate::scoped_producer_observe::qualification_scoped_attempt_proof(
+                state,
+                authority,
+                guard,
+                &settlement.launch_owner,
+                purpose,
+                candidate,
+            )?,
+        )
+    } else {
+        None
     };
     if calls.len() != required.len() {
         bail!("execution evidence omitted or added a required participant");
@@ -382,9 +413,10 @@ pub(super) fn prove(
             call,
         )?);
     }
-    // Callback-free subprocesses cannot hide daemon-dispatched participants.
-    // A callback-capable contract must account for its calls through its own
-    // projector; mere direct-vs-managed classification never proves leafness.
+    // A callback-free direct verifier has no subordinate operation. A
+    // qualification-only callback verifier must instead name exactly one
+    // daemon-corroborated scoped attempt; neither lane can silently claim
+    // leafness from the absence of managed child events.
     if required.is_empty() {
         require_hookless_participant(admitted)?;
         require_hookless_participant(&current.resolution)?;
@@ -394,10 +426,19 @@ pub(super) fn prove(
             bail!("zero-participant qualification requires a callback-free subprocess contract");
         };
         let protocol = state.engine.protocols.require(protocol_ref)?;
-        if protocol.descriptor.callback_channel
-            != ryeos_engine::protocol_vocabulary::CallbackChannel::None
-        {
-            bail!("zero-participant qualification protocol can dispatch callbacks");
+        match (
+            &scoped_proof,
+            protocol.descriptor.requires_qualification_purpose,
+        ) {
+            (None, false)
+                if protocol.descriptor.callback_channel
+                    == ryeos_engine::protocol_vocabulary::CallbackChannel::None => {}
+            (Some(_), true)
+                if protocol.descriptor.callback_channel
+                    == ryeos_engine::protocol_vocabulary::CallbackChannel::Http => {}
+            _ => bail!(
+                "zero-participant qualification protocol has unaccounted callback authority or scoped attempt"
+            ),
         }
     }
     Ok((
@@ -407,7 +448,7 @@ pub(super) fn prove(
             projection_contract_digest: contract_digest.to_owned(),
             projector: projector_identity(&projector.projector),
             participants,
-            scoped_attempt: None,
+            scoped_attempt: scoped_proof,
         },
         root_settlement_digest,
     ))
@@ -641,6 +682,45 @@ pub(in crate::operator_external_content) fn verify_current(
     )?)?;
     if required.len() != proof.participants.len() {
         bail!("qualification required participant set changed");
+    }
+    if let Some(scoped) = &proof.scoped_attempt {
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor { protocol_ref, .. } =
+            &current.artifact_identity
+        else {
+            bail!("current scoped qualification verifier is not a direct execution");
+        };
+        let protocol = state.engine.protocols.require(protocol_ref)?;
+        if !protocol.descriptor.requires_qualification_purpose
+            || protocol.descriptor.callback_channel
+                != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
+            || scoped.callback_method_surface_digest
+                != crate::callback_token::CallbackRuntimeMethodSurface::qualification_scoped_producer()
+                    .exact_surface_digest()?
+        {
+            bail!("current scoped qualification callback authority changed");
+        }
+        let current_policy = super::resolve_current_bundle_qualification_policy(
+            state,
+            &evidence.policy_source.canonical_ref,
+        )?;
+        if current_policy != evidence.policy_source {
+            bail!("current scoped qualification policy changed");
+        }
+        let scenario = current_policy
+            .policy
+            .producer_scenarios
+            .get(&scoped.scenario_id)
+            .context("current scoped qualification scenario disappeared")?;
+        let current_recipe = state.engine.with_checked_bundle_generation(|generation| {
+            super::resolve_bundle_producer_recipe_in_generation(
+                state,
+                generation.request_engine_generation_identity(),
+                &scenario.recipe_ref,
+            )
+        })?;
+        if current_recipe.source_identity()? != scoped.producer_source {
+            bail!("current scoped qualification recipe source changed");
+        }
     }
     for required in required {
         let retained = proof

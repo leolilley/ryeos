@@ -268,6 +268,7 @@ staged_payload_records_for_set() {
     core rye-parser-regex-kv ryeos-handler-bins release \
     core rye-composer-identity ryeos-handler-bins release \
     core ryeos-direct-execution-evidence ryeos-handler-bins release \
+    core ryeos-scoped-qualification-execution-evidence ryeos-handler-bins release \
     core ryeos-core-tools ryeos-core-tools release \
     core ryeos-session-exec ryeos-session-exec static \
     core ryeos-worker-execution-launch-preparer ryeos-structured-session static \
