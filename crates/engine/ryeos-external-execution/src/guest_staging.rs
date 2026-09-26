@@ -2157,6 +2157,82 @@ mod tests {
             .is_err(),
             "a completed pre-install stage cannot reserve a second owner"
         );
+        // A separate exact occurrence exercises the production one-way cut,
+        // not merely the canonical record helper used above.
+        let committed_occurrence_dir = tempfile::tempdir().unwrap();
+        let committed_occurrence =
+            lillux::PinnedDirectory::open(committed_occurrence_dir.path())
+                .unwrap()
+                .unwrap();
+        committed_occurrence
+            .tighten_owner_private_directory()
+            .unwrap();
+        let committed_source_dir = tempfile::tempdir().unwrap();
+        let committed_source = lillux::PinnedDirectory::open(committed_source_dir.path())
+            .unwrap()
+            .unwrap();
+        committed_source.tighten_owner_private_directory().unwrap();
+        let committed = crate::guest_installation::GuestOccurrenceOwner::begin(
+            &committed_occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap()
+        .stage_uploaded_with_source_root_for_test(
+            &upload,
+            &committed_source,
+            &context,
+            &inputs,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )
+        .unwrap()
+        .install_base_once(&context, &inputs)
+        .unwrap()
+        .prepare_content_for_adoption(&context, &inputs)
+        .unwrap()
+        .create_private_scratch_once(&context, &inputs)
+        .unwrap()
+        .prepare_launch_artifacts_once(&context, &inputs)
+        .unwrap()
+        .prepare_supervisor_request(&context, &inputs, 10.0)
+        .unwrap()
+        .commit_outer_launch_intent(&context, &inputs)
+        .unwrap();
+        let committed_owner = committed_occurrence
+            .open_child_directory(OsStr::new("guest-import-owner"))
+            .unwrap()
+            .unwrap();
+        let committed_file = committed_owner
+            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+            .unwrap()
+            .unwrap();
+        let committed_bytes = committed_file.read_bounded(8 * 1024).unwrap();
+        assert_eq!(committed.record_sha256(), lillux::sha256_hex(&committed_bytes));
+        assert_eq!(
+            committed.record_file(),
+            &lillux::pinned_regular_file_identity(
+                &committed_file.try_clone_descriptor().unwrap()
+            )
+            .unwrap()
+        );
+        assert!(crate::guest_installation::create_launch_intent_record_for_test(
+            &committed_owner,
+            &committed_bytes,
+        )
+        .is_err(), "committed launch intent cannot be replaced");
+        drop(committed);
+        assert_eq!(
+            crate::guest_installation::recover_guest_occurrence(
+                &committed_occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .unwrap()
+            .phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::LaunchUncertain,
+        );
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
             ..context
