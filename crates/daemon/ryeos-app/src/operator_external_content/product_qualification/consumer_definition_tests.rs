@@ -11,7 +11,9 @@ use ryeos_state::external_content::products::qualification::{
 use super::{
     admit_current_bundle_consumer_worker, consumer_definition_identity,
     require_consumer_worker_matches_definitions, resolve_consumer_definition_in_generation,
-    resolve_current_bundle_consumer_definitions, resolve_current_bundle_qualification_policy,
+    resolve_current_bundle_consumer_definitions,
+    resolve_current_bundle_consumer_environment_definition,
+    resolve_current_bundle_qualification_policy,
 };
 
 #[test]
@@ -169,6 +171,22 @@ product_qualification_policy:
             .as_ref()
             .unwrap(),
     )?;
+    let environment = resolve_current_bundle_consumer_environment_definition(
+        &state,
+        &policy_source,
+        &relationship,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("signed consumer environment definition absent"))?;
+    ensure!(
+        environment.definitions == definitions
+            && environment.declarations.len() == 1
+            && environment.declarations[0].id == "authoring-tools"
+            && environment.executable_search.len() == 1
+            && environment.executable_search[0].realization_id == "authoring-tools"
+            && environment.executable_search[0].relative_directory == "bin"
+            && environment.process_environment.contains_key("TMPDIR"),
+        "signed consumer environment definition did not match its executable closure"
+    );
     let (joined, worker) =
         admit_current_bundle_consumer_worker(&state, &policy_source, &relationship)?
             .ok_or_else(|| anyhow::anyhow!("signed consumer Worker admission absent"))?;
@@ -216,12 +234,26 @@ product_qualification_policy:
         resolve_current_bundle_consumer_definitions(&state, &changed, &relationship).is_err(),
         "changed policy was admitted against the current signed Bundle generation"
     );
+    ensure!(
+        resolve_current_bundle_consumer_environment_definition(&state, &changed, &relationship)
+            .is_err(),
+        "changed policy admitted consumer environment intent"
+    );
     let mut wrong_relationship = relationship.clone();
     wrong_relationship.consumer.declaration_id = "other-runtime".into();
     ensure!(
         resolve_current_bundle_consumer_definitions(&state, &policy_source, &wrong_relationship)
             .is_err(),
         "wrong consumer slot was admitted against the signed qualification policy"
+    );
+    ensure!(
+        resolve_current_bundle_consumer_environment_definition(
+            &state,
+            &policy_source,
+            &wrong_relationship,
+        )
+        .is_err(),
+        "wrong consumer slot admitted consumer environment intent"
     );
     Ok(())
 }

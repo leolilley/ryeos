@@ -44,8 +44,8 @@ use ryeos_state::external_content::products::qualification_publication::{
 };
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::objects::{
-    Attestation, ExternalContentKind, ExternalContentMode, ExternalContentRealizationSet,
-    ThreadSnapshot, ThreadStatus,
+    Attestation, ExecutableSearchPathEntry, ExternalContentKind, ExternalContentMode,
+    ExternalContentRealizationSet, SessionProcessEnvironmentValue, ThreadSnapshot, ThreadStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -741,6 +741,162 @@ fn require_consumer_worker_matches_definitions(
         bail!("qualification consumer Worker source differs from signed definitions");
     }
     Ok(())
+}
+
+/// Signed environment intent from the same consumer-definition generation.
+/// These are declarations, not captured/verified realizations or applied
+/// process settings. The admission owner must still resolve exact content.
+pub(super) struct CurrentBundleConsumerEnvironmentDefinition {
+    pub definitions: ProductQualificationConsumerDefinitionIdentity,
+    pub declarations: Vec<ryeos_engine::external_content::ExternalContentDeclaration>,
+    pub executable_search: Vec<ExecutableSearchPathEntry>,
+    pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
+}
+
+pub(super) fn resolve_current_bundle_consumer_environment_definition(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+) -> anyhow::Result<Option<CurrentBundleConsumerEnvironmentDefinition>> {
+    let Some(definitions) =
+        resolve_current_bundle_consumer_definitions(state, policy_source, relationship)?
+    else {
+        return Ok(None);
+    };
+    let context = policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("qualification consumer context is absent")?;
+    let (declarations, executable_search, process_environment) =
+        state.engine.with_checked_bundle_generation(|generation| {
+            if generation.request_engine_generation_identity()
+                != definitions.bundle_generation_identity
+            {
+                bail!("qualification environment changed Bundle generation");
+            }
+            let environment = resolve_consumer_definition_in_generation(
+                generation,
+                &context.environment_ref,
+                "config",
+            )?;
+            let worker_execution = resolve_consumer_definition_in_generation(
+                generation,
+                &context.worker_execution_ref,
+                "worker_execution",
+            )?;
+            if consumer_definition_identity(&environment)? != definitions.environment
+                || consumer_definition_identity(&worker_execution)? != definitions.worker_execution
+            {
+                bail!("qualification environment definitions changed after admission");
+            }
+            let authored = &environment.composed.composed;
+            if authored
+                .get("worker_ref")
+                .and_then(serde_json::Value::as_str)
+                != Some(context.worker_ref.as_str())
+            {
+                bail!("qualification environment names a different Worker");
+            }
+            let configuration = authored
+                .get("configuration")
+                .context("qualification environment has no configuration")?;
+            let executable_search: Vec<ExecutableSearchPathEntry> = serde_json::from_value(
+                configuration
+                    .get("executable_search")
+                    .cloned()
+                    .context("qualification environment has no executable search")?,
+            )?;
+            let process_environment: BTreeMap<String, SessionProcessEnvironmentValue> =
+                serde_json::from_value(
+                    configuration
+                        .get("process_environment")
+                        .cloned()
+                        .context("qualification environment has no process environment")?,
+                )?;
+            if executable_search.len() > ryeos_state::objects::MAX_EXECUTABLE_SEARCH_PATH_ENTRIES {
+                bail!("qualification environment executable search exceeds bound");
+            }
+            let mut search_ids = std::collections::BTreeSet::new();
+            for entry in &executable_search {
+                entry.validate()?;
+                if !search_ids.insert((&entry.realization_id, &entry.relative_directory)) {
+                    bail!("qualification environment has duplicate executable search");
+                }
+            }
+            ryeos_state::objects::validate_session_process_environment(&process_environment)?;
+            let execution_config = worker_execution
+                .composed
+                .composed
+                .get("config")
+                .context("qualification WorkerExecution has no config")?;
+            if execution_config
+                .get("environment_binding")
+                .and_then(serde_json::Value::as_str)
+                != Some(context.environment_binding.as_str())
+            {
+                bail!("qualification WorkerExecution environment binding differs from policy");
+            }
+            let execution_worker = execution_config
+                .get("worker_ref")
+                .context("qualification WorkerExecution has no worker_ref")?;
+            if !execution_worker.is_null()
+                && execution_worker.as_str() != Some(context.worker_ref.as_str())
+            {
+                bail!("qualification WorkerExecution names a different Worker");
+            }
+            let contract = state
+                .engine
+                .kinds
+                .get("config")
+                .and_then(|schema| schema.external_content_contract());
+            let declarer = ryeos_engine::external_content::declaring_authority(&environment)?;
+            let declarations =
+                ryeos_engine::external_content::effective_external_content_declarations(
+                    &environment,
+                    contract,
+                    declarer,
+                )?
+                .context("qualification environment has no external-content declaration")?;
+            if declarations.is_empty()
+                || declarations.iter().any(|declaration| {
+                    declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                        || declaration.locator.is_some()
+                        || declaration.digest.is_none()
+                })
+            {
+                bail!("qualification environment requires exact pinned tree declarations");
+            }
+            for entry in &executable_search {
+                if !declarations.iter().any(|declaration| {
+                    declaration.id == entry.realization_id
+                        && declaration.kind
+                            == ryeos_engine::external_content::ExternalContentKind::Tree
+                }) {
+                    bail!("qualification executable search names absent or non-tree content");
+                }
+            }
+            for value in process_environment.values() {
+                let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+                else {
+                    continue;
+                };
+                if !declarations.iter().any(|declaration| {
+                    declaration.id == *realization_id
+                        && declaration.kind
+                            == ryeos_engine::external_content::ExternalContentKind::Tree
+                }) {
+                    bail!("qualification process environment names absent or non-tree content");
+                }
+            }
+            Ok((declarations, executable_search, process_environment))
+        })?;
+    Ok(Some(CurrentBundleConsumerEnvironmentDefinition {
+        definitions,
+        declarations,
+        executable_search,
+        process_environment,
+    }))
 }
 
 fn resolve_consumer_definition_in_generation(
