@@ -990,8 +990,30 @@ mod tests {
             produced_manifest.guest_input_identity,
             manifest.guest_input_identity
         );
+        for executable in ["supervisor", "launcher"] {
+            assert!(produced_manifest.entries.iter().any(|entry| {
+                matches!(entry, GuestStagingEntry::RegularFile { path, mode: 0o500, .. }
+                    if path == executable)
+            }));
+        }
         let produced_stage =
             stage_guest_package(produced_bytes.as_slice(), &parent, &produced_expected).unwrap();
+        for executable in ["supervisor", "launcher"] {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                produced_stage
+                    .root()
+                    .open_regular(OsStr::new(executable), false)
+                    .unwrap()
+                    .unwrap()
+                    .metadata()
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o500
+            );
+        }
         crate::guest_content::recheck_staged_guest_content(&produced_stage, &retained_inputs)
             .unwrap();
         produced_stage.discard().unwrap();

@@ -3086,6 +3086,13 @@ pub(crate) mod tests {
             )
             .is_err());
         assert_eq!(
+            db.dedicated_session(&reserved.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "outcome_unknown"
+        );
+        assert_eq!(
             db.credential_profile("P-failed-start")
                 .unwrap()
                 .unwrap()
