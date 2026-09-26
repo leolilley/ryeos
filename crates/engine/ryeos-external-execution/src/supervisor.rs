@@ -26,6 +26,7 @@ use ryeos_state::{
 /// implementation of this trait.
 pub trait ExternalCandidateLauncherClient {
     fn release(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
+    fn poll_applied_launch(&mut self) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>>;
     fn apply_protocol_chunk(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<usize>;
     fn cancel(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()>;
     fn capture(
@@ -89,6 +90,18 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
 
     pub fn journal(&self) -> &LiveGuestJournal {
         &self.journal
+    }
+
+    /// Join one native point read to the protected occurrence journal. `false`
+    /// means the exact child has not reached its pre-exec receipt boundary;
+    /// neither pending nor local success is a controller-visible claim.
+    pub fn poll_applied_runtime(&mut self, occurrence_digest: &str) -> Result<bool> {
+        let Some(receipt) = self.launcher.poll_applied_launch()? else {
+            return Ok(false);
+        };
+        self.journal
+            .record_applied_runtime(occurrence_digest, &receipt)?;
+        Ok(true)
     }
 
     /// Retain a controller-authored acknowledgement without inventing an
@@ -462,6 +475,12 @@ mod tests {
         fn release(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<()> {
             self.releases += 1;
             Ok(())
+        }
+
+        fn poll_applied_launch(
+            &mut self,
+        ) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>> {
+            Ok(None)
         }
 
         fn apply_protocol_chunk(&mut self, _frame: &AuthenticatedExecutionFrame) -> Result<usize> {

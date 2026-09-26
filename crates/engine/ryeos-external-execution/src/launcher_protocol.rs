@@ -123,6 +123,7 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     supervisor_signing_key: lillux::crypto::SigningKey,
     bootstrap_digest: String,
     ready_frame: String,
+    applied_runtime_recorded: bool,
 }
 
 pub enum ExternalOwnerFrameOutcome {
@@ -231,10 +232,36 @@ impl LiveInheritedExternalCandidateSupervisor {
     }
 
     pub fn poll_execution_output(&mut self) -> Result<Option<String>> {
+        // Transport may poll before the controller has released the target.
+        // Do not ask Lillux for a pre-exec receipt until release is durably
+        // applied, and do not forward any output before the exact local
+        // occurrence row is retained. This still is not qualification.
+        if !self.supervisor.journal().has_applied_release()? {
+            return Ok(None);
+        }
+        if !self.applied_runtime_recorded && !self.poll_applied_runtime()? {
+            return Ok(None);
+        }
         Ok(self
             .supervisor
             .poll_execution_output(&self.supervisor_signing_key)?
             .map(|frame| frame.canonical().to_owned()))
+    }
+
+    /// Retain the exact native receipt in the occurrence journal before any
+    /// later signed projection can expose it to the controller.
+    pub fn poll_applied_runtime(&mut self) -> Result<bool> {
+        if self.applied_runtime_recorded {
+            return Ok(true);
+        }
+        if !self.supervisor.journal().has_applied_release()? {
+            return Ok(false);
+        }
+        let recorded = self
+            .supervisor
+            .poll_applied_runtime(&self.occurrence_digest)?;
+        self.applied_runtime_recorded = recorded;
+        Ok(recorded)
     }
 
     /// Recover the next exact journal-authored frame rather than relying on a
@@ -396,6 +423,7 @@ pub fn launch_external_candidate_supervisor(
         supervisor_signing_key,
         bootstrap_digest,
         ready_frame,
+        applied_runtime_recorded: false,
     })
 }
 
@@ -546,6 +574,10 @@ impl InheritedExternalCandidateLauncherClient {
 }
 
 impl ExternalCandidateLauncherClient for InheritedExternalCandidateLauncherClient {
+    fn poll_applied_launch(&mut self) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>> {
+        InheritedExternalCandidateLauncherClient::poll_applied_launch(self)
+    }
+
     fn release(&mut self, frame: &AuthenticatedExecutionFrame) -> Result<()> {
         ensure!(
             self.apply(frame)?.is_none(),

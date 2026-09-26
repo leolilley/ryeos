@@ -27,12 +27,12 @@ use crate::{
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 10;
+const SCHEMA_EPOCH: i64 = 11;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=10),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=11),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -52,6 +52,14 @@ CREATE TABLE external_guest_launcher_ready (
     binding_digest TEXT PRIMARY KEY,
     handshake_transcript_digest TEXT NOT NULL,
     FOREIGN KEY(binding_digest) REFERENCES external_guest_launcher_occurrence(binding_digest)
+);
+CREATE TABLE external_guest_runtime_applied (
+    binding_digest TEXT PRIMARY KEY,
+    launcher_occurrence_digest TEXT NOT NULL,
+    candidate_program_digest TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    FOREIGN KEY(binding_digest) REFERENCES external_guest_launcher_ready(binding_digest)
 );
 CREATE TABLE external_guest_terminal_application (
     binding_digest TEXT PRIMARY KEY,
@@ -111,6 +119,12 @@ BEGIN SELECT RAISE(ABORT, 'external guest launcher readiness is immutable'); END
 CREATE TRIGGER external_guest_launcher_ready_no_delete
 BEFORE DELETE ON external_guest_launcher_ready
 BEGIN SELECT RAISE(ABORT, 'external guest launcher readiness cannot be deleted'); END;
+CREATE TRIGGER external_guest_runtime_applied_no_update
+BEFORE UPDATE ON external_guest_runtime_applied
+BEGIN SELECT RAISE(ABORT, 'external guest applied runtime is immutable'); END;
+CREATE TRIGGER external_guest_runtime_applied_no_delete
+BEFORE DELETE ON external_guest_runtime_applied
+BEGIN SELECT RAISE(ABORT, 'external guest applied runtime cannot be deleted'); END;
 CREATE TRIGGER external_guest_terminal_application_immutable
 BEFORE UPDATE ON external_guest_terminal_application
 WHEN NEW.binding_digest!=OLD.binding_digest OR NEW.frame_digest!=OLD.frame_digest
@@ -157,6 +171,30 @@ fn hash(value: &str, label: &str) -> Result<()> {
         "{label} is not a canonical SHA-256 digest"
     );
     Ok(())
+}
+
+fn retained_launcher_occurrence_digest(conn: &Connection, binding_digest: &str) -> Result<String> {
+    let (process_json, launcher_artifact_digest, channel_challenge_digest): (
+        String,
+        String,
+        String,
+    ) = conn.query_row(
+        "SELECT process_identity_json,launcher_artifact_digest,channel_challenge_digest
+         FROM external_guest_launcher_occurrence WHERE binding_digest=?1",
+        [binding_digest],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let process_identity: lillux::ExactProcessIdentity = serde_json::from_str(&process_json)?;
+    ensure!(
+        process_json == lillux::canonical_json(&serde_json::to_value(&process_identity)?)?,
+        "guest launcher process identity is noncanonical"
+    );
+    LauncherOccurrenceEvidence::from_held_launcher(
+        process_identity,
+        &launcher_artifact_digest,
+        &channel_challenge_digest,
+    )?
+    .digest()
 }
 
 struct GuestStore {
@@ -647,6 +685,106 @@ impl RecoveredGuestJournal {
 impl LiveGuestJournal {
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
+    }
+
+    pub fn has_applied_release(&self) -> Result<bool> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        self.0
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='release')",
+                [self.0.binding.digest()?],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Retain the sole exact native pre-exec observation after a completed
+    /// release. This is local occurrence evidence, not a signed controller
+    /// projection or a qualification claim. An ambiguous commit is reconciled
+    /// by reading the same row; a different receipt can never replace it.
+    pub fn record_applied_runtime(
+        &self,
+        launcher_occurrence_digest: &str,
+        receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    ) -> Result<bool> {
+        hash(
+            launcher_occurrence_digest,
+            "applied launcher occurrence digest",
+        )?;
+        ensure!(
+            receipt.owned_child_pid > 0
+                && receipt.namespace_pid == 1
+                && receipt.effective_uid == 1
+                && receipt.effective_gid == 1
+                && receipt.no_new_privs
+                && receipt.seccomp_mode == 2
+                && receipt.post_release_mount_view.schema == 1
+                && receipt.post_release_mount_view.mount_count > 0,
+            "guest applied runtime receipt lacks native controls"
+        );
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let binding_digest = self.0.binding.digest()?;
+        let receipt_json = lillux::canonical_json(&serde_json::to_value(receipt)?)?;
+        let receipt_digest = lillux::sha256_hex(receipt_json.as_bytes());
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        ensure!(
+            retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                == launcher_occurrence_digest,
+            "guest applied runtime changed exact launcher occurrence"
+        );
+        let release_applied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+               AND application='applied'
+               AND json_extract(frame_json,'$.frame.payload.kind')='release')",
+            [&binding_digest],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            release_applied,
+            "guest applied runtime precedes durable release"
+        );
+        let previous: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT launcher_occurrence_digest,candidate_program_digest,
+                        receipt_digest,receipt_json
+                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                [&binding_digest],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some(previous) = previous {
+            ensure!(
+                previous
+                    == (
+                        launcher_occurrence_digest.to_owned(),
+                        self.0.binding.candidate_program_digest.clone(),
+                        receipt_digest,
+                        receipt_json,
+                    ),
+                "guest applied runtime differs from retained native evidence"
+            );
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO external_guest_runtime_applied VALUES(?1,?2,?3,?4,?5)",
+            params![
+                binding_digest,
+                launcher_occurrence_digest,
+                self.0.binding.candidate_program_digest,
+                receipt_digest,
+                receipt_json,
+            ],
+        )?;
+        tx.commit()?;
+        self.0.database_file.sync_all()?;
+        Ok(true)
     }
 
     pub fn native_capture_for_quiesce(
@@ -1717,6 +1855,50 @@ impl GuestStore {
             ),
             "external guest launcher lifecycle lost exact occurrence evidence"
         );
+        let applied: Option<(String, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT launcher_occurrence_digest,candidate_program_digest,
+                        receipt_digest,receipt_json
+                 FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                [self.binding.digest()?],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((occurrence, program, digest, receipt_json)) = applied {
+            let receipt: lillux::LinuxSandboxAppliedLaunchReceipt =
+                serde_json::from_str(&receipt_json)?;
+            let release_applied: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+                 WHERE binding_digest=?1 AND direction='owner_to_supervisor'
+                   AND application='applied'
+                   AND json_extract(frame_json,'$.frame.payload.kind')='release')",
+                [self.binding.digest()?],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                lifecycle == "ready"
+                    && ready_count == 1
+                    && release_applied
+                    && occurrence
+                        == retained_launcher_occurrence_digest(
+                            &self.conn,
+                            &self.binding.digest()?,
+                        )?
+                    && program == self.binding.candidate_program_digest
+                    && digest == lillux::sha256_hex(receipt_json.as_bytes())
+                    && receipt_json == lillux::canonical_json(&serde_json::to_value(&receipt)?)?
+                    && receipt.owned_child_pid > 0
+                    && receipt.namespace_pid == 1
+                    && receipt.effective_uid == 1
+                    && receipt.effective_gid == 1
+                    && receipt.no_new_privs
+                    && receipt.seccomp_mode == 2
+                    && receipt.post_release_mount_view.schema == 1
+                    && receipt.post_release_mount_view.mount_count > 0,
+                "external guest applied runtime lost exact occurrence evidence"
+            );
+        }
         journal::validate_channels(&self.conn, &self.owner())?;
         Ok(())
     }
@@ -2254,6 +2436,76 @@ mod tests {
         let authority = db.pinned_authority().unwrap();
         drop(db);
         (root, authority)
+    }
+
+    #[test]
+    fn applied_runtime_requires_released_exact_occurrence_and_reopens_immutably() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_root, authority) = state_authority();
+        let (live, binding, owner, _supervisor, bootstrap, store_identity) =
+            live_store(&root, &authority);
+        let occurrence =
+            retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap();
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 101,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        assert!(!live.has_applied_release().unwrap());
+        assert!(live.record_applied_runtime(&occurrence, &receipt).is_err());
+        let (release, _) = wire(
+            &binding,
+            &owner,
+            ChannelDirection::OwnerToSupervisor,
+            1,
+            None,
+            1,
+            ExecutionChannelPayload::Release,
+        );
+        let GuestApplicationClaim::New(token) = live.record_and_claim(&release).unwrap() else {
+            panic!("release must have one exact application")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        assert!(live.has_applied_release().unwrap());
+        assert!(
+            live.record_applied_runtime(&"a".repeat(64), &receipt)
+                .is_err()
+        );
+        assert!(live.record_applied_runtime(&occurrence, &receipt).unwrap());
+        assert!(!live.record_applied_runtime(&occurrence, &receipt).unwrap());
+        let mut changed = receipt.clone();
+        changed.environment_sha256[0] ^= 1;
+        assert!(live.record_applied_runtime(&occurrence, &changed).is_err());
+        for statement in [
+            "UPDATE external_guest_runtime_applied SET receipt_digest='other'",
+            "DELETE FROM external_guest_runtime_applied",
+        ] {
+            assert!(live.0.conn.execute(statement, []).is_err());
+        }
+        live.validate().unwrap();
+        drop(live);
+        let recovered = RecoveredGuestJournal::open(
+            lillux::PinnedDirectory::open(root.path()).unwrap().unwrap(),
+            &authority,
+            &store_identity,
+            &bootstrap,
+            &binding,
+        )
+        .unwrap();
+        recovered.validate().unwrap();
     }
 
     #[test]
