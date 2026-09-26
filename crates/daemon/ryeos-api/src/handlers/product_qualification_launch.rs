@@ -74,6 +74,26 @@ fn launch_error(error: crate::routes::launch::LaunchSpawnError) -> HandlerError 
     }
 }
 
+/// An uncertain handoff may still have a dispatch task borrowing the staged
+/// consumer objects. The stage must outlive that task, not merely the API
+/// response. The task's accepted root owns the durable closure if admitted.
+fn retain_uncertain_consumer_stage_until_task_terminal(
+    task: tokio::task::JoinHandle<Result<(), crate::routes::launch::LaunchSpawnError>>,
+    workspace_guard: Arc<ryeos_app::temp_dir_guard::TempDirGuard>,
+    thread_id: String,
+    publication: Option<ryeos_state::PendingCasPublication>,
+) {
+    let keeper = crate::routes::launch::retain_launch_workspace_until_task_terminal(
+        task,
+        Some(workspace_guard),
+        thread_id,
+    );
+    tokio::spawn(async move {
+        let _publication = publication;
+        let _ = keeper.await;
+    });
+}
+
 fn require_exact_admitted_fixed_pin(
     engine: &ryeos_engine::engine::Engine,
     admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
@@ -139,7 +159,7 @@ pub async fn handle(
         AcceptedLaunchAdmissionGuard::reserve(&state, &req.launch_id, &ctx.fingerprint)
             .map_err(map_reservation_error)?;
 
-    let prepared = {
+    let mut prepared = {
         let state = Arc::clone(&state);
         let context = ctx.clone();
         let request = req.clone();
@@ -293,6 +313,14 @@ pub async fn handle(
             .map_err(|error| HandlerError::BadRequest(format!(
                 "qualification producer recipe admission refused: {error:#}"
             )))?;
+    let consumer_content = prepared.consumer_content_identity().map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "qualification consumer content identity refused: {error:#}"
+        ))
+    })?;
+    let consumer_definitions = consumer_content
+        .as_ref()
+        .map(|content| content.definitions.clone());
     let purpose = ProductQualificationLaunchPurpose {
         schema: PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA.to_string(),
         launch_id: prepared.launch_id.clone(),
@@ -301,7 +329,8 @@ pub async fn handle(
         witness_source: prepared.witness_source.clone(),
         relationship_name: prepared.relationship.name.clone(),
         policy_source: prepared.policy_source.clone(),
-        consumer_definitions: None,
+        consumer_definitions,
+        consumer_content,
         producer_recipe_sources,
         subject_declaration_id: prepared.policy_source.policy.subject_declaration_id.clone(),
         subject_manifest_hash: prepared.subject_manifest_hash.clone(),
@@ -339,6 +368,11 @@ pub async fn handle(
         &prepared,
     )
     .map_err(|error| HandlerError::BadRequest(format!("qualification policy changed: {error:#}")))?;
+    let consumer_publication = prepared
+        .take_consumer_content_publication()
+        .map_err(|error| {
+            HandlerError::Internal(format!("qualification consumer content staging: {error:#}"))
+        })?;
     let thread_id = reservation.reserved_thread_id.clone();
     let (mut task, handoff) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
         &state,
@@ -357,10 +391,11 @@ pub async fn handle(
         readiness = handoff => match readiness {
             Ok(Ok(id)) => id,
             Ok(Err(failure)) => {
-                crate::routes::launch::retain_launch_workspace_until_task_terminal(
+                retain_uncertain_consumer_stage_until_task_terminal(
                     task,
-                    Some(Arc::clone(&workspace_guard)),
+                    Arc::clone(&workspace_guard),
                     thread_id.clone(),
+                    consumer_publication,
                 );
                 return Err(HandlerError::Structured {
                     code: failure.code,
@@ -383,10 +418,11 @@ pub async fn handle(
         },
     };
     if ready_thread_id != thread_id {
-        crate::routes::launch::retain_launch_workspace_until_task_terminal(
+        retain_uncertain_consumer_stage_until_task_terminal(
             task,
-            Some(Arc::clone(&workspace_guard)),
+            Arc::clone(&workspace_guard),
             thread_id.clone(),
+            consumer_publication,
         );
         return Err(HandlerError::Internal(
             "qualification handoff returned a different thread identity".to_string(),
@@ -395,8 +431,13 @@ pub async fn handle(
     crate::routes::launch::retain_launch_workspace_until_task_terminal(
         task,
         Some(workspace_guard),
-        thread_id,
+        thread_id.clone(),
     );
+    if let Some(publication) = consumer_publication {
+        publication.publish().map_err(|error| HandlerError::Internal(format!(
+            "qualification root {thread_id} accepted but consumer content stage could not release; query launch/status: {error:#}"
+        )))?;
+    }
     Ok(json!({
         "status":"accepted",
         "launch_id":req.launch_id,

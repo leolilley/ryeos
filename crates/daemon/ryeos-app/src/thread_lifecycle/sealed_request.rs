@@ -839,7 +839,10 @@ impl SealedRootExecutionRequest {
         let checks = [
             ("candidate evaluation", self.candidate_evaluation.is_none()),
             ("scheduled fire", self.scheduled_fire.is_none()),
-            ("project context", self.project_context == ProjectContext::None),
+            (
+                "project context",
+                self.project_context == ProjectContext::None,
+            ),
             (
                 "project authority",
                 matches!(
@@ -856,10 +859,19 @@ impl SealedRootExecutionRequest {
                 "requested owner",
                 self.requested_by.as_deref() == Some(purpose.owner_fingerprint.as_str()),
             ),
-            ("planning principal", fingerprint == &purpose.owner_fingerprint),
+            (
+                "planning principal",
+                fingerprint == &purpose.owner_fingerprint,
+            ),
             ("verifier ref", self.item_ref == purpose.verifier_ref),
-            ("verifier source space", self.verified_subject.source_space == ItemSpace::Bundle),
-            ("verifier trust", self.verified_trust_class == TrustClass::Trusted),
+            (
+                "verifier source space",
+                self.verified_subject.source_space == ItemSpace::Bundle,
+            ),
+            (
+                "verifier trust",
+                self.verified_trust_class == TrustClass::Trusted,
+            ),
             (
                 "resolution trust",
                 self.resolution_output.effective_trust_class == ResolutionTrustClass::TrustedBundle,
@@ -869,7 +881,9 @@ impl SealedRootExecutionRequest {
                 // Root admission checked the pre-realization definition.
                 // This sealed request carries the finalized definition after
                 // the exact fixed external pin was realized.
-                self.resolution_output.effective_definition_digest()?.as_str()
+                self.resolution_output
+                    .effective_definition_digest()?
+                    .as_str()
                     == purpose.verifier_realized_definition_digest,
             ),
             (
@@ -2191,6 +2205,7 @@ mod authority_tests {
             "product_witness_hash": "b".repeat(64),
             "witness_source": {"kind":"local_capture"},
             "relationship_name": "runtime_to_worker",
+            "consumer_content": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2260,6 +2275,7 @@ mod authority_tests {
             "product_witness_hash": "b".repeat(64),
             "witness_source": {"kind":"local_capture"},
             "relationship_name": "runtime_to_worker",
+            "consumer_content": null,
             "policy_source": {
                 "canonical_ref": "config:test/qualification_policy",
                 "raw_content_digest": "c".repeat(64),
@@ -2284,10 +2300,18 @@ mod authority_tests {
         })).unwrap());
         sealed.validate_product_qualification_purpose().unwrap();
 
-        sealed.product_qualification.as_mut().unwrap().verifier_realized_definition_digest =
-            "2".repeat(64);
-        assert!(sealed.validate_product_qualification_purpose().unwrap_err().to_string()
-            .contains("verifier definition"));
+        sealed
+            .product_qualification
+            .as_mut()
+            .unwrap()
+            .verifier_realized_definition_digest = "2".repeat(64);
+        assert!(
+            sealed
+                .validate_product_qualification_purpose()
+                .unwrap_err()
+                .to_string()
+                .contains("verifier definition")
+        );
     }
 
     #[test]

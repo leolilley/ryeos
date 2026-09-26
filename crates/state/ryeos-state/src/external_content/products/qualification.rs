@@ -18,11 +18,15 @@ use super::publication::ProductCaptureCoordinate;
 use super::transfer::ProductWitnessSource;
 use super::{validate_canonical_unsuffixed_ref, validate_hash, validate_name};
 use crate::Signer;
-use crate::objects::{AdmittedLaunchArtifactIdentity, Attestation, canonical_value_digest};
+use crate::objects::{
+    AdmittedLaunchArtifactIdentity, Attestation, EffectiveSourceClosureProjection,
+    ExecutableSearchPathEntry, ExternalContentMode, ExternalContentRealizationSet,
+    SessionProcessEnvironmentValue, canonical_value_digest, validate_session_process_environment,
+};
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
 pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
-    "ryeos.product_qualification_launch_purpose.v1";
+    "ryeos.product_qualification_launch_purpose.v2";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v8";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
@@ -32,6 +36,7 @@ pub const MAX_PRODUCT_QUALIFICATION_POLICY_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_RESULT_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_SELECTIONS_BYTES: usize = 16 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES: usize = 64 * 1024;
+pub const MAX_PRODUCT_QUALIFICATION_CONSUMER_CONTENT_BYTES: usize = 24 * 1024;
 pub const MAX_PRODUCT_QUALIFICATION_PARTICIPANTS: usize = 16;
 pub const MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS: usize = 8;
 pub const MAX_PRODUCT_QUALIFICATION_CALL_ID_BYTES: usize = 128;
@@ -141,6 +146,91 @@ impl ProductQualificationConsumerDefinitionIdentity {
             bail!("consumer definitions differ from the signed context");
         }
         Ok(())
+    }
+}
+
+/// Independently admitted content that a direct verifier must exercise.
+/// This is a retained launch input, not a runnable Worker or qualification
+/// claim. The daemon still has to join it to the product witness, signed
+/// recipe, applied target and settled scoped observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerContentIdentity {
+    pub definitions: ProductQualificationConsumerDefinitionIdentity,
+    pub relationship_definition: ProductQualificationBundleDefinitionIdentity,
+    pub worker_source: EffectiveSourceClosureProjection,
+    pub worker_profile_hash: String,
+    pub worker_preselection_effective_definition_digest: String,
+    pub worker_literals: ExternalContentRealizationSet,
+    pub environment_realized_effective_definition_digest: String,
+    pub environment_realizations: ExternalContentRealizationSet,
+    pub executable_search: Vec<ExecutableSearchPathEntry>,
+    pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
+}
+
+impl ProductQualificationConsumerContentIdentity {
+    pub fn validate_for(
+        &self,
+        context: &ProductQualificationConsumerExecutionContext,
+        definitions: &ProductQualificationConsumerDefinitionIdentity,
+    ) -> anyhow::Result<()> {
+        self.definitions.validate_for(context)?;
+        if &self.definitions != definitions {
+            bail!("qualification consumer content differs from retained definitions");
+        }
+        self.relationship_definition.validate()?;
+        if !self
+            .relationship_definition
+            .canonical_ref
+            .starts_with("config:")
+        {
+            bail!("qualification relationship definition must be a Config");
+        }
+        self.worker_source.validate()?;
+        for (label, hash) in [
+            ("qualification Worker profile", &self.worker_profile_hash),
+            (
+                "qualification Worker preselection",
+                &self.worker_preselection_effective_definition_digest,
+            ),
+            (
+                "qualification environment realization",
+                &self.environment_realized_effective_definition_digest,
+            ),
+        ] {
+            validate_hash(label, hash)?;
+        }
+        self.worker_literals.validate()?;
+        self.environment_realizations.validate()?;
+        if self.worker_literals.is_empty()
+            || self.environment_realizations.is_empty()
+            || self
+                .worker_literals
+                .iter()
+                .chain(self.environment_realizations.iter())
+                .any(|realized| realized.mode != ExternalContentMode::Pinned)
+        {
+            bail!("qualification consumer content requires exact pinned realizations");
+        }
+        if self.executable_search.is_empty() {
+            bail!("qualification consumer executable search is absent");
+        }
+        for entry in &self.executable_search {
+            entry.validate()?;
+            if !self
+                .environment_realizations
+                .iter()
+                .any(|realized| realized.id == entry.realization_id)
+            {
+                bail!("qualification executable search differs from environment realizations");
+            }
+        }
+        validate_session_process_environment(&self.process_environment)?;
+        bounded(
+            self,
+            MAX_PRODUCT_QUALIFICATION_CONSUMER_CONTENT_BYTES,
+            "qualification consumer content",
+        )
     }
 }
 
@@ -273,6 +363,10 @@ pub struct ProductQualificationLaunchPurpose {
     /// Bundle generation. Still not source-closure or execution testimony.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_definitions: Option<ProductQualificationConsumerDefinitionIdentity>,
+    /// Required nullable: content remains non-authorizing until a daemon
+    /// purpose owns its exact CAS closure and execution parity is proved.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
     /// Exact signed source for every scenario the verifier may later select.
     /// A Config ref alone cannot prevent recipe drift after root admission.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -344,9 +438,13 @@ impl ProductQualificationLaunchPurpose {
         match (
             &self.policy_source.policy.consumer_execution_context,
             &self.consumer_definitions,
+            &self.consumer_content,
         ) {
-            (Some(context), Some(definitions)) => definitions.validate_for(context)?,
-            (None, None) => {}
+            (Some(context), Some(definitions), Some(content)) => {
+                definitions.validate_for(context)?;
+                content.validate_for(context, definitions)?;
+            }
+            (None, None, None) => {}
             _ => bail!("qualification purpose consumer definitions differ from signed policy"),
         }
         if self.producer_recipe_sources.len() != self.policy_source.policy.producer_scenarios.len()

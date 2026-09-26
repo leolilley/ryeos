@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use ryeos_state::external_content::products::composition::{
     ProductRelationship, ProductSelectionInputs,
 };
+use ryeos_state::external_content::products::qualification::ProductQualificationConsumerContentIdentity;
 use ryeos_state::external_content::products::qualification::ProductQualificationPolicySource;
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,29 @@ pub struct PreparedProductQualificationLaunch {
     pub verifier_realized_definition_digest: String,
     pub verifier_parameters: Value,
     pub product_selections: ProductSelectionInputs,
+    consumer_content: Option<super::PreparedBundleConsumerContentInputs>,
+}
+
+impl PreparedProductQualificationLaunch {
+    pub fn consumer_content_identity(
+        &self,
+    ) -> Result<Option<ProductQualificationConsumerContentIdentity>> {
+        self.consumer_content
+            .as_ref()
+            .map(super::PreparedBundleConsumerContentInputs::retained_identity)
+            .transpose()
+    }
+
+    /// Transfer the one staged lease to the accepted-root owner. Releasing
+    /// it before the durable capsule owns its typed CAS edges is forbidden.
+    pub fn take_consumer_content_publication(
+        &mut self,
+    ) -> Result<Option<ryeos_state::PendingCasPublication>> {
+        self.consumer_content
+            .take()
+            .map(super::PreparedBundleConsumerContentInputs::into_publication)
+            .transpose()
+    }
 }
 
 /// Recheck the exact current signed Bundle policy just before dispatch. A
@@ -129,19 +153,20 @@ pub fn prepare_after_reservation(
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
     let policy_source = super::resolve_current_bundle_qualification_policy(state, policy_ref)?;
-    if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
-        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-        let _definitions = super::resolve_current_bundle_consumer_definitions(
-            state,
-            &policy_source,
-            &relationship,
-        )?
-        .context("signed consumer definitions are absent")?;
-        // A declaration is not a current admitted Worker/environment/profile
-        // closure. Refuse before verifier or provider contact until that
-        // authenticated join is retained and rechecked at proof/selection.
-        bail!("qualification consumer execution context has no authenticated closure proof");
-    }
+    let consumer_content =
+        if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
+            consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+            let prepared = super::prepare_current_bundle_consumer_content_inputs(
+                state,
+                &policy_source,
+                &relationship,
+                &product.evidence.recipe_ref,
+            )?
+            .context("signed consumer content is absent")?;
+            Some(prepared)
+        } else {
+            None
+        };
     for claim in &relationship.qualification.required_claims {
         if policy_source
             .policy
@@ -197,6 +222,7 @@ pub fn prepare_after_reservation(
         // A selected-slot verifier needs a separate signed-contract branch;
         // it must never be inferred from the policy subject id alone.
         product_selections: Vec::new(),
+        consumer_content,
     })
 }
 

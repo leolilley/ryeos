@@ -125,7 +125,65 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         environment: definition(&context.environment_ref),
         worker_execution: definition(&context.worker_execution_ref),
     });
+    assert!(purpose.validate().is_err());
+    purpose.consumer_content = Some(ProductQualificationConsumerContentIdentity {
+        definitions: purpose.consumer_definitions.as_ref().unwrap().clone(),
+        relationship_definition: definition("config:codex/guest-runtime-products"),
+        worker_source: EffectiveSourceClosureProjection {
+            schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+            binding_hash: "1".repeat(64),
+            content_manifest_hash: "2".repeat(64),
+            owner_key: "3".repeat(64),
+            file_count: 1,
+            total_bytes: 1,
+        },
+        worker_profile_hash: "4".repeat(64),
+        worker_preselection_effective_definition_digest: "5".repeat(64),
+        worker_literals: ExternalContentRealizationSet::new(vec![
+            crate::objects::ExternalContentRealization {
+                id: "codex".into(),
+                kind: ExternalContentKind::File,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: "6".repeat(64),
+                entry_count: 1,
+                total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "codex".into(),
+            },
+        ])
+        .unwrap(),
+        environment_realized_effective_definition_digest: "7".repeat(64),
+        environment_realizations: ExternalContentRealizationSet::new(vec![
+            crate::objects::ExternalContentRealization {
+                id: "authoring-tools".into(),
+                kind: ExternalContentKind::Tree,
+                mode: ExternalContentMode::Pinned,
+                manifest_hash: "8".repeat(64),
+                entry_count: 1,
+                total_bytes: 1,
+                mount_root: ExternalContentMountRoot::ExecutionRuntime,
+                mount: "authoring-tools".into(),
+            },
+        ])
+        .unwrap(),
+        executable_search: vec![ExecutableSearchPathEntry {
+            realization_id: "authoring-tools".into(),
+            relative_directory: "bin".into(),
+        }],
+        process_environment: BTreeMap::new(),
+    });
     purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_profile_hash = "not-a-hash".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .worker_profile_hash = "4".repeat(64);
     purpose
         .consumer_definitions
         .as_mut()
@@ -178,6 +236,7 @@ fn launch_purpose() -> ProductQualificationLaunchPurpose {
             policy: policy.clone(),
         },
         consumer_definitions: None,
+        consumer_content: None,
         producer_recipe_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
         subject_manifest_hash: "f".repeat(64),

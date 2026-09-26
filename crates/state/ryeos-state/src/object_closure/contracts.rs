@@ -807,6 +807,32 @@ fn links_admitted_launch_capsule(value: &Value) -> Result<ContractLinks, String>
         value.pointer("/sealed_invocation/resolution_output"),
         &mut links,
     )?;
+    if let Some(content) = value
+        .pointer("/sealed_invocation/product_qualification/consumer_content")
+        .filter(|content| !content.is_null())
+    {
+        let content: crate::external_content::products::qualification::ProductQualificationConsumerContentIdentity =
+            serde_json::from_value(content.clone())
+                .map_err(|error| format!("invalid retained qualification consumer content: {error}"))?;
+        super::push_typed_hash(
+            &content.worker_source.binding_hash,
+            ExpectedObject::Kind(crate::objects::EFFECTIVE_SOURCE_BINDING_KIND),
+            None,
+            &mut links.object_edges,
+        )?;
+        for realized in content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+        {
+            super::push_typed_hash(
+                &realized.manifest_hash,
+                ExpectedObject::OneOf(EXTERNAL_MANIFEST_KINDS),
+                None,
+                &mut links.object_edges,
+            )?;
+        }
+    }
 
     let execution_closure = value
         .get("execution_closure")
@@ -1324,6 +1350,82 @@ fn links_item_source(value: &Value) -> Result<ContractLinks, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_launch_capsule_roots_exact_consumer_source_and_manifests() {
+        use crate::external_content::products::qualification::{
+            ProductQualificationBundleDefinitionIdentity,
+            ProductQualificationConsumerContentIdentity,
+            ProductQualificationConsumerDefinitionIdentity,
+        };
+        use crate::objects::{
+            EffectiveSourceClosureProjection, ExternalContentKind, ExternalContentMode,
+            ExternalContentMountRoot, ExternalContentRealization, ExternalContentRealizationSet,
+        };
+
+        let definition = |canonical_ref: &str| ProductQualificationBundleDefinitionIdentity {
+            canonical_ref: canonical_ref.into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+        };
+        let source_binding = "1".repeat(64);
+        let worker_manifest = "2".repeat(64);
+        let environment_manifest = "3".repeat(64);
+        let realization = |id: &str, hash: String| ExternalContentRealization {
+            id: id.into(),
+            kind: ExternalContentKind::File,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: hash,
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: id.into(),
+        };
+        let content = ProductQualificationConsumerContentIdentity {
+            definitions: ProductQualificationConsumerDefinitionIdentity {
+                bundle_generation_identity: "generation".into(),
+                worker: definition("worker:codex/authoring"),
+                environment: definition("config:codex/environment"),
+                worker_execution: definition("worker_execution:codex/bounded-turn"),
+            },
+            relationship_definition: definition("config:codex/products"),
+            worker_source: EffectiveSourceClosureProjection {
+                schema: crate::objects::EFFECTIVE_SOURCE_BINDING_SCHEMA,
+                binding_hash: source_binding.clone(),
+                content_manifest_hash: "4".repeat(64),
+                owner_key: "5".repeat(64),
+                file_count: 1,
+                total_bytes: 1,
+            },
+            worker_profile_hash: "6".repeat(64),
+            worker_preselection_effective_definition_digest: "7".repeat(64),
+            worker_literals: ExternalContentRealizationSet::new(vec![realization(
+                "codex",
+                worker_manifest.clone(),
+            )])
+            .unwrap(),
+            environment_realized_effective_definition_digest: "8".repeat(64),
+            environment_realizations: ExternalContentRealizationSet::new(vec![realization(
+                "tools",
+                environment_manifest.clone(),
+            )])
+            .unwrap(),
+            executable_search: Vec::new(),
+            process_environment: Default::default(),
+        };
+        let capsule = serde_json::json!({
+            "project_authority": {"kind":"projectless"},
+            "execution_realization_hash": "9".repeat(64),
+            "sealed_invocation": {"product_qualification": {"consumer_content": content}},
+            "execution_closure": {"driver":"other"},
+        });
+        let links = links_admitted_launch_capsule(&capsule).unwrap();
+        for hash in [&source_binding, &worker_manifest, &environment_manifest] {
+            assert!(links.object_edges.iter().any(|edge| &edge.hash == hash));
+        }
+        assert_eq!(links.object_edges.len(), 4);
+    }
 
     #[test]
     fn accepted_product_result_owns_only_exact_attestations() {

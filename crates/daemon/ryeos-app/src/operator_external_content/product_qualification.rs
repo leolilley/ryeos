@@ -35,9 +35,9 @@ use ryeos_state::external_content::products::publication::{
 };
 use ryeos_state::external_content::products::qualification::{
     PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, ProductProducerRecipeSourceIdentity,
-    ProductQualificationBundleDefinitionIdentity, ProductQualificationConsumerDefinitionIdentity,
-    ProductQualificationEvidence, ProductQualificationPolicySource, ProductQualificationResult,
-    ProductQualificationVerifier,
+    ProductQualificationBundleDefinitionIdentity, ProductQualificationConsumerContentIdentity,
+    ProductQualificationConsumerDefinitionIdentity, ProductQualificationEvidence,
+    ProductQualificationPolicySource, ProductQualificationResult, ProductQualificationVerifier,
 };
 use ryeos_state::external_content::products::qualification_publication::{
     QualificationCoordinate, QualificationWitnessLookup, VerifiedQualificationWitness,
@@ -792,6 +792,42 @@ pub(super) struct PreparedBundleConsumerContentInputs {
     pub worker_literals: ExternalContentRealizationSet,
     pub environment: AdmittedBundleConsumerEnvironment,
     publication: Option<ryeos_state::PendingCasPublication>,
+}
+
+impl PreparedBundleConsumerContentInputs {
+    fn retained_identity(&self) -> anyhow::Result<ProductQualificationConsumerContentIdentity> {
+        let context = self
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .as_ref()
+            .context("prepared consumer content has no signed context")?;
+        let identity = ProductQualificationConsumerContentIdentity {
+            definitions: self.definitions.clone(),
+            relationship_definition: self.relationship_definition.clone(),
+            worker_source: self.worker_source.source.clone(),
+            worker_profile_hash: self.worker_source.profile.profile_hash.clone(),
+            worker_preselection_effective_definition_digest: self
+                .worker_source
+                .preselection_effective_definition_digest
+                .clone(),
+            worker_literals: self.worker_literals.clone(),
+            environment_realized_effective_definition_digest: self
+                .environment
+                .realized_effective_definition_digest
+                .clone(),
+            environment_realizations: self.environment.realizations.clone(),
+            executable_search: self.environment.definition.executable_search.clone(),
+            process_environment: self.environment.definition.process_environment.clone(),
+        };
+        identity.validate_for(context, &self.definitions)?;
+        Ok(identity)
+    }
+
+    fn into_publication(self) -> anyhow::Result<ryeos_state::PendingCasPublication> {
+        self.publication
+            .context("prepared consumer content has no staged CAS publication")
+    }
 }
 
 impl PreparedBundleConsumerEnvironment {
