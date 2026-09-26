@@ -76,6 +76,25 @@ impl CallbackRuntimeMethodSurface {
         Self { exact: None }
     }
 
+    /// The only runtime methods admitted for a product-qualification verifier
+    /// with an exact scoped-producer grant. It may drive and settle that one
+    /// daemon-owned attempt, but it cannot dispatch managed children, publish,
+    /// or acquire unrelated runtime authority through its callback bearer.
+    pub fn qualification_scoped_producer() -> Self {
+        Self::exact(vec![
+            "runtime.scoped_child_expected_source".into(),
+            "runtime.scoped_child_expected_isolation_class".into(),
+            "runtime.scoped_child_start".into(),
+            "runtime.scoped_child_resume".into(),
+            "runtime.scoped_child_observe".into(),
+            "runtime.scoped_child_abort".into(),
+            "runtime.scoped_child_write".into(),
+            "runtime.scoped_child_read".into(),
+            "runtime.scoped_child_close_input".into(),
+        ])
+        .expect("fixed qualification callback surface is canonical")
+    }
+
     pub fn exact(mut methods: Vec<String>) -> Result<Self> {
         if methods.is_empty() {
             bail!("exact callback runtime-method surface is empty");
@@ -1089,6 +1108,34 @@ mod tests {
                 .is_err(),
             "an exact bearer must never be widened or replaced in place"
         );
+    }
+
+    #[test]
+    fn qualification_callback_surface_excludes_managed_work_and_publication() {
+        let surface = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        for method in [
+            "runtime.scoped_child_expected_source",
+            "runtime.scoped_child_expected_isolation_class",
+            "runtime.scoped_child_start",
+            "runtime.scoped_child_resume",
+            "runtime.scoped_child_observe",
+            "runtime.scoped_child_abort",
+            "runtime.scoped_child_write",
+            "runtime.scoped_child_read",
+            "runtime.scoped_child_close_input",
+        ] {
+            surface.authorize(method).unwrap();
+        }
+        for method in [
+            "runtime.dispatch_action",
+            "runtime.spawn_follow_child",
+            "runtime.author_item",
+            "runtime.publish_artifact",
+            "runtime.provider_attempt_prepare",
+            "runtime.vault_get",
+        ] {
+            assert!(surface.authorize(method).is_err(), "unexpected method: {method}");
+        }
     }
 
     #[test]

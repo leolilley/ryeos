@@ -3236,6 +3236,20 @@ fn build_protocol_launch_env(
                         return Err(error);
                     }
                 }
+                match state.callback_tokens.restrict_runtime_methods(
+                    &token,
+                    ryeos_app::callback_token::CallbackRuntimeMethodSurface::qualification_scoped_producer(),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        state.callback_tokens.invalidate(&token);
+                        anyhow::bail!("fresh qualification callback capability disappeared before method restriction");
+                    }
+                    Err(error) => {
+                        state.callback_tokens.invalidate(&token);
+                        return Err(error);
+                    }
+                }
             }
             Ok(token)
         })
