@@ -26,7 +26,7 @@ use crate::objects::{
 
 pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualification_policy.v2";
 pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
-    "ryeos.product_qualification_launch_purpose.v2";
+    "ryeos.product_qualification_launch_purpose.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
 pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v8";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
@@ -166,6 +166,35 @@ pub struct ProductQualificationConsumerContentIdentity {
     pub environment_realizations: ExternalContentRealizationSet,
     pub executable_search: Vec<ExecutableSearchPathEntry>,
     pub process_environment: BTreeMap<String, SessionProcessEnvironmentValue>,
+    pub runtime_member: ProductQualificationConsumerRuntimeMemberIdentity,
+}
+
+/// Exact product member selected by both the signed consumer runtime route
+/// and every signed direct-probe recipe. The product manifest remains the
+/// separate subject authority owned by the launch purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerRuntimeMemberIdentity {
+    pub product_declaration_id: String,
+    pub relative_path: String,
+    pub executable_sha256: String,
+}
+
+impl ProductQualificationConsumerRuntimeMemberIdentity {
+    pub fn validate_for(
+        &self,
+        context: &ProductQualificationConsumerExecutionContext,
+    ) -> anyhow::Result<()> {
+        validate_name(&self.product_declaration_id)?;
+        if self.product_declaration_id != context.product_declaration_id {
+            bail!("qualification runtime member selects a different product");
+        }
+        crate::objects::validate_canonical_project_relative_path(&self.relative_path)?;
+        validate_hash(
+            "qualification runtime member executable",
+            &self.executable_sha256,
+        )
+    }
 }
 
 impl ProductQualificationConsumerContentIdentity {
@@ -243,6 +272,7 @@ impl ProductQualificationConsumerContentIdentity {
                 bail!("qualification process environment names an unadmitted realization");
             }
         }
+        self.runtime_member.validate_for(context)?;
         bounded(
             self,
             MAX_PRODUCT_QUALIFICATION_CONSUMER_CONTENT_BYTES,

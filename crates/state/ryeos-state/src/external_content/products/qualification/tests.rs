@@ -188,7 +188,26 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
             relative_directory: "bin".into(),
         }],
         process_environment: BTreeMap::new(),
+        runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+            product_declaration_id: "guest-runtime".into(),
+            relative_path: "bin/codex".into(),
+            executable_sha256: "9".repeat(64),
+        },
     });
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_member
+        .product_declaration_id = "other-runtime".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .runtime_member
+        .product_declaration_id = context.product_declaration_id.clone();
     purpose.validate().unwrap();
     let mut no_scenarios = purpose.clone();
     no_scenarios.policy_source.policy.producer_scenarios.clear();

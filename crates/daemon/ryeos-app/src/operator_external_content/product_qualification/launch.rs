@@ -156,7 +156,7 @@ pub fn prepare_after_reservation(
     let consumer_content =
         if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
             consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-            let prepared = super::prepare_current_bundle_consumer_content_inputs(
+            let mut prepared = super::prepare_current_bundle_consumer_content_inputs(
                 state,
                 &policy_source,
                 &relationship,

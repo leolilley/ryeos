@@ -36,7 +36,8 @@ use ryeos_state::external_content::products::publication::{
 use ryeos_state::external_content::products::qualification::{
     PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, ProductProducerRecipeSourceIdentity,
     ProductQualificationBundleDefinitionIdentity, ProductQualificationConsumerContentIdentity,
-    ProductQualificationConsumerDefinitionIdentity, ProductQualificationEvidence,
+    ProductQualificationConsumerDefinitionIdentity,
+    ProductQualificationConsumerRuntimeMemberIdentity, ProductQualificationEvidence,
     ProductQualificationPolicySource, ProductQualificationResult, ProductQualificationVerifier,
 };
 use ryeos_state::external_content::products::qualification_publication::{
@@ -791,6 +792,7 @@ pub(super) struct PreparedBundleConsumerContentInputs {
     pub worker_source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
     pub worker_literals: ExternalContentRealizationSet,
     pub environment: AdmittedBundleConsumerEnvironment,
+    runtime_member: Option<ProductQualificationConsumerRuntimeMemberIdentity>,
     publication: Option<ryeos_state::PendingCasPublication>,
 }
 
@@ -819,6 +821,10 @@ impl PreparedBundleConsumerContentInputs {
             environment_realizations: self.environment.realizations.clone(),
             executable_search: self.environment.definition.executable_search.clone(),
             process_environment: self.environment.definition.process_environment.clone(),
+            runtime_member: self
+                .runtime_member
+                .clone()
+                .context("prepared consumer content has no exact runtime member join")?,
         };
         identity.validate_for(context, &self.definitions)?;
         Ok(identity)
@@ -833,7 +839,7 @@ impl PreparedBundleConsumerContentInputs {
     /// verifier contact. This proves only executable-member identity, not
     /// hosted exec-server, placement, or candidate-lifecycle qualification.
     fn require_external_runtime_member_alignment(
-        &self,
+        &mut self,
         state: &AppState,
         authority: &ryeos_state::PinnedStateAuthority,
         guard: &ryeos_state::CasMutationGuard,
@@ -901,7 +907,13 @@ impl PreparedBundleConsumerContentInputs {
                 }
             }
             Ok(())
-        })
+        })?;
+        self.runtime_member = Some(ProductQualificationConsumerRuntimeMemberIdentity {
+            product_declaration_id: context.product_declaration_id.clone(),
+            relative_path: requirement.runtime_recipe.executable_relative_path.clone(),
+            executable_sha256: executable_hash,
+        });
+        Ok(())
     }
 }
 
@@ -1044,6 +1056,7 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
             realizations,
             realized_effective_definition_digest,
         },
+        runtime_member: None,
         publication,
     }))
 }
@@ -1464,6 +1477,26 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
             &scenario.recipe_ref,
         )?;
         require_direct_consumer_target(&current_policy, &current, &purpose.subject_manifest_hash)?;
+        if let Some(content) = &purpose.consumer_content {
+            if generation.request_engine_generation_identity()
+                != content.definitions.bundle_generation_identity
+            {
+                bail!("qualification consumer Bundle generation changed before direct probe");
+            }
+            let ProducerExecutableSource::AdmittedRealizationMember {
+                relative_path,
+                executable_sha256,
+                ..
+            } = &current.recipe.executable_source
+            else {
+                bail!("qualification direct probe no longer selects a product member");
+            };
+            if relative_path != &content.runtime_member.relative_path
+                || executable_sha256 != &content.runtime_member.executable_sha256
+            {
+                bail!("qualification direct probe differs from retained consumer runtime member");
+            }
+        }
         state
             .node_policy
             .require::<NodeExecutionAdmissionPolicy>()?

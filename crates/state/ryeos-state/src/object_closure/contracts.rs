@@ -1357,6 +1357,7 @@ mod tests {
             ProductQualificationBundleDefinitionIdentity,
             ProductQualificationConsumerContentIdentity,
             ProductQualificationConsumerDefinitionIdentity,
+            ProductQualificationConsumerRuntimeMemberIdentity,
         };
         use crate::objects::{
             EffectiveSourceClosureProjection, ExternalContentKind, ExternalContentMode,
@@ -1413,6 +1414,11 @@ mod tests {
             .unwrap(),
             executable_search: Vec::new(),
             process_environment: Default::default(),
+            runtime_member: ProductQualificationConsumerRuntimeMemberIdentity {
+                product_declaration_id: "runtime".into(),
+                relative_path: "bin/codex".into(),
+                executable_sha256: "a".repeat(64),
+            },
         };
         let capsule = serde_json::json!({
             "project_authority": {"kind":"projectless"},
