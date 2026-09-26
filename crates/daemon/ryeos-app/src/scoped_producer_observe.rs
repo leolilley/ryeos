@@ -268,43 +268,69 @@ pub fn observe_scoped_producer(
     key: &ScopedProducerProcessKey,
     callback_deadline: lillux::time::MonotonicDeadline,
 ) -> Result<serde_json::Value> {
-    ensure!(
-        !callback_deadline.has_elapsed(),
-        "scoped observation callback expired"
-    );
-    let record = exact_record(state, key)?;
-    if record.observation_object_hash.is_some() {
+    loop {
         ensure!(
-            record.phase == ScopedChildPhase::Retired,
+            !callback_deadline.has_elapsed(),
+            "scoped observation callback expired"
+        );
+        let record = exact_record(state, key)?;
+        if record.observation_object_hash.is_some() && record.phase == ScopedChildPhase::Retired {
+            return replay_observation(state, &record);
+        }
+        if state.scoped_producer_processes.is_observing_exact(key)? {
+            state.scoped_producer_processes.wait_for_change(
+                callback_deadline.remaining().min(Duration::from_secs(1)),
+            )?;
+            continue;
+        }
+        ensure!(
+            record.observation_object_hash.is_none(),
             "scoped observation commit is still being settled by its owner"
         );
-        return replay_observation(state, &record);
-    }
-    ensure!(
-        record.phase == ScopedChildPhase::ReleasePermitted,
-        "scoped child is not releasably observable"
-    );
-    if state
-        .scoped_producer_processes
-        .interactive_io_exact(&record)?
-        .is_some()
-    {
-        state
+        ensure!(
+            record.phase == ScopedChildPhase::ReleasePermitted,
+            "scoped child is not releasably observable"
+        );
+        if state
+            .scoped_producer_processes
+            .interactive_io_exact(&record)?
+            .is_some()
+        {
+            state.state_store.assert_scoped_child_input_closed(
+                &record.initial.attempt_id,
+                &record.initial.owner,
+            )?;
+        }
+        let child = match state.scoped_producer_processes.take_for_observation(key) {
+            Ok(child) => child,
+            Err(_error) if state.scoped_producer_processes.is_observing_exact(key)? => {
+                state.scoped_producer_processes.wait_for_change(
+                    callback_deadline.remaining().min(Duration::from_secs(1)),
+                )?;
+                continue;
+            }
+            Err(error) => {
+                let latest = exact_record(state, key)?;
+                if latest.observation_object_hash.is_some()
+                    && latest.phase == ScopedChildPhase::Retired
+                {
+                    return replay_observation(state, &latest);
+                }
+                return Err(error);
+            }
+        };
+        let result = observe_owned_scoped_producer(state, key, &record, child, callback_deadline);
+        let settled = state
             .state_store
-            .assert_scoped_child_input_closed(&record.initial.attempt_id, &record.initial.owner)?;
+            .scoped_child_attempt(&key.attempt_id)
+            .ok()
+            .flatten()
+            .is_some_and(|record| record.phase == ScopedChildPhase::Retired);
+        state
+            .scoped_producer_processes
+            .finish_observation(key, settled)?;
+        return result;
     }
-    let child = state.scoped_producer_processes.take_for_observation(key)?;
-    let result = observe_owned_scoped_producer(state, key, &record, child, callback_deadline);
-    let settled = state
-        .state_store
-        .scoped_child_attempt(&key.attempt_id)
-        .ok()
-        .flatten()
-        .is_some_and(|record| record.phase == ScopedChildPhase::Retired);
-    state
-        .scoped_producer_processes
-        .finish_observation(key, settled)?;
-    result
 }
 
 fn observe_owned_scoped_producer(

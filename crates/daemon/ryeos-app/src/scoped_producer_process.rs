@@ -337,6 +337,21 @@ impl ScopedProducerProcessRegistry {
         Ok(())
     }
 
+    /// Whether the exact process owner has already transferred to its sole
+    /// natural-result observer. A duplicate callback may wait for that owner
+    /// to commit or fail; this is never permission to take or launch it again.
+    pub fn is_observing_exact(&self, key: &ScopedProducerProcessKey) -> Result<bool> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scoped producer process registry poisoned"))?;
+        Ok(state
+            .slots
+            .iter()
+            .find(|slot| &slot.key == key)
+            .is_some_and(|slot| matches!(slot.state, SlotState::Observing(_))))
+    }
+
     pub fn insert(
         &self,
         record: &ScopedChildAttemptRecord,
@@ -484,5 +499,51 @@ mod tests {
         let mut stale = owner;
         stale.daemon_generation_id = "old-generation".into();
         assert!(ScopedProducerProcessKey::new(key.attempt_id, stale).is_err());
+    }
+
+    #[test]
+    fn only_exact_inflight_observer_is_waitable_for_lost_ack() {
+        let owner = LaunchOwner {
+            thread_id: "T-scoped-observation-test".into(),
+            monotonic_launch_epoch: 1,
+            unpredictable_nonce: "nonce".into(),
+            daemon_generation_id: crate::runtime_db::daemon_generation_id().into(),
+        };
+        let key = ScopedProducerProcessKey::new(
+            format!("scoped-{}", "a".repeat(64)),
+            owner.clone(),
+        )
+        .unwrap();
+        let recovery: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 4, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+            }},
+            "backend": {"implementation": "linux_cgroup_v2",
+                "boot_id": "00000000-0000-4000-8000-000000000000",
+                "parent": {"containing_device": 1, "inode": 2},
+                "directory": {"containing_device": 1, "inode": 3},
+                "name": "producer-one"}
+        }))
+        .unwrap();
+        let registry = ScopedProducerProcessRegistry::default();
+        assert!(!registry.is_observing_exact(&key).unwrap());
+        {
+            let mut state = registry.state.lock().unwrap();
+            state.slots.push(AttemptSlot {
+                key: key.clone(),
+                state: SlotState::Observing(recovery),
+                cancel_requested: false,
+            });
+        }
+        assert!(registry.is_observing_exact(&key).unwrap());
+        let wrong = ScopedProducerProcessKey::new(
+            format!("scoped-{}", "b".repeat(64)),
+            owner,
+        )
+        .unwrap();
+        assert!(!registry.is_observing_exact(&wrong).unwrap());
+        registry.state.lock().unwrap().slots[0].state = SlotState::Uncertain;
+        assert!(!registry.is_observing_exact(&key).unwrap());
     }
 }

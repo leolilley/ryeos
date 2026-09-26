@@ -277,10 +277,25 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let observed = match client
+    let first_observation = client
         .observe_scoped_child(&thread_id, &locator.attempt_id)
-        .await
-    {
+        .await;
+    // A lost response may follow a committed natural result. This is a
+    // point-read of the same attempt, not a second producer or model turn.
+    // The daemon waits for its sole live observer and replays only retired
+    // CAS-backed evidence while this callback remains authorized. A response
+    // lost near the deadline may still be unrecoverable; another transport
+    // loss remains uncertain.
+    let (observation_result, first_transport_loss) = match first_observation {
+        Err(first @ CallbackError::Transport(_)) if running_relay.is_some() => (
+            client
+                .observe_scoped_child(&thread_id, &locator.attempt_id)
+                .await,
+            Some(first.to_string()),
+        ),
+        other => (other, None),
+    };
+    let observed = match observation_result {
         Ok(observed) => observed,
         Err(error) if running_relay.is_some() => {
             // A lost observation response might already have committed a
@@ -292,7 +307,7 @@ async fn main() -> Result<()> {
                 .map(cancel_scoped_relay)
                 .context("direct-target observation lost its owned relay")?;
             return Err(anyhow::Error::new(error).context(format!(
-                "direct-target observation failed; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
+                "direct-target observation failed; first transport loss={first_transport_loss:?}; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
             )));
         }
         Err(error) => {
