@@ -162,10 +162,11 @@ retain its exact installed generation through a Lillux-proved enclosing-scope
 settlement and separately verify the supervisor's signed candidate
 writer-exclusion/export evidence;
 provider `terminated` and parent process exit cannot substitute for either.
-`GuestStageIdentity` now provides a serializable name/inode/manifest coordinate
-for a retained private generation. The guest owner still has to journal that
-coordinate before installation or launch, resolve it only under its exact
-private parent on recovery, and reverify content. The stage retains a bounded
+`GuestStageIdentity` provides a serializable name/inode/manifest coordinate
+for a retained private generation. The occurrence owner journals that
+coordinate before base installation and resolves it only under its exact
+private parent on recovery. It must still bind and verify the coordinate at
+supervisor launch under writer exclusion. The stage retains a bounded
 canonical manifest sidecar; recovery reads that sidecar by pinned descriptor,
 checks it against the separately retained ticket, and rechecks the selected
 base, executable and input content. It never replays an upload or authorizes a
