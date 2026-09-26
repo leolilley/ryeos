@@ -211,7 +211,7 @@ impl TicketedGuestImport {
     /// installation. This operation does not grant supervisor launch or Ready:
     /// its caller still has to exclude untrusted writers, bind every checked
     /// descriptor, and retain the generation through scope settlement.
-    pub fn install_base_into(
+    pub(crate) fn install_base_into(
         &self,
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
@@ -350,7 +350,7 @@ pub fn stage_uploaded_guest_package(
 /// guest's independently retained placement. The stable reader measures every
 /// uploaded byte before this returns; a matching provider acknowledgement is
 /// never sufficient. This is still not supervisor adoption or Ready.
-pub fn stage_ticketed_uploaded_guest_package(
+pub(crate) fn stage_ticketed_uploaded_guest_package(
     upload: &lillux::PinnedRegularFile,
     parent: &lillux::PinnedDirectory,
     ticket: &GuestImportTicket,
@@ -393,7 +393,7 @@ pub fn stage_ticketed_uploaded_guest_package(
 /// launch and scope journal separately. The import-time upload digest is
 /// trusted only through the retained ticket; all installed content is
 /// rechecked from the pinned stage before it can be used again.
-pub fn recover_ticketed_guest_import(
+pub(crate) fn recover_ticketed_guest_import(
     parent: &lillux::PinnedDirectory,
     identity: &GuestStageIdentity,
     ticket: &GuestImportTicket,
@@ -1392,6 +1392,157 @@ mod tests {
             recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
                 .unwrap();
         imported.discard().unwrap();
+        let occurrence_dir = tempfile::tempdir().unwrap();
+        let occurrence = lillux::PinnedDirectory::open(occurrence_dir.path())
+            .unwrap()
+            .unwrap();
+        occurrence.tighten_owner_private_directory().unwrap();
+        let owner = crate::guest_installation::GuestOccurrenceOwner::begin(
+            &occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            crate::guest_installation::GuestOccurrenceOwner::begin(
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "the exact occurrence cannot reserve a second import owner"
+        );
+        let staged_occurrence = owner
+            .stage_uploaded_once(
+                &upload,
+                &context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .unwrap();
+        let installed_occurrence = staged_occurrence
+            .install_base_once(&context, &inputs)
+            .unwrap();
+        let owned_runtime = occurrence
+            .open_child_directory(OsStr::new("candidate-runtime"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ryeos_project_capture::inspect_project_snapshot_transfer(
+                &owned_runtime
+                    .open_child_directory(OsStr::new("objects"))
+                    .unwrap()
+                    .unwrap(),
+                &inputs.base_snapshot.snapshot_hash,
+            )
+            .unwrap(),
+            measurement
+        );
+        drop(installed_occurrence);
+        let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
+            &occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_occurrence.phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::InstallationUncertain
+        );
+        drop(recovered_occurrence);
+        let owner_root = occurrence
+            .open_child_directory(OsStr::new("guest-import-owner"))
+            .unwrap()
+            .unwrap();
+        let intent_value: serde_json::Value = serde_json::from_slice(
+            &owner_root
+                .open_pinned_regular(OsStr::new("guest-base-install-intent.json"), false)
+                .unwrap()
+                .unwrap()
+                .read_bounded(8 * 1024)
+                .unwrap(),
+        )
+        .unwrap();
+        let installed_stage = owner_root
+            .open_child_directory(OsStr::new(intent_value["stage"]["name"].as_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        let install_marker = installed_stage
+            .open_pinned_regular(OsStr::new("guest-base-install-owner.json"), false)
+            .unwrap()
+            .unwrap();
+        install_marker.set_mode(0o644).unwrap();
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "recovery must reject a mode-weakened stage owner marker"
+        );
+        install_marker.set_mode(0o600).unwrap();
+        owned_runtime.set_mode(0o777).unwrap();
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "recovery must reject a mode-weakened installed runtime"
+        );
+        owned_runtime.set_mode(0o700).unwrap();
+        assert!(
+            crate::guest_installation::GuestOccurrenceOwner::begin(
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "an installed occurrence cannot be restaged after owner exit"
+        );
+        let crash_occurrence_dir = tempfile::tempdir().unwrap();
+        let crash_occurrence = lillux::PinnedDirectory::open(crash_occurrence_dir.path())
+            .unwrap()
+            .unwrap();
+        crash_occurrence.tighten_owner_private_directory().unwrap();
+        let crash_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
+            &crash_occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        drop(crash_owner);
+        let recovered_crash = crate::guest_installation::recover_guest_occurrence(
+            &crash_occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_crash.phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::ImportUncertain
+        );
+        drop(recovered_crash);
+        assert!(
+            crate::guest_installation::GuestOccurrenceOwner::begin(
+                &crash_occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "an ambiguous import cannot restage the same occurrence"
+        );
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
             ..context

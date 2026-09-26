@@ -140,9 +140,15 @@ not an installed generation or a settlement witness. Its
 bootstrap/executable and realized-input checks before descriptor binding, but
 its caller must exclude concurrent writers across that binding. The
 `install_base_into` operation can install a rechecked ticketed base into an
-exact empty private runtime while retaining the stage; the guest owner must
-record both directory identities before invoking it. Neither operation
-records launch intent or proves immutable custody. The synthetic
+exact empty private runtime while retaining the stage. The provider-neutral
+`guest_installation` path now reserves a fixed, create-only occurrence owner
+before upload; that owner can stage once and writes a create-only, exact-inode
+base-install intent and stage-owner marker before invoking the copy. Recovery
+point-reads the same occurrence, owner, stage, fixed candidate-runtime child
+and intent, with no restage or reinstall API. An ambiguous or partial copy
+must be inspected and settled,
+not retried. This is not yet a full installed generation, supervisor launch
+intent, or immutable custody proof. The synthetic
 fixture currently copies/moves staged inputs into its occurrence and discards the
 staging directory before launching the supervisor. Its terminal path checks
 the supervisor/server process identities and exits, not an enclosing process
