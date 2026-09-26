@@ -177,6 +177,61 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         .consumer_content
         .as_mut()
         .unwrap()
+        .process_environment
+        .insert(
+            "TOOL_PATH".into(),
+            SessionProcessEnvironmentValue::RealizationPath {
+                realization_id: "ambient-tool".into(),
+                relative_path: "content".into(),
+                path_kind: crate::objects::SessionProcessEnvironmentPathKind::File,
+            },
+        );
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .process_environment
+        .clear();
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .environment_realizations =
+        ExternalContentRealizationSet::new(vec![crate::objects::ExternalContentRealization {
+            id: "codex".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "8".repeat(64),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "authoring-tools".into(),
+        }])
+        .unwrap();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
+        .environment_realizations =
+        ExternalContentRealizationSet::new(vec![crate::objects::ExternalContentRealization {
+            id: "authoring-tools".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: "8".repeat(64),
+            entry_count: 1,
+            total_bytes: 1,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "authoring-tools".into(),
+        }])
+        .unwrap();
+    purpose.validate().unwrap();
+    purpose
+        .consumer_content
+        .as_mut()
+        .unwrap()
         .worker_profile_hash = "not-a-hash".into();
     assert!(purpose.validate().is_err());
     purpose

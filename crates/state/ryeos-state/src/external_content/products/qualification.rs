@@ -212,6 +212,16 @@ impl ProductQualificationConsumerContentIdentity {
         {
             bail!("qualification consumer content requires exact pinned realizations");
         }
+        let mut realization_ids = BTreeSet::from([context.product_declaration_id.as_str()]);
+        for realized in self
+            .worker_literals
+            .iter()
+            .chain(self.environment_realizations.iter())
+        {
+            if !realization_ids.insert(realized.id.as_str()) {
+                bail!("qualification consumer content has overlapping realization identities");
+            }
+        }
         if self.executable_search.is_empty() {
             bail!("qualification consumer executable search is absent");
         }
@@ -226,6 +236,13 @@ impl ProductQualificationConsumerContentIdentity {
             }
         }
         validate_session_process_environment(&self.process_environment)?;
+        for value in self.process_environment.values() {
+            if let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value
+                && !realization_ids.contains(realization_id.as_str())
+            {
+                bail!("qualification process environment names an unadmitted realization");
+            }
+        }
         bounded(
             self,
             MAX_PRODUCT_QUALIFICATION_CONSUMER_CONTENT_BYTES,
