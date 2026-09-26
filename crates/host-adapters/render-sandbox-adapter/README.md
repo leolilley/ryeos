@@ -86,6 +86,13 @@ returned origins, methods, queries, fragments, credentials, ports and alternate
 encodings before a future bearer token could be forwarded. This is local
 policy/test evidence, **not** evidence that Render always returns that shape or
 that a proxy operation has been safely implemented.
+The same dormant boundary now parses a bounded connect response directly into
+a zeroizing bearer, rejects duplicates, unknown fields and trailing data,
+checks expiry and execution identity, and binds the returned method and URI to
+the exact occurrence route. A generic JSON value is deliberately not used:
+it would leave a non-zeroized copy of the token. Raw response bytes must also
+remain in a zeroizing buffer. This preflight does not mint a token or change
+`supervisor_pending` activation behavior.
 
 The intended first activation is one-shot. The controller durably commits its
 activation intent before any adapter contact. A single bounded adapter call

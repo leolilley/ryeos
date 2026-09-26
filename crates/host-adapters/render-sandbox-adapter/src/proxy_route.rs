@@ -6,13 +6,112 @@
 //! It only prevents a future activation implementation from forwarding a
 //! short-lived bearer token to a different destination.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
+use chrono::DateTime;
+use serde::Deserialize;
 use url::Url;
+use zeroize::Zeroizing;
+
+const MAX_CONNECT_RESPONSE_BYTES: usize = 16 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ConnectResponse {
+    execution_id: String,
+    expires_at: String,
+    method: String,
+    token: SecretToken,
+    uri: String,
+}
+
+struct SecretToken(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SecretToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self(Zeroizing::new(String::deserialize(deserializer)?)))
+    }
+}
+
+/// A validated, one-use proxy destination and short-lived bearer. The caller
+/// must still hold the original activation mutation fence; this value does
+/// not authorize a retry after an uncertain upload or run.
+#[allow(dead_code)]
+pub(crate) struct BoundConnectToken {
+    pub(crate) execution_id: String,
+    pub(crate) expires_at_ms: i64,
+    pub(crate) method: String,
+    pub(crate) route: Url,
+    pub(crate) bearer: Zeroizing<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyOperation<'a> {
     UploadFile { remote_path: &'a str },
     RunStream,
+}
+
+#[allow(dead_code)]
+pub(crate) fn bind_connect_response(
+    response_bytes: &Zeroizing<Vec<u8>>,
+    occurrence_id: &str,
+    region: &str,
+    operation: ProxyOperation<'_>,
+    now_ms: i64,
+) -> Result<BoundConnectToken> {
+    ensure!(
+        !response_bytes.is_empty() && response_bytes.len() <= MAX_CONNECT_RESPONSE_BYTES,
+        "Render connect response exceeds its byte bound"
+    );
+    // This flat, deny-unknown-fields struct rejects duplicate known fields.
+    // Deserialize directly so a generic Value cannot retain an unzeroized
+    // copy of the bearer. Malformed-input errors are deliberately redacted.
+    let mut decoder = serde_json::Deserializer::from_slice(response_bytes.as_slice());
+    let mut response = ConnectResponse::deserialize(&mut decoder)
+        .map_err(|_| anyhow!("Render connect response is invalid"))?;
+    decoder
+        .end()
+        .map_err(|_| anyhow!("Render connect response has trailing data"))?;
+    ensure!(
+        valid_dns_label(&response.execution_id, 128)
+            && response.execution_id.starts_with("exe-")
+            && response.execution_id.len() > 4,
+        "Render connect execution identity is invalid"
+    );
+    let expires_at_ms = DateTime::parse_from_rfc3339(&response.expires_at)
+        .context("Render connect token expiry is invalid")?
+        .timestamp_millis();
+    ensure!(
+        expires_at_ms > now_ms
+            && expires_at_ms <= now_ms.saturating_add(24 * 60 * 60 * 1000),
+        "Render connect token expiry is outside its bound"
+    );
+    ensure!(
+        !response.token.0.is_empty()
+            && response.token.0.len() <= 4096
+            && response.token.0.bytes().all(|byte| byte.is_ascii_graphic()),
+        "Render connect token is invalid"
+    );
+    let route = validate_proxy_route(
+        &response.uri,
+        &response.method,
+        occurrence_id,
+        region,
+        operation,
+    )?;
+    Ok(BoundConnectToken {
+        execution_id: std::mem::take(&mut response.execution_id),
+        expires_at_ms,
+        method: std::mem::take(&mut response.method),
+        route,
+        bearer: std::mem::replace(
+            &mut response.token,
+            SecretToken(Zeroizing::new(String::new())),
+        )
+        .0,
+    })
 }
 
 pub(crate) fn validate_proxy_route(
@@ -84,9 +183,84 @@ fn valid_remote_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const OCCURRENCE: &str = "sbx-abc123";
     const REGION: &str = "oregon";
+
+    fn connect_response(uri: &str, method: &str, token: &str) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(
+            serde_json::to_vec(&json!({
+                "executionId": "exe-abc123",
+                "expiresAt": "2026-09-26T00:15:00Z",
+                "method": method,
+                "token": token,
+                "uri": uri,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn connect_token_binds_exact_one_use_proxy_route() {
+        let bytes = connect_response(
+            "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream",
+            "POST",
+            "short-lived-token",
+        );
+        let bound = bind_connect_response(
+            &bytes,
+            OCCURRENCE,
+            REGION,
+            ProxyOperation::RunStream,
+            1_790_380_800_000,
+        )
+        .unwrap();
+        assert_eq!(bound.execution_id, "exe-abc123");
+        assert_eq!(bound.method, "POST");
+        assert_eq!(bound.route.as_str(), "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream");
+        assert_eq!(bound.bearer.as_str(), "short-lived-token");
+    }
+
+    #[test]
+    fn connect_token_rejects_stale_secret_or_substituted_destination() {
+        let route = "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream";
+        let now_ms = 1_790_380_800_000;
+        for (uri, method, token, now) in [
+            (route, "POST", "short-lived-token", now_ms + 16 * 60 * 1000),
+            (route, "POST", "with\r\nheader", now_ms),
+            ("https://sbx-other.oregon.sandbox.onrender.com/runs/stream", "POST", "token", now_ms),
+            (route, "PUT", "token", now_ms),
+        ] {
+            let bytes = connect_response(uri, method, token);
+            assert!(bind_connect_response(&bytes, OCCURRENCE, REGION, ProxyOperation::RunStream, now).is_err());
+        }
+    }
+
+    #[test]
+    fn connect_token_parser_rejects_duplicates_unknowns_and_trailing_data_without_echo() {
+        let route = "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream";
+        let response = format!(
+            "{{\"executionId\":\"exe-abc123\",\"expiresAt\":\"2026-09-26T00:15:00Z\",\"method\":\"POST\",\"token\":\"private-sentinel\",\"uri\":\"{route}\"}}"
+        );
+        for raw in [
+            response.replace("\"token\":", "\"token\":\"duplicate\",\"token\":"),
+            response.replace("\"uri\":", "\"unknown\":1,\"uri\":"),
+            format!("{response} true"),
+        ] {
+            let bytes = Zeroizing::new(raw.into_bytes());
+            let error = bind_connect_response(
+                &bytes,
+                OCCURRENCE,
+                REGION,
+                ProxyOperation::RunStream,
+                1_790_380_800_000,
+            )
+            .err()
+            .expect("malformed connect response was accepted");
+            assert!(!format!("{error:#}").contains("private-sentinel"));
+        }
+    }
 
     #[test]
     fn accepts_only_exact_example_proxy_routes() {
