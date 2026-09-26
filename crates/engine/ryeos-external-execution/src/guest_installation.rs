@@ -31,8 +31,32 @@ const CANDIDATE_RUNTIME_DIRECTORY: &str = "candidate-runtime";
 const CANDIDATE_PRIVATE_DIRECTORY: &str = "candidate-private";
 const SUPERVISOR_STATE_DIRECTORY: &str = "supervisor-state";
 const RECORD_NAME: &str = "guest-base-install-intent.json";
+const SUPERVISOR_LAUNCH_RECORD_NAME: &str = "guest-supervisor-launch-intent.json";
 const STAGE_MARKER_NAME: &str = "guest-base-install-owner.json";
 const MAX_RECORD_BYTES: u64 = 8 * 1024;
+
+/// Recovery-only outer owner→supervisor intent. The only future production
+/// writer must hold continuous writer exclusion and commit this before spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuestSupervisorLaunchIntent {
+    schema: u32,
+    ticket_sha256: String,
+    occurrence_id: String,
+    occurrence_directory: lillux::PinnedDirectoryIdentity,
+    owner_directory: lillux::PinnedDirectoryIdentity,
+    install_record_file: lillux::PinnedRegularFileIdentity,
+    install_record_sha256: String,
+    stage: GuestStageIdentity,
+    candidate_runtime: lillux::PinnedDirectoryIdentity,
+    private_parent: lillux::PinnedDirectoryIdentity,
+    supervisor_state_root: lillux::PinnedDirectoryIdentity,
+    bootstrap_sha256: String,
+    supervisor_sha256: String,
+    launcher_sha256: String,
+    guest_input_identity: String,
+    inherited_descriptors: Vec<u32>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GuestBaseInstallIntentIdentity {
@@ -165,6 +189,36 @@ impl PreparedGuestSupervisorRequest {
             &self.bootstrap_sha256,
             &self._artifacts.supervisor,
         )
+    }
+
+    /// Synthetic fixture bytes only. This does not commit a production launch
+    /// intent or authorize a spawn without continuous writer exclusion.
+    pub(crate) fn planned_outer_launch_intent_bytes_for_test(
+        &self,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<Vec<u8>> {
+        let installed = &self._artifacts.private.content._installed;
+        let ticket = installed.imported.ticket();
+        let owner = &installed.owner;
+        ensure!(self.plan == fixed_guest_supervisor_descriptor_plan(inputs)?, "fixture descriptor plan changed");
+        canonical_launch_record(&GuestSupervisorLaunchIntent {
+            schema: 1,
+            ticket_sha256: digest_ticket(ticket)?,
+            occurrence_id: owner.record.occurrence_id.clone(),
+            occurrence_directory: owner.occurrence.identity()?,
+            owner_directory: owner.root.identity()?,
+            install_record_file: installed.intent_identity.record_file.clone(),
+            install_record_sha256: installed.intent_identity.record_sha256.clone(),
+            stage: installed.imported.stage_identity()?,
+            candidate_runtime: installed.runtime.identity()?,
+            private_parent: self._artifacts.private.observation.private_parent.clone(),
+            supervisor_state_root: self._artifacts.observation.state_root.clone(),
+            bootstrap_sha256: self.bootstrap_sha256.clone(),
+            supervisor_sha256: ticket.supervisor_sha256.clone(),
+            launcher_sha256: ticket.launcher_sha256.clone(),
+            guest_input_identity: inputs.identity_digest()?,
+            inherited_descriptors: self.plan.inherited_descriptors.clone(),
+        })
     }
 }
 
@@ -748,6 +802,9 @@ pub enum GuestOccurrenceRecoveryPhase {
     /// Installation intent is committed. The base copy may be absent,
     /// partial, or complete; this observation does not grant another copy.
     InstallationUncertain,
+    /// An outer launch intent is present. The supervisor may have started;
+    /// recovery must not repeat launch or demand pristine mutable inputs.
+    LaunchUncertain,
 }
 
 pub struct RecoveredGuestOccurrence {
@@ -809,6 +866,10 @@ pub fn recover_guest_occurrence(
         "guest occurrence owner differs from retained placement"
     );
     let Some(record) = root.open_pinned_regular(OsStr::new(RECORD_NAME), false)? else {
+        ensure!(
+            root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)?.is_none(),
+            "guest supervisor launch intent exists without base installation intent"
+        );
         ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
         return Ok(RecoveredGuestOccurrence {
             _occurrence: occurrence.try_clone()?,
@@ -842,6 +903,58 @@ pub fn recover_guest_occurrence(
         .context("committed guest installation has no retained runtime")?;
     runtime.require_owner_private_directory()?;
     root.require_disjoint_directory_tree(&runtime)?;
+    if let Some(launch_file) = root.open_pinned_regular(OsStr::new(SUPERVISOR_LAUNCH_RECORD_NAME), false)? {
+        let private_parent = occurrence
+            .open_child_directory(OsStr::new(CANDIDATE_PRIVATE_DIRECTORY))?
+            .context("committed guest launch has no retained private parent")?;
+        let state_root = occurrence
+            .open_child_directory(OsStr::new(SUPERVISOR_STATE_DIRECTORY))?
+            .context("committed guest launch has no retained supervisor state root")?;
+        private_parent.require_owner_private_directory()?;
+        state_root.require_owner_private_directory()?;
+        root.require_disjoint_directory_tree(&private_parent)?;
+        root.require_disjoint_directory_tree(&state_root)?;
+        runtime.require_disjoint_directory_tree(&private_parent)?;
+        runtime.require_disjoint_directory_tree(&state_root)?;
+        private_parent.require_disjoint_directory_tree(&state_root)?;
+        ensure!(launch_file.permission_mode()? == 0o600, "guest supervisor launch intent mode changed");
+        let launch_observation = launch_file.observation()?;
+        ensure!(launch_observation.size() <= MAX_RECORD_BYTES, "guest supervisor launch intent exceeds bound");
+        let launch_bytes = launch_file.read_stable_bounded(&launch_observation, MAX_RECORD_BYTES)?;
+        let launch: GuestSupervisorLaunchIntent = serde_json::from_slice(&launch_bytes)?;
+        let expected_descriptors = fixed_guest_supervisor_descriptor_plan(inputs)?;
+        ensure!(
+            canonical_launch_record(&launch)? == launch_bytes
+                && launch.schema == 1
+                && launch.ticket_sha256 == owner.ticket_sha256
+                && launch.occurrence_id == owner.occurrence_id
+                && launch.occurrence_directory == owner.occurrence_directory
+                && launch.owner_directory == owner.owner_directory
+                && launch.install_record_file == lillux::pinned_regular_file_identity(&record.try_clone_descriptor()?)?
+                && launch.install_record_sha256 == lillux::sha256_hex(&bytes)
+                && launch.stage == intent.stage
+                && launch.candidate_runtime == intent.candidate_runtime
+                && launch.candidate_runtime == runtime.identity()?
+                && launch.private_parent == private_parent.identity()?
+                && launch.supervisor_state_root == state_root.identity()?
+                && launch.bootstrap_sha256 == ticket.bootstrap_sha256
+                && launch.supervisor_sha256 == ticket.supervisor_sha256
+                && launch.launcher_sha256 == ticket.launcher_sha256
+                && launch.guest_input_identity == inputs.identity_digest()?
+                && launch.inherited_descriptors == expected_descriptors.inherited_descriptors,
+            "guest supervisor launch intent differs from retained authority"
+        );
+        ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
+        ensure_child_binding(occurrence, CANDIDATE_RUNTIME_DIRECTORY, &runtime)?;
+        return Ok(RecoveredGuestOccurrence {
+            _occurrence: occurrence.try_clone()?,
+            _root: root,
+            _lock: lock,
+            _imported: None,
+            _runtime: Some(runtime),
+            phase: GuestOccurrenceRecoveryPhase::LaunchUncertain,
+        });
+    }
     let imported = recover_ticketed_guest_import(&root, &intent.stage, ticket, context, inputs)?;
     runtime.require_disjoint_directory_tree(imported.root())?;
     let marker = imported
@@ -1207,6 +1320,12 @@ fn canonical_owner_record(record: &GuestOccurrenceOwnerRecord) -> Result<Vec<u8>
         bytes.len() as u64 <= MAX_RECORD_BYTES,
         "guest occurrence owner record exceeds bound"
     );
+    Ok(bytes)
+}
+
+fn canonical_launch_record(record: &GuestSupervisorLaunchIntent) -> Result<Vec<u8>> {
+    let bytes = lillux::canonical_json(&serde_json::to_value(record)?)?.into_bytes();
+    ensure!(bytes.len() as u64 <= MAX_RECORD_BYTES, "guest supervisor launch intent exceeds bound");
     Ok(bytes)
 }
 

@@ -1814,6 +1814,9 @@ mod tests {
             executable.source_descriptor().unwrap(),
             supervisor_source.inherited_descriptor().unwrap()
         );
+        let synthetic_launch_intent = prepared
+            .planned_outer_launch_intent_bytes_for_test(&inputs)
+            .unwrap();
         drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
@@ -1882,6 +1885,78 @@ mod tests {
             .is_err(),
             "an installed occurrence cannot be restaged after owner exit"
         );
+        owner_root
+            .atomic_create_regular(
+                OsStr::new("guest-supervisor-launch-intent.json"),
+                &synthetic_launch_intent,
+                0o600,
+            )
+            .unwrap();
+        // A launched supervisor may legitimately have changed its runtime.
+        // Recovery must quarantine the launch rather than demand pristine
+        // prelaunch state or make another launch possible.
+        owned_runtime
+            .open_child_directory(OsStr::new("refs"))
+            .unwrap()
+            .unwrap()
+            .create_child(OsStr::new("post-launch-mutation"), 0o700)
+            .unwrap();
+        let recovered_launch = crate::guest_installation::recover_guest_occurrence(
+            &occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_launch.phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::LaunchUncertain
+        );
+        drop(recovered_launch);
+        let launch_file = owner_root
+            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+            .unwrap()
+            .unwrap();
+        launch_file.set_mode(0o644).unwrap();
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "recovery must reject a mode-weakened outer launch intent"
+        );
+        launch_file.set_mode(0o600).unwrap();
+        for child in ["candidate-private", "supervisor-state"] {
+            let original = occurrence_dir.path().join(child);
+            let detached = occurrence_dir.path().join(format!("{child}-detached"));
+            std::fs::rename(&original, &detached).unwrap();
+            assert!(
+                crate::guest_installation::recover_guest_occurrence(
+                    &occurrence,
+                    &ticket,
+                    &context,
+                    &inputs,
+                )
+                .is_err(),
+                "recovery must reject a missing fixed {child} child"
+            );
+            occurrence.create_child(OsStr::new(child), 0o700).unwrap();
+            assert!(
+                crate::guest_installation::recover_guest_occurrence(
+                    &occurrence,
+                    &ticket,
+                    &context,
+                    &inputs,
+                )
+                .is_err(),
+                "recovery must reject a replaced fixed {child} child"
+            );
+            std::fs::remove_dir(&original).unwrap();
+            std::fs::rename(&detached, &original).unwrap();
+        }
         let crash_occurrence_dir = tempfile::tempdir().unwrap();
         let crash_occurrence = lillux::PinnedDirectory::open(crash_occurrence_dir.path())
             .unwrap()
