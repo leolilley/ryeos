@@ -2042,6 +2042,30 @@ mod tests {
             std::fs::remove_dir(&original).unwrap();
             std::fs::rename(&detached, &original).unwrap();
         }
+        let scratch_path = occurrence_dir
+            .path()
+            .join("candidate-private/guest-scratch-03");
+        let detached_scratch = occurrence_dir
+            .path()
+            .join("candidate-private/guest-scratch-detached");
+        std::fs::rename(&scratch_path, &detached_scratch).unwrap();
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &occurrence, &ticket, &context, &inputs,
+            )
+            .is_err(),
+            "recovery must reject detached private scratch"
+        );
+        std::fs::create_dir(&scratch_path).unwrap();
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &occurrence, &ticket, &context, &inputs,
+            )
+            .is_err(),
+            "recovery must reject replacement private scratch"
+        );
+        std::fs::remove_dir(&scratch_path).unwrap();
+        std::fs::rename(&detached_scratch, &scratch_path).unwrap();
         let crash_occurrence_dir = tempfile::tempdir().unwrap();
         let crash_occurrence = lillux::PinnedDirectory::open(crash_occurrence_dir.path())
             .unwrap()

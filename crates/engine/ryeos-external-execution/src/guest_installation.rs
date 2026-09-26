@@ -49,6 +49,7 @@ struct GuestSupervisorLaunchIntent {
     stage: GuestStageIdentity,
     candidate_runtime: lillux::PinnedDirectoryIdentity,
     private_parent: lillux::PinnedDirectoryIdentity,
+    scratch: Vec<GuestScratchIdentity>,
     supervisor_state_root: lillux::PinnedDirectoryIdentity,
     bootstrap_sha256: String,
     supervisor_sha256: String,
@@ -247,6 +248,7 @@ impl PreparedGuestSupervisorRequest {
             stage: installed.imported.stage_identity()?,
             candidate_runtime: installed.runtime.identity()?,
             private_parent: self._artifacts.private.observation.private_parent.clone(),
+            scratch: self._artifacts.private.observation.scratch.clone(),
             supervisor_state_root: self._artifacts.observation.state_root.clone(),
             bootstrap_sha256: self.bootstrap_sha256.clone(),
             supervisor_sha256: ticket.supervisor_sha256.clone(),
@@ -285,6 +287,21 @@ impl PreparedGuestSupervisorRequest {
         self._artifacts
             .state_root
             .require_owner_private_directory()?;
+        ensure_child_binding(
+            &installed.owner.occurrence,
+            CANDIDATE_PRIVATE_DIRECTORY,
+            &self._artifacts.private.private_parent,
+        )?;
+        ensure_child_binding(
+            &installed.owner.occurrence,
+            SUPERVISOR_STATE_DIRECTORY,
+            &self._artifacts.state_root,
+        )?;
+        recheck_scratch_bindings(
+            &self._artifacts.private.private_parent,
+            &self._artifacts.private.observation.scratch,
+            inputs,
+        )?;
         let bytes = self.planned_outer_launch_intent_bytes(inputs)?;
         let (record_file, record_sha256) =
             create_launch_intent_record(&installed.owner.root, &bytes)?;
@@ -1072,6 +1089,9 @@ pub fn recover_guest_occurrence(
                 && launch.inherited_descriptors == expected_descriptors.inherited_descriptors,
             "guest supervisor launch intent differs from retained authority"
         );
+        ensure_child_binding(occurrence, CANDIDATE_PRIVATE_DIRECTORY, &private_parent)?;
+        ensure_child_binding(occurrence, SUPERVISOR_STATE_DIRECTORY, &state_root)?;
+        recheck_scratch_bindings(&private_parent, &launch.scratch, inputs)?;
         ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
         ensure_child_binding(occurrence, CANDIDATE_RUNTIME_DIRECTORY, &runtime)?;
         return Ok(RecoveredGuestOccurrence {
@@ -1114,6 +1134,44 @@ fn ensure_child_binding(
             == child.identity()?,
         "retained guest occurrence child changed inode"
     );
+    Ok(())
+}
+
+fn recheck_scratch_bindings(
+    private_parent: &lillux::PinnedDirectory,
+    scratch: &[GuestScratchIdentity],
+    inputs: &ExternalGuestInputProjection,
+) -> Result<()> {
+    let expected = inputs
+        .inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, input)| match &input.content_authority {
+            GuestMountContentAuthority::PrivateScratch { binding_hash } => {
+                Some((index, binding_hash.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        scratch.len() == expected.len(),
+        "guest private scratch inventory differs from admitted inputs"
+    );
+    for (observed, (index, binding_hash)) in scratch.iter().zip(expected) {
+        ensure!(
+            observed.input_index == index && observed.binding_hash == binding_hash,
+            "guest private scratch coordinate differs from admitted input"
+        );
+        let name = format!("guest-scratch-{index:02}");
+        let opened = private_parent
+            .open_child_directory(OsStr::new(&name))?
+            .context("guest private scratch binding disappeared")?;
+        opened.require_owner_private_directory()?;
+        ensure!(
+            opened.identity()? == observed.directory,
+            "guest private scratch binding changed inode"
+        );
+    }
     Ok(())
 }
 
