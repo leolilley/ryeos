@@ -10,9 +10,10 @@ use std::ffi::{OsStr, OsString};
 use std::io::Read;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::ExternalGuestInputProjection;
 use ryeos_external_execution_contract::staging_package::{
-    GuestStagingEntry, GuestStagingExpected, GuestStagingPackageManifest, GuestStagingStreamReader,
-    MAX_GUEST_STAGING_ENTRIES,
+    GuestImportContext, GuestImportTicket, GuestStagingEntry, GuestStagingExpected,
+    GuestStagingPackageManifest, GuestStagingStreamReader, MAX_GUEST_STAGING_ENTRIES,
 };
 
 pub struct StagedGuestPackage {
@@ -120,6 +121,44 @@ pub fn stage_uploaded_guest_package(
             );
         }
         anyhow::bail!("guest upload staging deadline expired");
+    }
+    Ok(staged)
+}
+
+/// Import one uploaded inode against a separately carried ticket and the
+/// guest's independently retained placement. The stable reader measures every
+/// uploaded byte before this returns; a matching provider acknowledgement is
+/// never sufficient. This is still not supervisor adoption or Ready.
+pub fn stage_ticketed_uploaded_guest_package(
+    upload: &lillux::PinnedRegularFile,
+    parent: &lillux::PinnedDirectory,
+    ticket: &GuestImportTicket,
+    context: &GuestImportContext<'_>,
+    inputs: &ExternalGuestInputProjection,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<StagedGuestPackage> {
+    let expected = ticket.staging_expected(context, inputs)?;
+    let staged = stage_uploaded_guest_package(
+        upload,
+        ticket.framed_bytes,
+        &ticket.payload_sha256,
+        parent,
+        &expected,
+        deadline,
+    )?;
+    let check = ticket
+        .validate_verified_manifest(
+            context,
+            staged.manifest(),
+            &ticket.payload_sha256,
+            ticket.framed_bytes,
+        )
+        .and_then(|()| crate::guest_content::recheck_staged_guest_content(&staged, inputs));
+    if let Err(error) = check {
+        if let Err(cleanup) = staged.discard() {
+            return Err(error.context(format!("ticketed guest import cleanup failed: {cleanup:#}")));
+        }
+        return Err(error);
     }
     Ok(staged)
 }
@@ -788,6 +827,85 @@ mod tests {
             .is_err()
         );
         assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
+        let ticket = GuestImportTicket {
+            schema: ryeos_external_execution_contract::staging_package::GUEST_IMPORT_TICKET_SCHEMA,
+            binding_hash: "1".repeat(64),
+            allocation_request_digest: "2".repeat(64),
+            occurrence_id: "occ-staging-test".into(),
+            activation_request_digest: manifest.activation_request_digest.clone(),
+            guest_input_identity: manifest.guest_input_identity.clone(),
+            payload_sha256: lillux::sha256_hex(&bytes),
+            manifest_sha256: lillux::sha256_hex(
+                &ryeos_external_execution_contract::canonical_json(&manifest).unwrap(),
+            ),
+            framed_bytes: bytes.len() as u64,
+            regular_bytes: manifest.total_regular_bytes,
+            bootstrap_sha256: manifest.bootstrap_sha256.clone(),
+            supervisor_sha256: manifest.supervisor_sha256.clone(),
+            launcher_sha256: manifest.launcher_sha256.clone(),
+            maximum_regular_bytes: expected.maximum_regular_bytes,
+            maximum_framed_bytes: expected.maximum_framed_bytes,
+        };
+        let context = GuestImportContext {
+            binding_hash: &ticket.binding_hash,
+            allocation_request_digest: &ticket.allocation_request_digest,
+            occurrence_id: &ticket.occurrence_id,
+            activation_request_digest: &ticket.activation_request_digest,
+        };
+        let imported = stage_ticketed_uploaded_guest_package(
+            &upload,
+            &parent,
+            &ticket,
+            &context,
+            &inputs,
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+        )
+        .unwrap();
+        assert_eq!(imported.manifest(), &manifest);
+        imported.discard().unwrap();
+        let wrong_context = GuestImportContext {
+            occurrence_id: "occ-other",
+            ..context
+        };
+        assert!(
+            stage_ticketed_uploaded_guest_package(
+                &upload,
+                &parent,
+                &ticket,
+                &wrong_context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .is_err()
+        );
+        assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
+        let mut wrong_ticket = ticket.clone();
+        wrong_ticket.payload_sha256 = "0".repeat(64);
+        assert!(
+            stage_ticketed_uploaded_guest_package(
+                &upload,
+                &parent,
+                &wrong_ticket,
+                &context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .is_err()
+        );
+        wrong_ticket = ticket.clone();
+        wrong_ticket.manifest_sha256 = "0".repeat(64);
+        assert!(
+            stage_ticketed_uploaded_guest_package(
+                &upload,
+                &parent,
+                &wrong_ticket,
+                &context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .is_err()
+        );
+        assert!(parent.entries_no_follow_bounded(0).unwrap().is_empty());
         let staged = stage_uploaded_guest_package(
             &upload,
             bytes.len() as u64,
@@ -1033,9 +1151,7 @@ mod tests {
         assert_eq!(
             prepared.manifest_sha256(),
             lillux::sha256_hex(
-                lillux::canonical_json(&serde_json::to_value(&produced_manifest).unwrap())
-                    .unwrap()
-                    .as_bytes()
+                &ryeos_external_execution_contract::canonical_json(&produced_manifest).unwrap()
             )
         );
         assert_eq!(prepared.bytes(), produced_bytes.len() as u64);

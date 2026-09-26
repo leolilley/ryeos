@@ -148,7 +148,7 @@ pub fn prepare_private_guest_package(
         check?;
         require_time(deadline)?;
         let manifest_sha256 = lillux::sha256_hex(
-            lillux::canonical_json(&serde_json::to_value(&manifest)?)?.as_bytes(),
+            &ryeos_external_execution_contract::canonical_json(&manifest)?,
         );
         Ok((payload, manifest, manifest_sha256, bytes, sha256))
     })();

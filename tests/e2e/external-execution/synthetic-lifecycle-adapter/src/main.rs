@@ -752,9 +752,9 @@ fn activate(
     let installation = (|| -> Result<()> {
         ensure!(
             staged.manifest().total_regular_bytes == guest_package.regular_bytes
-                && lillux::sha256_hex(
-                    lillux::canonical_json(&serde_json::to_value(staged.manifest())?)?.as_bytes()
-                ) == guest_package.manifest_sha256,
+                && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(
+                    staged.manifest()
+                )?) == guest_package.manifest_sha256,
             "synthetic package manifest contradicts durable delivery commitment"
         );
         ryeos_external_execution::guest_content::recheck_staged_guest_content(
