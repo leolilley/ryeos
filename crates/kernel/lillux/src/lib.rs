@@ -153,11 +153,26 @@ pub fn spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessRes
     exec::lib_spawn(request)
 }
 
+#[cfg(target_os = "linux")]
+pub fn spawn_exact_inheritance(
+    request: SubprocessRequest,
+) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn_exact_inheritance(request)
+}
+
 pub fn spawn_until(
     request: SubprocessRequest,
     deadline: time::MonotonicDeadline,
 ) -> Result<RunningProcess, SubprocessResult> {
     exec::lib_spawn_until(request, deadline)
+}
+
+#[cfg(target_os = "linux")]
+pub fn spawn_exact_inheritance_until(
+    request: SubprocessRequest,
+    deadline: time::MonotonicDeadline,
+) -> Result<RunningProcess, SubprocessResult> {
+    exec::lib_spawn_exact_inheritance_until(request, deadline)
 }
 
 pub fn spawn_awaiting_attachment(

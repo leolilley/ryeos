@@ -5019,15 +5019,54 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
             "Failed to spawn: attachment-bearing supervision requires spawn_awaiting_attachment",
         ));
     }
-    lib_spawn_with_stdio(request, false, None, None, None, None)
+    lib_spawn_with_stdio(request, false, None, None, None, None, false)
+}
+
+/// Spawn with an exact exec-time descriptor allowlist. Every descriptor above
+/// stderr is made close-on-exec in the child before only the request's typed
+/// inherited authorities and explicit mappings are restored. If the kernel
+/// cannot enforce the allowlist, no target executable is started.
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_exact_inheritance(
+    request: SubprocessRequest,
+) -> Result<RunningProcess, SubprocessResult> {
+    if request.supervised_status.as_ref().is_some_and(|status| {
+        matches!(
+            status.state,
+            SupervisedProcessStatusState::AwaitingAttachment { .. }
+        )
+    }) {
+        return Err(spawn_failure(
+            Instant::now(),
+            "Failed to spawn: attachment-bearing supervision requires spawn_awaiting_attachment",
+        ));
+    }
+    lib_spawn_with_stdio(request, false, None, None, None, None, true)
 }
 
 /// Spawn using one existing monotonic operation deadline, including descriptor
 /// barrier acquisition and final pre-exec admission. This is the ordinary
 /// buffered process owner, not an attachment or process-scope substitute.
 pub fn lib_spawn_until(
+    request: SubprocessRequest,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<RunningProcess, SubprocessResult> {
+    lib_spawn_until_with_inheritance(request, deadline, false)
+}
+
+/// Deadline-bound exact-inheritance launch for a trusted guest owner.
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_exact_inheritance_until(
+    request: SubprocessRequest,
+    deadline: crate::time::MonotonicDeadline,
+) -> Result<RunningProcess, SubprocessResult> {
+    lib_spawn_until_with_inheritance(request, deadline, true)
+}
+
+fn lib_spawn_until_with_inheritance(
     mut request: SubprocessRequest,
     deadline: crate::time::MonotonicDeadline,
+    exact_inheritance: bool,
 ) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
     if request.supervised_status.is_some() {
@@ -5047,7 +5086,15 @@ pub fn lib_spawn_until(
     if deadline.has_elapsed() {
         return Err(spawn_deadline_failure(start));
     }
-    lib_spawn_with_stdio(request, false, None, None, None, Some(deadline))
+    lib_spawn_with_stdio(
+        request,
+        false,
+        None,
+        None,
+        None,
+        Some(deadline),
+        exact_inheritance,
+    )
 }
 
 /// Spawn with inherited terminal stdio while retaining the same session,
@@ -5067,7 +5114,7 @@ pub fn lib_spawn_inherited_stdio(
             "Failed to spawn: attachment-bearing supervision requires spawn_awaiting_attachment",
         ));
     }
-    lib_spawn_with_stdio(request, true, None, None, None, None)
+    lib_spawn_with_stdio(request, true, None, None, None, None, false)
 }
 
 /// Spawn a Linux subprocess whose final trusted setup completes before the
@@ -5104,7 +5151,7 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
             ));
         }
         let timeout = request.timeout;
-        let running = lib_spawn_with_stdio(request, false, None, process_scope, None, None)?;
+        let running = lib_spawn_with_stdio(request, false, None, process_scope, None, None, false)?;
         if running.attachment_release.is_none() {
             return Err(running.into_spawn_failure(spawn_failure(
                 start,
@@ -5229,7 +5276,9 @@ pub(crate) fn lib_spawn_awaiting_attachment_in_scope(
     // inherit an advisory lock and deadlock the owner's durable attach path.
     let worker = thread::Builder::new()
         .name("lillux-attachment-spawn".to_string())
-        .spawn(move || lib_spawn_with_stdio(request, false, Some(gate), process_scope, None, None))
+        .spawn(move || {
+            lib_spawn_with_stdio(request, false, Some(gate), process_scope, None, None, false)
+        })
         .map_err(|error| {
             spawn_failure(
                 start,
@@ -5620,8 +5669,11 @@ fn lib_spawn_with_stdio(
     process_scope: Option<crate::ProcessScope>,
     account: Option<&crate::ControllerAccount>,
     absolute_deadline: Option<crate::time::MonotonicDeadline>,
+    exact_inheritance: bool,
 ) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
+    #[cfg(not(target_os = "linux"))]
+    let _ = exact_inheritance;
     let SubprocessRequest {
         cmd,
         argv0,
@@ -5834,6 +5886,16 @@ fn lib_spawn_with_stdio(
                 }
                 if !inherit_stdio {
                     preserve_configured_stdio_across_exec()?;
+                }
+                if exact_inheritance
+                    && libc::syscall(
+                        libc::SYS_close_range,
+                        3_u32,
+                        u32::MAX,
+                        libc::CLOSE_RANGE_CLOEXEC,
+                    ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
                 }
                 for fd in &raw_inherited_fds {
                     let flags = libc::fcntl(*fd, libc::F_GETFD);
@@ -7863,6 +7925,98 @@ mod absolute_spawn_deadline_tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod exact_inheritance_tests {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    use super::*;
+
+    #[test]
+    fn exact_inheritance_probe() {
+        let Ok(ambient_fd) = std::env::var("LILLUX_EXACT_INHERITANCE_PROBE") else {
+            return;
+        };
+        let ambient_fd: i32 = ambient_fd.parse().unwrap();
+        assert_eq!(unsafe { libc::fcntl(ambient_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        assert!(unsafe { libc::fcntl(50, libc::F_GETFD) } >= 0);
+        let mut contents = [0_u8; 9];
+        assert_eq!(
+            unsafe { libc::pread(50, contents.as_mut_ptr().cast(), contents.len(), 0) },
+            contents.len() as isize
+        );
+        assert_eq!(&contents, b"permitted");
+        let raw_fd: i32 = std::env::var("LILLUX_EXACT_RAW_FD").unwrap().parse().unwrap();
+        let mut raw_contents = [0_u8; 9];
+        assert_eq!(
+            unsafe {
+                libc::pread(
+                    raw_fd,
+                    raw_contents.as_mut_ptr().cast(),
+                    raw_contents.len(),
+                    0,
+                )
+            },
+            raw_contents.len() as isize
+        );
+        assert_eq!(&raw_contents, b"raw-owned");
+    }
+
+    #[test]
+    fn exact_spawn_excludes_ambient_fd_but_keeps_explicit_mapping() {
+        let ambient_source = sealed_memfd(c"lillux-ambient-test", b"ambient-secret").unwrap();
+        // F_DUPFD deliberately creates an inheritable descriptor. A high
+        // coordinate distinguishes it from the test harness's normal I/O.
+        let ambient_fd =
+            unsafe { libc::fcntl(ambient_source.file().as_raw_fd(), libc::F_DUPFD, 256) };
+        assert!(ambient_fd >= 256);
+        let ambient = unsafe { std::fs::File::from_raw_fd(ambient_fd) };
+        let permitted = sealed_memfd(c"lillux-permitted-test", b"permitted").unwrap();
+        let raw = sealed_memfd(c"lillux-raw-test", b"raw-owned").unwrap();
+        let raw_fd = raw.inherited_descriptor().unwrap();
+        let executable = inherited_descriptor_path(
+            std::fs::File::open(std::env::current_exe().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let mut request = SubprocessRequest {
+            cmd: std::env::current_exe().unwrap().to_str().unwrap().into(),
+            argv0: None,
+            args: vec![
+                "--exact".into(),
+                "exec::exact_inheritance_tests::exact_inheritance_probe".into(),
+            ],
+            cwd: None,
+            envs: vec![
+                (
+                    "LILLUX_EXACT_INHERITANCE_PROBE".into(),
+                    ambient_fd.to_string(),
+                ),
+                ("LILLUX_EXACT_RAW_FD".into(), raw_fd.to_string()),
+            ],
+            stdin_data: None,
+            timeout: 10.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        permitted.bind_to_subprocess_request(&mut request, 50).unwrap();
+        raw.retain_for_child(&mut request.inherited_fds);
+        executable.bind_as_subprocess_executable(&mut request, 60).unwrap();
+        let result = lib_spawn_exact_inheritance_until(
+            request,
+            crate::time::MonotonicDeadline::after(Duration::from_secs(10)),
+        )
+        .unwrap_or_else(|failure| panic!("exact spawn failed: {}", failure.stderr))
+        .wait();
+        drop(ambient);
+        assert!(result.success, "{}", result.stderr);
+    }
+}
+
 pub(crate) fn spawn_failure(start: Instant, reason: impl Into<String>) -> SubprocessResult {
     SubprocessResult {
         success: false,
@@ -8085,7 +8239,7 @@ pub fn lib_run_as_account(
             "maintenance account execution cannot carry worker supervision",
         );
     }
-    match lib_spawn_with_stdio(request, false, None, None, Some(account), None) {
+    match lib_spawn_with_stdio(request, false, None, None, Some(account), None, false) {
         Ok(running) => running.wait(),
         Err(result) => result,
     }
