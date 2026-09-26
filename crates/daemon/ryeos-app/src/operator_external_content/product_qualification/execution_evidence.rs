@@ -407,6 +407,7 @@ pub(super) fn prove(
             projection_contract_digest: contract_digest.to_owned(),
             projector: projector_identity(&projector.projector),
             participants,
+            scoped_attempt: None,
         },
         root_settlement_digest,
     ))

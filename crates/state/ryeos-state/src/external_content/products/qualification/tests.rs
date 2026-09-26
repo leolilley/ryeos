@@ -239,6 +239,91 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     );
 }
 
+#[test]
+fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
+    let mut evidence = evidence();
+    let mut wire = serde_json::to_value(&evidence).unwrap();
+    wire["execution_proof"]
+        .as_object_mut()
+        .unwrap()
+        .remove("scoped_attempt");
+    assert!(ProductQualificationEvidence::from_value(&wire).is_err());
+
+    let source = ProductProducerRecipeSourceIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        canonical_ref: "config:fixtures/producer".into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+        recipe_digest: "d".repeat(64),
+    };
+    evidence.policy_source.policy.producer_scenarios.insert(
+        "native_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: source.canonical_ref.clone(),
+        },
+    );
+    let scoped = ProductQualificationScopedAttemptProof {
+        attempt_id: format!("scoped-{}", "a".repeat(64)),
+        launch_owner_digest: "b".repeat(64),
+        scenario_id: "native_codex".into(),
+        producer_source: source,
+        process_identity_digest: "c".repeat(64),
+        scope_recovery_digest: "d".repeat(64),
+        mount_preparation_digest: "e".repeat(64),
+        natural_empty_receipt_digest: "f".repeat(64),
+        observation_object_hash: "1".repeat(64),
+        retirement_evidence_digest: "2".repeat(64),
+        callback_method_surface_digest: "3".repeat(64),
+    };
+    evidence.execution_proof.scoped_attempt = Some(scoped);
+    evidence.validate().unwrap();
+
+    let mut wrong_scenario = evidence.clone();
+    wrong_scenario
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .scenario_id = "other".into();
+    assert!(wrong_scenario.validate().is_err());
+    let mut wrong_source = evidence.clone();
+    wrong_source
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .producer_source
+        .canonical_ref = "config:fixtures/other".into();
+    assert!(wrong_source.validate().is_err());
+    let mut bad_digest = evidence.clone();
+    bad_digest
+        .execution_proof
+        .scoped_attempt
+        .as_mut()
+        .unwrap()
+        .observation_object_hash = "not-a-hash".into();
+    assert!(bad_digest.validate().is_err());
+    let mut mixed = evidence.clone();
+    mixed
+        .execution_proof
+        .participants
+        .push(ProductQualificationParticipant {
+            call_id: "probe".into(),
+            operation_id: "4".repeat(64),
+            request_hash: "5".repeat(64),
+            action_digest: "6".repeat(64),
+            inherited_realizations_digest: "7".repeat(64),
+            verifier: evidence.verifier.clone(),
+        });
+    assert!(mixed.validate().is_err());
+    let mut graph = evidence;
+    graph.verifier.artifact_identity = graph_artifact_identity();
+    graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
+    graph.execution_proof.scoped_attempt = mixed.execution_proof.scoped_attempt;
+    assert!(graph.validate().is_err());
+}
+
 pub(crate) fn execution_proof(
     artifact: &AdmittedLaunchArtifactIdentity,
 ) -> ProductQualificationExecutionProof {
@@ -266,6 +351,7 @@ pub(crate) fn execution_proof(
             binary_signer_fingerprint: "2".repeat(64),
         },
         participants: Vec::new(),
+        scoped_attempt: None,
     }
 }
 

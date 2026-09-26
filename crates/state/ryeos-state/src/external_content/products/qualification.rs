@@ -24,7 +24,7 @@ pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualificati
 pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
     "ryeos.product_qualification_launch_purpose.v1";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v7";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v8";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -558,12 +558,66 @@ impl ProductQualificationParticipant {
 /// State validates mechanical identity and bounds, never a runtime's language.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ProductQualificationScopedAttemptProof {
+    pub attempt_id: String,
+    pub launch_owner_digest: String,
+    pub scenario_id: String,
+    pub producer_source: ProductProducerRecipeSourceIdentity,
+    pub process_identity_digest: String,
+    pub scope_recovery_digest: String,
+    pub mount_preparation_digest: String,
+    pub natural_empty_receipt_digest: String,
+    pub observation_object_hash: String,
+    pub retirement_evidence_digest: String,
+    pub callback_method_surface_digest: String,
+}
+
+impl ProductQualificationScopedAttemptProof {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.attempt_id.len() != 71
+            || !self.attempt_id.starts_with("scoped-")
+            || !self.attempt_id[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("qualification scoped attempt id is not canonical");
+        }
+        validate_name(&self.scenario_id)?;
+        self.producer_source.validate()?;
+        for (label, digest) in [
+            ("scoped launch owner", &self.launch_owner_digest),
+            ("scoped process identity", &self.process_identity_digest),
+            ("scoped recovery", &self.scope_recovery_digest),
+            ("scoped mount preparation", &self.mount_preparation_digest),
+            (
+                "scoped natural-empty receipt",
+                &self.natural_empty_receipt_digest,
+            ),
+            ("scoped observation", &self.observation_object_hash),
+            ("scoped retirement", &self.retirement_evidence_digest),
+            (
+                "scoped callback method surface",
+                &self.callback_method_surface_digest,
+            ),
+        ] {
+            validate_hash(label, digest)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProductQualificationExecutionProof {
     /// Declaration owner, distinct from the realization's execution contract.
     pub projection_contract_ref: String,
     pub projection_contract_digest: String,
     pub projector: ProductQualificationProjectorIdentity,
     pub participants: Vec<ProductQualificationParticipant>,
+    /// Required nullable: a scoped producer is a daemon-owned process attempt,
+    /// never a synthetic managed child participant.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub scoped_attempt: Option<ProductQualificationScopedAttemptProof>,
 }
 
 impl ProductQualificationExecutionProof {
@@ -596,6 +650,18 @@ impl ProductQualificationExecutionProof {
         }
         if self.participants.len() > MAX_PRODUCT_QUALIFICATION_PARTICIPANTS {
             bail!("qualification execution proof exceeds participant bound");
+        }
+        if let Some(scoped) = &self.scoped_attempt {
+            scoped.validate()?;
+            if !self.participants.is_empty() {
+                bail!("qualification cannot mix scoped attempt and managed participants");
+            }
+            if !matches!(
+                root.artifact_identity,
+                AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. }
+            ) {
+                bail!("qualification scoped attempt requires a direct verifier");
+            }
         }
         let mut calls = BTreeSet::new();
         let mut operations = BTreeSet::new();
@@ -653,6 +719,17 @@ impl ProductQualificationEvidence {
         self.policy_source.validate()?;
         self.verifier.validate()?;
         self.execution_proof.validate_for(&self.verifier)?;
+        if let Some(scoped) = &self.execution_proof.scoped_attempt {
+            let scenario = self
+                .policy_source
+                .policy
+                .producer_scenarios
+                .get(&scoped.scenario_id)
+                .context("qualification scoped attempt has no signed producer scenario")?;
+            if scenario.recipe_ref != scoped.producer_source.canonical_ref {
+                bail!("qualification scoped attempt recipe differs from signed scenario");
+            }
+        }
         for verifier in self.execution_verifiers() {
             if let Some(actual) = verifier.process_settlement_authority
                 && !actual.satisfies(

@@ -129,6 +129,22 @@ impl CallbackRuntimeMethodSurface {
         bail!("callback capability does not authorize runtime method `{method}`")
     }
 
+    /// Stable evidence identity for a closed callback surface. Qualification
+    /// retains this digest so a later verifier cannot silently widen or
+    /// reinterpret the methods available to its producer-driving bearer.
+    pub fn exact_surface_digest(&self) -> Result<String> {
+        let methods = self.exact.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unbounded callback surface has no evidence identity")
+        })?;
+        let coordinate = serde_json::json!({
+            "schema": "ryeos.callback_runtime_method_surface.v1",
+            "methods": methods,
+        });
+        Ok(lillux::sha256_hex(
+            lillux::canonical_json(&coordinate)?.as_bytes(),
+        ))
+    }
+
     fn is_exact(&self) -> bool {
         self.exact.is_some()
     }
@@ -1113,6 +1129,26 @@ mod tests {
     #[test]
     fn qualification_callback_surface_excludes_managed_work_and_publication() {
         let surface = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        let digest = surface.exact_surface_digest().unwrap();
+        assert!(lillux::valid_hash(&digest));
+        assert_eq!(
+            digest,
+            CallbackRuntimeMethodSurface::qualification_scoped_producer()
+                .exact_surface_digest()
+                .unwrap()
+        );
+        assert_ne!(
+            digest,
+            CallbackRuntimeMethodSurface::exact(vec!["runtime.scoped_child_start".into()])
+                .unwrap()
+                .exact_surface_digest()
+                .unwrap()
+        );
+        assert!(
+            CallbackRuntimeMethodSurface::complete_runtime_protocol()
+                .exact_surface_digest()
+                .is_err()
+        );
         for method in [
             "runtime.scoped_child_expected_source",
             "runtime.scoped_child_expected_isolation_class",
@@ -1134,7 +1170,10 @@ mod tests {
             "runtime.provider_attempt_prepare",
             "runtime.vault_get",
         ] {
-            assert!(surface.authorize(method).is_err(), "unexpected method: {method}");
+            assert!(
+                surface.authorize(method).is_err(),
+                "unexpected method: {method}"
+            );
         }
     }
 
