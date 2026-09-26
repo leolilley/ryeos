@@ -28,7 +28,16 @@ support, signing, installation, or provider qualification.
   independent provider attestation of its contents or the guest base B.
 - A valid `201 application/json` response must match the pinned Sandbox shape,
   including the requested plan, region, lifetime and network policy, before
-  its provider ID is returned as an occurrence.
+  its provider ID is returned as an occurrence. Render's current
+  [Python SDK reference](https://render.com/docs/sandboxes-sdk-python) says
+  early-access `plan` and `region` request parameters have no effect (all
+  Sandboxes currently run in Oregon with fixed resources). That does not tell
+  us whether the create response echoes the requested fields or reports the
+  effective fields. The exact equality check is fail-closed, but this profile
+  may refuse a real successful create and leave its occurrence unknown. An
+  installed, bounded observation must settle the actual response semantics
+  before this adapter is admitted for production allocation; do not relax the
+  match based on the documentation alone or retry an uncertain create.
 - `allocation_no_occurrence` is returned only when W1 classifies the create as
   `NoRequestSent`, which establishes locally that the request did not reach
   Render. Every provider response other than a complete, valid `201` remains
