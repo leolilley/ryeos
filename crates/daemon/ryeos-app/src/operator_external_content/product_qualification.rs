@@ -1109,6 +1109,7 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         .consumer_content
         .as_ref()
         .context("consumer qualification evidence has no retained content")?;
+    require_retained_consumer_content_closure(authority, guard, limits, retained)?;
     let mut current = prepare_current_bundle_consumer_content_inputs(
         state,
         policy_source,
@@ -2336,6 +2337,9 @@ pub(super) fn verify_retained_qualification_guarded(
     )?;
     if evidence != proof.evidence {
         bail!("retained qualification attestation contradicts its sealed evidence");
+    }
+    if let Some(content) = &evidence.consumer_content {
+        require_retained_consumer_content_closure(authority, guard, limits, content)?;
     }
     ryeos_state::external_content::products::qualification_publication::verify_retained_verifier_realization(
         authority,
