@@ -763,6 +763,7 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             publisher_fingerprint: "7".repeat(64),
             policy,
         },
+        consumer_content: None,
         verifier_root_selections: None,
         execution_proof: execution_proof(&artifact_identity()),
         result,
@@ -1001,6 +1002,7 @@ fn finite_policy_and_compact_evidence_round_trip() {
     evidence.validate().unwrap();
     let wire = serde_json::to_value(&evidence).unwrap();
     assert!(wire["verifier_root_selections"].is_null());
+    assert!(wire["consumer_content"].is_null());
     assert_eq!(
         ProductQualificationEvidence::from_value(&wire).unwrap(),
         evidence
@@ -1011,6 +1013,12 @@ fn finite_policy_and_compact_evidence_round_trip() {
         .unwrap()
         .remove("verifier_root_selections");
     assert!(ProductQualificationEvidence::from_value(&missing_required_null).is_err());
+    let mut missing_consumer_content = wire.clone();
+    missing_consumer_content
+        .as_object_mut()
+        .unwrap()
+        .remove("consumer_content");
+    assert!(ProductQualificationEvidence::from_value(&missing_consumer_content).is_err());
     assert_eq!(
         ProductQualificationPolicy::from_value(&serde_json::to_value(policy()).unwrap()).unwrap(),
         policy()

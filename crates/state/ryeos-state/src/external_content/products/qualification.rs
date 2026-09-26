@@ -28,7 +28,7 @@ pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualificati
 pub const PRODUCT_QUALIFICATION_LAUNCH_PURPOSE_SCHEMA: &str =
     "ryeos.product_qualification_launch_purpose.v3";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v8";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v9";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -978,6 +978,10 @@ pub struct ProductQualificationEvidence {
     pub witness_source: super::transfer::ProductWitnessSource,
     pub product_coordinate: ProductCaptureCoordinate,
     pub policy_source: ProductQualificationPolicySource,
+    /// Required nullable: copied from the exact owner-bound verifier purpose,
+    /// never reconstructed from a later Bundle generation as historical proof.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub consumer_content: Option<ProductQualificationConsumerContentIdentity>,
     pub verifier: ProductQualificationVerifier,
     pub execution_proof: ProductQualificationExecutionProof,
     /// Exact root product selections retained from the admitted verifier.
@@ -1008,6 +1012,16 @@ impl ProductQualificationEvidence {
         self.witness_source.validate()?;
         self.product_coordinate.validate()?;
         self.policy_source.validate()?;
+        match (
+            &self.policy_source.policy.consumer_execution_context,
+            &self.consumer_content,
+        ) {
+            (Some(context), Some(content)) => {
+                content.validate_for(context, &content.definitions)?
+            }
+            (None, None) => {}
+            _ => bail!("qualification evidence consumer content differs from signed policy"),
+        }
         self.verifier.validate()?;
         self.execution_proof.validate_for(&self.verifier)?;
         if let Some(scoped) = &self.execution_proof.scoped_attempt {
@@ -1140,6 +1154,7 @@ impl ProductQualificationEvidence {
             witness_source: _,
             product_coordinate,
             policy_source,
+            consumer_content,
             verifier,
             execution_proof,
             verifier_root_selections,
@@ -1151,6 +1166,7 @@ impl ProductQualificationEvidence {
             product_witness_hash: &'a str,
             product_coordinate: &'a ProductCaptureCoordinate,
             policy_source: &'a ProductQualificationPolicySource,
+            consumer_content: &'a Option<ProductQualificationConsumerContentIdentity>,
             verifier: &'a ProductQualificationVerifier,
             execution_proof: &'a ProductQualificationExecutionProof,
             verifier_root_selections: Option<Value>,
@@ -1165,6 +1181,7 @@ impl ProductQualificationEvidence {
             product_witness_hash,
             product_coordinate,
             policy_source,
+            consumer_content,
             verifier,
             execution_proof,
             verifier_root_selections,

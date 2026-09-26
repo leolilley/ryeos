@@ -241,7 +241,6 @@ fn prove_with_guard(
     let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
     if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-        bail!("qualification consumer execution context has no authenticated closure proof");
     }
     let root = state
         .state_store
@@ -307,6 +306,12 @@ fn prove_with_guard(
         || purpose.required_claims != relationship.qualification.required_claims
     {
         bail!("qualification verifier purpose differs from its accepted product launch");
+    }
+    if let Some(content) = &purpose.consumer_content {
+        require_retained_consumer_content_closure(authority, guard, limits, content)?;
+        // The exact historical inputs are retained, but the applied target,
+        // environment, protocol and hosted lifecycle are not yet joined.
+        bail!("qualification consumer execution context has no applied runtime parity proof");
     }
     let admitted_resolution = sealed.admitted_effective_resolution()?;
     require_reproducible_current_verifier_lane(&admitted_resolution.composed.derived, true)?;
@@ -446,6 +451,7 @@ fn prove_with_guard(
         witness_source: request.witness_source.clone(),
         product_coordinate,
         policy_source,
+        consumer_content: purpose.consumer_content.clone(),
         verifier_root_selections,
         execution_proof,
         verifier: ProductQualificationVerifier {
@@ -482,6 +488,31 @@ fn prove_with_guard(
         &relationship.qualification.required_claims,
     )?;
     Ok(evidence)
+}
+
+fn require_retained_consumer_content_closure(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    content: &ProductQualificationConsumerContentIdentity,
+) -> anyhow::Result<()> {
+    authority.ensure_guard(guard)?;
+    let roots = std::iter::once(content.worker_source.binding_hash.clone()).chain(
+        content
+            .worker_literals
+            .iter()
+            .chain(content.environment_realizations.iter())
+            .map(|realized| realized.manifest_hash.clone()),
+    );
+    let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &authority.cas_store()?,
+        roots,
+        limits,
+    )?;
+    if !closure.is_complete() {
+        bail!("qualification consumer retained source/content closure is incomplete");
+    }
+    Ok(())
 }
 
 fn authorize_verifier_terminal(
@@ -1675,6 +1706,14 @@ pub(super) fn resolve_current_bundle_verifier_identity_for_evidence(
     let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::decode_from_admitted_capsule(
         &capsule,
     )?;
+    if sealed
+        .product_qualification_purpose()
+        .context("qualification evidence verifier has no sealed purpose")?
+        .consumer_content
+        != evidence.consumer_content
+    {
+        bail!("qualification evidence consumer content differs from sealed verifier purpose");
+    }
     let admitted_resolution = sealed.admitted_effective_resolution()?;
     if sealed.item_ref() != evidence.verifier.canonical_ref
         || sealed.effective_definition_digest().as_str()
