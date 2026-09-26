@@ -295,6 +295,8 @@ pub struct NativeExternalCandidate {
     binding: ExecutionChannelBinding,
     guest_inputs: ExternalGuestInputProjection,
     process: lillux::HeldLinuxSandboxProcess,
+    expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     root: lillux::PinnedDirectory,
     workspace_input_shadows: Vec<String>,
     workspace_input_anchors: Vec<WorkspaceInputAnchor>,
@@ -322,6 +324,21 @@ pub struct NativeExternalCandidate {
 pub struct NativeCandidateOutput {
     pub stdout: std::fs::File,
     pub stderr: std::fs::File,
+}
+
+fn require_applied_candidate_runtime(
+    receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    expected_target: &lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mounts: &lillux::LinuxSandboxMountPreparationCommitments,
+    held_pid: u32,
+) -> Result<()> {
+    ensure!(
+        receipt.matches_commitments(expected_target)
+            && receipt.matches_post_release_mounts(expected_mounts)
+            && receipt.owned_child_pid == held_pid,
+        "external candidate applied runtime differs from admitted held target"
+    );
+    Ok(())
 }
 
 /// The admitted command mode determines the execution view. A deterministic
@@ -798,13 +815,39 @@ impl NativeExternalCandidate {
             access: workspace_access,
             layer: 0,
         });
+        let expected_applied_launch = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+            lillux::LinuxSandboxAppliedLaunchTarget {
+                executable: &request.executable,
+                argv0: &request.argv0,
+                arguments: &request.arguments,
+                cwd: &request.cwd,
+                environment: &request.environment,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        let expected_mount_preparation =
+            lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+                &request.mounts,
+                &[],
+            )
+            .map_err(anyhow::Error::msg)?;
         let (process, pipes) =
             lillux::prepare_linux_sandbox_piped(request).map_err(anyhow::Error::msg)?;
+        let held_mount_preparation = process
+            .mount_preparation_receipt()
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            held_mount_preparation.matches_commitments(&expected_mount_preparation)
+                && held_mount_preparation.owned_child_pid == process.child_pid(),
+            "external candidate held mounts differ from admitted inputs"
+        );
         Ok((
             Self {
                 binding,
                 guest_inputs: guest_inputs.clone(),
                 process,
+                expected_applied_launch,
+                expected_mount_preparation,
                 root,
                 workspace_input_shadows,
                 workspace_input_anchors,
@@ -852,6 +895,30 @@ impl NativeExternalCandidate {
             return Err(anyhow::Error::msg(error));
         }
         Ok(())
+    }
+
+    /// Point-read the child-owned pre-exec receipt for the sole released
+    /// target. Pending is not success; a mismatch refuses without turning a
+    /// launcher assertion into qualification testimony. The supervisor must
+    /// durably join this fact to its exact occurrence before any claim uses it.
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>> {
+        ensure!(self.released, "external candidate has not been released");
+        let Some(receipt) = self
+            .process
+            .try_observe_applied_launch()
+            .map_err(anyhow::Error::msg)?
+        else {
+            return Ok(None);
+        };
+        require_applied_candidate_runtime(
+            &receipt,
+            &self.expected_applied_launch,
+            &self.expected_mount_preparation,
+            self.process.child_pid(),
+        )?;
+        Ok(Some(receipt))
     }
 
     /// Called only after the supervisor's exact durable application claim and
@@ -1356,6 +1423,64 @@ impl NativeExternalCandidate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applied_candidate_runtime_requires_exact_target_mounts_and_held_child() {
+        let expected_target = lillux::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let expected_mounts = lillux::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 2,
+            destination_access_sha256: [5; 32],
+        };
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: expected_target.executable_sha256,
+            argv_sha256: expected_target.argv_sha256,
+            environment_sha256: expected_target.environment_sha256,
+            cwd_sha256: expected_target.cwd_sha256,
+            post_release_mount_view: expected_mounts.clone(),
+        };
+        require_applied_candidate_runtime(&receipt, &expected_target, &expected_mounts, 42)
+            .unwrap();
+        assert!(
+            require_applied_candidate_runtime(&receipt, &expected_target, &expected_mounts, 43)
+                .is_err()
+        );
+        let mut wrong_target = receipt.clone();
+        wrong_target.argv_sha256[0] ^= 1;
+        assert!(
+            require_applied_candidate_runtime(
+                &wrong_target,
+                &expected_target,
+                &expected_mounts,
+                42
+            )
+            .is_err()
+        );
+        let mut wrong_mounts = receipt.clone();
+        wrong_mounts
+            .post_release_mount_view
+            .destination_access_sha256[0] ^= 1;
+        assert!(
+            require_applied_candidate_runtime(
+                &wrong_mounts,
+                &expected_target,
+                &expected_mounts,
+                42
+            )
+            .is_err()
+        );
+    }
 
     fn preparation_deadline() -> lillux::time::MonotonicDeadline {
         lillux::time::MonotonicDeadline::after(Duration::from_secs(10))
