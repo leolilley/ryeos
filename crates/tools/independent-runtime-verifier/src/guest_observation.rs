@@ -334,6 +334,28 @@ pub fn check_guest_observation(observation: &Value, scenario: &GuestScenario<'_>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn applied_receipt() -> Value {
+        serde_json::to_value(lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [0; 32],
+            argv_sha256: [0; 32],
+            environment_sha256: [0; 32],
+            cwd_sha256: [0; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 0,
+                destination_access_sha256: [0; 32],
+            },
+        })
+        .unwrap()
+    }
+
     #[test]
     fn exact_agreement_rejects_substitution_and_unforwarded_ack() {
         let request_hash = "a".repeat(64);
@@ -380,10 +402,7 @@ mod tests {
         };
         let hash = ryeos_state::objects::canonical_value_digest(&file.to_value()).unwrap();
         let observation = json!({"schema":"test.routed_guest_observation.v1","request_sha256":request_hash,
-        "namespace_exit":"Signal(9)","applied_receipt":{"owned_child_pid":42,
-            "namespace_pid":1,"effective_uid":1,"effective_gid":1,"no_new_privs":true,"seccomp_mode":2,
-            "executable_sha256":vec![0u8;32],"argv_sha256":vec![0u8;32],
-            "environment_sha256":vec![0u8;32],"cwd_sha256":vec![0u8;32]},
+        "namespace_exit":"Signal(9)","applied_receipt":applied_receipt(),
         "guest_input_base64":STANDARD.encode(&input),"guest_output_base64":STANDARD.encode(&output),
         "forwarded_output_bytes":output.len(),"captured_files":{"result":hash}});
         check_guest_observation(&observation, &scenario).unwrap();
@@ -395,6 +414,12 @@ mod tests {
         assert!(check_guest_observation(&changed, &scenario).is_err());
         changed = observation.clone();
         changed["applied_receipt"]["namespace_pid"] = json!(2);
+        assert!(check_guest_observation(&changed, &scenario).is_err());
+        changed = observation.clone();
+        changed["applied_receipt"]
+            .as_object_mut()
+            .unwrap()
+            .remove("post_release_mount_view");
         assert!(check_guest_observation(&changed, &scenario).is_err());
         changed = observation.clone();
         changed["applied_receipt"]["effective_uid"] = json!(0);
@@ -500,11 +525,7 @@ mod tests {
                 "schema":"test.routed_guest_observation.v1",
                 "request_sha256":request_hash,
                 "namespace_exit":"Signal(9)",
-                "applied_receipt":{"owned_child_pid":42,
-                    "namespace_pid":1,"effective_uid":1,"effective_gid":1,
-                    "no_new_privs":true,"seccomp_mode":2,
-                    "executable_sha256":vec![0u8;32],"argv_sha256":vec![0u8;32],
-                    "environment_sha256":vec![0u8;32],"cwd_sha256":vec![0u8;32]},
+                "applied_receipt":applied_receipt(),
                 "guest_input_base64":encode(input),
                 "guest_output_base64":encoded_output,
                 "forwarded_output_bytes":STANDARD.decode(&encoded_output).unwrap().len(),
