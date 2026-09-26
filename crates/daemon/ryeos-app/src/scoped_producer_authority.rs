@@ -10,13 +10,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail, ensure};
+#[cfg(test)]
+use ryeos_engine::isolation::IsolationDescriptorBoundCommand;
 use ryeos_engine::isolation::{
     IsolationAdmittedCommand, IsolationCommandAuthority,
     IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
     IsolationReadOnlyMountAuthority,
 };
-#[cfg(test)]
-use ryeos_engine::isolation::IsolationDescriptorBoundCommand;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
     ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
@@ -83,6 +83,33 @@ impl ScopedProducerAttemptCoordinate {
         admitted_stdin: &str,
     ) -> Result<Self> {
         ScopedProducerAuthorityKey::new(key.root_thread_id.clone(), key.launch_owner.clone())?;
+        Self::derive_recorded(
+            &key.root_thread_id,
+            &key.launch_owner,
+            scenario_id,
+            source,
+            admitted_stdin,
+        )
+    }
+
+    /// Reconstruct only the immutable identity of a recorded attempt. Proof
+    /// authoring may run after daemon restart, when the old launch owner can
+    /// no longer mint a live scope. This method grants no launch authority.
+    pub fn derive_recorded(
+        root_thread_id: &str,
+        launch_owner: &LaunchOwner,
+        scenario_id: &str,
+        source: &ProductProducerRecipeSourceIdentity,
+        admitted_stdin: &str,
+    ) -> Result<Self> {
+        ryeos_runtime::validate_runtime_thread_id(root_thread_id).map_err(anyhow::Error::msg)?;
+        ensure!(
+            root_thread_id == launch_owner.thread_id
+                && launch_owner.monotonic_launch_epoch > 0
+                && !launch_owner.unpredictable_nonce.is_empty()
+                && !launch_owner.daemon_generation_id.is_empty(),
+            "recorded scoped producer launch owner is invalid"
+        );
         source.validate()?;
         ensure!(
             !scenario_id.is_empty()
@@ -98,8 +125,8 @@ impl ScopedProducerAttemptCoordinate {
         );
         let scenario = serde_json::json!({
             "schema": "ryeos.scoped_producer_attempt_coordinate.v1",
-            "root_thread_id": key.root_thread_id,
-            "launch_owner": key.launch_owner,
+            "root_thread_id": root_thread_id,
+            "launch_owner": launch_owner,
             "scenario_id": scenario_id,
             "recipe_source": source,
             "admitted_stdin_sha256": lillux::sha256_hex(admitted_stdin.as_bytes()),
@@ -319,7 +346,9 @@ impl ScopedProducerLiveAuthority {
             let relative = format!("prepared/{id}");
             let source = workspace_view
                 .open_directory_descendant(Path::new(&relative))?
-                .ok_or_else(|| anyhow::anyhow!("signed producer prepared directory is absent: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("signed producer prepared directory is absent: {id}")
+                })?;
             let directory = source.try_clone_pinned_directory(source.path().to_path_buf())?;
             let mut immutable_files = Vec::new();
             for declaration in recipe
@@ -329,25 +358,24 @@ impl ScopedProducerLiveAuthority {
             {
                 let file = directory
                     .open_pinned_regular(std::ffi::OsStr::new(&declaration.leaf_name), false)?
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "signed producer immutable file is absent: {id}/{}",
-                        declaration.leaf_name
-                    ))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "signed producer immutable file is absent: {id}/{}",
+                            declaration.leaf_name
+                        )
+                    })?;
                 let observation = file.observation()?;
-                let captured = file.capture_sealed_bounded(
-                    &observation,
-                    declaration.maximum_bytes,
-                )?;
+                let captured =
+                    file.capture_sealed_bounded(&observation, declaration.maximum_bytes)?;
                 immutable_files.push(IsolationProducerPreparedImmutableFileAuthority::new(
                     declaration,
                     captured,
                 )?);
             }
-            prepared_mounts.push(IsolationProducerPreparedDirectoryAuthority::new(
-                id.to_owned(),
-                relative,
-                source,
-            )?.with_immutable_files(immutable_files)?);
+            prepared_mounts.push(
+                IsolationProducerPreparedDirectoryAuthority::new(id.to_owned(), relative, source)?
+                    .with_immutable_files(immutable_files)?,
+            );
         }
         let buffered_input = match (&recipe.executable_source, &recipe.stdin_source) {
             (
@@ -413,7 +441,9 @@ impl ScopedProducerLiveAuthority {
                 .find(|mount| mount.id() == id)
                 .and_then(|mount| mount.destination().to_str())
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("signed producer prepared directory is not bound: {id}"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("signed producer prepared directory is not bound: {id}")
+                })
         };
         for (name, binding) in &recipe.environment_bindings {
             let value = match binding {
@@ -660,8 +690,15 @@ mod tests {
                 file_type: 0,
             },
         );
-        ScopedProducerLiveAuthority::new(command.into(), workspace, None, Vec::new(), None, Arc::new(root))
-            .unwrap()
+        ScopedProducerLiveAuthority::new(
+            command.into(),
+            workspace,
+            None,
+            Vec::new(),
+            None,
+            Arc::new(root),
+        )
+        .unwrap()
     }
 
     fn source() -> ProductProducerRecipeSourceIdentity {
@@ -717,18 +754,13 @@ mod tests {
         let mut signed_environment = recipe.clone();
         signed_environment.environment_bindings.insert(
             "LANG".into(),
-            ProducerEnvironmentBinding::Literal {
-                value: "C".into(),
-            },
+            ProducerEnvironmentBinding::Literal { value: "C".into() },
         );
         let signed_request = authority
             .request_for_recipe(&signed_environment, "{\"sealed\":true}", &selected_command)
             .unwrap()
             .request;
-        assert_eq!(
-            signed_request.envs,
-            vec![("LANG".into(), "C".into())]
-        );
+        assert_eq!(signed_request.envs, vec![("LANG".into(), "C".into())]);
         let mut bound_workspace = recipe.clone();
         bound_workspace.environment_bindings.insert(
             "PRODUCER_WORKSPACE".into(),
@@ -761,16 +793,15 @@ mod tests {
                 .request_for_recipe(&recipe, "{\"sealed\":true}", &unrelated)
                 .is_err()
         );
-        let swapped_descriptor = IsolationAdmittedCommand::DescriptorBound(
-            IsolationDescriptorBoundCommand::new(
+        let swapped_descriptor =
+            IsolationAdmittedCommand::DescriptorBound(IsolationDescriptorBoundCommand::new(
                 authority.command().authority().identity().clone(),
                 lillux::sealed_memfd(c"scoped-producer-swapped", b"fixture").unwrap(),
                 match authority.command() {
                     IsolationAdmittedCommand::DescriptorBound(command) => command.file_identity(),
                     IsolationAdmittedCommand::RealizationMember(_) => unreachable!(),
                 },
-            ),
-        );
+            ));
         assert!(
             authority
                 .request_for_recipe(&recipe, "{\"sealed\":true}", &swapped_descriptor)
@@ -831,42 +862,63 @@ mod tests {
                 expected_sha256: lillux::sha256_hex(b"[commands]\n"),
             },
         );
-        assert!(authority
-            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("immutable file is absent"));
+        assert!(
+            authority
+                .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("immutable file is absent")
+        );
         prepared_home
-            .atomic_create_regular(std::ffi::OsStr::new("config.toml"), b"model = 'fixture'\n", 0o600)
+            .atomic_create_regular(
+                std::ffi::OsStr::new("config.toml"),
+                b"model = 'fixture'\n",
+                0o600,
+            )
             .unwrap()
             .unwrap();
-        assert!(authority
-            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("immutable file is absent"));
+        assert!(
+            authority
+                .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("immutable file is absent")
+        );
         prepared_home
-            .atomic_create_regular(std::ffi::OsStr::new("environments.toml"), b"[commands]\n", 0o600)
+            .atomic_create_regular(
+                std::ffi::OsStr::new("environments.toml"),
+                b"[commands]\n",
+                0o600,
+            )
             .unwrap()
             .unwrap();
         let immutable_request = authority
             .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
             .unwrap();
         let file = &immutable_request.prepared_mounts[0].immutable_files()[0];
-        assert_eq!(immutable_request.prepared_mounts[0].immutable_files().len(), 2);
+        assert_eq!(
+            immutable_request.prepared_mounts[0].immutable_files().len(),
+            2
+        );
         assert_eq!(
             file.destination().to_str(),
             Some("/ryeos/producer-prepared/codex-home/config.toml")
         );
-        assert_eq!(file.content_sha256(), lillux::sha256_hex(b"model = 'fixture'\n"));
+        assert_eq!(
+            file.content_sha256(),
+            lillux::sha256_hex(b"model = 'fixture'\n")
+        );
         assert_eq!(
             immutable_request.prepared_mounts[0].immutable_files()[1].content_sha256(),
             lillux::sha256_hex(b"[commands]\n")
         );
-        std::fs::write(prepared_home.path().join("config.toml"), b"changed after seal")
-            .unwrap();
+        std::fs::write(
+            prepared_home.path().join("config.toml"),
+            b"changed after seal",
+        )
+        .unwrap();
         immutable_request.prepared_mounts[0].immutable_files()[0]
             .verify_sealed_content()
             .unwrap();
@@ -874,20 +926,26 @@ mod tests {
             immutable_request.prepared_mounts[0].immutable_files()[0].content_sha256(),
             lillux::sha256_hex(b"model = 'fixture'\n")
         );
-        assert!(authority
-            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("differs from signed content hash"));
+        assert!(
+            authority
+                .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("differs from signed content hash")
+        );
         std::fs::write(prepared_home.path().join("config.toml"), vec![b'x'; 65537]).unwrap();
-        assert!(authority
-            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
-            .is_err());
+        assert!(
+            authority
+                .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+                .is_err()
+        );
         std::fs::write(prepared_home.path().join("config.toml"), b"").unwrap();
-        assert!(authority
-            .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
-            .is_err());
+        assert!(
+            authority
+                .request_for_recipe(&immutable, "{\"sealed\":true}", &selected_command)
+                .is_err()
+        );
         let mut maximum = recipe.clone();
         maximum.cwd_source = ProducerCwdSource::PreparedDirectory { id: "cwd".into() };
         prepared_root
@@ -964,11 +1022,7 @@ mod tests {
         );
         assert!(
             authority
-                .request_for_recipe(
-                    &recipe,
-                    "{\"sealed\":true}",
-                    authority.command(),
-                )
+                .request_for_recipe(&recipe, "{\"sealed\":true}", authority.command(),)
                 .err()
                 .unwrap()
                 .to_string()
@@ -1005,6 +1059,42 @@ mod tests {
         assert_eq!(journal.owner, key.launch_owner);
         assert_eq!(journal.recipe_digest, source.recipe_digest);
         assert_eq!(journal.scenario_digest, first.scenario_digest);
+        assert_eq!(
+            first,
+            ScopedProducerAttemptCoordinate::derive_recorded(
+                &key.root_thread_id,
+                &key.launch_owner,
+                "native_codex",
+                &source,
+                "{\"request\":1}",
+            )
+            .unwrap()
+        );
+        let mut retired_owner = key.launch_owner.clone();
+        retired_owner.daemon_generation_id = "prior-daemon-generation".into();
+        assert!(
+            ScopedProducerAttemptCoordinate::derive_recorded(
+                &key.root_thread_id,
+                &retired_owner,
+                "native_codex",
+                &source,
+                "{\"request\":1}",
+            )
+            .is_ok(),
+            "historical proof must remain possible after daemon restart"
+        );
+        assert_ne!(
+            first,
+            ScopedProducerAttemptCoordinate::derive_recorded(
+                &key.root_thread_id,
+                &key.launch_owner,
+                "another_scenario",
+                &source,
+                "{\"request\":1}",
+            )
+            .unwrap(),
+            "an identical recipe under another signed scenario is not the same attempt"
+        );
         assert_eq!(
             first,
             ScopedProducerAttemptCoordinate::derive(

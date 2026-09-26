@@ -647,8 +647,24 @@ pub(crate) fn qualification_scoped_attempt_proof(
         .state_store
         .scoped_child_attempt_for_owner(owner)?
         .context("qualification verifier has no daemon-owned scoped attempt")?;
+    let admitted_stdin =
+        crate::operator_external_content::product_qualification::admitted_root_producer_stdin(
+            state,
+            &owner.thread_id,
+            purpose,
+        )?;
+    let coordinate =
+        crate::scoped_producer_authority::ScopedProducerAttemptCoordinate::derive_recorded(
+            &owner.thread_id,
+            owner,
+            &candidate.scenario_id,
+            source,
+            &admitted_stdin,
+        )?;
     ensure!(
         record.initial.attempt_id == candidate.attempt_id
+            && record.initial.attempt_id == coordinate.attempt_id()
+            && record.initial.scenario_digest == coordinate.scenario_digest()
             && record.initial.owner == *owner
             && record.initial.recipe_digest == source.recipe_digest
             && record.initial.recipe_generation == source.bundle_generation_identity
