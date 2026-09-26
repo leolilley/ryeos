@@ -180,6 +180,7 @@ fn held_source_target(
     name: &str,
     writable_source: bool,
     wrong_source: bool,
+    alias_source: bool,
 ) -> Result<(), String> {
     use lillux::sandbox::{
         LinuxSandboxExit, LinuxSandboxLifecycle, LinuxSandboxMount, LinuxSandboxMountAccess,
@@ -193,7 +194,13 @@ fn held_source_target(
     let loader =
         lillux::pin_canonical_mount_source(std::path::Path::new("/usr/lib/ld-linux-x86-64.so.2"))
             .map_err(|error| error.to_string())?;
-    let mount_name = if wrong_source { "wrong-source" } else { name };
+    let mount_name = if wrong_source {
+        "wrong-source"
+    } else if alias_source {
+        "alias-source"
+    } else {
+        name
+    };
     let source_mount =
         lillux::pin_canonical_mount_source(&std::path::Path::new("/tmp").join(mount_name))
             .map_err(|error| error.to_string())?;
@@ -335,6 +342,7 @@ fn held_source_target(
     _name: &str,
     _writable_source: bool,
     _wrong_source: bool,
+    _alias_source: bool,
 ) -> Result<(), String> {
     Err("held private source native probe currently requires x86_64 loader fixture".into())
 }
@@ -344,6 +352,7 @@ fn child(
     hold_writer: bool,
     writable_mount: bool,
     wrong_source: bool,
+    alias_source: bool,
 ) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
@@ -381,6 +390,30 @@ fn child(
             .root()
             .create_child(OsStr::new("wrong-source"), 0o700)
             .map_err(|error| error.to_string())?;
+    }
+    if alias_source {
+        owner
+            .root()
+            .create_child(OsStr::new("alias-source"), 0o700)
+            .map_err(|error| error.to_string())?;
+        let source =
+            std::ffi::CString::new(format!("/tmp/{name}")).map_err(|error| error.to_string())?;
+        let destination = c"/tmp/alias-source";
+        let mounted = unsafe {
+            libc::mount(
+                source.as_ptr(),
+                destination.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        if mounted != 0 {
+            return Err(format!(
+                "create native source bind alias: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
     }
     let preopened = std::fs::OpenOptions::new()
         .write(true)
@@ -431,7 +464,7 @@ fn child(
             exec_output.status, exec_stderr
         ));
     }
-    held_source_target(owner, name, writable_mount, wrong_source)?;
+    held_source_target(owner, name, writable_mount, wrong_source, alias_source)?;
     std::io::stdout()
         .write_all(b"READY\n")
         .map_err(|error| error.to_string())?;
@@ -517,6 +550,29 @@ fn parent() -> Result<(), String> {
             "wrong sealed source did not refuse before target: exit={}, stderr={}",
             wrong_source_output.status,
             String::from_utf8_lossy(&wrong_source_output.stderr)
+        ));
+    }
+    let mut alias_source_probe =
+        Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+            .arg("child-alias-source")
+            .arg(&name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    wait_bounded(&mut alias_source_probe, "bound source alias refusal")?;
+    let alias_source_output = alias_source_probe
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if alias_source_output.status.code() != Some(125)
+        || !String::from_utf8_lossy(&alias_source_output.stderr)
+            .contains("private source mount is not the exact selected child and destination")
+    {
+        return Err(format!(
+            "bound source alias did not refuse before target: exit={}, stderr={}",
+            alias_source_output.status,
+            String::from_utf8_lossy(&alias_source_output.stderr)
         ));
     }
     let mut process = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
@@ -748,11 +804,13 @@ fn main() {
             false,
             false,
             false,
+            false,
         )
     } else if args.get(1).is_some_and(|arg| arg == "child-held-writer") {
         child(
             args.get(2).map(String::as_str).unwrap_or(""),
             true,
+            false,
             false,
             false,
         )
@@ -762,10 +820,20 @@ fn main() {
             false,
             true,
             false,
+            false,
         )
     } else if args.get(1).is_some_and(|arg| arg == "child-wrong-source") {
         child(
             args.get(2).map(String::as_str).unwrap_or(""),
+            false,
+            false,
+            true,
+            false,
+        )
+    } else if args.get(1).is_some_and(|arg| arg == "child-alias-source") {
+        child(
+            args.get(2).map(String::as_str).unwrap_or(""),
+            false,
             false,
             false,
             true,
