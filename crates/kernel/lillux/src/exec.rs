@@ -74,7 +74,8 @@ pub struct InheritedDescriptorMapping {
 }
 
 impl InheritedDescriptorMapping {
-    fn source_descriptor(&self) -> Result<u32, String> {
+    /// Coordinate only; this does not transfer or duplicate the authority.
+    pub fn source_descriptor(&self) -> Result<u32, String> {
         #[cfg(unix)]
         {
             self.source.inherited_descriptor()
@@ -83,6 +84,11 @@ impl InheritedDescriptorMapping {
         {
             Err("mapped inherited descriptors are unavailable on this platform".to_owned())
         }
+    }
+
+    /// Child coordinate only; this does not transfer or duplicate authority.
+    pub fn target_descriptor(&self) -> u32 {
+        self.target_fd
     }
 }
 

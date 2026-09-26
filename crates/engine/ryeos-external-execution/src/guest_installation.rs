@@ -8,6 +8,10 @@
 use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_supervisor_descriptors::{
+    GuestSupervisorDescriptorPlan, SUPERVISOR_CANDIDATE_RUNTIME_FD,
+    SUPERVISOR_PRIVATE_PARENT_FD, fixed_guest_supervisor_descriptor_plan,
+};
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::staging_package::{GuestImportContext, GuestImportTicket};
 use serde::{Deserialize, Serialize};
@@ -114,6 +118,123 @@ pub struct PreparedGuestPrivateInputs {
     pub(crate) content: PreparedGuestContent,
     pub(crate) private_parent: lillux::PinnedDirectory,
     pub(crate) observation: GuestPrivateInputObservation,
+}
+
+impl PreparedGuestPrivateInputs {
+    /// Bind retained input handles to the supervisor's one fixed descriptor
+    /// plan. The request is consumed so a partial binding failure cannot be
+    /// reused as a launch request. This is a repeatable prelaunch observation,
+    /// not one-shot launch authority. Bootstrap, state root, launcher, durable
+    /// launch intent, and writer exclusion remain separate requirements.
+    pub fn bind_content_to_supervisor_request(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        mut request: lillux::SubprocessRequest,
+    ) -> Result<(lillux::SubprocessRequest, GuestSupervisorDescriptorPlan)> {
+        ensure!(
+            request.inherited_fds.is_empty() && request.inherited_fd_mappings.is_empty(),
+            "guest content binding requires an unbound subprocess request"
+        );
+        ensure!(
+            self.content._installed.recheck_for_adoption(context, inputs)?
+                == self.content.observation,
+            "installed guest base changed after content custody"
+        );
+        ensure!(
+            self.private_parent.identity()? == self.observation.private_parent,
+            "private guest parent changed after creation"
+        );
+        self.private_parent.require_owner_private_directory()?;
+        for scratch in &self.observation.scratch {
+            let name = format!("guest-scratch-{:02}", scratch.input_index);
+            let directory = self
+                .private_parent
+                .open_child_directory(OsStr::new(&name))?
+                .context("private guest scratch disappeared before descriptor binding")?;
+            directory.require_owner_private_directory()?;
+            ensure!(
+                directory.identity()? == scratch.directory
+                    && directory.entries_no_follow_bounded(0)?.is_empty(),
+                "private guest scratch changed before descriptor binding"
+            );
+        }
+        let plan = fixed_guest_supervisor_descriptor_plan(inputs)?;
+        ensure!(
+            plan.runtime_mount_descriptors.len() == self.content.handles.runtime_mounts.len()
+                && plan.content_record_descriptors.len()
+                    == self.content.handles.content_records.len(),
+            "prepared guest content differs from fixed supervisor descriptor plan"
+        );
+        self.content
+            ._installed
+            .runtime
+            .inherited_descriptor_authority()?
+            .bind_to_subprocess_request(&mut request, SUPERVISOR_CANDIDATE_RUNTIME_FD)
+            .map_err(anyhow::Error::msg)?;
+        self.private_parent
+            .inherited_descriptor_authority()?
+            .bind_to_subprocess_request(&mut request, SUPERVISOR_PRIVATE_PARENT_FD)
+            .map_err(anyhow::Error::msg)?;
+        match (
+            self.content.handles.workspace_outputs.as_ref(),
+            inputs.workspace_outputs.as_ref(),
+        ) {
+            (Some(handle), Some(_)) => handle
+                .bind_to_subprocess_request(
+                    &mut request,
+                    ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_WORKSPACE_OUTPUT_FD,
+                )
+                .map_err(anyhow::Error::msg)?,
+            (None, None) => {}
+            _ => anyhow::bail!("prepared guest workspace-output authority changed"),
+        }
+        for (handle, target) in self
+            .content
+            .handles
+            .runtime_mounts
+            .iter()
+            .zip(&plan.runtime_mount_descriptors)
+        {
+            handle
+                .as_ref()
+                .context("private guest input slot is absent")?
+                .bind_to_subprocess_request(&mut request, *target)
+                .map_err(anyhow::Error::msg)?;
+        }
+        for (handle, target) in self
+            .content
+            .handles
+            .content_records
+            .iter()
+            .zip(&plan.content_record_descriptors)
+        {
+            handle
+                .bind_to_subprocess_request(&mut request, *target)
+                .map_err(anyhow::Error::msg)?;
+        }
+        let mut expected_targets = vec![
+            SUPERVISOR_CANDIDATE_RUNTIME_FD,
+            SUPERVISOR_PRIVATE_PARENT_FD,
+        ];
+        if inputs.workspace_outputs.is_some() {
+            expected_targets.push(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_WORKSPACE_OUTPUT_FD,
+            );
+        }
+        expected_targets.extend(&plan.runtime_mount_descriptors);
+        expected_targets.extend(&plan.content_record_descriptors);
+        ensure!(
+            request
+                .inherited_fd_mappings
+                .iter()
+                .map(lillux::InheritedDescriptorMapping::target_descriptor)
+                .collect::<Vec<_>>()
+                == expected_targets,
+            "guest content binding differs from fixed supervisor descriptor subset"
+        );
+        Ok((request, plan))
+    }
 }
 
 impl PreparedGuestContent {

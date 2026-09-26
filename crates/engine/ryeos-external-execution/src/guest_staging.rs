@@ -1569,6 +1569,73 @@ mod tests {
                 .is_err(),
             "a second scratch directory must not replace the first identity"
         );
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let (bound, plan) = private
+            .bind_content_to_supervisor_request(&context, &inputs, request)
+            .unwrap();
+        assert_eq!(plan.execution_inputs.identity_digest().unwrap(), inputs.identity_digest().unwrap());
+        assert_eq!(bound.inherited_fd_mappings.len(), 2 + inputs.inputs.len() + inputs.record_descriptors().count());
+        let mut expected_targets = vec![
+            ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CANDIDATE_RUNTIME_FD,
+            ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_PRIVATE_PARENT_FD,
+        ];
+        expected_targets.extend(&plan.runtime_mount_descriptors);
+        expected_targets.extend(&plan.content_record_descriptors);
+        assert_eq!(
+            bound.inherited_fd_mappings.iter().map(lillux::InheritedDescriptorMapping::target_descriptor).collect::<Vec<_>>(),
+            expected_targets
+        );
+        for (mapping, handle) in bound.inherited_fd_mappings[2..2 + inputs.inputs.len()]
+            .iter()
+            .zip(&private.content.handles.runtime_mounts)
+        {
+            assert_eq!(mapping.source_descriptor().unwrap(), handle.as_ref().unwrap().inherited_descriptor().unwrap());
+        }
+        for (mapping, handle) in bound.inherited_fd_mappings[2 + inputs.inputs.len()..]
+            .iter()
+            .zip(&private.content.handles.content_records)
+        {
+            assert_eq!(mapping.source_descriptor().unwrap(), handle.inherited_descriptor().unwrap());
+        }
+        assert!(!expected_targets.contains(&ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
+        assert!(
+            private
+                .bind_content_to_supervisor_request(&context, &inputs, bound)
+                .is_err(),
+            "prebound descriptors must not enter guest content binding"
+        );
+        scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
+        let second_request = lillux::SubprocessRequest {
+            cmd: "/bin/true".into(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        assert!(
+            private
+                .bind_content_to_supervisor_request(&context, &inputs, second_request)
+                .is_err(),
+            "ambient private scratch content must refuse descriptor binding"
+        );
         drop(private);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
