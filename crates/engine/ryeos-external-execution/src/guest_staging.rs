@@ -835,9 +835,7 @@ mod tests {
             activation_request_digest: manifest.activation_request_digest.clone(),
             guest_input_identity: manifest.guest_input_identity.clone(),
             payload_sha256: lillux::sha256_hex(&bytes),
-            manifest_sha256: lillux::sha256_hex(
-                &ryeos_external_execution_contract::canonical_json(&manifest).unwrap(),
-            ),
+            manifest_sha256: manifest.identity_digest().unwrap(),
             framed_bytes: bytes.len() as u64,
             regular_bytes: manifest.total_regular_bytes,
             bootstrap_sha256: manifest.bootstrap_sha256.clone(),
@@ -1150,9 +1148,7 @@ mod tests {
         assert_eq!(prepared.manifest(), &produced_manifest);
         assert_eq!(
             prepared.manifest_sha256(),
-            lillux::sha256_hex(
-                &ryeos_external_execution_contract::canonical_json(&produced_manifest).unwrap()
-            )
+            produced_manifest.identity_digest().unwrap()
         );
         assert_eq!(prepared.bytes(), produced_bytes.len() as u64);
         assert_eq!(prepared.sha256(), lillux::sha256_hex(&produced_bytes));

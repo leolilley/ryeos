@@ -147,9 +147,7 @@ pub fn prepare_private_guest_package(
         }
         check?;
         require_time(deadline)?;
-        let manifest_sha256 = lillux::sha256_hex(
-            &ryeos_external_execution_contract::canonical_json(&manifest)?,
-        );
+        let manifest_sha256 = manifest.identity_digest()?;
         Ok((payload, manifest, manifest_sha256, bytes, sha256))
     })();
     match result {

@@ -146,7 +146,7 @@ impl GuestImportTicket {
                 && manifest.launcher_sha256 == self.launcher_sha256
                 && manifest.total_regular_bytes == self.regular_bytes
                 && manifest.framed_bytes()? == self.framed_bytes
-                && hex::encode(Sha256::digest(canonical_json(manifest)?)) == self.manifest_sha256,
+                && manifest.identity_digest()? == self.manifest_sha256,
             "verified guest package differs from retained import ticket"
         );
         Ok(())
@@ -236,6 +236,13 @@ enum RootKind<'a> {
 }
 
 impl GuestStagingPackageManifest {
+    /// Digest of the exact typed manifest encoding carried on the package
+    /// wire. Hashing a generic JSON value changes field order and therefore
+    /// does not identify these bytes.
+    pub fn identity_digest(&self) -> Result<String> {
+        Ok(hex::encode(Sha256::digest(canonical_json(self)?)))
+    }
+
     /// Decode only a bounded, duplicate-key-free manifest. Callers must still
     /// validate it against the retained activation before reading entry bytes.
     pub fn from_bounded_json(bytes: &[u8]) -> Result<Self> {
