@@ -301,11 +301,10 @@ impl ExternalCandidateQualificationUse {
     }
 }
 
-/// Admission ceiling for the profile-owned recipe. The launcher bootstrap
-/// carries both the admitted program and an independently checked projection
-/// of this recipe. Keeping the recipe below 96 KiB leaves more than 64 KiB for
-/// the fixed binding/program envelope inside its 256 KiB descriptor limit, so
-/// every admitted recipe remains representable after channel attachment.
+/// Admission ceiling for the profile-owned recipe. The signed structured-
+/// session profile carries this recipe inside its separately bounded contract;
+/// the launcher also carries its admitted program and an independently checked
+/// recipe projection. Each enclosing document must pass its own bound.
 pub const MAX_EXTERNAL_RUNTIME_RECIPE_BYTES: usize = 96 * 1024;
 
 /// Exact credential-free exec-server recipe selected by the signed worker

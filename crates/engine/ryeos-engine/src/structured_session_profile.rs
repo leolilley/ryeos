@@ -13,11 +13,11 @@ use serde_json::Value;
 
 use ryeos_state::objects::{
     AdmittedStructuredSessionProfile, MAX_SESSION_CONFIGURATION_FILE_BYTES,
-    SessionConfigurationFile, SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
+    MAX_STRUCTURED_SESSION_PROFILE_BYTES, SessionConfigurationFile,
+    SessionRuntimeConfigurationFile, validate_session_auxiliary_configs,
     validate_session_runtime_configs,
 };
 
-const MAX_PROFILE_BYTES: usize = 64 * 1024;
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 /// v10 commits an external provider's generated private configuration
@@ -54,7 +54,7 @@ pub fn compile(
     profile_bytes: &[u8],
     source_files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<AdmittedStructuredSessionProfile> {
-    if profile_bytes.is_empty() || profile_bytes.len() > MAX_PROFILE_BYTES {
+    if profile_bytes.is_empty() || profile_bytes.len() > MAX_STRUCTURED_SESSION_PROFILE_BYTES {
         bail!("structured-session profile is empty or exceeds its byte ceiling");
     }
     let profile: Value = serde_json::from_slice(profile_bytes)
@@ -2472,6 +2472,21 @@ mod tests {
         let external = compile(&serde_json::to_vec(&profile).unwrap(), &schemas()).unwrap();
         assert!(external.external_candidate_requirement().unwrap().is_some());
         assert_ne!(local.profile_hash, external.profile_hash);
+        let mut large_profile = profile.clone();
+        large_profile["external_candidate"]["runtime_recipe"]["arguments"] =
+            json!(["a".repeat(48 * 1024), "b".repeat(42 * 1024)]);
+        let large_bytes = serde_json::to_vec(&large_profile).unwrap();
+        assert!(large_bytes.len() > 64 * 1024);
+        let large = compile(&large_bytes, &schemas()).unwrap();
+        assert!(large.contract.to_string().len() > 64 * 1024);
+        let mut oversized_raw = large_bytes;
+        oversized_raw.resize(MAX_STRUCTURED_SESSION_PROFILE_BYTES + 1, b' ');
+        assert!(
+            compile(&oversized_raw, &schemas())
+                .unwrap_err()
+                .to_string()
+                .contains("byte ceiling")
+        );
         let mut reconciled = profile.clone();
         reconciled["external_candidate"]["required_lifecycle_capabilities"] =
             json!(["exact_allocation_reconciliation"]);

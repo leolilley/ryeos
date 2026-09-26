@@ -18,8 +18,8 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
-    ProducerPreparedImmutableFile,
-    ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
+    ProducerExecutableSource, ProducerPreparedImmutableFile, ProducerStdinSource,
+    ProductProducerRecipe,
 };
 use ryeos_state::external_execution::admission::{
     ExternalCandidateProcFilesystem, ExternalCandidateQualificationUse,
@@ -495,14 +495,16 @@ impl SelectedInput {
                 .external_candidate_qualification_context
                 .profile_hash,
             0o644,
-            64 * 1024,
+            u64::try_from(ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES)?,
         )?;
         let profile_file = roots
             .configurations
             .open_pinned_regular_descendant(Path::new("admitted-profile.json"), false)?
             .context("admitted profile member absent")?;
-        let profile_bytes =
-            profile_file.read_stable_bounded(&profile_file.observation()?, 64 * 1024)?;
+        let profile_bytes = profile_file.read_stable_bounded(
+            &profile_file.observation()?,
+            u64::try_from(ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES)?,
+        )?;
         let profile: serde_json::Value = serde_json::from_slice(&profile_bytes)?;
         ensure!(
             lillux::sha256_hex(&profile_bytes)

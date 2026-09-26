@@ -891,6 +891,10 @@ mod tests {
             let mut program = program();
             program.requirement.runtime_recipe.arguments = arguments;
             program.runtime_recipe_digest = program.requirement.runtime_recipe.digest()?;
+            program.qualification_use =
+                ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                    &program.requirement,
+                )?;
             let mut binding = binding();
             binding.candidate_program_digest = program.digest()?;
             ExternalCandidateLauncherSpec::from_admitted_program(

@@ -976,6 +976,10 @@ pub struct SessionConfigurationFile {
 }
 
 pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
+/// Bounds both authored profile input and its retained canonical contract.
+/// Leaves room for the 96 KiB external runtime recipe and other signed policy
+/// without accepting an unbounded document before parsing.
+pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
 pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
 
 /// Immutable data from captured worker source, mounted at an exact path in
@@ -1185,7 +1189,7 @@ impl AdmittedStructuredSessionProfile {
             .map(|contract| contract.validate())
             .transpose()?;
         let canonical = lillux::canonical_json(&self.contract)?;
-        if canonical.len() > 64 * 1024
+        if canonical.len() > MAX_STRUCTURED_SESSION_PROFILE_BYTES
             || lillux::sha256_hex(canonical.as_bytes()) != self.profile_hash
         {
             anyhow::bail!("structured-session contract contradicts its admitted hash");

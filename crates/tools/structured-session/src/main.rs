@@ -1000,11 +1000,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         .nth(1)
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
-    let profile_bytes = lillux::read_regular_file_bounded_no_follow(&profile_path, 64 * 1024)
-        .context("read structured-session profile through Lillux")?;
-    if profile_bytes.is_empty() || profile_bytes.len() > 64 * 1024 {
-        bail!("structured-session profile is empty or exceeds its bound");
-    }
+    let profile_bytes = read_admitted_profile_bytes(&profile_path)?;
     let profile: StructuredSessionProfile =
         serde_json::from_slice(&profile_bytes).context("decode structured-session profile")?;
     if profile.schema_version
@@ -1543,6 +1539,20 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
             _ => bail!("daemon sent a non-request frame"),
         }
     }
+}
+
+fn read_admitted_profile_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
+    let profile_bytes = lillux::read_regular_file_bounded_no_follow(
+        path,
+        u64::try_from(ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES)?,
+    )
+    .context("read structured-session profile through Lillux")?;
+    if profile_bytes.is_empty()
+        || profile_bytes.len() > ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES
+    {
+        bail!("structured-session profile is empty or exceeds its bound");
+    }
+    Ok(profile_bytes)
 }
 
 /// Verify the seed prepared by the daemon's persistent-session launch owner.
@@ -4443,6 +4453,21 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    #[test]
+    fn admitted_profile_file_accepts_new_bound_and_refuses_oversize() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("admitted-profile.json");
+        let bytes = vec![b' '; 96 * 1024];
+        std::fs::write(&profile, &bytes).unwrap();
+        assert_eq!(read_admitted_profile_bytes(&profile).unwrap(), bytes);
+        std::fs::write(
+            &profile,
+            vec![b' '; ryeos_state::objects::MAX_STRUCTURED_SESSION_PROFILE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_admitted_profile_bytes(&profile).is_err());
+    }
 
     #[test]
     fn invocation_identity_and_progress_ack_are_exact() {
