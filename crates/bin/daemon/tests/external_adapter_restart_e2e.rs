@@ -86,7 +86,9 @@ fn signed_codex_worker_source_admits_direct_qualification_profile() -> anyhow::R
             && requirement.runtime_product_declaration_id == "guest-runtime"
             && lillux::valid_hash(&admitted.source.binding_hash)
             && lillux::valid_hash(&admitted.source.content_manifest_hash)
-            && lillux::valid_hash(&admitted.profile.profile_hash),
+            && lillux::valid_hash(&admitted.profile.profile_hash)
+            && lillux::valid_hash(&admitted.signed_effective_definition_digest)
+            && lillux::valid_hash(&admitted.preselection_effective_definition_digest),
         "signed Codex Worker admission changed the direct qualification identity"
     );
     eprintln!(
@@ -95,12 +97,16 @@ fn signed_codex_worker_source_admits_direct_qualification_profile() -> anyhow::R
             "source_binding_hash":admitted.source.binding_hash,
             "source_content_manifest_hash":admitted.source.content_manifest_hash,
             "profile_hash":admitted.profile.profile_hash,
+            "bundle_generation_identity":admitted.bundle_generation_identity,
+            "signed_effective_definition_digest":admitted.signed_effective_definition_digest,
+            "preselection_effective_definition_digest":admitted.preselection_effective_definition_digest,
         })
     );
     Ok(())
 }
 
 fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::AdmittedWorkerEvidence> {
+    use anyhow::ensure;
     use std::sync::Arc;
 
     let root = tempfile::tempdir()?;
@@ -138,7 +144,32 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
             .with_composers(composers)
             .with_registered_bundle_roots(registered),
     );
-    admitted_worker_evidence::admit_worker(&state, "worker:codex/external-hosted-authoring")
+    let admitted =
+        admitted_worker_evidence::admit_worker(&state, "worker:codex/external-hosted-authoring")?;
+    let signed = state.engine.with_checked_bundle_generation(|generation| {
+        let resolution = generation.effective_resolution_output(
+            ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
+                    "worker:codex/external-hosted-authoring",
+                )?,
+                expected_kind: Some("worker".into()),
+                project_root: None,
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+            },
+        )?;
+        Ok::<_, anyhow::Error>((
+            generation.request_engine_generation_identity().to_owned(),
+            resolution.effective_definition_digest()?.as_str().to_owned(),
+        ))
+    })?;
+    ensure!(
+        admitted.bundle_generation_identity == signed.0
+            && admitted.signed_effective_definition_digest == signed.1
+            && admitted.preselection_effective_definition_digest != signed.1,
+        "signed Worker definition, captured source D0, or checked generation diverged"
+    );
+    Ok(admitted)
 }
 
 fn artifact(directory: &Path, name: &str) -> PathBuf {

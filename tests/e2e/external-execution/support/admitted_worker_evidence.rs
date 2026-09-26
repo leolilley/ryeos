@@ -1,15 +1,15 @@
 //! Test-only, non-circular Worker evidence from one signed source admission.
 //! This does not qualify a product or issue external-execution claims.
 
-use anyhow::{Context as _, Result, ensure};
-use ryeos_engine::{canonical_ref::CanonicalRef, contracts::SubjectResolutionAuthority};
-use ryeos_state::objects::{
-    AdmittedStructuredSessionProfile, EffectiveSourceClosureProjection, SOURCE_CLOSURE_DERIVED_KEY,
-};
+use anyhow::Result;
+use ryeos_state::objects::{AdmittedStructuredSessionProfile, EffectiveSourceClosureProjection};
 
 pub struct AdmittedWorkerEvidence {
+    pub bundle_generation_identity: String,
     pub source: EffectiveSourceClosureProjection,
     pub profile: AdmittedStructuredSessionProfile,
+    pub signed_effective_definition_digest: String,
+    pub preselection_effective_definition_digest: String,
 }
 
 /// Capture the signed Worker once, then compile the full profile from that
@@ -19,49 +19,14 @@ pub fn admit_worker(
     state: &ryeos_app::state::AppState,
     worker_ref: &str,
 ) -> Result<AdmittedWorkerEvidence> {
-    let roots = state.engine.resolution_roots(None);
-    let mut resolution =
-        state
-            .engine
-            .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
-                item_ref: CanonicalRef::parse(worker_ref)?,
-                expected_kind: Some("worker".into()),
-                project_root: None,
-                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
-            })?;
-    let captured = ryeos_app::source_closure_admission::admit_source_closure(
-        state,
-        &state.engine,
-        "worker",
-        &mut resolution,
-        &roots,
-        None,
-        None,
-    )?
-    .context("signed Worker has no admitted source closure")?;
-    let source = EffectiveSourceClosureProjection::from_value(
-        resolution
-            .composed
-            .derived
-            .get(SOURCE_CLOSURE_DERIVED_KEY)
-            .context("source admission omitted its exact projection")?,
+    let admitted = ryeos_app::source_closure_admission::admit_bundle_structured_worker_profile(
+        state, worker_ref,
     )?;
-    ensure!(
-        captured.binding().digest()? == source.binding_hash
-            && captured.manifest().digest()? == source.content_manifest_hash,
-        "signed Worker source projection differs from its captured closure"
-    );
-    let profile_authority = captured.source_authority()?;
-    let guard = profile_authority.acquire_shared_guard()?;
-    profile_authority.ensure_guard(&guard)?;
-    let profile = ryeos_app::source_closure_admission::compile_admitted_structured_worker_profile(
-        &captured, &guard,
-    )?;
-    drop(guard);
-    let publication = captured.into_publication();
-    profile.validate()?;
-    if let Some(publication) = publication {
-        publication.publish()?;
-    }
-    Ok(AdmittedWorkerEvidence { source, profile })
+    Ok(AdmittedWorkerEvidence {
+        bundle_generation_identity: admitted.bundle_generation_identity,
+        source: admitted.source,
+        profile: admitted.profile,
+        signed_effective_definition_digest: admitted.signed_effective_definition_digest,
+        preselection_effective_definition_digest: admitted.preselection_effective_definition_digest,
+    })
 }

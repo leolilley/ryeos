@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+use anyhow::{Context as _, ensure};
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
 use ryeos_engine::launch::plan_builder::ExecutorSourcePolicyProjection;
 use ryeos_engine::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
 use ryeos_engine::source_closure::{
@@ -15,6 +17,9 @@ use ryeos_engine::source_closure::{
     SourceRootRequest, SourceRootSelection,
 };
 use ryeos_state::PendingCasPublication;
+use ryeos_state::objects::{
+    AdmittedStructuredSessionProfile, EffectiveSourceClosureProjection, SOURCE_CLOSURE_DERIVED_KEY,
+};
 
 use crate::state::AppState;
 
@@ -87,6 +92,112 @@ pub fn compile_admitted_structured_worker_profile(
         anyhow::anyhow!("structured-session entry is absent from captured source")
     })?;
     ryeos_engine::structured_session_profile::compile(profile_bytes, &source_files)
+}
+
+/// One current signed Bundle Worker, captured before product selection. The
+/// effective definition here includes admitted source but no product result.
+/// It is not a qualification claim or applied-runtime testimony.
+pub struct AdmittedBundleStructuredWorkerProfile {
+    pub bundle_generation_identity: String,
+    pub source: EffectiveSourceClosureProjection,
+    pub profile: AdmittedStructuredSessionProfile,
+    pub signed_effective_definition_digest: String,
+    pub preselection_effective_definition_digest: String,
+    pub raw_content_digest: String,
+    pub publisher_fingerprint: String,
+}
+
+pub fn admit_bundle_structured_worker_profile(
+    state: &AppState,
+    worker_ref: &str,
+) -> anyhow::Result<AdmittedBundleStructuredWorkerProfile> {
+    let canonical = CanonicalRef::parse(worker_ref)?;
+    ensure!(
+        canonical.to_string() == worker_ref
+            && canonical.suffix.is_none()
+            && canonical.kind == "worker",
+        "structured-session Worker must be an exact Bundle ref"
+    );
+    let (admitted, publication) = state.engine.with_checked_bundle_generation(|generation| {
+        let roots = state.engine.resolution_roots(None);
+        let mut resolution =
+            generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                item_ref: canonical,
+                expected_kind: Some("worker".into()),
+                project_root: None,
+                subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+            })?;
+        ensure!(
+            resolution.root.resolved_ref == worker_ref
+                && resolution.effective_trust_class
+                    == ryeos_engine::resolution::TrustClass::TrustedBundle
+                && resolution.root.source_space == ItemSpace::Bundle
+                && matches!(resolution.root.source_root, ItemSourceRoot::Bundle { .. }),
+            "structured-session Worker must resolve from a trusted Bundle"
+        );
+        let raw_content_digest = resolution.root.raw_content_digest.clone();
+        let signed_effective_definition_digest = resolution
+            .effective_definition_digest()?
+            .as_str()
+            .to_owned();
+        let publisher_fingerprint = resolution
+            .root
+            .signer_fingerprint
+            .clone()
+            .context("trusted Worker has no publisher")?;
+        let captured = admit_source_closure(
+            state,
+            &state.engine,
+            "worker",
+            &mut resolution,
+            &roots,
+            None,
+            None,
+        )?
+        .context("signed Worker has no admitted source closure")?;
+        let source = EffectiveSourceClosureProjection::from_value(
+            resolution
+                .composed
+                .derived
+                .get(SOURCE_CLOSURE_DERIVED_KEY)
+                .context("source admission omitted its exact projection")?,
+        )?;
+        ensure!(
+            captured.binding().digest()? == source.binding_hash
+                && captured.manifest().digest()? == source.content_manifest_hash,
+            "signed Worker source projection differs from its captured closure"
+        );
+        let authority = captured.source_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let profile = compile_admitted_structured_worker_profile(&captured, &guard)?;
+        profile.validate()?;
+        drop(guard);
+        crate::effective_program_preparation::prepare_hookless_preselection_effective_program(
+            &state.engine,
+            "worker",
+            &mut resolution,
+        )?;
+        let preselection_effective_definition_digest = resolution
+            .effective_definition_digest()?
+            .as_str()
+            .to_owned();
+        Ok((
+            AdmittedBundleStructuredWorkerProfile {
+                bundle_generation_identity: generation.request_engine_generation_identity().into(),
+                source,
+                profile,
+                signed_effective_definition_digest,
+                preselection_effective_definition_digest,
+                raw_content_digest,
+                publisher_fingerprint,
+            },
+            captured.into_publication(),
+        ))
+    })?;
+    if let Some(publication) = publication {
+        publication.publish()?;
+    }
+    Ok(admitted)
 }
 
 pub fn admit_source_closure(
