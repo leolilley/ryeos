@@ -62,6 +62,14 @@ enum LauncherMessage {
         schema: u32,
         frame_digest: String,
     },
+    PollAppliedLaunch {
+        schema: u32,
+    },
+    AppliedLaunch {
+        schema: u32,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        receipt: Option<lillux::LinuxSandboxAppliedLaunchReceipt>,
+    },
     PollOutput {
         schema: u32,
         maximum_bytes: usize,
@@ -86,6 +94,16 @@ enum LauncherMessage {
         frame_digest: String,
         detail: String,
     },
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 pub struct InheritedExternalCandidateLauncherClient {
@@ -413,6 +431,29 @@ pub fn launch_prepared_external_candidate_supervisor(
 }
 
 impl InheritedExternalCandidateLauncherClient {
+    /// Exact local point read from the authenticated, already-bound launcher.
+    /// This does not journal the observation or authorize a qualification
+    /// claim; the protected supervisor must retain it separately.
+    pub fn poll_applied_launch(
+        &mut self,
+    ) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>> {
+        write_message(
+            &mut self.channel,
+            self.deadline,
+            &LauncherMessage::PollAppliedLaunch {
+                schema: PROTOCOL_SCHEMA,
+            },
+        )?;
+        match read_message(&mut self.channel, self.deadline)
+            .context("read dedicated launcher applied-launch response")?
+        {
+            LauncherMessage::AppliedLaunch { schema, receipt } if schema == PROTOCOL_SCHEMA => {
+                Ok(receipt)
+            }
+            _ => anyhow::bail!("dedicated launcher returned a mismatched applied-launch response"),
+        }
+    }
+
     pub fn authenticate(
         mut channel: lillux::InheritedDuplexChannel,
         binding: ExecutionChannelBinding,
@@ -1224,6 +1265,17 @@ pub fn serve_native_candidate_launcher(
                         },
                     )?;
                 }
+                LauncherMessage::PollAppliedLaunch { schema } if schema == PROTOCOL_SCHEMA => {
+                    let receipt = candidate.try_observe_applied_launch()?;
+                    write_message(
+                        &mut channel,
+                        candidate.control_io_deadline(deadline),
+                        &LauncherMessage::AppliedLaunch {
+                            schema: PROTOCOL_SCHEMA,
+                            receipt,
+                        },
+                    )?;
+                }
                 LauncherMessage::PollOutput {
                     schema,
                     maximum_bytes,
@@ -1331,6 +1383,57 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use lillux::crypto::SigningKey;
     use ryeos_state::external_execution::{ChannelDirection, ExecutionFrame, SignedExecutionFrame};
+
+    #[test]
+    fn applied_launch_point_read_requires_explicit_pending_or_complete_receipt() {
+        let pending = LauncherMessage::AppliedLaunch {
+            schema: PROTOCOL_SCHEMA,
+            receipt: None,
+        };
+        let pending_bytes = serde_json::to_vec(&pending).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<LauncherMessage>(&pending_bytes).unwrap(),
+            LauncherMessage::AppliedLaunch {
+                schema: PROTOCOL_SCHEMA,
+                receipt: None
+            }
+        ));
+        let mut missing: serde_json::Value = serde_json::from_slice(&pending_bytes).unwrap();
+        missing.as_object_mut().unwrap().remove("receipt");
+        assert!(serde_json::from_value::<LauncherMessage>(missing).is_err());
+        let mut unknown: serde_json::Value = serde_json::from_slice(&pending_bytes).unwrap();
+        unknown["ambient_process"] = serde_json::json!(42);
+        assert!(serde_json::from_value::<LauncherMessage>(unknown).is_err());
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        let complete = LauncherMessage::AppliedLaunch {
+            schema: PROTOCOL_SCHEMA,
+            receipt: Some(receipt.clone()),
+        };
+        assert!(matches!(
+            serde_json::from_slice::<LauncherMessage>(&serde_json::to_vec(&complete).unwrap())
+                .unwrap(),
+            LauncherMessage::AppliedLaunch {
+                schema: PROTOCOL_SCHEMA,
+                receipt: Some(observed)
+            } if observed == receipt
+        ));
+    }
 
     fn binding() -> (ExecutionChannelBinding, SigningKey) {
         let owner = lillux::crypto::generate_signing_key();
