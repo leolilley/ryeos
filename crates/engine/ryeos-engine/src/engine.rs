@@ -985,6 +985,16 @@ impl CheckedEngineGeneration<'_> {
         self.engine.effective_item_current(request)
     }
 
+    /// Resolve a complete execution definition while this exact installed
+    /// Bundle generation remains held. Multi-item authority joins must use
+    /// this guard instead of independently resolving each current item.
+    pub fn effective_resolution_output(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<crate::resolution::ResolutionOutput, EngineError> {
+        self.engine.effective_resolution_output_current(&request)
+    }
+
     pub fn effective_item_under_project_authority(
         &self,
         request: EffectiveItemRequest,
@@ -4292,6 +4302,16 @@ formats:
                 let results = generation.resolve_many(&ctx, &[item_ref.clone(), item_ref]);
                 assert_eq!(results.len(), 2);
                 assert!(results.into_iter().all(|result| result.is_err()));
+                assert!(
+                    generation
+                        .effective_resolution_output(EffectiveItemRequest {
+                            item_ref: CanonicalRef::parse("worker:missing").unwrap(),
+                            expected_kind: Some("worker".to_string()),
+                            project_root: None,
+                            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+                        })
+                        .is_err()
+                );
                 Ok(())
             })
             .unwrap();
