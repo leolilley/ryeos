@@ -288,6 +288,7 @@ pub async fn handle(
             resolve_current_bundle_producer_recipes_for_policy(
                 &state,
                 &prepared.policy_source,
+                &prepared.subject_manifest_hash,
             )
             .map_err(|error| HandlerError::BadRequest(format!(
                 "qualification producer recipe admission refused: {error:#}"

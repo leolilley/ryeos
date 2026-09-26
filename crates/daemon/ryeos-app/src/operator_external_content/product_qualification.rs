@@ -1235,7 +1235,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
             generation.request_engine_generation_identity(),
             &scenario.recipe_ref,
         )?;
-        require_direct_consumer_target(&current_policy, &current)?;
+        require_direct_consumer_target(&current_policy, &current, &purpose.subject_manifest_hash)?;
         state
             .node_policy
             .require::<NodeExecutionAdmissionPolicy>()?
@@ -1278,8 +1278,10 @@ pub fn admitted_root_producer_stdin(
 pub fn resolve_current_bundle_producer_recipes_for_policy(
     state: &AppState,
     policy_source: &ProductQualificationPolicySource,
+    subject_manifest_hash: &str,
 ) -> anyhow::Result<BTreeMap<String, ProductProducerRecipeSourceIdentity>> {
     policy_source.validate()?;
+    require_canonical_hash("qualification subject manifest", subject_manifest_hash)?;
     state.engine.with_checked_bundle_generation(|generation| {
         let current =
             resolve_current_bundle_qualification_policy(state, &policy_source.canonical_ref)?;
@@ -1293,7 +1295,7 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
                 generation.request_engine_generation_identity(),
                 &scenario.recipe_ref,
             )?;
-            require_direct_consumer_target(&current, &recipe)?;
+            require_direct_consumer_target(&current, &recipe, subject_manifest_hash)?;
             state
                 .node_policy
                 .require::<NodeExecutionAdmissionPolicy>()?
@@ -1310,14 +1312,20 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
 fn require_direct_consumer_target(
     policy: &ProductQualificationPolicySource,
     recipe: &CurrentBundleProducerRecipe,
+    subject_manifest_hash: &str,
 ) -> anyhow::Result<()> {
-    if policy.policy.consumer_execution_context.is_some()
-        && !matches!(
-            recipe.recipe.executable_source,
-            ProducerExecutableSource::AdmittedRealizationMember { .. }
-        )
-    {
-        bail!("consumer runtime qualification requires a direct admitted subject executable");
+    if policy.policy.consumer_execution_context.is_some() {
+        match &recipe.recipe.executable_source {
+            ProducerExecutableSource::AdmittedRealizationMember {
+                realization_id,
+                manifest_hash,
+                ..
+            } if realization_id == &policy.policy.subject_declaration_id
+                && manifest_hash == subject_manifest_hash => {}
+            _ => bail!(
+                "consumer runtime qualification requires the exact admitted subject executable"
+            ),
+        }
     }
     Ok(())
 }
