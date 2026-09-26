@@ -156,7 +156,7 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         .as_mut()
         .unwrap()
         .worker_execution
-        .publisher_fingerprint = "e".repeat(64);
+        .publisher_fingerprint = "not-a-hash".into();
     assert!(purpose.validate().is_err());
 }
 

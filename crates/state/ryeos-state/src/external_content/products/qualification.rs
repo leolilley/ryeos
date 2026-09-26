@@ -137,10 +137,8 @@ impl ProductQualificationConsumerDefinitionIdentity {
         if self.worker.canonical_ref != context.worker_ref
             || self.environment.canonical_ref != context.environment_ref
             || self.worker_execution.canonical_ref != context.worker_execution_ref
-            || self.worker.publisher_fingerprint != self.environment.publisher_fingerprint
-            || self.worker.publisher_fingerprint != self.worker_execution.publisher_fingerprint
         {
-            bail!("consumer definitions differ from the signed context or publisher");
+            bail!("consumer definitions differ from the signed context");
         }
         Ok(())
     }

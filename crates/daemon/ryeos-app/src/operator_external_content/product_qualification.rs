@@ -5,6 +5,9 @@
 //! that witness's signed relationship, projects facts from an already
 //! completed admitted verifier, and can publish that immutable testimony.
 
+#[cfg(test)]
+#[path = "product_qualification/consumer_definition_tests.rs"]
+mod consumer_definition_tests;
 pub mod launch;
 pub(super) mod runtime_identity;
 
