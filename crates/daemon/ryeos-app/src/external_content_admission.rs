@@ -693,6 +693,70 @@ pub fn admit_external_realizations_in_publication(
     )
 }
 
+/// Retain only the signed literal pins of a consumer whose product slot is
+/// still pending qualification. This is evidence input for an independently
+/// admitted verifier, never a launchable realization of the consumer: the
+/// ordinary admission path must continue to require a qualified selection.
+pub(crate) fn admit_pending_consumer_literal_realizations_in_publication(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    kind: &str,
+    resolution: &mut ryeos_engine::resolution::ResolutionOutput,
+    roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    publication: &mut Option<PendingCasPublication>,
+) -> anyhow::Result<(
+    AdmittedExternalRealizations,
+    Vec<ExternalContentDeclaration>,
+)> {
+    let contract = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.external_content_contract())
+        .ok_or_else(|| anyhow::anyhow!("pending consumer has no signed content contract"))?;
+    let declarer = ryeos_engine::external_content::declaring_authority(resolution)?;
+    let shape = ryeos_engine::external_content::authored_external_content_shape(
+        &resolution.composed.composed,
+        Some(contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer has no signed content shape"))?;
+    if shape.product_slots.is_empty()
+        || ryeos_engine::external_content::resolved_external_product_selections(resolution)?
+            .is_some()
+    {
+        anyhow::bail!("literal-only admission requires an unselected product slot");
+    }
+    let declarations = ryeos_engine::external_content::external_content_declarations_for_binding(
+        resolution,
+        Some(contract),
+        declarer,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer has no literal declarations"))?;
+    if declarations.is_empty()
+        || declarations.iter().any(|declaration| {
+            declaration.mode != ryeos_engine::external_content::ExternalContentMode::Pinned
+                || declaration.locator.is_some()
+                || declaration.digest.is_none()
+        })
+    {
+        anyhow::bail!("pending consumer literals must be exact retained pins");
+    }
+    let admitted = admit_declarations_in_publication(
+        state,
+        Some(engine),
+        Some(roots),
+        resolution,
+        Some(contract),
+        declarations.clone(),
+        &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        None,
+        publication,
+        kind,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("pending consumer produced no literal realization"))?;
+    Ok((admitted, declarations))
+}
+
 /// Admit the locator-free pinned declarations of a prepared content
 /// dependency. The signed launch policy supplies only mechanical ceilings;
 /// manifest identity and consumer binding remain owned by the resolved item

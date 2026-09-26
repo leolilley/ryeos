@@ -11,8 +11,9 @@ use ryeos_state::external_content::products::qualification::{
 
 use super::{
     admit_current_bundle_consumer_worker, consumer_definition_identity,
-    prepare_current_bundle_consumer_environment, require_consumer_worker_matches_definitions,
-    resolve_consumer_definition_in_generation, resolve_current_bundle_consumer_definitions,
+    prepare_current_bundle_consumer_environment, prepare_current_bundle_consumer_worker_literals,
+    require_consumer_worker_matches_definitions, resolve_consumer_definition_in_generation,
+    resolve_current_bundle_consumer_definitions,
     resolve_current_bundle_consumer_environment_definition,
     resolve_current_bundle_qualification_policy,
 };
@@ -199,6 +200,20 @@ product_qualification_policy:
     ensure!(
         unavailable.to_string().contains("no retained manifest"),
         "consumer environment refused before its external-content admission boundary: {unavailable}"
+    );
+    let unavailable_worker = prepare_current_bundle_consumer_worker_literals(
+        &state,
+        &policy_source,
+        &relationship,
+        "config:codex/guest-runtime-products",
+    )
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("uninstalled Worker literal pins were admitted"))?;
+    ensure!(
+        unavailable_worker
+            .to_string()
+            .contains("no retained manifest"),
+        "consumer Worker refused before literal pin admission: {unavailable_worker}"
     );
     state.engine.with_checked_bundle_generation(|generation| {
         let mut worker = resolve_consumer_definition_in_generation(

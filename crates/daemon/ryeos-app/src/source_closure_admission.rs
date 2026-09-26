@@ -125,6 +125,17 @@ impl PreparedBundleStructuredWorkerProfile {
         }
         Ok(self.admitted)
     }
+
+    /// Transfer the source roots into a larger admission transaction. Its
+    /// owner must keep this stage until all joined inputs have been checked.
+    pub fn into_staged_parts(
+        self,
+    ) -> (
+        AdmittedBundleStructuredWorkerProfile,
+        Option<PendingCasPublication>,
+    ) {
+        (self.admitted, self.publication)
+    }
 }
 
 pub fn admit_bundle_structured_worker_profile(

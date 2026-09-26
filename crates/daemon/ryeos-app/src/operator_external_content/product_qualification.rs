@@ -45,7 +45,8 @@ use ryeos_state::external_content::products::qualification_publication::{
 use ryeos_state::external_content::products::transfer::ProductWitnessSource;
 use ryeos_state::objects::{
     Attestation, ExecutableSearchPathEntry, ExternalContentKind, ExternalContentMode,
-    ExternalContentRealizationSet, SessionProcessEnvironmentValue, ThreadSnapshot, ThreadStatus,
+    ExternalContentRealizationSet, SOURCE_CLOSURE_DERIVED_KEY, SessionProcessEnvironmentValue,
+    ThreadSnapshot, ThreadStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -766,6 +767,18 @@ pub(super) struct PreparedBundleConsumerEnvironment {
     publication: Option<ryeos_state::PendingCasPublication>,
 }
 
+/// Proof inputs for a direct verifier, not a runnable Worker. The source and
+/// literal content share one staged CAS publication; the selected product
+/// remains unselected, so ordinary Worker admission is still impossible here.
+/// This preparatory value has no publication method: the future launch owner
+/// must retain the complete stage under its exact verifier purpose before use.
+pub(super) struct PreparedBundleConsumerWorkerLiterals {
+    pub definitions: ProductQualificationConsumerDefinitionIdentity,
+    pub source: crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
+    pub literal_realizations: ExternalContentRealizationSet,
+    publication: Option<ryeos_state::PendingCasPublication>,
+}
+
 impl PreparedBundleConsumerEnvironment {
     pub fn admitted(&self) -> &AdmittedBundleConsumerEnvironment {
         &self.admitted
@@ -805,6 +818,130 @@ pub(super) fn prepare_current_bundle_consumer_environment(
             realizations,
             realized_effective_definition_digest,
         },
+        publication,
+    }))
+}
+
+pub(super) fn prepare_current_bundle_consumer_worker_literals(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+    relationship_ref: &str,
+) -> anyhow::Result<Option<PreparedBundleConsumerWorkerLiterals>> {
+    let Some(definitions) =
+        resolve_current_bundle_consumer_definitions(state, policy_source, relationship)?
+    else {
+        return Ok(None);
+    };
+    let context = policy_source
+        .policy
+        .consumer_execution_context
+        .as_ref()
+        .context("qualification consumer context is absent")?;
+    let source = crate::source_closure_admission::prepare_bundle_structured_worker_profile(
+        state,
+        &context.worker_ref,
+    )?;
+    require_consumer_worker_matches_definitions(&definitions, source.admitted())?;
+    let (source, source_publication) = source.into_staged_parts();
+    let mut publication = Some(
+        source_publication.context("qualification Worker source has no staged CAS publication")?,
+    );
+    let literal_realizations = state.engine.with_checked_bundle_generation(|generation| {
+        if generation.request_engine_generation_identity() != definitions.bundle_generation_identity
+        {
+            bail!("qualification Worker changed Bundle generation before literal admission");
+        }
+        let mut resolution =
+            resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
+        if consumer_definition_identity(&resolution)? != definitions.worker {
+            bail!("qualification Worker changed signed definition before literal admission");
+        }
+        let relationship_definition =
+            resolve_consumer_definition_in_generation(generation, relationship_ref, "config")?;
+        let signed_relationships =
+            ryeos_state::external_content::products::composition::ProductRelationships::from_value(
+                relationship_definition
+                    .composed
+                    .composed
+                    .get("product_relationships")
+                    .context("qualification product relationship Config has no relationships")?
+                    .clone(),
+            )?;
+        if signed_relationships.select(&relationship.name)? != relationship {
+            bail!("qualification relationship differs from its current signed Config");
+        }
+        let contract = state
+            .engine
+            .kinds
+            .get("worker")
+            .and_then(|schema| schema.external_content_contract())
+            .context("qualification Worker has no signed content contract")?;
+        let declarer = ryeos_engine::external_content::declaring_authority(&resolution)?;
+        let shape = ryeos_engine::external_content::authored_external_content_shape(
+            &resolution.composed.composed,
+            Some(contract),
+            declarer,
+        )?
+        .context("qualification Worker has no signed content shape")?;
+        if shape.product_slots.len() != 1
+            || shape.product_slots[0].id != context.product_declaration_id
+            || shape.product_slots[0].relationship != relationship.name
+            || shape.product_slots[0].relationship_ref != relationship_ref
+        {
+            bail!("qualification Worker product slot differs from signed relationship");
+        }
+        resolution
+            .composed
+            .derived
+            .insert(SOURCE_CLOSURE_DERIVED_KEY.into(), source.source.to_value()?);
+        crate::effective_program_preparation::prepare_hookless_preselection_effective_program(
+            &state.engine,
+            "worker",
+            &mut resolution,
+        )?;
+        if resolution.effective_definition_digest()?.as_str()
+            != source.preselection_effective_definition_digest
+        {
+            bail!("qualification Worker source-derived D0 changed before literal admission");
+        }
+        let roots = state.engine.resolution_roots(None);
+        let (_admitted, declarations) = crate::external_content_admission::
+                admit_pending_consumer_literal_realizations_in_publication(
+                    state,
+                    &state.engine,
+                    "worker",
+                    &mut resolution,
+                    &roots,
+                    &mut publication,
+                )?;
+        let literals = ExternalContentRealizationSet::from_value(
+            resolution
+                .composed
+                .derived
+                .get(EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                .context("qualification Worker omitted literal realization projection")?,
+        )?;
+        if literals.iter().len() != declarations.len()
+            || declarations.iter().any(|declaration| {
+                !literals.iter().any(|realized| {
+                    realized.id == declaration.id
+                        && realized.kind == declaration.kind
+                        && realized.mode == declaration.mode
+                        && Some(realized.manifest_hash.as_str()) == declaration.digest.as_deref()
+                        && realized.mount_root == declaration.mount_root
+                        && realized.mount == declaration.mount
+                })
+            })
+        {
+            bail!("qualification Worker literals differ from signed declarations");
+        }
+        Ok(literals)
+    })?;
+    Ok(Some(PreparedBundleConsumerWorkerLiterals {
+        definitions,
+        source,
+        literal_realizations,
         publication,
     }))
 }
