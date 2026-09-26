@@ -1616,7 +1616,7 @@ mod tests {
                 .is_err(),
             "prebound descriptors must not enter guest content binding"
         );
-        scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
+        let ambient = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
         let second_request = lillux::SubprocessRequest {
             cmd: "/bin/true".into(),
             argv0: None,
@@ -1636,7 +1636,27 @@ mod tests {
                 .is_err(),
             "ambient private scratch content must refuse descriptor binding"
         );
-        drop(private);
+        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient).unwrap());
+        let artifacts = private.prepare_launch_artifacts_once(&context, &inputs).unwrap();
+        assert_eq!(artifacts.observation.schema, 1);
+        assert_eq!(artifacts.observation.state_root, artifacts.state_root.identity().unwrap());
+        assert_eq!(artifacts.bootstrap_source.regular_file_observation().unwrap().size(), bootstrap.len() as u64);
+        assert_eq!(artifacts.supervisor.regular_file_observation().unwrap().size(), supervisor.len() as u64);
+        assert_eq!(artifacts.launcher.regular_file_observation().unwrap().size(), launcher.len() as u64);
+        assert!(artifacts.state_root.entries_no_follow_bounded(0).unwrap().is_empty());
+        assert!(artifacts.private.private_parent.entries_no_follow_bounded(1).is_ok());
+        let wrong_context = GuestImportContext {
+            binding_hash: context.binding_hash,
+            allocation_request_digest: context.allocation_request_digest,
+            occurrence_id: "different-occurrence",
+            activation_request_digest: context.activation_request_digest,
+        };
+        assert!(artifacts.seal_supervisor_bootstrap(&wrong_context, &inputs).is_err());
+        assert!(
+            artifacts.seal_supervisor_bootstrap(&context, &inputs).is_err(),
+            "a digest-matched but non-protocol bootstrap cannot become FD50 authority"
+        );
+        drop(artifacts);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
             &ticket,

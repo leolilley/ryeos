@@ -13,7 +13,9 @@ use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_PRIVATE_PARENT_FD, fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
-use ryeos_external_execution_contract::staging_package::{GuestImportContext, GuestImportTicket};
+use ryeos_external_execution_contract::staging_package::{
+    GuestImportContext, GuestImportTicket, GuestStagingEntry,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::guest_staging::{
@@ -25,6 +27,7 @@ const OWNER_DIRECTORY: &str = "guest-import-owner";
 const OWNER_RECORD_NAME: &str = "occurrence-owner.json";
 const CANDIDATE_RUNTIME_DIRECTORY: &str = "candidate-runtime";
 const CANDIDATE_PRIVATE_DIRECTORY: &str = "candidate-private";
+const SUPERVISOR_STATE_DIRECTORY: &str = "supervisor-state";
 const RECORD_NAME: &str = "guest-base-install-intent.json";
 const STAGE_MARKER_NAME: &str = "guest-base-install-owner.json";
 const MAX_RECORD_BYTES: u64 = 8 * 1024;
@@ -118,6 +121,173 @@ pub struct PreparedGuestPrivateInputs {
     pub(crate) content: PreparedGuestContent,
     pub(crate) private_parent: lillux::PinnedDirectory,
     pub(crate) observation: GuestPrivateInputObservation,
+}
+
+/// Exact opened package artifacts and fresh state retained alongside the
+/// installed base. The bootstrap source is a regular package file, not the
+/// sealed memfd required at supervisor FD50. This remains neither writer
+/// exclusion nor launch authority.
+pub struct PreparedGuestLaunchArtifacts {
+    pub(crate) private: PreparedGuestPrivateInputs,
+    pub(crate) state_root: lillux::PinnedDirectory,
+    pub(crate) bootstrap_source: lillux::InheritedDescriptorAuthority,
+    pub(crate) supervisor: lillux::InheritedDescriptorAuthority,
+    pub(crate) launcher: lillux::InheritedDescriptorAuthority,
+    pub(crate) observation: GuestLaunchArtifactObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestLaunchArtifactObservation {
+    pub schema: u32,
+    pub state_root: lillux::PinnedDirectoryIdentity,
+    pub bootstrap: lillux::PinnedRegularFileIdentity,
+    pub supervisor: lillux::PinnedRegularFileIdentity,
+    pub launcher: lillux::PinnedRegularFileIdentity,
+}
+
+impl PreparedGuestLaunchArtifacts {
+    /// Re-read the exact opened package source, validate its canonical secret
+    /// bootstrap against the independently retained occurrence and projection,
+    /// then mint the sealed FD50 input required by the supervisor. No regular
+    /// package file may be bound directly at that coordinate.
+    pub fn seal_supervisor_bootstrap(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<lillux::InheritedDescriptorAuthority> {
+        let source = &self.bootstrap_source;
+        let ticket = self.private.content._installed.imported.ticket();
+        ticket.validate_for_context(context)?;
+        ensure!(
+            ticket.guest_input_identity == inputs.identity_digest()?,
+            "supervisor bootstrap ticket differs from retained guest input"
+        );
+        let (bytes, observed) = source.read_regular_file_stable_bounded(
+            ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES
+                as u64,
+        )?;
+        ensure!(
+            // The ticket's bootstrap digest is supplied from the controller's
+            // exact retained activation, not derived from package bytes. It
+            // binds every field, including controller and owner authority.
+            lillux::sha256_hex(&bytes) == ticket.bootstrap_sha256
+                && observed.permission_mode()? == 0o600,
+            "opened supervisor bootstrap source changed before sealing"
+        );
+        let bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bytes).context("decode imported supervisor bootstrap")?;
+        ensure!(
+            bootstrap.canonical_bytes()? == bytes
+                && bootstrap.occurrence_id == context.occurrence_id
+                && bootstrap.allocation_request_digest == context.allocation_request_digest
+                && bootstrap.base_snapshot_hash == inputs.base_snapshot.snapshot_hash
+                && bootstrap.guest_input_identity == inputs.identity_digest()?
+                && bootstrap.launcher_artifact_hash == ticket.launcher_sha256,
+            "imported supervisor bootstrap differs from retained occurrence authority"
+        );
+        lillux::sealed_memfd(c"ryeos-external-supervisor-bootstrap", &bytes)
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+impl PreparedGuestPrivateInputs {
+    /// Open and verify the three exact package artifacts, then create the
+    /// state root once under the retained occurrence. A failed or crashed
+    /// preparation leaves this occurrence fenced against a second owner.
+    pub fn prepare_launch_artifacts_once(
+        self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<PreparedGuestLaunchArtifacts> {
+        self.content._installed.recheck_for_adoption(context, inputs)?;
+        let imported = &self.content._installed.imported;
+        let (bootstrap_source, bootstrap_identity) = open_verified_guest_artifact(
+            imported,
+            "bootstrap",
+            &imported.ticket().bootstrap_sha256,
+            false,
+        )?;
+        let (supervisor, supervisor_identity) = open_verified_guest_artifact(
+            imported,
+            "supervisor",
+            &imported.ticket().supervisor_sha256,
+            true,
+        )?;
+        let (launcher, launcher_identity) = open_verified_guest_artifact(
+            imported,
+            "launcher",
+            &imported.ticket().launcher_sha256,
+            true,
+        )?;
+        let state_root = self
+            .content
+            ._installed
+            .owner
+            .occurrence
+            .create_child(OsStr::new(SUPERVISOR_STATE_DIRECTORY), 0o700)?;
+        state_root.require_owner_private_directory()?;
+        ensure!(
+            state_root.entries_no_follow_bounded(0)?.is_empty(),
+            "new supervisor state root contains ambient content"
+        );
+        state_root.require_disjoint_directory_tree(&self.content._installed.runtime)?;
+        state_root.require_disjoint_directory_tree(&self.private_parent)?;
+        state_root.require_disjoint_directory_tree(imported.root())?;
+        let observation = GuestLaunchArtifactObservation {
+            schema: 1,
+            state_root: state_root.identity()?,
+            bootstrap: bootstrap_identity,
+            supervisor: supervisor_identity,
+            launcher: launcher_identity,
+        };
+        Ok(PreparedGuestLaunchArtifacts {
+            private: self,
+            state_root,
+            bootstrap_source,
+            supervisor,
+            launcher,
+            observation,
+        })
+    }
+}
+
+fn open_verified_guest_artifact(
+    imported: &TicketedGuestImport,
+    name: &str,
+    expected_hash: &str,
+    executable: bool,
+) -> Result<(lillux::InheritedDescriptorAuthority, lillux::PinnedRegularFileIdentity)> {
+    let (expected_bytes, expected_mode) = imported
+        .manifest()
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            GuestStagingEntry::RegularFile {
+                path, bytes, mode, ..
+            } if path == name => Some((*bytes, *mode)),
+            _ => None,
+        })
+        .with_context(|| format!("guest {name} is absent from its manifest"))?;
+    let file = imported
+        .root()
+        .open_pinned_regular(OsStr::new(name), false)?
+        .with_context(|| format!("guest {name} disappeared before handle custody"))?;
+    let observation = file.observation()?;
+    ensure!(
+        observation.size() == expected_bytes
+            && file.permission_mode()? == expected_mode
+            && file.digest_stable_exact(&observation)? == expected_hash,
+        "opened guest {name} differs from retained package identity"
+    );
+    let authority = file.inherited_descriptor_authority()?;
+    if executable {
+        authority.require_owned_executable()?;
+    } else {
+        authority.require_owned_regular()?;
+    }
+    let identity = lillux::pinned_regular_file_identity(&file.try_clone_descriptor()?)?;
+    Ok((authority, identity))
 }
 
 impl PreparedGuestPrivateInputs {
