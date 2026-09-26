@@ -508,6 +508,7 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
             activation,
             guest_input_identity,
             guest_package,
+            import_ticket,
             ..
         } => activate(
             adapter_executable,
@@ -518,6 +519,7 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
             activation,
             guest_input_identity,
             guest_package,
+            import_ticket,
         )?,
         LifecycleAdapterRequest::ReconcileSupervisorActivation {
             occurrence,
@@ -624,6 +626,7 @@ fn activate(
     activation: &ryeos_external_execution_contract::SupervisorActivationIntent,
     guest_input_identity: &str,
     guest_package: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
+    import_ticket: &ryeos_external_execution_contract::staging_package::GuestImportTicket,
 ) -> Result<LifecycleAdapterResponse> {
     let occurrence_root = require_occurrence(root, request, occurrence)?;
     let Some(phase_lock) = occurrence_root.try_lock_exclusive()? else {
@@ -724,15 +727,19 @@ fn activate(
         "synthetic guest package descriptor changed at handoff"
     );
     let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
-    let expected = ryeos_external_execution_contract::staging_package::GuestStagingExpected {
-        inputs: &bootstrap.guest_inputs,
-        activation_request_digest: &activation.activation_request_digest,
-        bootstrap_sha256: &bootstrap_sha256,
-        supervisor_sha256: &retained.supervisor_digest,
-        launcher_sha256: &retained.launcher_digest,
-        maximum_regular_bytes: guest_package.regular_bytes,
-        maximum_framed_bytes: guest_package.framed_bytes,
+    let import_context = ryeos_external_execution_contract::staging_package::GuestImportContext {
+        binding_hash: &request.common().binding_hash,
+        allocation_request_digest: &occurrence.request_digest,
+        occurrence_id: &retained.occurrence_id,
+        activation_request_digest: &retained.activation_request_digest,
     };
+    ensure!(
+        import_ticket.bootstrap_sha256 == bootstrap_sha256
+            && import_ticket.supervisor_sha256 == retained.supervisor_digest
+            && import_ticket.launcher_sha256 == retained.launcher_digest,
+        "synthetic import ticket changed retained bootstrap or executable authority"
+    );
+    let expected = import_ticket.staging_expected(&import_context, &bootstrap.guest_inputs)?;
     let mut reader = package.stable_regular_reader_exact(
         guest_package.framed_bytes,
         &guest_package.payload_sha256,
@@ -750,11 +757,12 @@ fn activate(
         return Err(error);
     }
     let installation = (|| -> Result<()> {
-        ensure!(
-            staged.manifest().total_regular_bytes == guest_package.regular_bytes
-                && staged.manifest().identity_digest()? == guest_package.manifest_sha256,
-            "synthetic package manifest contradicts durable delivery commitment"
-        );
+        import_ticket.validate_verified_manifest(
+            &import_context,
+            staged.manifest(),
+            &guest_package.payload_sha256,
+            guest_package.framed_bytes,
+        )?;
         ryeos_external_execution::guest_content::recheck_staged_guest_content(
             &staged,
             &bootstrap.guest_inputs,

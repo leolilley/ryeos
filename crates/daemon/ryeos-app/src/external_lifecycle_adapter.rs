@@ -686,12 +686,12 @@ impl ExecutableExternalPlacementBackend {
             &reservation.binding_hash,
             &intent.activation_request_digest,
         );
-        let package_authority = if reconcile {
-            None
+        let (package_authority, import_ticket) = if reconcile {
+            (None, None)
         } else {
-            let package = activation_authority
-                .context("first lifecycle activation has no guest package authority")?
-                .prepared_guest_package()?;
+            let activation_authority = activation_authority
+                .context("first lifecycle activation has no guest package authority")?;
+            let package = activation_authority.prepared_guest_package()?;
             ensure!(
                 package.sha256() == intent.delivery.payload_sha256
                     && package.manifest_sha256() == intent.delivery.manifest_sha256
@@ -699,7 +699,38 @@ impl ExecutableExternalPlacementBackend {
                     && package.manifest().total_regular_bytes == intent.delivery.regular_bytes,
                 "prepared guest package changed after durable activation claim"
             );
-            Some(package.delivery_descriptor()?)
+            let ticket = ryeos_external_execution_contract::staging_package::GuestImportTicket {
+                schema:
+                    ryeos_external_execution_contract::staging_package::GUEST_IMPORT_TICKET_SCHEMA,
+                binding_hash: reservation.binding_hash.clone(),
+                allocation_request_digest: reservation.request_digest.clone(),
+                occurrence_id: occurrence.occurrence_id.clone(),
+                activation_request_digest: intent.activation_request_digest.clone(),
+                guest_input_identity: intent.guest_input_identity.clone(),
+                payload_sha256: intent.delivery.payload_sha256.clone(),
+                manifest_sha256: intent.delivery.manifest_sha256.clone(),
+                framed_bytes: intent.delivery.framed_bytes,
+                regular_bytes: intent.delivery.regular_bytes,
+                bootstrap_sha256: lillux::sha256_hex(
+                    &activation_authority.bootstrap().canonical_bytes()?,
+                ),
+                supervisor_sha256: contract.supervisor_artifact_hash.clone(),
+                launcher_sha256: contract.launcher_artifact_hash.clone(),
+                maximum_regular_bytes: contract.max_guest_package_regular_bytes,
+                maximum_framed_bytes: contract.max_guest_package_framed_bytes,
+            };
+            ticket.validate_verified_manifest(
+                &ryeos_external_execution_contract::staging_package::GuestImportContext {
+                    binding_hash: &reservation.binding_hash,
+                    allocation_request_digest: &reservation.request_digest,
+                    occurrence_id: &occurrence.occurrence_id,
+                    activation_request_digest: &intent.activation_request_digest,
+                },
+                package.manifest(),
+                package.sha256(),
+                package.bytes(),
+            )?;
+            (Some(package.delivery_descriptor()?), Some(ticket))
         };
         let request = if reconcile {
             LifecycleAdapterRequest::ReconcileSupervisorActivation {
@@ -713,6 +744,7 @@ impl ExecutableExternalPlacementBackend {
                 occurrence: occurrence_wire,
                 activation,
                 guest_input_identity: intent.guest_input_identity.clone(),
+                import_ticket: import_ticket.context("first activation lost its import ticket")?,
                 guest_package: LifecycleGuestPackageDelivery {
                     descriptor: package_authority
                         .as_ref()

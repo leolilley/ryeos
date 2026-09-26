@@ -969,6 +969,9 @@ pub enum LifecycleAdapterRequest {
         /// must never be interpreted as adapter-local file descriptors.
         guest_input_identity: String,
         guest_package: LifecycleGuestPackageDelivery,
+        /// Carried separately from package bytes. The guest must still join
+        /// this against independently retained placement before import.
+        import_ticket: staging_package::GuestImportTicket,
     },
     ReconcileSupervisorActivation {
         common: LifecycleOperationCommon,
@@ -1195,16 +1198,34 @@ impl LifecycleAdapterRequest {
                 reservation.validate()
             }
             Self::ActivateSupervisor {
+                common,
                 occurrence,
                 activation,
                 guest_input_identity,
                 guest_package,
+                import_ticket,
                 ..
             } => {
                 occurrence.validate()?;
                 activation.validate()?;
                 digest(guest_input_identity, "lifecycle guest input identity")?;
-                guest_package.validate()
+                guest_package.validate()?;
+                import_ticket.validate_for_context(&staging_package::GuestImportContext {
+                    binding_hash: &common.binding_hash,
+                    allocation_request_digest: &occurrence.request_digest,
+                    occurrence_id: &occurrence.occurrence_id,
+                    activation_request_digest: &activation.activation_request_digest,
+                })?;
+                ensure!(
+                    import_ticket.guest_input_identity == *guest_input_identity
+                        && import_ticket.payload_sha256 == guest_package.payload_sha256
+                        && import_ticket.manifest_sha256 == guest_package.manifest_sha256
+                        && import_ticket.regular_bytes == guest_package.regular_bytes
+                        && import_ticket.framed_bytes == guest_package.framed_bytes
+                        && import_ticket.launcher_sha256 == activation.launcher_artifact_hash,
+                    "lifecycle guest import ticket contradicts activation delivery"
+                );
+                Ok(())
             }
             Self::ReconcileSupervisorActivation {
                 occurrence,
@@ -2171,6 +2192,84 @@ mod tests {
         assert!(from_json_slice_strict::<LifecycleAdapterRequest>(unknown, 1024).is_err());
         let duplicate = br#"{"operation":"allocate","operation":"terminate"}"#;
         assert!(from_json_slice_strict::<Value>(duplicate, 1024).is_err());
+    }
+
+    #[test]
+    fn activation_import_ticket_is_separate_and_exactly_correlated() {
+        let digest = |byte: char| byte.to_string().repeat(64);
+        let activation = SupervisorActivationIntent {
+            activation_request_digest: digest('a'),
+            supervisor_runtime_hash: digest('b'),
+            launcher_artifact_hash: digest('c'),
+            attachment_deadline_ms: 1,
+            execution_timeout_seconds: 1,
+            post_execution_timeout_seconds: 1,
+            channel_max_bytes: 1024,
+        };
+        let occurrence = BoundOccurrence {
+            request_digest: digest('d'),
+            occurrence_id: "occ-test".into(),
+        };
+        let package = LifecycleGuestPackageDelivery {
+            descriptor: 60,
+            payload_sha256: digest('e'),
+            manifest_sha256: digest('f'),
+            regular_bytes: 100,
+            framed_bytes: 200,
+        };
+        let ticket = staging_package::GuestImportTicket {
+            schema: staging_package::GUEST_IMPORT_TICKET_SCHEMA,
+            binding_hash: common().binding_hash,
+            allocation_request_digest: occurrence.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: activation.activation_request_digest.clone(),
+            guest_input_identity: digest('1'),
+            payload_sha256: package.payload_sha256.clone(),
+            manifest_sha256: package.manifest_sha256.clone(),
+            framed_bytes: package.framed_bytes,
+            regular_bytes: package.regular_bytes,
+            bootstrap_sha256: digest('2'),
+            // Executable bytes and runtime manifest are different identities.
+            supervisor_sha256: digest('3'),
+            launcher_sha256: activation.launcher_artifact_hash.clone(),
+            maximum_regular_bytes: 1000,
+            maximum_framed_bytes: 2000,
+        };
+        let request = LifecycleAdapterRequest::ActivateSupervisor {
+            common: common(),
+            occurrence,
+            activation,
+            guest_input_identity: digest('1'),
+            guest_package: package,
+            import_ticket: ticket,
+        };
+        request.validate().unwrap();
+        let encoded = request.canonical_bytes().unwrap();
+        let decoded: LifecycleAdapterRequest =
+            from_json_slice_strict(&encoded, encoded.len()).unwrap();
+        assert_eq!(decoded, request);
+        for field in [
+            "binding_hash",
+            "allocation_request_digest",
+            "occurrence_id",
+            "activation_request_digest",
+            "guest_input_identity",
+            "payload_sha256",
+            "manifest_sha256",
+            "launcher_sha256",
+        ] {
+            let mut changed = serde_json::to_value(&request).unwrap();
+            changed["import_ticket"][field] = serde_json::json!(if field == "occurrence_id" {
+                "occ-other".to_owned()
+            } else {
+                digest('9')
+            });
+            let changed: LifecycleAdapterRequest = serde_json::from_value(changed).unwrap();
+            assert!(
+                changed.validate().is_err(),
+                "accepted changed ticket {field}"
+            );
+        }
     }
 
     #[test]
