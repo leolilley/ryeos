@@ -109,6 +109,7 @@ pub struct StagedGuestOccurrence {
 /// An ordinary pinned directory exists only for structural unit fixtures.
 enum GuestSourceCustody {
     Live(lillux::sandbox::LinuxPrivateSourceFilesystem),
+    Sealed(lillux::sandbox::LinuxSealedPrivateSourceFilesystem),
     #[cfg(test)]
     StructuralFixture(lillux::PinnedDirectory),
 }
@@ -117,8 +118,20 @@ impl GuestSourceCustody {
     fn root(&self) -> &lillux::PinnedDirectory {
         match self {
             Self::Live(source) => source.root(),
+            Self::Sealed(source) => source.root(),
             #[cfg(test)]
             Self::StructuralFixture(root) => root,
+        }
+    }
+
+    fn seal_after_install(self) -> Result<Self> {
+        match self {
+            Self::Live(source) => Ok(Self::Sealed(
+                source.seal_read_only().map_err(anyhow::Error::msg)?,
+            )),
+            Self::Sealed(_) => anyhow::bail!("guest private source was already sealed"),
+            #[cfg(test)]
+            Self::StructuralFixture(root) => Ok(Self::StructuralFixture(root)),
         }
     }
 }
@@ -1189,13 +1202,18 @@ impl StagedGuestOccurrence {
         let intent_identity = prepared.identity.clone();
         prepared.install_once()?;
         let children = inspect_installed_runtime_children(&runtime)?;
+        // The imported package is no longer writable before any launch
+        // preparation can consume these exact staged descriptors. A failed
+        // seal leaves the create-only installation intent uncertain; it does
+        // not authorize a second import or another base copy.
+        let source = self.source.seal_after_install()?;
         Ok(InstalledGuestBase {
             owner: self.owner,
             imported: self.imported,
             runtime,
             intent_identity,
             children,
-            _source: self.source,
+            _source: source,
         })
     }
 }
