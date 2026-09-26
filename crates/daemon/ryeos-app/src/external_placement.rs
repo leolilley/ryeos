@@ -1836,6 +1836,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             &credential,
             &generic_program,
         )?;
+        if existing.is_none() {
+            require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+        }
         let authority_generation = ryeos_state::objects::canonical_value_digest(
             &serde_json::json!({
                 "domain":"ryeos.external-direct-channel-authority.v1", "placement_thread_id":placement,
@@ -2069,6 +2072,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             &credential,
             &AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
         )?;
+        if existing.is_none() {
+            require_guest_package_artifact_floor(&contract, backend.as_ref())?;
+        }
         let contact_gate = self
             .state
             .external_placement_backends
@@ -3101,6 +3107,14 @@ impl PreparedExternalPlacement {
     /// one allowed allocator call. A false claim is reconciliation authority,
     /// never permission to allocate again.
     pub(crate) fn claim(self) -> Result<ExternalPlacementContactDecision> {
+        // A Reserved record can be re-entered after daemon restart without
+        // passing through fresh preparation. Check the exact retained
+        // executable floor at the final pre-contact boundary as well. Never
+        // impose a new startup refusal on an already-contacted obligation;
+        // those paths must remain able to reconcile and clean up.
+        if self.record.phase == ExternalAllocationPhase::Reserved {
+            require_guest_package_artifact_floor(&self.contract, self.backend.as_ref())?;
+        }
         ensure!(
             self.contact_gate
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -3654,6 +3668,50 @@ impl ExternalPlacementReconciliation {
         self.state_store
             .external_allocation(placement)?
             .context("external allocation disappeared after cleanup observation")
+    }
+}
+
+/// Refuse a fresh allocation that cannot possibly carry its two exact
+/// executable roots. The occurrence-bound bootstrap and complete inventory
+/// are still checked when the final package is prepared after allocation;
+/// this lower bound is only an early, provider-contact-free refusal.
+fn require_guest_package_artifact_floor(
+    contract: &ExternalPlacementBackendContract,
+    backend: &dyn ExternalPlacementBackend,
+) -> Result<()> {
+    let (_, supervisor_bytes) = backend.supervisor_artifact();
+    let (_, launcher_bytes) = backend.launcher_artifact();
+    require_guest_package_artifact_floor_bytes(
+        contract.max_guest_package_regular_bytes,
+        supervisor_bytes,
+        launcher_bytes,
+    )
+}
+
+fn require_guest_package_artifact_floor_bytes(
+    maximum_regular_bytes: u64,
+    supervisor_bytes: u64,
+    launcher_bytes: u64,
+) -> Result<()> {
+    let executable_bytes = supervisor_bytes
+        .checked_add(launcher_bytes)
+        .context("external guest executable byte floor overflow")?;
+    ensure!(
+        executable_bytes <= maximum_regular_bytes,
+        "external guest executable roots exceed the signed regular package budget before allocation"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod guest_package_artifact_floor_tests {
+    use super::require_guest_package_artifact_floor_bytes;
+
+    #[test]
+    fn refuses_impossible_signed_budget_before_allocation() {
+        assert!(require_guest_package_artifact_floor_bytes(9, 4, 5).is_ok());
+        assert!(require_guest_package_artifact_floor_bytes(8, 4, 5).is_err());
+        assert!(require_guest_package_artifact_floor_bytes(u64::MAX, u64::MAX, 1).is_err());
     }
 }
 
@@ -5687,6 +5745,42 @@ mod tests {
     #[test]
     fn replacement_controller_quarantines_ambiguous_contact_without_provider_io() {
         replacement_controller_fence_fixture(true);
+    }
+
+    #[test]
+    fn reopened_reserved_allocation_refuses_impossible_package_before_contact() {
+        let (predecessor, reservation, binding, predecessor_lifetime, lock_path) =
+            placement_store_fixture();
+        drop(predecessor);
+        drop(predecessor_lifetime);
+
+        let (reopened, replacement_lifetime) = reopen_placement_store(&lock_path);
+        let backend = Arc::new(FaultBackend::new());
+        let gate = Arc::new(AtomicBool::new(false));
+        let mut prepared = prepared_fixture(
+            reopened.clone(),
+            backend.clone(),
+            &reservation,
+            &binding,
+            gate.clone(),
+            replacement_lifetime,
+        );
+        assert_eq!(prepared.record.phase, ExternalAllocationPhase::Reserved);
+        // The exact two executable roots are 4096 bytes each. An older
+        // retained reservation must not bypass the new pre-contact check.
+        prepared.contract.max_guest_package_regular_bytes = 8191;
+        let error = prepared.claim().err().expect("undersized package was admitted");
+        assert!(error.to_string().contains("before allocation"), "{error:#}");
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 0);
+        assert!(!gate.load(Ordering::SeqCst));
+        assert_eq!(
+            reopened
+                .external_allocation(&reservation.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Reserved
+        );
     }
 
     #[test]
