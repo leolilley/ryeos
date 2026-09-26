@@ -360,6 +360,13 @@ pub(super) fn prove(
         }
     };
     let scoped_proof = if let Some(candidate) = scoped_attempt.as_ref() {
+        // Re-resolve at proof, not only at launch/release. A clean observation
+        // of a different signed recipe cannot qualify the consumer runtime.
+        super::resolve_current_bundle_producer_recipe_for_purpose(
+            state,
+            purpose,
+            &candidate.scenario_id,
+        )?;
         let settlement = state
             .state_store
             .latest_thread_process_settlement(&terminal.thread_id)?
@@ -452,7 +459,11 @@ fn require_zero_participant_lane(
 ) -> anyhow::Result<()> {
     use ryeos_engine::protocol_vocabulary::CallbackChannel;
     if !matches!(
-        (has_scoped_attempt, requires_qualification_purpose, callback_channel),
+        (
+            has_scoped_attempt,
+            requires_qualification_purpose,
+            callback_channel
+        ),
         (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
     ) {
         bail!(
@@ -742,6 +753,11 @@ pub(in crate::operator_external_content) fn verify_current(
         if current_recipe.source_identity()? != scoped.producer_source {
             bail!("current scoped qualification recipe source changed");
         }
+        super::require_direct_consumer_target(
+            &current_policy,
+            &current_recipe,
+            &evidence.result.subject_manifest_hash,
+        )?;
     }
     for required in required {
         let retained = proof
