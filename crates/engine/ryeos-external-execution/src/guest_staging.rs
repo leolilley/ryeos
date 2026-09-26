@@ -1782,20 +1782,20 @@ mod tests {
         let prepared = artifacts
             .prepare_supervisor_request(&context, &inputs, 10.0)
             .unwrap();
-        let mut actual_targets = prepared
-            .request
+        let (request, plan, bootstrap_sha256, supervisor_source) = prepared.inspect_for_test();
+        let mut actual_targets = request
             .inherited_fd_mappings
             .iter()
             .map(lillux::InheritedDescriptorMapping::target_descriptor)
             .collect::<Vec<_>>();
         actual_targets.sort_unstable();
-        let mut expected_targets = prepared.plan.inherited_descriptors.clone();
+        let mut expected_targets = plan.inherited_descriptors.clone();
         expected_targets.sort_unstable();
         assert_eq!(actual_targets, expected_targets);
         assert!(!actual_targets.contains(&ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
-        assert_eq!(prepared.request.cmd, "/proc/self/fd/57");
-        assert_eq!(prepared.bootstrap_sha256, lillux::sha256_hex(&bootstrap));
-        let sealed_mapping = prepared.request.inherited_fd_mappings.iter().find(|mapping| {
+        assert_eq!(request.cmd, "/proc/self/fd/57");
+        assert_eq!(bootstrap_sha256, lillux::sha256_hex(&bootstrap));
+        let sealed_mapping = request.inherited_fd_mappings.iter().find(|mapping| {
             mapping.target_descriptor()
                 == ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_BOOTSTRAP_FD
         }).unwrap();
@@ -1806,13 +1806,13 @@ mod tests {
             ).unwrap(),
             bootstrap
         );
-        let executable = prepared.request.inherited_fd_mappings.iter().find(|mapping| {
+        let executable = request.inherited_fd_mappings.iter().find(|mapping| {
             mapping.target_descriptor()
                 == ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_EXECUTABLE_FD
         }).unwrap();
         assert_eq!(
             executable.source_descriptor().unwrap(),
-            prepared._artifacts.supervisor.inherited_descriptor().unwrap()
+            supervisor_source.inherited_descriptor().unwrap()
         );
         drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(

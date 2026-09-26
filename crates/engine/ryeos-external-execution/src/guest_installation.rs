@@ -141,10 +141,31 @@ pub struct PreparedGuestLaunchArtifacts {
 /// Full exact descriptor proposal. This cannot spawn: the owner must first
 /// establish writer exclusion and commit its durable outer launch intent.
 pub struct PreparedGuestSupervisorRequest {
-    pub(crate) _artifacts: PreparedGuestLaunchArtifacts,
-    pub(crate) request: lillux::SubprocessRequest,
-    pub(crate) plan: GuestSupervisorDescriptorPlan,
-    pub(crate) bootstrap_sha256: String,
+    _artifacts: PreparedGuestLaunchArtifacts,
+    request: lillux::SubprocessRequest,
+    plan: GuestSupervisorDescriptorPlan,
+    bootstrap_sha256: String,
+}
+
+#[cfg(test)]
+impl PreparedGuestSupervisorRequest {
+    /// Structural inspection only. Production code has no way to extract the
+    /// raw request until an outer writer-fenced launch transition exists.
+    pub(crate) fn inspect_for_test(
+        &self,
+    ) -> (
+        &lillux::SubprocessRequest,
+        &GuestSupervisorDescriptorPlan,
+        &str,
+        &lillux::InheritedDescriptorAuthority,
+    ) {
+        (
+            &self.request,
+            &self.plan,
+            &self.bootstrap_sha256,
+            &self._artifacts.supervisor,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
