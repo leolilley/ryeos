@@ -101,6 +101,65 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
     assert!(policy.validate().is_err());
 }
 
+#[test]
+fn launch_purpose_retains_same_generation_consumer_definitions() {
+    let mut purpose = launch_purpose();
+    let context = ProductQualificationConsumerExecutionContext {
+        worker_ref: "worker:codex/external-hosted-authoring".into(),
+        product_declaration_id: "guest-runtime".into(),
+        environment_ref: "config:codex/environments/external-authoring".into(),
+        worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+        environment_binding: "environment".into(),
+    };
+    purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+    assert!(purpose.validate().is_err());
+    let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
+        canonical_ref: reference.into(),
+        raw_content_digest: "a".repeat(64),
+        effective_definition_digest: "b".repeat(64),
+        publisher_fingerprint: "c".repeat(64),
+    };
+    purpose.consumer_definitions = Some(ProductQualificationConsumerDefinitionIdentity {
+        bundle_generation_identity: "generation-1".into(),
+        worker: definition(&context.worker_ref),
+        environment: definition(&context.environment_ref),
+        worker_execution: definition(&context.worker_execution_ref),
+    });
+    purpose.validate().unwrap();
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .environment
+        .canonical_ref = "config:codex/environments/other".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .environment
+        .canonical_ref = context.environment_ref.clone();
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .bundle_generation_identity
+        .clear();
+    assert!(purpose.validate().is_err());
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .bundle_generation_identity = "generation-1".into();
+    purpose
+        .consumer_definitions
+        .as_mut()
+        .unwrap()
+        .worker_execution
+        .publisher_fingerprint = "e".repeat(64);
+    assert!(purpose.validate().is_err());
+}
+
 #[cfg(test)]
 fn launch_purpose() -> ProductQualificationLaunchPurpose {
     let policy = policy();
@@ -118,6 +177,7 @@ fn launch_purpose() -> ProductQualificationLaunchPurpose {
             publisher_fingerprint: "e".repeat(64),
             policy: policy.clone(),
         },
+        consumer_definitions: None,
         producer_recipe_sources: BTreeMap::new(),
         subject_declaration_id: policy.subject_declaration_id.clone(),
         subject_manifest_hash: "f".repeat(64),

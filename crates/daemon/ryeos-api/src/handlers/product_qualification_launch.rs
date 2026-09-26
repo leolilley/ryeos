@@ -300,6 +300,7 @@ pub async fn handle(
         witness_source: prepared.witness_source.clone(),
         relationship_name: prepared.relationship.name.clone(),
         policy_source: prepared.policy_source.clone(),
+        consumer_definitions: None,
         producer_recipe_sources,
         subject_declaration_id: prepared.policy_source.policy.subject_declaration_id.clone(),
         subject_manifest_hash: prepared.subject_manifest_hash.clone(),

@@ -595,6 +595,7 @@ fn admit_selected_qualification(
         qualification::resolve_current_bundle_qualification_policy(state, policy_ref)?;
     if let Some(consumer_context) = &current_policy.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+        bail!("qualification consumer execution context has no authenticated closure proof");
     }
     let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
         state,

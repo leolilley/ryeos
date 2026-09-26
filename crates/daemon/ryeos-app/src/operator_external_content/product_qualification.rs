@@ -31,6 +31,7 @@ use ryeos_state::external_content::products::publication::{
 };
 use ryeos_state::external_content::products::qualification::{
     PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, ProductProducerRecipeSourceIdentity,
+    ProductQualificationBundleDefinitionIdentity, ProductQualificationConsumerDefinitionIdentity,
     ProductQualificationEvidence, ProductQualificationPolicySource, ProductQualificationResult,
     ProductQualificationVerifier,
 };
@@ -234,6 +235,7 @@ fn prove_with_guard(
     let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
     if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+        bail!("qualification consumer execution context has no authenticated closure proof");
     }
     let root = state
         .state_store
@@ -617,7 +619,16 @@ pub(super) fn resolve_current_bundle_qualification_policy(
     state: &AppState,
     policy_ref: &str,
 ) -> anyhow::Result<ProductQualificationPolicySource> {
-    let resolution = resolve_current_trusted_bundle(state, policy_ref, Some("config"))?;
+    state.engine.with_checked_bundle_generation(|generation| {
+        resolve_current_bundle_qualification_policy_in_generation(generation, policy_ref)
+    })
+}
+
+fn resolve_current_bundle_qualification_policy_in_generation(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    policy_ref: &str,
+) -> anyhow::Result<ProductQualificationPolicySource> {
+    let resolution = resolve_consumer_definition_in_generation(generation, policy_ref, "config")?;
     let policy = ryeos_state::external_content::products::qualification::ProductQualificationPolicy::from_value(
         resolution
             .composed
@@ -641,6 +652,94 @@ pub(super) fn resolve_current_bundle_qualification_policy(
     };
     source.validate()?;
     Ok(source)
+}
+
+/// Read the three signed consumer definitions under one checked Bundle
+/// generation. This is definition identity only; Worker D0 must be derived
+/// after source admission and before product selection. Neither that source
+/// closure nor runtime behavior is proved here.
+pub(super) fn resolve_current_bundle_consumer_definitions(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+) -> anyhow::Result<Option<ProductQualificationConsumerDefinitionIdentity>> {
+    let Some(context) = &policy_source.policy.consumer_execution_context else {
+        return Ok(None);
+    };
+    context.validate_relationship_consumer(&relationship.consumer)?;
+    state.engine.with_checked_bundle_generation(|generation| {
+        let current_policy = resolve_current_bundle_qualification_policy_in_generation(
+            generation,
+            &policy_source.canonical_ref,
+        )?;
+        if current_policy != *policy_source {
+            bail!("qualification consumer policy changed during definition admission");
+        }
+        let worker =
+            resolve_consumer_definition_in_generation(generation, &context.worker_ref, "worker")?;
+        let environment = resolve_consumer_definition_in_generation(
+            generation,
+            &context.environment_ref,
+            "config",
+        )?;
+        let worker_execution = resolve_consumer_definition_in_generation(
+            generation,
+            &context.worker_execution_ref,
+            "worker_execution",
+        )?;
+        let definitions = ProductQualificationConsumerDefinitionIdentity {
+            bundle_generation_identity: generation.request_engine_generation_identity().into(),
+            worker: consumer_definition_identity(&worker)?,
+            environment: consumer_definition_identity(&environment)?,
+            worker_execution: consumer_definition_identity(&worker_execution)?,
+        };
+        definitions.validate_for(context)?;
+        Ok(Some(definitions))
+    })
+}
+
+fn resolve_consumer_definition_in_generation(
+    generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
+    item_ref: &str,
+    kind: &str,
+) -> anyhow::Result<ResolutionOutput> {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)?;
+    if canonical.to_string() != item_ref || canonical.suffix.is_some() || canonical.kind != kind {
+        bail!("qualification consumer definition must be an exact {kind} Bundle ref");
+    }
+    let resolution =
+        generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: canonical,
+            expected_kind: Some(kind.into()),
+            project_root: None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
+        })?;
+    if resolution.root.resolved_ref != item_ref
+        || resolution.effective_trust_class != TrustClass::TrustedBundle
+        || resolution.root.source_space != ItemSpace::Bundle
+        || !matches!(resolution.root.source_root, ItemSourceRoot::Bundle { .. })
+        || resolution.root.signer_fingerprint.is_none()
+    {
+        bail!("qualification consumer definition must resolve from a trusted Bundle");
+    }
+    Ok(resolution)
+}
+
+fn consumer_definition_identity(
+    resolution: &ResolutionOutput,
+) -> anyhow::Result<ProductQualificationBundleDefinitionIdentity> {
+    let identity = ProductQualificationBundleDefinitionIdentity {
+        canonical_ref: resolution.root.resolved_ref.clone(),
+        raw_content_digest: resolution.root.raw_content_digest.clone(),
+        effective_definition_digest: resolution.effective_definition_digest()?.as_str().into(),
+        publisher_fingerprint: resolution
+            .root
+            .signer_fingerprint
+            .clone()
+            .context("consumer Bundle definition has no publisher")?,
+    };
+    identity.validate()?;
+    Ok(identity)
 }
 
 /// Re-resolve a finite producer scenario from the exact current signed Bundle

@@ -89,6 +89,63 @@ pub struct ProductQualificationConsumerExecutionContext {
     pub environment_binding: String,
 }
 
+/// Same-generation signed definition coordinates, before source capture and
+/// product selection. This is not an admitted Worker closure or a claim grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerDefinitionIdentity {
+    pub bundle_generation_identity: String,
+    pub worker: ProductQualificationBundleDefinitionIdentity,
+    pub environment: ProductQualificationBundleDefinitionIdentity,
+    pub worker_execution: ProductQualificationBundleDefinitionIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationBundleDefinitionIdentity {
+    pub canonical_ref: String,
+    pub raw_content_digest: String,
+    pub effective_definition_digest: String,
+    pub publisher_fingerprint: String,
+}
+
+impl ProductQualificationBundleDefinitionIdentity {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_canonical_unsuffixed_ref("consumer Bundle definition", &self.canonical_ref)?;
+        validate_hash("consumer Bundle source", &self.raw_content_digest)?;
+        validate_hash(
+            "consumer Bundle effective definition",
+            &self.effective_definition_digest,
+        )?;
+        validate_hash("consumer Bundle publisher", &self.publisher_fingerprint)
+    }
+}
+
+impl ProductQualificationConsumerDefinitionIdentity {
+    pub fn validate_for(
+        &self,
+        context: &ProductQualificationConsumerExecutionContext,
+    ) -> anyhow::Result<()> {
+        context.validate()?;
+        exact_coordinate(
+            "consumer Bundle generation",
+            &self.bundle_generation_identity,
+        )?;
+        self.worker.validate()?;
+        self.environment.validate()?;
+        self.worker_execution.validate()?;
+        if self.worker.canonical_ref != context.worker_ref
+            || self.environment.canonical_ref != context.environment_ref
+            || self.worker_execution.canonical_ref != context.worker_execution_ref
+            || self.worker.publisher_fingerprint != self.environment.publisher_fingerprint
+            || self.worker.publisher_fingerprint != self.worker_execution.publisher_fingerprint
+        {
+            bail!("consumer definitions differ from the signed context or publisher");
+        }
+        Ok(())
+    }
+}
+
 impl ProductQualificationConsumerExecutionContext {
     pub fn validate(&self) -> anyhow::Result<()> {
         for (label, reference, kind) in [
@@ -214,6 +271,10 @@ pub struct ProductQualificationLaunchPurpose {
     pub witness_source: ProductWitnessSource,
     pub relationship_name: String,
     pub policy_source: ProductQualificationPolicySource,
+    /// Exact pre-selection definitions resolved from one checked installed
+    /// Bundle generation. Still not source-closure or execution testimony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_definitions: Option<ProductQualificationConsumerDefinitionIdentity>,
     /// Exact signed source for every scenario the verifier may later select.
     /// A Config ref alone cannot prevent recipe drift after root admission.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -282,6 +343,14 @@ impl ProductQualificationLaunchPurpose {
         self.witness_source.validate()?;
         validate_name(&self.relationship_name)?;
         self.policy_source.validate()?;
+        match (
+            &self.policy_source.policy.consumer_execution_context,
+            &self.consumer_definitions,
+        ) {
+            (Some(context), Some(definitions)) => definitions.validate_for(context)?,
+            (None, None) => {}
+            _ => bail!("qualification purpose consumer definitions differ from signed policy"),
+        }
         if self.producer_recipe_sources.len() != self.policy_source.policy.producer_scenarios.len()
         {
             bail!("qualification purpose does not pin every signed producer scenario");

@@ -131,6 +131,12 @@ pub fn prepare_after_reservation(
     let policy_source = super::resolve_current_bundle_qualification_policy(state, policy_ref)?;
     if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+        let _definitions = super::resolve_current_bundle_consumer_definitions(
+            state,
+            &policy_source,
+            &relationship,
+        )?
+        .context("signed consumer definitions are absent")?;
         // A declaration is not a current admitted Worker/environment/profile
         // closure. Refuse before verifier or provider contact until that
         // authenticated join is retained and rechecked at proof/selection.
