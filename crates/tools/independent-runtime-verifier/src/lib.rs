@@ -1862,6 +1862,9 @@ mod tests {
             direct.request_sha256(),
             lillux::sha256_hex(&std::fs::read(direct_guest.join("guest-request.json")).unwrap())
         );
+        std::fs::set_permissions(&direct_home, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(staging::reopen_direct_target_probe(&selected, &root, &parameters).is_err());
+        std::fs::set_permissions(&direct_home, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(direct_guest.join("candidate/ambient"), b"not frozen").unwrap();
         assert!(direct.recheck_preflight(&parameters).is_err());
         let reopened = staging::reopen_direct_target_probe(&selected, &root, &parameters).unwrap();

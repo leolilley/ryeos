@@ -1055,6 +1055,10 @@ impl StagedDirectTargetProbe {
         self.occurrence.ensure_path_binding()?;
         self.guest.ensure_path_binding()?;
         self.home.ensure_path_binding()?;
+        self.prepared.require_owner_private_directory()?;
+        self.occurrence.require_owner_private_directory()?;
+        self.guest.require_owner_private_directory()?;
+        self.home.require_owner_private_directory()?;
         self.controller.ensure_path_binding()?;
         super::exact_member(
             &self.controller,

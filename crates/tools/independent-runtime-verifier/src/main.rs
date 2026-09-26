@@ -52,6 +52,26 @@ async fn main() -> Result<()> {
         staged.recheck_preflight(&parameters)?;
         return run_scenario_driver(&parameters, &staged);
     }
+    let thread_id = std::env::var("RYEOS_THREAD_ID")
+        .context("admitted verifier root thread identity absent")?;
+    let client = UdsRuntimeClient::from_env()?;
+    if project.open_child_directory(OsStr::new("prepared"))?.is_some() {
+        // A new verifier process cannot inherit the original relay, pipe or
+        // provider transcript. Reopening sealed files may aid diagnosis, but
+        // never permits restaging or another START under this accepted root.
+        let reopened = staging::reopen_direct_target_probe(&selected, &project, &parameters);
+        let resumed = client.resume_scoped_child(&thread_id).await;
+        let cleanup = match &resumed {
+            Ok(locator) => {
+                abort_known_scoped_locators(&client, &thread_id, std::slice::from_ref(locator)).await
+            }
+            Err(_) => Vec::new(),
+        };
+        bail!(
+            "direct verifier preparation already exists; sealed reopen={:?}; exact resume={resumed:?}; cleanup={cleanup:?}",
+            reopened.map(|_| ())
+        );
+    }
     let (_, expected_request) = selected.prepare_native_probe_request(&project, &parameters)?;
     let expected_request_sha256 = lillux::sha256_hex(&expected_request);
     let direct_stage = staging::stage_direct_target_probe(&selected, &project, &parameters)?;
@@ -67,9 +87,6 @@ async fn main() -> Result<()> {
     )?;
     let provider_endpoint = challenge.publish_provider_endpoint(&socket_name)?;
     let provider = provider.start()?;
-    let thread_id = std::env::var("RYEOS_THREAD_ID")
-        .context("admitted verifier root thread identity absent")?;
-    let client = UdsRuntimeClient::from_env()?;
     let expected_source: ProductProducerRecipeSourceIdentity = serde_json::from_value(
         client
             .scoped_child_expected_source(&thread_id, PRODUCER_SCENARIO_ID)
