@@ -10,8 +10,8 @@ use ryeos_state::external_content::products::qualification::{
 
 use super::{
     admit_current_bundle_consumer_worker, consumer_definition_identity,
-    require_consumer_worker_matches_definitions, resolve_consumer_definition_in_generation,
-    resolve_current_bundle_consumer_definitions,
+    prepare_current_bundle_consumer_environment, require_consumer_worker_matches_definitions,
+    resolve_consumer_definition_in_generation, resolve_current_bundle_consumer_definitions,
     resolve_current_bundle_consumer_environment_definition,
     resolve_current_bundle_qualification_policy,
 };
@@ -186,6 +186,18 @@ product_qualification_policy:
             && environment.executable_search[0].relative_directory == "bin"
             && environment.process_environment.contains_key("TMPDIR"),
         "signed consumer environment definition did not match its executable closure"
+    );
+    let unavailable =
+        prepare_current_bundle_consumer_environment(&state, &policy_source, &relationship)
+            .err()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "uninstalled authoring-tools content was admitted as an exact realization"
+                )
+            })?;
+    ensure!(
+        unavailable.to_string().contains("no retained manifest"),
+        "consumer environment refused before its external-content admission boundary: {unavailable}"
     );
     let (joined, worker) =
         admit_current_bundle_consumer_worker(&state, &policy_source, &relationship)?
