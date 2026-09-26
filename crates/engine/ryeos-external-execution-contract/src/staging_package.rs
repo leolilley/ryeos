@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub const GUEST_STAGING_PACKAGE_SCHEMA: u32 = 1;
+pub const GUEST_IMPORT_TICKET_SCHEMA: u32 = 1;
 // The base CAS transfer alone admits up to 400,010 filesystem entries. Other
 // inputs share this package and must be accounted for by backend admission.
 pub const MAX_GUEST_STAGING_ENTRIES: usize = 500_000;
@@ -38,6 +39,139 @@ pub struct GuestStagingExpected<'a> {
     pub launcher_sha256: &'a str,
     pub maximum_regular_bytes: u64,
     pub maximum_framed_bytes: u64,
+}
+
+/// Public, occurrence-bound expectations carried separately from the upload.
+/// The controller derives this from its committed activation, exact prepared
+/// package and signed artifact generation. It contains no bootstrap secret or
+/// process-local descriptor. A ticket is not a Ready claim or a substitute for
+/// the guest's full-package digest and staged-content checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestImportTicket {
+    pub schema: u32,
+    pub binding_hash: String,
+    pub allocation_request_digest: String,
+    pub occurrence_id: String,
+    pub activation_request_digest: String,
+    pub guest_input_identity: String,
+    pub payload_sha256: String,
+    pub manifest_sha256: String,
+    pub framed_bytes: u64,
+    pub regular_bytes: u64,
+    pub bootstrap_sha256: String,
+    pub supervisor_sha256: String,
+    pub launcher_sha256: String,
+    pub maximum_regular_bytes: u64,
+    pub maximum_framed_bytes: u64,
+}
+
+/// Coordinates retained independently of the ticket and uploaded package.
+/// The importer obtains these from its committed placement/activation, not
+/// from values echoed by the upload or its caller.
+pub struct GuestImportContext<'a> {
+    pub binding_hash: &'a str,
+    pub allocation_request_digest: &'a str,
+    pub occurrence_id: &'a str,
+    pub activation_request_digest: &'a str,
+}
+
+impl GuestImportTicket {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == GUEST_IMPORT_TICKET_SCHEMA,
+            "unknown guest import ticket schema"
+        );
+        for (value, label) in [
+            (&self.binding_hash, "binding"),
+            (&self.allocation_request_digest, "allocation request"),
+            (&self.activation_request_digest, "activation request"),
+            (&self.guest_input_identity, "guest input"),
+            (&self.payload_sha256, "package payload"),
+            (&self.manifest_sha256, "package manifest"),
+            (&self.bootstrap_sha256, "bootstrap"),
+            (&self.supervisor_sha256, "supervisor"),
+            (&self.launcher_sha256, "launcher"),
+        ] {
+            digest(value, label)?;
+        }
+        ensure!(
+            !self.occurrence_id.is_empty()
+                && self.occurrence_id.len() <= 512
+                && self.occurrence_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                }),
+            "guest import ticket occurrence is invalid"
+        );
+        ensure!(
+            self.regular_bytes > 0
+                && self.regular_bytes <= self.maximum_regular_bytes
+                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes <= self.maximum_framed_bytes
+                && self.maximum_framed_bytes <= 4 * 1024 * 1024 * 1024,
+            "guest import ticket package exceeds its bounds"
+        );
+        Ok(())
+    }
+
+    pub fn validate_for_context(&self, context: &GuestImportContext<'_>) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            self.binding_hash == context.binding_hash
+                && self.allocation_request_digest == context.allocation_request_digest
+                && self.occurrence_id == context.occurrence_id
+                && self.activation_request_digest == context.activation_request_digest,
+            "guest import ticket differs from retained placement"
+        );
+        Ok(())
+    }
+
+    /// After independently verifying the upload's exact length and full
+    /// digest, join its decoded inventory to this separately carried ticket.
+    pub fn validate_verified_manifest(
+        &self,
+        context: &GuestImportContext<'_>,
+        manifest: &GuestStagingPackageManifest,
+        observed_payload_sha256: &str,
+        observed_framed_bytes: u64,
+    ) -> Result<()> {
+        self.validate_for_context(context)?;
+        ensure!(
+            observed_payload_sha256 == self.payload_sha256
+                && observed_framed_bytes == self.framed_bytes
+                && manifest.activation_request_digest == self.activation_request_digest
+                && manifest.guest_input_identity == self.guest_input_identity
+                && manifest.bootstrap_sha256 == self.bootstrap_sha256
+                && manifest.supervisor_sha256 == self.supervisor_sha256
+                && manifest.launcher_sha256 == self.launcher_sha256
+                && manifest.total_regular_bytes == self.regular_bytes
+                && manifest.framed_bytes()? == self.framed_bytes
+                && hex::encode(Sha256::digest(canonical_json(manifest)?)) == self.manifest_sha256,
+            "verified guest package differs from retained import ticket"
+        );
+        Ok(())
+    }
+
+    pub fn staging_expected<'a>(
+        &'a self,
+        context: &GuestImportContext<'_>,
+        inputs: &'a ExternalGuestInputProjection,
+    ) -> Result<GuestStagingExpected<'a>> {
+        self.validate_for_context(context)?;
+        ensure!(
+            inputs.identity_digest()? == self.guest_input_identity,
+            "guest import inputs differ from retained ticket"
+        );
+        Ok(GuestStagingExpected {
+            inputs,
+            activation_request_digest: &self.activation_request_digest,
+            bootstrap_sha256: &self.bootstrap_sha256,
+            supervisor_sha256: &self.supervisor_sha256,
+            launcher_sha256: &self.launcher_sha256,
+            maximum_regular_bytes: self.maximum_regular_bytes,
+            maximum_framed_bytes: self.maximum_framed_bytes,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,6 +852,78 @@ mod tests {
         package
             .validate_for(inputs, &hash('1'), &hash('e'), &hash('0'), &hash('f'), 20)
             .is_ok()
+    }
+
+    #[test]
+    fn independently_carried_import_ticket_binds_exact_verified_package() {
+        let (inputs, manifest) = fixture();
+        let ticket = GuestImportTicket {
+            schema: GUEST_IMPORT_TICKET_SCHEMA,
+            binding_hash: hash('3'),
+            allocation_request_digest: hash('4'),
+            occurrence_id: "occ-fixture".into(),
+            activation_request_digest: manifest.activation_request_digest.clone(),
+            guest_input_identity: manifest.guest_input_identity.clone(),
+            payload_sha256: hash('2'),
+            manifest_sha256: hex::encode(Sha256::digest(canonical_json(&manifest).unwrap())),
+            framed_bytes: manifest.framed_bytes().unwrap(),
+            regular_bytes: manifest.total_regular_bytes,
+            bootstrap_sha256: manifest.bootstrap_sha256.clone(),
+            supervisor_sha256: manifest.supervisor_sha256.clone(),
+            launcher_sha256: manifest.launcher_sha256.clone(),
+            maximum_regular_bytes: 1024,
+            maximum_framed_bytes: 4096,
+        };
+        let context = GuestImportContext {
+            binding_hash: &ticket.binding_hash,
+            allocation_request_digest: &ticket.allocation_request_digest,
+            occurrence_id: &ticket.occurrence_id,
+            activation_request_digest: &ticket.activation_request_digest,
+        };
+        ticket.validate().unwrap();
+        ticket.staging_expected(&context, &inputs).unwrap();
+        ticket
+            .validate_verified_manifest(&context, &manifest, &hash('2'), ticket.framed_bytes)
+            .unwrap();
+
+        let mut wrong = ticket.clone();
+        wrong.occurrence_id = "../other".into();
+        assert!(wrong.validate().is_err());
+        wrong.occurrence_id = "occ-other".into();
+        assert!(wrong.staging_expected(&context, &inputs).is_err());
+        wrong = ticket.clone();
+        wrong.binding_hash = hash('7');
+        assert!(wrong.staging_expected(&context, &inputs).is_err());
+        wrong = ticket.clone();
+        wrong.allocation_request_digest = hash('8');
+        assert!(wrong.staging_expected(&context, &inputs).is_err());
+        wrong = ticket.clone();
+        wrong.activation_request_digest = hash('9');
+        assert!(wrong.staging_expected(&context, &inputs).is_err());
+        let mut wrong = ticket.clone();
+        wrong.framed_bytes += 1;
+        assert!(
+            wrong
+                .validate_verified_manifest(&context, &manifest, &hash('2'), wrong.framed_bytes)
+                .is_err()
+        );
+        let mut changed_manifest = manifest.clone();
+        changed_manifest.launcher_sha256 = hash('5');
+        assert!(
+            ticket
+                .validate_verified_manifest(
+                    &context,
+                    &changed_manifest,
+                    &hash('2'),
+                    ticket.framed_bytes
+                )
+                .is_err()
+        );
+        assert!(
+            ticket
+                .validate_verified_manifest(&context, &manifest, &hash('6'), ticket.framed_bytes)
+                .is_err()
+        );
     }
 
     #[test]
