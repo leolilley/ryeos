@@ -7,15 +7,18 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{Read, Write};
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::ExternalGuestInputProjection;
 use ryeos_external_execution_contract::staging_package::{
     GuestImportContext, GuestImportTicket, GuestStagingEntry, GuestStagingExpected,
     GuestStagingPackageManifest, GuestStagingStreamReader, MAX_GUEST_STAGING_ENTRIES,
+    MAX_GUEST_STAGING_MANIFEST_BYTES,
 };
 use serde::{Deserialize, Serialize};
+
+const STAGE_MANIFEST_FILE: &str = "stage-manifest.json";
 
 /// Durable coordinate for one private import generation. A recovery owner
 /// must resolve it under its separately retained private parent and compare
@@ -349,6 +352,97 @@ pub fn stage_ticketed_uploaded_guest_package(
     })
 }
 
+/// Reopen only the exact previously journaled stage under the independently
+/// retained private parent. This never reads the uploaded package again and
+/// never authorizes another launch: the guest owner must reconcile its own
+/// launch and scope journal separately. The import-time upload digest is
+/// trusted only through the retained ticket; all installed content is
+/// rechecked from the pinned stage before it can be used again.
+pub fn recover_ticketed_guest_import(
+    parent: &lillux::PinnedDirectory,
+    identity: &GuestStageIdentity,
+    ticket: &GuestImportTicket,
+    context: &GuestImportContext<'_>,
+    inputs: &ExternalGuestInputProjection,
+) -> Result<TicketedGuestImport> {
+    let expected = ticket.staging_expected(context, inputs)?;
+    ensure!(
+        identity.manifest_sha256() == ticket.manifest_sha256,
+        "retained guest stage and import ticket disagree"
+    );
+    let root = identity.resolve_under(parent)?;
+    let manifest = read_stage_manifest(&root, &ticket.manifest_sha256)?;
+    manifest.validate_for(
+        inputs,
+        &ticket.activation_request_digest,
+        &ticket.bootstrap_sha256,
+        &ticket.supervisor_sha256,
+        &ticket.launcher_sha256,
+        expected.maximum_regular_bytes,
+    )?;
+    ensure!(
+        manifest.framed_bytes()? == ticket.framed_bytes
+            && manifest.total_regular_bytes == ticket.regular_bytes,
+        "recovered guest manifest contradicts retained package bounds"
+    );
+    let base_root = root
+        .open_child_directory(OsStr::new("base"))?
+        .context("recovered guest base transfer is absent")?;
+    let base = ryeos_project_capture::inspect_project_snapshot_transfer(
+        &base_root,
+        &inputs.base_snapshot.snapshot_hash,
+    )?;
+    ensure!(
+        base.snapshot_hash == inputs.base_snapshot.snapshot_hash
+            && base.closure_digest == inputs.base_snapshot.closure_digest
+            && base.object_count == inputs.base_snapshot.object_count
+            && base.blob_count == inputs.base_snapshot.blob_count
+            && base.total_bytes == inputs.base_snapshot.total_bytes,
+        "recovered guest base differs from retained snapshot"
+    );
+    let imported = TicketedGuestImport {
+        staged: StagedGuestPackage {
+            parent: parent.try_clone()?,
+            name: OsString::from(identity.name()),
+            root,
+            manifest,
+            base,
+        },
+        ticket: ticket.clone(),
+    };
+    imported.recheck_for_adoption(context, inputs)?;
+    Ok(imported)
+}
+
+fn read_stage_manifest(
+    root: &lillux::PinnedDirectory,
+    expected_digest: &str,
+) -> Result<GuestStagingPackageManifest> {
+    let file = root
+        .open_pinned_regular(OsStr::new(STAGE_MANIFEST_FILE), false)?
+        .context("retained guest stage manifest is absent")?;
+    let observation = file.observation()?;
+    ensure!(
+        observation.size() <= MAX_GUEST_STAGING_MANIFEST_BYTES as u64,
+        "retained guest stage manifest exceeds bound"
+    );
+    ensure!(
+        file.permission_mode()? == 0o600,
+        "retained guest stage manifest mode changed"
+    );
+    let bytes = file.read_stable_bounded(&observation, MAX_GUEST_STAGING_MANIFEST_BYTES as u64)?;
+    ensure!(
+        lillux::sha256_hex(&bytes) == expected_digest,
+        "retained guest stage manifest changed bytes"
+    );
+    let manifest = GuestStagingPackageManifest::from_bounded_json(&bytes)?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&manifest)? == bytes,
+        "retained guest stage manifest is noncanonical"
+    );
+    Ok(manifest)
+}
+
 struct DeadlineReader<'a, R> {
     inner: &'a mut R,
     deadline: lillux::time::MonotonicDeadline,
@@ -454,6 +548,15 @@ fn stage_guest_package_in_private_root<R: Read>(
             && base.total_bytes == admitted.total_bytes,
         "guest base transfer contradicts the retained snapshot measurement"
     );
+    let manifest_bytes = ryeos_external_execution_contract::canonical_json(&manifest)?;
+    ensure!(
+        manifest_bytes.len() <= MAX_GUEST_STAGING_MANIFEST_BYTES,
+        "guest stage manifest exceeds bound"
+    );
+    let mut sidecar =
+        stage.open_regular_create(OsStr::new(STAGE_MANIFEST_FILE), true, true, 0o600)?;
+    sidecar.write_all(&manifest_bytes)?;
+    sidecar.sync_all()?;
     stage.sync_tree_with_symlinks_bounded(staging_budget(), 4096)?;
     Ok((manifest, base))
 }
@@ -477,7 +580,7 @@ fn open_staged_parent(
 }
 
 fn staging_budget() -> lillux::DirectoryTraversalBudget {
-    lillux::DirectoryTraversalBudget::new(MAX_GUEST_STAGING_ENTRIES, 32)
+    lillux::DirectoryTraversalBudget::new(MAX_GUEST_STAGING_ENTRIES + 1, 32)
 }
 
 #[cfg(test)]
@@ -1075,14 +1178,29 @@ mod tests {
         wrong_stage_identity.name = "guest-input./escape".into();
         assert!(wrong_stage_identity.resolve_under(&parent).is_err());
         wrong_stage_identity = stage_identity.clone();
-        wrong_stage_identity.name = "guest-input.other".into();
-        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
-        wrong_stage_identity = stage_identity.clone();
         wrong_stage_identity.schema = 2;
         assert!(wrong_stage_identity.resolve_under(&parent).is_err());
         wrong_stage_identity = stage_identity.clone();
         wrong_stage_identity.manifest_sha256 = "not-a-digest".into();
         assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        let recovered =
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+                .unwrap();
+        assert_eq!(recovered.stage_identity().unwrap(), stage_identity);
+        assert_eq!(recovered.manifest(), &manifest);
+        drop(recovered);
+        let mut wrong_ticket = ticket.clone();
+        wrong_ticket.manifest_sha256 = "0".repeat(64);
+        assert!(
+            recover_ticketed_guest_import(
+                &parent,
+                &stage_identity,
+                &wrong_ticket,
+                &context,
+                &inputs,
+            )
+            .is_err()
+        );
         imported.recheck_for_adoption(&context, &inputs).unwrap();
         assert!(
             imported
@@ -1137,6 +1255,40 @@ mod tests {
             .set_mode(0o600)
             .unwrap();
         assert!(imported.recheck_for_adoption(&context, &inputs).is_err());
+        imported
+            .root()
+            .open_pinned_regular(OsStr::new("supervisor"), false)
+            .unwrap()
+            .unwrap()
+            .set_mode(0o755)
+            .unwrap();
+        recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+            .unwrap();
+        let sidecar = imported
+            .root()
+            .open_pinned_regular(OsStr::new(STAGE_MANIFEST_FILE), false)
+            .unwrap()
+            .unwrap();
+        sidecar.set_mode(0o644).unwrap();
+        assert!(
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+                .is_err()
+        );
+        sidecar.set_mode(0o600).unwrap();
+        drop(sidecar);
+        recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
+            .unwrap();
+        let mut changed_sidecar = imported
+            .root()
+            .open_regular_create(OsStr::new(STAGE_MANIFEST_FILE), true, false, 0o600)
+            .unwrap();
+        changed_sidecar.write_all(b"bad!").unwrap();
+        changed_sidecar.sync_all().unwrap();
+        drop(changed_sidecar);
+        assert!(
+            recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs,)
+                .is_err()
+        );
         imported.discard().unwrap();
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",

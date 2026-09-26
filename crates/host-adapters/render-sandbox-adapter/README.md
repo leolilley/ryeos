@@ -141,10 +141,20 @@ provider `terminated` and parent process exit cannot substitute for either.
 `GuestStageIdentity` now provides a serializable name/inode/manifest coordinate
 for a retained private generation. The guest owner still has to journal that
 coordinate before installation or launch, resolve it only under its exact
-private parent on recovery, and reverify content; the coordinate itself is
-not a recoverable launch or cleanup authority. In particular, the import-only
-500,000-entry cleanup budget cannot retire a generation after the base CAS has
+private parent on recovery, and reverify content. The stage retains a bounded
+canonical manifest sidecar; recovery reads that sidecar by pinned descriptor,
+checks it against the separately retained ticket, and rechecks the selected
+base, executable and input content. It never replays an upload or authorizes a
+new supervisor launch. The coordinate itself is not a recoverable launch or
+cleanup authority. In particular, the import-only, roughly 500,000-entry
+cleanup budget cannot retire a generation after the base CAS has
 been duplicated into the candidate runtime or candidate writers have run.
+The manifest sidecar also consumes disk beyond `regular_bytes`:
+`GuestImportTicket::minimum_upload_and_stage_bytes` accounts for the exact
+coexisting upload and staged regular bytes. Before activation, the guest
+owner/provider profile must reserve at least that amount plus filesystem
+overhead and the separately bounded installed runtime. The current adapter
+does not make or prove that reservation and remains fail-closed.
 Until that joined handoff is implemented and tested, the adapter must continue
 returning `supervisor_pending` even if token minting and upload work locally.
 

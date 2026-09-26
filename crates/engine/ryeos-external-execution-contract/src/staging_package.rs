@@ -77,6 +77,20 @@ pub struct GuestImportContext<'a> {
 }
 
 impl GuestImportTicket {
+    /// Logical regular-file bytes needed while the exact uploaded package and
+    /// its private staged generation coexist. Staging retains a canonical
+    /// manifest sidecar: the upload contains 20 framing bytes plus manifest
+    /// and payload, while the stage contains manifest plus payload. Filesystem
+    /// allocation overhead and a later installed runtime require additional
+    /// host capacity and are not covered by this lower bound.
+    pub fn minimum_upload_and_stage_bytes(&self) -> Result<u64> {
+        self.validate()?;
+        self.framed_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_sub(20))
+            .ok_or_else(|| anyhow::anyhow!("guest temporary storage bound overflow"))
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.schema == GUEST_IMPORT_TICKET_SCHEMA,
@@ -888,6 +902,12 @@ mod tests {
             activation_request_digest: &ticket.activation_request_digest,
         };
         ticket.validate().unwrap();
+        assert_eq!(
+            ticket.minimum_upload_and_stage_bytes().unwrap(),
+            ticket.framed_bytes
+                + manifest.total_regular_bytes
+                + canonical_json(&manifest).unwrap().len() as u64,
+        );
         ticket.staging_expected(&context, &inputs).unwrap();
         ticket
             .validate_verified_manifest(&context, &manifest, &hash('2'), ticket.framed_bytes)
