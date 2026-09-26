@@ -1429,6 +1429,88 @@ mod tests {
             .open_child_directory(OsStr::new("candidate-runtime"))
             .unwrap()
             .unwrap();
+        let adoption = installed_occurrence
+            .recheck_for_adoption(&context, &inputs)
+            .unwrap();
+        assert_eq!(adoption.occurrence_id, context.occurrence_id);
+        assert_eq!(
+            adoption.base_snapshot_hash,
+            inputs.base_snapshot.snapshot_hash
+        );
+        assert_eq!(adoption.base_closure_digest, measurement.closure_digest);
+        assert_eq!(
+            adoption.candidate_runtime,
+            owned_runtime.identity().unwrap()
+        );
+        assert_eq!(
+            adoption.children.objects,
+            owned_runtime
+                .open_child_directory(OsStr::new("objects"))
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap()
+        );
+        owned_runtime.set_mode(0o777).unwrap();
+        assert!(
+            installed_occurrence
+                .recheck_for_adoption(&context, &inputs)
+                .is_err(),
+            "installed runtime mode drift must refuse pre-adoption"
+        );
+        owned_runtime.set_mode(0o700).unwrap();
+        let refs = owned_runtime
+            .open_child_directory(OsStr::new("refs"))
+            .unwrap()
+            .unwrap();
+        let ambient_name = OsStr::new("ambient-before-adoption");
+        let ambient = refs
+            .open_regular_create(ambient_name, true, true, 0o600)
+            .unwrap();
+        assert!(
+            installed_occurrence
+                .recheck_for_adoption(&context, &inputs)
+                .is_err(),
+            "ambient refs must refuse pre-adoption"
+        );
+        refs.remove_if_same(ambient_name, &ambient).unwrap();
+        installed_occurrence
+            .recheck_for_adoption(&context, &inputs)
+            .unwrap();
+        let recovery = owned_runtime
+            .open_child_directory(OsStr::new("recovery"))
+            .unwrap()
+            .unwrap();
+        let unexpected_name = OsStr::new("unexpected-before-adoption");
+        let unexpected = recovery
+            .open_regular_create(unexpected_name, true, true, 0o600)
+            .unwrap();
+        assert!(
+            installed_occurrence
+                .recheck_for_adoption(&context, &inputs)
+                .is_err(),
+            "ambient recovery content must refuse pre-adoption"
+        );
+        recovery
+            .remove_if_same(unexpected_name, &unexpected)
+            .unwrap();
+        let mut lock = recovery
+            .open_regular(OsStr::new("cas-mutation.lock"), true)
+            .unwrap()
+            .unwrap();
+        lock.write_all(b"changed").unwrap();
+        lock.sync_all().unwrap();
+        assert!(
+            installed_occurrence
+                .recheck_for_adoption(&context, &inputs)
+                .is_err(),
+            "changed mutation lock must refuse pre-adoption"
+        );
+        lock.set_len(0).unwrap();
+        lock.sync_all().unwrap();
+        installed_occurrence
+            .recheck_for_adoption(&context, &inputs)
+            .unwrap();
         assert_eq!(
             ryeos_project_capture::inspect_project_snapshot_transfer(
                 &owned_runtime

@@ -71,9 +71,155 @@ pub struct StagedGuestOccurrence {
 /// Retains both the exact owner and stage after base installation. This is
 /// not supervisor adoption, writer exclusion, or a Ready claim.
 pub struct InstalledGuestBase {
-    _owner: GuestOccurrenceOwner,
-    _imported: TicketedGuestImport,
-    _runtime: lillux::PinnedDirectory,
+    owner: GuestOccurrenceOwner,
+    imported: TicketedGuestImport,
+    runtime: lillux::PinnedDirectory,
+    intent_identity: GuestBaseInstallIntentIdentity,
+    children: InstalledRuntimeChildren,
+}
+
+/// Exact installed child inodes observed before handoff. This is a point
+/// coordinate, not a lock or evidence that untrusted writers were excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledRuntimeChildren {
+    pub objects: lillux::PinnedDirectoryIdentity,
+    pub refs: lillux::PinnedDirectoryIdentity,
+    pub recovery: lillux::PinnedDirectoryIdentity,
+    pub thread_projection: lillux::PinnedDirectoryIdentity,
+    pub mutation_lock: lillux::PinnedRegularFileIdentity,
+}
+
+/// A point observation of the still-owned, exact installed base. It does not
+/// grant supervisor launch or attest exclusion of other writers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledGuestBaseObservation {
+    pub schema: u32,
+    pub occurrence_id: String,
+    pub ticket_sha256: String,
+    pub stage: GuestStageIdentity,
+    pub candidate_runtime: lillux::PinnedDirectoryIdentity,
+    pub children: InstalledRuntimeChildren,
+    pub base_snapshot_hash: String,
+    pub base_closure_digest: String,
+}
+
+impl InstalledGuestBase {
+    /// Recheck the original stage, installation journal, and copied base
+    /// immediately before a future descriptor-bound supervisor adoption.
+    /// The caller must separately exclude writers across that handoff.
+    pub fn recheck_for_adoption(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<InstalledGuestBaseObservation> {
+        self.owner.recheck(context, inputs)?;
+        self.runtime.require_owner_private_directory()?;
+        ensure_child_binding(
+            &self.owner.occurrence,
+            CANDIDATE_RUNTIME_DIRECTORY,
+            &self.runtime,
+        )?;
+        self.owner
+            .root
+            .require_disjoint_directory_tree(&self.runtime)?;
+        verify_committed_intent(
+            &self.imported,
+            context,
+            inputs,
+            &self.owner.root,
+            &self.runtime,
+            &self.intent_identity,
+        )?;
+        ensure!(
+            inspect_installed_runtime_children(&self.runtime)? == self.children,
+            "installed guest runtime child inodes changed before adoption"
+        );
+        let objects = self
+            .runtime
+            .open_child_directory(OsStr::new("objects"))?
+            .context("installed guest base CAS disappeared")?;
+        let observed = ryeos_project_capture::inspect_project_snapshot_transfer(
+            &objects,
+            &inputs.base_snapshot.snapshot_hash,
+        )?;
+        ensure!(
+            &observed == self.imported.base(),
+            "installed guest base changed before adoption"
+        );
+        Ok(InstalledGuestBaseObservation {
+            schema: 1,
+            occurrence_id: context.occurrence_id.to_owned(),
+            ticket_sha256: digest_ticket(&self.owner.ticket)?,
+            stage: self.imported.stage_identity()?,
+            candidate_runtime: self.runtime.identity()?,
+            children: self.children.clone(),
+            base_snapshot_hash: observed.snapshot_hash,
+            base_closure_digest: observed.closure_digest,
+        })
+    }
+}
+
+fn inspect_installed_runtime_children(
+    runtime: &lillux::PinnedDirectory,
+) -> Result<InstalledRuntimeChildren> {
+    runtime.require_owner_private_directory()?;
+    ensure!(
+        runtime.entry_names()?
+            == ["objects", "recovery", "refs"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+        "installed guest runtime has unexpected entries before adoption"
+    );
+    let objects = runtime
+        .open_child_directory(OsStr::new("objects"))?
+        .context("installed guest base CAS disappeared")?;
+    objects.require_owner_private_directory()?;
+    let refs = runtime
+        .open_child_directory(OsStr::new("refs"))?
+        .context("installed guest refs root disappeared")?;
+    refs.require_owner_private_directory()?;
+    ensure!(
+        refs.entries_no_follow_bounded(0)?.is_empty(),
+        "installed guest refs changed before supervisor adoption"
+    );
+    let recovery = runtime
+        .open_child_directory(OsStr::new("recovery"))?
+        .context("installed guest CAS recovery root disappeared")?;
+    recovery.require_owner_private_directory()?;
+    ensure!(
+        recovery.entry_names()?
+            == ["cas-mutation.lock", "thread-projection"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+        "installed guest CAS recovery root has unexpected entries"
+    );
+    let lock = recovery
+        .open_pinned_regular(OsStr::new("cas-mutation.lock"), false)?
+        .context("installed guest CAS mutation lock disappeared")?;
+    let lock_observation = lock.observation()?;
+    ensure!(
+        lock.permission_mode()? == 0o600 && lock_observation.size() == 0,
+        "installed guest CAS mutation lock changed"
+    );
+    let thread_projection = recovery
+        .open_child_directory(OsStr::new("thread-projection"))?
+        .context("installed guest thread projection root disappeared")?;
+    thread_projection.require_owner_private_directory()?;
+    ensure!(
+        thread_projection.entries_no_follow_bounded(0)?.is_empty(),
+        "installed guest thread projection changed before adoption"
+    );
+    Ok(InstalledRuntimeChildren {
+        objects: objects.identity()?,
+        refs: refs.identity()?,
+        recovery: recovery.identity()?,
+        thread_projection: thread_projection.identity()?,
+        mutation_lock: lillux::pinned_regular_file_identity(&lock.try_clone_descriptor()?)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,11 +497,15 @@ impl StagedGuestOccurrence {
             &runtime,
             self.owner._lock.clone(),
         )?;
+        let intent_identity = prepared.identity.clone();
         prepared.install_once()?;
+        let children = inspect_installed_runtime_children(&runtime)?;
         Ok(InstalledGuestBase {
-            _owner: self.owner,
-            _imported: self.imported,
-            _runtime: runtime,
+            owner: self.owner,
+            imported: self.imported,
+            runtime,
+            intent_identity,
+            children,
         })
     }
 }

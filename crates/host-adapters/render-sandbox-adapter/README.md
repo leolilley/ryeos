@@ -147,7 +147,11 @@ base-install intent and stage-owner marker before invoking the copy. Recovery
 point-reads the same occurrence, owner, stage, fixed candidate-runtime child
 and intent, with no restage or reinstall API. An ambiguous or partial copy
 must be inspected and settled,
-not retried. This is not yet a full installed generation, supervisor launch
+not retried. The live owner can now recheck that retained intent, the staged
+input and installed base CAS, empty refs/recovery roots, and the original
+runtime child/lock inodes immediately before a future descriptor handoff. Its
+serialized observation is a point coordinate, not writer exclusion or a
+launch permission. This is not yet a full installed generation, supervisor launch
 intent, or immutable custody proof. The synthetic
 fixture currently copies/moves staged inputs into its occurrence and discards the
 staging directory before launching the supervisor. Its terminal path checks
