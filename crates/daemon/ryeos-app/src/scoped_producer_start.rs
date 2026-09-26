@@ -35,17 +35,21 @@ fn admit_recipe_subject(
     executable: &ProducerExecutableSource,
     subject_declaration_id: &str,
     subject_manifest_hash: &str,
+    direct_consumer_target_required: bool,
 ) -> Result<()> {
-    if let ProducerExecutableSource::AdmittedRealizationMember {
-        realization_id,
-        manifest_hash,
-        ..
-    } = executable
-    {
-        ensure!(
+    match executable {
+        ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id,
+            manifest_hash,
+            ..
+        } => ensure!(
             realization_id == subject_declaration_id && manifest_hash == subject_manifest_hash,
             "producer executable is not the sealed qualification subject"
-        );
+        ),
+        ProducerExecutableSource::AdmittedVerifierExecutable => ensure!(
+            !direct_consumer_target_required,
+            "consumer runtime qualification requires a direct admitted subject executable"
+        ),
     }
     Ok(())
 }
@@ -62,19 +66,28 @@ mod recipe_subject_tests {
             relative_path: "bin/codex".to_owned(),
             executable_sha256: "b".repeat(64),
         };
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64)).is_ok());
-        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64)).is_err());
-        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64)).is_err());
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"a".repeat(64), true).is_ok());
+        assert!(admit_recipe_subject(&executable, "other_runtime", &"a".repeat(64), true).is_err());
+        assert!(admit_recipe_subject(&executable, "codex_runtime", &"c".repeat(64), true).is_err());
         assert!(
             admit_recipe_subject(
                 &ProducerExecutableSource::AdmittedVerifierExecutable,
                 "codex_runtime",
-                &"a".repeat(64)
+                &"a".repeat(64),
+                false,
             )
             .is_ok()
         );
+        assert!(
+            admit_recipe_subject(
+                &ProducerExecutableSource::AdmittedVerifierExecutable,
+                "codex_runtime",
+                &"a".repeat(64),
+                true,
+            )
+            .is_err()
+        );
     }
-
 }
 
 /// The successful return is only an attempt locator. The process and all
@@ -113,6 +126,11 @@ pub fn start_scoped_producer(
         &selected.recipe.executable_source,
         &purpose.subject_declaration_id,
         &purpose.subject_manifest_hash,
+        purpose
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .is_some(),
     )?;
     let source = selected.source_identity()?;
     let derived =
@@ -149,10 +167,17 @@ pub fn start_scoped_producer(
         .recipe
         .prepared_immutable_files
         .iter()
-        .map(|file| file.destination().map(|path| path.to_string_lossy().into_owned()))
+        .map(|file| {
+            file.destination()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
         .collect::<Result<BTreeSet<_>>>()?;
     ensure!(
-        prepared_immutable_sha256.keys().cloned().collect::<BTreeSet<_>>() == signed_destinations,
+        prepared_immutable_sha256
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            == signed_destinations,
         "sealed producer files differ from exact signed destinations"
     );
     let workspace_view = live.workspace_view()?;
@@ -205,19 +230,18 @@ pub fn start_scoped_producer(
                 maximum_processes: selected.recipe.bounds.maximum_processes,
             })
             .map_err(|(_, error)| anyhow::anyhow!(error))?;
-        let (interactive_parent, target_channels) =
-            if matches!(selected.recipe.stdin_source, ProducerStdinSource::InteractiveVerifierChannel { .. }) {
-                let (parent, child) =
-                    lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
-                let channel = IsolationTargetChannelAuthority::new(
-                    child,
-                    0,
-                    "RYEOS_PRODUCER_STDIN_FD",
-                )?;
-                (Some(parent), vec![channel])
-            } else {
-                (None, Vec::new())
-            };
+        let (interactive_parent, target_channels) = if matches!(
+            selected.recipe.stdin_source,
+            ProducerStdinSource::InteractiveVerifierChannel { .. }
+        ) {
+            let (parent, child) =
+                lillux::inherited_duplex_channel_pair().map_err(anyhow::Error::msg)?;
+            let channel =
+                IsolationTargetChannelAuthority::new(child, 0, "RYEOS_PRODUCER_STDIN_FD")?;
+            (Some(parent), vec![channel])
+        } else {
+            (None, Vec::new())
+        };
         let context = IsolationLaunchContext {
             project_path: live.workspace().path(),
             project_authority: IsolationProjectAuthority::EphemeralScratch,
@@ -241,72 +265,82 @@ pub fn start_scoped_producer(
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
         };
-        let (mut held, provenance, expected_applied_launch, expected_mount_preparation, mut validated_listener) =
-            if let Some(ingress) = &selected.recipe.loopback_ingress {
-                let compiled = state
-                    .isolation
-                    .apply_awaiting_attachment_in_scope_with_loopback_ingress(
-                        request,
-                        context,
-                        limited.into_process_scope(),
-                        &IsolationLoopbackIngress {
-                            address: ingress.address.clone(),
-                        },
-                    )?;
-                let provenance = compiled.provenance.clone();
-                ensure!(
-                    provenance.plan_digest.is_some()
-                        && provenance.has_same_admission_class(expected_isolation_class),
-                    "scoped producer compiled isolation differs from root admission class"
-                );
-                let expected = compiled.expected_applied_launch.clone();
-                let expected_mounts = compiled.expected_mount_preparation.clone();
-                let spawned = compiled
-                    .require_applied_launch_receipt()?
-                    .spawn()
-                    .map_err(|failure| anyhow::anyhow!("held producer spawn failed: {failure:?}"))?;
-                let (held, listener) = match spawned.receive_listener(release_deadline) {
-                    Ok(received) => received,
-                    Err((error, held)) => {
-                        let abort = held.abort_and_reap();
-                        if abort.is_err() {
-                            wrapper_reap_uncertain = true;
-                        }
-                        return Err(anyhow::anyhow!(error).context(format!(
-                            "held listener transfer checked abort: {abort:?}"
-                        )));
+        let (
+            mut held,
+            provenance,
+            expected_applied_launch,
+            expected_mount_preparation,
+            mut validated_listener,
+        ) = if let Some(ingress) = &selected.recipe.loopback_ingress {
+            let compiled = state
+                .isolation
+                .apply_awaiting_attachment_in_scope_with_loopback_ingress(
+                    request,
+                    context,
+                    limited.into_process_scope(),
+                    &IsolationLoopbackIngress {
+                        address: ingress.address.clone(),
+                    },
+                )?;
+            let provenance = compiled.provenance.clone();
+            ensure!(
+                provenance.plan_digest.is_some()
+                    && provenance.has_same_admission_class(expected_isolation_class),
+                "scoped producer compiled isolation differs from root admission class"
+            );
+            let expected = compiled.expected_applied_launch.clone();
+            let expected_mounts = compiled.expected_mount_preparation.clone();
+            let spawned = compiled
+                .require_applied_launch_receipt()?
+                .spawn()
+                .map_err(|failure| anyhow::anyhow!("held producer spawn failed: {failure:?}"))?;
+            let (held, listener) = match spawned.receive_listener(release_deadline) {
+                Ok(received) => received,
+                Err((error, held)) => {
+                    let abort = held.abort_and_reap();
+                    if abort.is_err() {
+                        wrapper_reap_uncertain = true;
                     }
-                };
-                (Some(held), provenance, expected, expected_mounts, Some(listener))
-            } else {
-                let applied = state
-                    .isolation
-                    .apply_awaiting_attachment_in_scope_with_provenance(
-                        request,
-                        context,
-                        Some(limited.into_process_scope()),
-                    )?;
-                let expected = applied
-                    .expected_applied_launch
-                    .clone()
-                    .context("enforced scoped producer has no compiled target commitments")?;
-                let expected_mounts = applied
-                    .expected_mount_preparation
-                    .clone()
-                    .context("enforced scoped producer has no compiled mount commitments")?;
-                let provenance = applied.provenance;
-                ensure!(
-                    provenance.plan_digest.is_some()
-                        && provenance.has_same_admission_class(expected_isolation_class),
-                    "scoped producer compiled isolation differs from root admission class"
-                );
-                let held = applied
-                    .request
-                    .require_applied_launch_receipt()?
-                    .spawn()
-                    .map_err(|failure| anyhow::anyhow!("held producer spawn failed: {failure:?}"))?;
-                (Some(held), provenance, expected, expected_mounts, None)
+                    return Err(anyhow::anyhow!(error)
+                        .context(format!("held listener transfer checked abort: {abort:?}")));
+                }
             };
+            (
+                Some(held),
+                provenance,
+                expected,
+                expected_mounts,
+                Some(listener),
+            )
+        } else {
+            let applied = state
+                .isolation
+                .apply_awaiting_attachment_in_scope_with_provenance(
+                    request,
+                    context,
+                    Some(limited.into_process_scope()),
+                )?;
+            let expected = applied
+                .expected_applied_launch
+                .clone()
+                .context("enforced scoped producer has no compiled target commitments")?;
+            let expected_mounts = applied
+                .expected_mount_preparation
+                .clone()
+                .context("enforced scoped producer has no compiled mount commitments")?;
+            let provenance = applied.provenance;
+            ensure!(
+                provenance.plan_digest.is_some()
+                    && provenance.has_same_admission_class(expected_isolation_class),
+                "scoped producer compiled isolation differs from root admission class"
+            );
+            let held = applied
+                .request
+                .require_applied_launch_receipt()?
+                .spawn()
+                .map_err(|failure| anyhow::anyhow!("held producer spawn failed: {failure:?}"))?;
+            (Some(held), provenance, expected, expected_mounts, None)
+        };
         let mut ingress_handoff = None;
         let mut relay_handoff = None;
         let prepared = (|| -> Result<_> {
@@ -331,27 +365,29 @@ pub fn start_scoped_producer(
                     && mount_preparation.matches_commitments(&expected_mount_preparation),
                 "final-root mount preparation differs from exact held identity or compiled plan"
             );
-            state
-                .state_store
-                .attach_scoped_child_process(
-                    &attempt_id,
-                    &identity,
-                    &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
-                        schema: 2,
-                        plan_digest: provenance.plan_digest.clone()
-                            .context("compiled scoped producer has no exact plan digest")?,
-                        expected: expected_mount_preparation.clone(),
-                        observed: mount_preparation.clone(),
-                        prepared_immutable_sha256: prepared_immutable_sha256.clone(),
-                    },
-                )?;
+            state.state_store.attach_scoped_child_process(
+                &attempt_id,
+                &identity,
+                &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
+                    schema: 2,
+                    plan_digest: provenance
+                        .plan_digest
+                        .clone()
+                        .context("compiled scoped producer has no exact plan digest")?,
+                    expected: expected_mount_preparation.clone(),
+                    observed: mount_preparation.clone(),
+                    prepared_immutable_sha256: prepared_immutable_sha256.clone(),
+                },
+            )?;
 
             if let Some(validated) = validated_listener.take() {
                 let mut channel = live.take_ingress_handoff()?;
                 let (listener, receipt) = validated.into_parts();
-                let ingress = selected.recipe.loopback_ingress.as_ref().context(
-                    "validated listener has no signed ingress",
-                )?;
+                let ingress = selected
+                    .recipe
+                    .loopback_ingress
+                    .as_ref()
+                    .context("validated listener has no signed ingress")?;
                 let handoff = ScopedRelayHandoff {
                     schema: HANDOFF_SCHEMA.to_owned(),
                     root_thread_id: key.root_thread_id.clone(),

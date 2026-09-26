@@ -29,6 +29,7 @@ use ryeos_state::external_content::products::composition::{
     AdmittedProductQualification, ProductSelection, ProductSelectionInput, ProductSelectionInputs,
     ProductSelectionTarget, ResolvedExternalProductSelections,
 };
+use ryeos_state::external_content::products::producer_recipe::ProducerExecutableSource;
 use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, load_product_attestation_value,
 };
@@ -1234,6 +1235,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
             generation.request_engine_generation_identity(),
             &scenario.recipe_ref,
         )?;
+        require_direct_consumer_target(&current_policy, &current)?;
         state
             .node_policy
             .require::<NodeExecutionAdmissionPolicy>()?
@@ -1291,6 +1293,7 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
                 generation.request_engine_generation_identity(),
                 &scenario.recipe_ref,
             )?;
+            require_direct_consumer_target(&current, &recipe)?;
             state
                 .node_policy
                 .require::<NodeExecutionAdmissionPolicy>()?
@@ -1299,6 +1302,24 @@ pub fn resolve_current_bundle_producer_recipes_for_policy(
         }
         Ok(sources)
     })
+}
+
+/// A qualification that promises a consumer runtime must execute the signed
+/// subject member itself. Running the verifier as the scoped target can still
+/// qualify verifier-only policies, but cannot establish consumer parity.
+fn require_direct_consumer_target(
+    policy: &ProductQualificationPolicySource,
+    recipe: &CurrentBundleProducerRecipe,
+) -> anyhow::Result<()> {
+    if policy.policy.consumer_execution_context.is_some()
+        && !matches!(
+            recipe.recipe.executable_source,
+            ProducerExecutableSource::AdmittedRealizationMember { .. }
+        )
+    {
+        bail!("consumer runtime qualification requires a direct admitted subject executable");
+    }
+    Ok(())
 }
 
 fn resolve_bundle_producer_recipe_in_generation(
