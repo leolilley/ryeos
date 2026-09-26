@@ -1899,7 +1899,8 @@ mod tests {
     fn fixed_supervisor_plan_excludes_consumed_base_and_preserves_source_order() {
         use crate::guest_supervisor_descriptors::{
             SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
-            SUPERVISOR_RUNTIME_MOUNT_FD_BASE, fixed_guest_supervisor_descriptor_plan,
+            SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
+            fixed_guest_supervisor_descriptor_plan,
         };
 
         let projection = source_projection();
@@ -1914,6 +1915,7 @@ mod tests {
         assert!(!plan
             .inherited_descriptors
             .contains(&SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
+        assert!(plan.inherited_descriptors.contains(&SUPERVISOR_EXECUTABLE_FD));
         assert_eq!(
             plan.runtime_mount_descriptors,
             vec![SUPERVISOR_RUNTIME_MOUNT_FD_BASE, SUPERVISOR_RUNTIME_MOUNT_FD_BASE + 1]

@@ -633,6 +633,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use super::*;
     use ryeos_external_execution_contract::staging_package::{
         GUEST_STAGING_PACKAGE_SCHEMA, GuestStagingStreamWriter,
@@ -643,6 +644,110 @@ mod tests {
         GuestMountKind, GuestMountRole, GuestProductManifestKind,
     };
     use ryeos_state::objects::*;
+
+    fn valid_supervisor_bootstrap(
+        inputs: &ExternalGuestInputProjection,
+        launcher_hash: &str,
+    ) -> Vec<u8> {
+        use ryeos_state::external_execution::admission::{
+            AdmittedExternalCandidateProgram, ExternalCandidateProcFilesystem,
+            ExternalCandidateRequirement, ExternalCandidateRuntimeRecipe, PROTOCOL,
+        };
+        use ryeos_state::external_execution::transport::{
+            EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
+            ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
+            ExternalSupervisorBootstrap, external_tls_root_bundle_digest,
+        };
+
+        let roots = vec![STANDARD.encode(b"fixture DER root")];
+        let recipe = ExternalCandidateRuntimeRecipe {
+            schema: 2,
+            runtime_mount_destination: "/runtime/product".into(),
+            executable_relative_path: "bin/tool".into(),
+            argv0: "tool".into(),
+            arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+            cwd: "/workspace".into(),
+            environment: BTreeMap::new(),
+            max_stdout_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024 * 1024,
+            proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+            contain_process_group: false,
+            nested_sandbox: true,
+        };
+        let recipe_digest = recipe.digest().unwrap();
+        let requirement = ExternalCandidateRequirement {
+            schema: 6,
+            protocol: PROTOCOL.into(),
+            connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+            execution_route: ryeos_state::external_execution::admission::ExternalCandidateExecutionRoute::ConnectorOnly,
+            required_lifecycle_capabilities: Default::default(),
+            provider_declaration_id: "codex-hosted".into(),
+            provider_configuration_destination: "environments.toml".into(),
+            runtime_product_declaration_id: "product".into(),
+            runtime_recipe: recipe,
+        };
+        let qualification_use =
+            ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                &requirement,
+            )
+            .unwrap();
+        let network_inputs = ExternalNetworkInputPolicy {
+            resolver: ExternalNetworkInputSelection {
+                source: "/etc/resolv.conf".into(),
+                max_bytes: 65_536,
+            },
+            hosts: ExternalNetworkInputSelection {
+                source: "/etc/hosts".into(),
+                max_bytes: 65_536,
+            },
+        };
+        let bootstrap = ExternalSupervisorBootstrap {
+            schema: 7,
+            controller: ExternalControllerTransportContract {
+                schema: 2,
+                network_inputs,
+                https_origin: "https://controller.example:7443".into(),
+                route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
+                tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
+                connect_timeout_ms: 5_000,
+                request_timeout_ms: 10_000,
+                maximum_response_bytes: 1024 * 1024,
+            },
+            tls_root_certificates_der_base64: roots,
+            placement_thread_id: "T-staging-test".into(),
+            occurrence_id: "occ-staging-test".into(),
+            allocation_request_digest: "2".repeat(64),
+            admitted_capsule_hash: "b".repeat(64),
+            base_snapshot_hash: inputs.base_snapshot.snapshot_hash.clone(),
+            execution_binding_hash: "d".repeat(64),
+            supervisor_runtime_hash: "e".repeat(64),
+            launcher_artifact_hash: launcher_hash.into(),
+            candidate_program: AdmittedExternalCandidateProgram {
+                requirement,
+                qualification_use,
+                runtime_manifest_kind: EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+                runtime_manifest_hash: "e".repeat(64),
+                runtime_witness_hash: "1".repeat(64),
+                qualification_attestation_hash: "2".repeat(64),
+                selection_identity_digest: "3".repeat(64),
+                runtime_recipe_digest: recipe_digest,
+            }
+            .into(),
+            guest_input_identity: inputs.identity_digest().unwrap(),
+            guest_inputs: inputs.clone(),
+            owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+                &lillux::crypto::SigningKey::from_bytes(&[41; 32]).verifying_key(),
+            )
+            .unwrap(),
+            bootstrap_capability: STANDARD.encode([42_u8; 32]),
+            attachment_deadline_ms: 2_000_000,
+            execution_timeout_seconds: 60,
+            post_execution_timeout_seconds: 120,
+            candidate_export_max_bytes: 512 * 1024,
+            channel_max_bytes: 1024 * 1024,
+        };
+        bootstrap.canonical_bytes().unwrap()
+    }
 
     #[test]
     fn malformed_base_closure_never_escapes_private_staging() {
@@ -820,7 +925,7 @@ mod tests {
             .unwrap();
         let mut entries = directory_entries;
         entries.extend(file_entries);
-        let bootstrap = b"boot".to_vec();
+        let mut bootstrap = b"boot".to_vec();
         let config = b"cfg".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
@@ -1085,6 +1190,19 @@ mod tests {
             executable_search: Vec::new(),
             environment: BTreeMap::new(),
         };
+        bootstrap = valid_supervisor_bootstrap(&inputs, &lillux::sha256_hex(&launcher));
+        files.insert("bootstrap".into(), bootstrap.clone());
+        let bootstrap_entry = entries
+            .iter_mut()
+            .find(|entry| entry.path() == "bootstrap")
+            .unwrap();
+        let GuestStagingEntry::RegularFile {
+            bytes, sha256, ..
+        } = bootstrap_entry else {
+            panic!("bootstrap fixture lost regular-file inventory");
+        };
+        *bytes = bootstrap.len() as u64;
+        *sha256 = lillux::sha256_hex(&bootstrap);
         let manifest = GuestStagingPackageManifest {
             schema: GUEST_STAGING_PACKAGE_SCHEMA,
             activation_request_digest: "c".repeat(64),
@@ -1652,11 +1770,51 @@ mod tests {
             activation_request_digest: context.activation_request_digest,
         };
         assert!(artifacts.seal_supervisor_bootstrap(&wrong_context, &inputs).is_err());
-        assert!(
-            artifacts.seal_supervisor_bootstrap(&context, &inputs).is_err(),
-            "a digest-matched but non-protocol bootstrap cannot become FD50 authority"
+        let sealed = artifacts.seal_supervisor_bootstrap(&context, &inputs).unwrap();
+        assert_eq!(
+            lillux::read_sealed_inherited_descriptor(
+                sealed.inherited_descriptor().unwrap(),
+                ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+            )
+            .unwrap(),
+            bootstrap
         );
-        drop(artifacts);
+        let prepared = artifacts
+            .prepare_supervisor_request(&context, &inputs, 10.0)
+            .unwrap();
+        let mut actual_targets = prepared
+            .request
+            .inherited_fd_mappings
+            .iter()
+            .map(lillux::InheritedDescriptorMapping::target_descriptor)
+            .collect::<Vec<_>>();
+        actual_targets.sort_unstable();
+        let mut expected_targets = prepared.plan.inherited_descriptors.clone();
+        expected_targets.sort_unstable();
+        assert_eq!(actual_targets, expected_targets);
+        assert!(!actual_targets.contains(&ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
+        assert_eq!(prepared.request.cmd, "/proc/self/fd/57");
+        assert_eq!(prepared.bootstrap_sha256, lillux::sha256_hex(&bootstrap));
+        let sealed_mapping = prepared.request.inherited_fd_mappings.iter().find(|mapping| {
+            mapping.target_descriptor()
+                == ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_BOOTSTRAP_FD
+        }).unwrap();
+        assert_eq!(
+            lillux::read_sealed_inherited_descriptor(
+                sealed_mapping.source_descriptor().unwrap(),
+                ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+            ).unwrap(),
+            bootstrap
+        );
+        let executable = prepared.request.inherited_fd_mappings.iter().find(|mapping| {
+            mapping.target_descriptor()
+                == ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_EXECUTABLE_FD
+        }).unwrap();
+        assert_eq!(
+            executable.source_descriptor().unwrap(),
+            prepared._artifacts.supervisor.inherited_descriptor().unwrap()
+        );
+        drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
             &ticket,

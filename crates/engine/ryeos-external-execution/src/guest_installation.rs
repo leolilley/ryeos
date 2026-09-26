@@ -10,7 +10,9 @@ use std::ffi::OsStr;
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_CANDIDATE_RUNTIME_FD,
-    SUPERVISOR_PRIVATE_PARENT_FD, fixed_guest_supervisor_descriptor_plan,
+    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD,
+    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STATE_ROOT_FD,
+    fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::staging_package::{
@@ -136,6 +138,15 @@ pub struct PreparedGuestLaunchArtifacts {
     pub(crate) observation: GuestLaunchArtifactObservation,
 }
 
+/// Full exact descriptor proposal. This cannot spawn: the owner must first
+/// establish writer exclusion and commit its durable outer launch intent.
+pub struct PreparedGuestSupervisorRequest {
+    pub(crate) _artifacts: PreparedGuestLaunchArtifacts,
+    pub(crate) request: lillux::SubprocessRequest,
+    pub(crate) plan: GuestSupervisorDescriptorPlan,
+    pub(crate) bootstrap_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestLaunchArtifactObservation {
@@ -147,6 +158,75 @@ pub struct GuestLaunchArtifactObservation {
 }
 
 impl PreparedGuestLaunchArtifacts {
+    /// Complete every fixed supervisor descriptor from retained handles.
+    /// The resulting request is intentionally held behind a non-launching
+    /// type until the outer one-way journal and writer fence are joined.
+    pub fn prepare_supervisor_request(
+        self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        timeout_seconds: f64,
+    ) -> Result<PreparedGuestSupervisorRequest> {
+        ensure!(
+            timeout_seconds.is_finite() && timeout_seconds > 0.0,
+            "supervisor launch timeout is invalid"
+        );
+        let sealed_bootstrap = self.seal_supervisor_bootstrap(context, inputs)?;
+        ensure!(
+            self.state_root.identity()? == self.observation.state_root
+                && self.state_root.entries_no_follow_bounded(0)?.is_empty(),
+            "supervisor state root changed before request preparation"
+        );
+        let request = lillux::SubprocessRequest {
+            cmd: String::new(),
+            argv0: Some("ryeos-external-candidate-supervisor".into()),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: timeout_seconds,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        };
+        let (mut request, plan) = self
+            .private
+            .bind_content_to_supervisor_request(context, inputs, request)?;
+        self.supervisor
+            .bind_as_subprocess_executable(&mut request, SUPERVISOR_EXECUTABLE_FD)
+            .map_err(anyhow::Error::msg)?;
+        sealed_bootstrap
+            .bind_to_subprocess_request(&mut request, SUPERVISOR_BOOTSTRAP_FD)
+            .map_err(anyhow::Error::msg)?;
+        self.state_root
+            .inherited_descriptor_authority()?
+            .bind_to_subprocess_request(&mut request, SUPERVISOR_STATE_ROOT_FD)
+            .map_err(anyhow::Error::msg)?;
+        self.launcher
+            .bind_to_subprocess_request(&mut request, SUPERVISOR_LAUNCHER_FD)
+            .map_err(anyhow::Error::msg)?;
+        let mut actual = request
+            .inherited_fd_mappings
+            .iter()
+            .map(lillux::InheritedDescriptorMapping::target_descriptor)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = plan.inherited_descriptors.clone();
+        expected.sort_unstable();
+        ensure!(
+            request.inherited_fds.is_empty() && actual == expected,
+            "supervisor request differs from exact fixed descriptor plan"
+        );
+        let bootstrap_sha256 = self.private.content._installed.imported.ticket().bootstrap_sha256.clone();
+        Ok(PreparedGuestSupervisorRequest {
+            _artifacts: self,
+            request,
+            plan,
+            bootstrap_sha256,
+        })
+    }
+
     /// Re-read the exact opened package source, validate its canonical secret
     /// bootstrap against the independently retained occurrence and projection,
     /// then mint the sealed FD50 input required by the supervisor. No regular
