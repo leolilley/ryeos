@@ -15,6 +15,74 @@ use ryeos_external_execution_contract::staging_package::{
     GuestImportContext, GuestImportTicket, GuestStagingEntry, GuestStagingExpected,
     GuestStagingPackageManifest, GuestStagingStreamReader, MAX_GUEST_STAGING_ENTRIES,
 };
+use serde::{Deserialize, Serialize};
+
+/// Durable coordinate for one private import generation. A recovery owner
+/// must resolve it under its separately retained private parent and compare
+/// the exact pinned inode before inspecting or retiring the generation. This
+/// record alone does not convey filesystem or cleanup authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestStageIdentity {
+    schema: u32,
+    name: String,
+    directory_identity: lillux::PinnedDirectoryIdentity,
+    manifest_sha256: String,
+}
+
+impl GuestStageIdentity {
+    /// Resolve only the exact named generation under the separately retained
+    /// private parent. This is a point read, never a stage-directory scan.
+    pub fn resolve_under(
+        &self,
+        parent: &lillux::PinnedDirectory,
+    ) -> Result<lillux::PinnedDirectory> {
+        ensure!(
+            self.schema == 1
+                && canonical_stage_name(&self.name)
+                && lillux::valid_hash(&self.manifest_sha256),
+            "guest stage identity is invalid"
+        );
+        parent.require_owner_private_directory()?;
+        let root = parent
+            .open_child_directory(OsStr::new(&self.name))?
+            .context("retained guest stage generation is absent")?;
+        root.require_owner_private_directory()?;
+        ensure!(
+            root.identity()? == self.directory_identity,
+            "retained guest stage generation changed inode"
+        );
+        Ok(root)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn directory_identity(&self) -> lillux::PinnedDirectoryIdentity {
+        self.directory_identity
+    }
+
+    pub fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
+    }
+}
+
+fn canonical_stage_name(name: &str) -> bool {
+    let mut parts = name.split('.');
+    let (Some("guest-input"), Some(pid), Some(nonce), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    pid.parse::<u32>()
+        .ok()
+        .is_some_and(|value| value != 0 && value.to_string() == pid)
+        && nonce
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|value| value.to_string() == nonce)
+}
 
 pub struct StagedGuestPackage {
     parent: lillux::PinnedDirectory,
@@ -35,6 +103,22 @@ pub struct TicketedGuestImport {
 }
 
 impl TicketedGuestImport {
+    pub fn stage_identity(&self) -> Result<GuestStageIdentity> {
+        let identity = GuestStageIdentity {
+            schema: 1,
+            name: self
+                .staged
+                .name
+                .to_str()
+                .context("guest staged generation name is not UTF-8")?
+                .to_owned(),
+            directory_identity: self.staged.root.identity()?,
+            manifest_sha256: self.ticket.manifest_sha256.clone(),
+        };
+        identity.resolve_under(&self.staged.parent)?;
+        Ok(identity)
+    }
+
     pub(crate) fn root(&self) -> &lillux::PinnedDirectory {
         self.staged.root()
     }
@@ -963,6 +1047,42 @@ mod tests {
         .unwrap();
         assert_eq!(imported.manifest(), &manifest);
         assert_eq!(imported.ticket(), &ticket);
+        let stage_identity = imported.stage_identity().unwrap();
+        assert_eq!(
+            stage_identity.directory_identity(),
+            imported.root().identity().unwrap()
+        );
+        assert_eq!(stage_identity.manifest_sha256(), ticket.manifest_sha256);
+        assert!(stage_identity.name().starts_with("guest-input"));
+        let retained_stage: GuestStageIdentity =
+            serde_json::from_slice(&serde_json::to_vec(&stage_identity).unwrap()).unwrap();
+        assert_eq!(retained_stage, stage_identity);
+        assert_eq!(
+            retained_stage
+                .resolve_under(&parent)
+                .unwrap()
+                .identity()
+                .unwrap(),
+            imported.root().identity().unwrap()
+        );
+        let mut wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.name = "guest-input.other".into();
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.directory_identity = parent.identity().unwrap();
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.name = "guest-input./escape".into();
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.name = "guest-input.other".into();
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.schema = 2;
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
+        wrong_stage_identity = stage_identity.clone();
+        wrong_stage_identity.manifest_sha256 = "not-a-digest".into();
+        assert!(wrong_stage_identity.resolve_under(&parent).is_err());
         imported.recheck_for_adoption(&context, &inputs).unwrap();
         assert!(
             imported

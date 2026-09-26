@@ -138,6 +138,13 @@ template for the Render owner. The owner must retain its exact installed
 generation through a Lillux-proved enclosing-scope settlement and separately
 verify the supervisor's signed candidate writer-exclusion/export evidence;
 provider `terminated` and parent process exit cannot substitute for either.
+`GuestStageIdentity` now provides a serializable name/inode/manifest coordinate
+for a retained private generation. The guest owner still has to journal that
+coordinate before installation or launch, resolve it only under its exact
+private parent on recovery, and reverify content; the coordinate itself is
+not a recoverable launch or cleanup authority. In particular, the import-only
+500,000-entry cleanup budget cannot retire a generation after the base CAS has
+been duplicated into the candidate runtime or candidate writers have run.
 Until that joined handoff is implemented and tested, the adapter must continue
 returning `supervisor_pending` even if token minting and upload work locally.
 
