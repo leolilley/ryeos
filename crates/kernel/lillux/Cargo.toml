@@ -41,6 +41,11 @@ name = "invocation_startup"
 path = "tests/invocation_startup.rs"
 harness = false
 
+[[test]]
+name = "private_source_owner"
+path = "tests/private_source_owner.rs"
+harness = false
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

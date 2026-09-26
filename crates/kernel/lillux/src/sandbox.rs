@@ -198,6 +198,61 @@ pub struct LinuxSandboxInspection {
     pub aggregate_resource_isolation: bool,
 }
 
+/// Resource ceiling for a fresh process-private source filesystem. This is a
+/// tmpfs limit, not a reservation or an enclosing process-memory limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinuxPrivateSourceLimits {
+    pub max_bytes: u64,
+    pub max_inodes: u64,
+}
+
+impl LinuxPrivateSourceLimits {
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=64 * 1024 * 1024 * 1024).contains(&self.max_bytes)
+            || !(1..=2_000_000).contains(&self.max_inodes)
+        {
+            return Err("private source filesystem limits exceed the bounded contract".into());
+        }
+        Ok(())
+    }
+}
+
+/// Fresh source inodes visible only to this dedicated owner's mount namespace.
+/// The owner becomes non-dumpable before receiving this value. This is a
+/// process-local custody primitive, not a complete writer-exclusion proof:
+/// the trusted caller must never leak a writable alias or descriptor, and
+/// must retain the owner through exact guest-scope settlement.
+pub struct LinuxPrivateSourceFilesystem {
+    root: crate::secure_fs::PinnedDirectory,
+    // Mount namespaces are process/thread state. Do not move this owner to a
+    // different Rust thread after the irreversible namespace transition.
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl LinuxPrivateSourceFilesystem {
+    pub fn root(&self) -> &crate::secure_fs::PinnedDirectory {
+        &self.root
+    }
+}
+
+/// Enter a fresh private filesystem view in a dedicated single-threaded
+/// occurrence-owner process, before importing any untrusted package bytes.
+/// The call changes the process's user and mount namespaces and hides its old
+/// `/tmp`. Pre-transition errors return without changing namespace authority;
+/// failures after namespace entry terminate the dedicated owner. Entry is
+/// one-shot even if a pre-transition check fails. No host path is adopted as source
+/// identity, and no other process receives this writable root by this API.
+pub fn enter_linux_private_source_filesystem(
+    limits: LinuxPrivateSourceLimits,
+) -> Result<LinuxPrivateSourceFilesystem, String> {
+    limits.validate()?;
+    let root = imp::enter_private_source_filesystem(limits)?;
+    Ok(LinuxPrivateSourceFilesystem {
+        root,
+        _thread_bound: std::marker::PhantomData,
+    })
+}
+
 impl LinuxSandboxInspection {
     /// Capabilities implemented by this Lillux backend when its runtime probe
     /// succeeds. This does not probe the current host; admission must use
@@ -1198,6 +1253,12 @@ pub fn exit_with_linux_sandbox_status(status: LinuxSandboxExit) -> ! {
 mod imp {
     use super::*;
 
+    pub fn enter_private_source_filesystem(
+        _limits: LinuxPrivateSourceLimits,
+    ) -> Result<crate::secure_fs::PinnedDirectory, String> {
+        Err("private source filesystem ownership is unavailable on this platform".into())
+    }
+
     pub fn take_overlay_template(_fd: u32) -> Result<LinuxOverlayTemplate, String> {
         Err("detached Linux overlay templates are unavailable on this platform".to_string())
     }
@@ -1835,6 +1896,100 @@ mod imp {
             unsafe { libc::setresuid(NAMESPACE_USER_ID, NAMESPACE_USER_ID, NAMESPACE_USER_ID) },
             "enter mapped sandbox uid",
         )
+    }
+
+    pub(super) fn enter_private_source_filesystem(
+        limits: LinuxPrivateSourceLimits,
+    ) -> Result<crate::secure_fs::PinnedDirectory, String> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static ENTERED: AtomicBool = AtomicBool::new(false);
+        if ENTERED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("private source filesystem entry is one-shot per process".into());
+        }
+        // No source is imported before this transition. Once user-namespace
+        // entry begins, any error terminates the dedicated owner process;
+        // returning would expose a partially changed authority to its caller.
+        // Do not retain a cwd below the old /tmp as an ambient alias.
+        std::env::set_current_dir("/")
+            .map_err(|error| format!("leave ambient cwd before private source entry: {error}"))?;
+        let former = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
+            .map_err(|error| format!("pin former temporary root: {error}"))?
+            .ok_or("temporary root is absent before private source entry")?;
+        let former_identity = former
+            .identity()
+            .map_err(|error| format!("identify former temporary root: {error}"))?;
+        let transition = || -> Result<crate::secure_fs::PinnedDirectory, String> {
+            enter_mapped_user_namespace()?;
+            syscall_zero(
+                unsafe { libc::unshare(libc::CLONE_NEWNS) },
+                "create private source mount namespace",
+            )?;
+            mount_raw(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)
+                .map_err(|error| format!("make private source mounts non-propagating: {error}"))?;
+            let options = format!(
+                "mode=0700,uid={NAMESPACE_USER_ID},gid={NAMESPACE_GROUP_ID},size={},nr_inodes={}",
+                limits.max_bytes, limits.max_inodes
+            );
+            mount_raw(
+                Some("tmpfs"),
+                ROOT,
+                Some("tmpfs"),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                Some(&options),
+            )
+            .map_err(|error| format!("mount fresh private source filesystem: {error}"))?;
+            let root = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
+                .map_err(|error| format!("pin private source filesystem: {error}"))?
+                .ok_or("private source filesystem disappeared after mount")?;
+            root.require_owner_private_directory()
+                .map_err(|error| format!("private source root is not owner-private: {error}"))?;
+            if root
+                .identity()
+                .map_err(|error| format!("identify private source root: {error}"))?
+                == former_identity
+            {
+                return Err("private source mount did not replace former temporary root".into());
+            }
+            let descriptor = root
+                .try_clone_descriptor()
+                .map_err(|error| format!("retain private source root descriptor: {error}"))?;
+            let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            syscall_zero(
+                unsafe { libc::fstatfs(descriptor.as_raw_fd(), stat.as_mut_ptr()) },
+                "inspect private source filesystem type",
+            )?;
+            const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+            if unsafe { stat.assume_init() }.f_type != TMPFS_MAGIC {
+                return Err("private source root is not a fresh tmpfs".into());
+            }
+            // UID transitions can reset dumpability. Disable it only after the
+            // final mapped UID is installed, before source bytes are imported.
+            syscall_zero(
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) },
+                "make private source owner non-dumpable",
+            )?;
+            if unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+                return Err("private source owner did not retain non-dumpable state".into());
+            }
+            crate::exec::disable_process_core_dumps()?;
+            unsafe { libc::umask(0o077) };
+            Ok(root)
+        };
+        let root = transition().unwrap_or_else(|error| fatal_private_source_transition(&error));
+        drop(former);
+        Ok(root)
+    }
+
+    fn fatal_private_source_transition(error: &str) -> ! {
+        let message = format!("lillux private source transition failed: {error}\n");
+        let bytes = message.as_bytes();
+        let bytes = &bytes[..bytes.len().min(512)];
+        // SAFETY: bounded diagnostic write followed by immediate process exit
+        // is the only safe outcome after an irreversible namespace transition.
+        unsafe {
+            libc::write(2, bytes.as_ptr().cast(), bytes.len());
+            libc::_exit(125)
+        }
     }
 
     fn enter_namespaces(network: LinuxSandboxNetwork) -> Result<(), String> {
@@ -7398,6 +7553,24 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_source_filesystem_requires_explicit_positive_limits() {
+        for limits in [
+            LinuxPrivateSourceLimits { max_bytes: 0, max_inodes: 1 },
+            LinuxPrivateSourceLimits { max_bytes: 4096, max_inodes: 0 },
+            LinuxPrivateSourceLimits { max_bytes: 64 * 1024 * 1024 * 1024 + 1, max_inodes: 1 },
+            LinuxPrivateSourceLimits { max_bytes: 4096, max_inodes: 2_000_001 },
+        ] {
+            assert!(limits.validate().is_err());
+        }
+        assert!(LinuxPrivateSourceLimits {
+            max_bytes: 4096,
+            max_inodes: 2,
+        }
+        .validate()
+        .is_ok());
+    }
 
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd as _;
