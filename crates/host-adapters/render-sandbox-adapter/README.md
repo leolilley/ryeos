@@ -122,6 +122,15 @@ it), stage and recheck the contents, install the fixed descriptor map, launch
 the exact packaged supervisor, retain the staged generation for its whole
 lifetime, and discard it only after scope and writer settlement. This owner
 belongs in RyeOS guest execution, not in the Render API adapter or Farm.
+The first activation carries the retained import ticket and exact package;
+reconciliation carries neither a fresh ticket nor another package. The guest
+owner must durably bind that ticket, the stage inode, installed
+runtime/state/private directory inodes, and supervisor executable before
+recording a one-way pre-spawn intent. After that intent, recovery may observe
+and settle only the original occurrence; it must not restage or start a
+replacement supervisor. This is placement ownership below the existing
+bounded-turn Worker, not a second session or candidate lifecycle. The
+supervisor's journal continues to own its one-shot native candidate launch.
 The ticket-checked import now has a distinct `TicketedGuestImport` result;
 that type establishes only the supplied ticket-to-bytes/content join. Its
 caller must source the ticket and context from retained occurrence authority;
@@ -134,9 +143,14 @@ fixture currently copies/moves staged inputs into its occurrence and discards th
 staging directory before launching the supervisor. Its terminal path checks
 the supervisor/server process identities and exits, not an enclosing process
 scope or workspace-writer exclusion. Neither behavior is a qualification
-template for the Render owner. The owner must retain its exact installed
-generation through a Lillux-proved enclosing-scope settlement and separately
-verify the supervisor's signed candidate writer-exclusion/export evidence;
+template for the Render owner. The fixture later reopens artifacts by name,
+so the original import check cannot attest their bytes at supervisor adoption.
+A pinned descriptor also does not prevent a writer from changing its inode:
+Lillux must enforce immutable/sealed source custody or exclude untrusted
+writers across final verification and descriptor handoff. The owner must
+retain its exact installed generation through a Lillux-proved enclosing-scope
+settlement and separately verify the supervisor's signed candidate
+writer-exclusion/export evidence;
 provider `terminated` and parent process exit cannot substitute for either.
 `GuestStageIdentity` now provides a serializable name/inode/manifest coordinate
 for a retained private generation. The guest owner still has to journal that
