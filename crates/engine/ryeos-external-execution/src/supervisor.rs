@@ -104,6 +104,13 @@ impl<L: ExternalCandidateLauncherClient> SerializedExternalCandidateSupervisor<L
         Ok(true)
     }
 
+    pub fn ensure_runtime_applied_frame(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        self.journal.ensure_runtime_applied_frame(signing_key)
+    }
+
     /// Retain a controller-authored acknowledgement without inventing an
     /// executable application for it. The shared journal reconciles the exact
     /// supervisor frame state named by the signed payload.

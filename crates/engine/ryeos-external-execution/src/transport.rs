@@ -288,10 +288,12 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             if !(verified.frame().direction == ChannelDirection::SupervisorToOwner
                 && match self.runtime.binding().execution_mode {
                     ryeos_external_execution_contract::ExternalExecutionMode::StructuredSession {} =>
-                        matches!(verified.frame().payload, ExecutionChannelPayload::ProtocolBytes { .. }
+                        matches!(verified.frame().payload, ExecutionChannelPayload::RuntimeApplied { .. }
+                            | ExecutionChannelPayload::ProtocolBytes { .. }
                             | ExecutionChannelPayload::ProtocolEof),
                     ryeos_external_execution_contract::ExternalExecutionMode::DirectCommand { .. } =>
-                        matches!(verified.frame().payload, ExecutionChannelPayload::CommandOutput { .. }
+                        matches!(verified.frame().payload, ExecutionChannelPayload::RuntimeApplied { .. }
+                            | ExecutionChannelPayload::CommandOutput { .. }
                             | ExecutionChannelPayload::CommandTerminated { .. }),
                 })
             {

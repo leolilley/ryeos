@@ -72,6 +72,10 @@ impl ChannelPhase {
             // The wire contract permits Ready only at supervisor sequence one.
             Ready { .. } if matches!(self, Self::Stopping | Self::Stopped) => self,
             Release if self == Self::Ready && before_execution_deadline => Self::Running,
+            // This signed projection follows the native guest row. It may be
+            // retained after a racing cancellation, but never restores input
+            // or success authority once the channel is stopping.
+            RuntimeApplied { .. } if matches!(self, Self::Running | Self::Stopping) => self,
             ProtocolBytes { .. } if self == Self::Running && before_execution_deadline => {
                 Self::Running
             }

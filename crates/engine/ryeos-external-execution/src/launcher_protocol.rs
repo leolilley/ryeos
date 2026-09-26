@@ -124,6 +124,7 @@ pub struct LiveInheritedExternalCandidateSupervisor {
     bootstrap_digest: String,
     ready_frame: String,
     applied_runtime_recorded: bool,
+    runtime_applied_frame_authored: bool,
 }
 
 pub enum ExternalOwnerFrameOutcome {
@@ -241,6 +242,16 @@ impl LiveInheritedExternalCandidateSupervisor {
         }
         if !self.applied_runtime_recorded && !self.poll_applied_runtime()? {
             return Ok(None);
+        }
+        if !self.runtime_applied_frame_authored {
+            let newly_authored = self
+                .supervisor
+                .ensure_runtime_applied_frame(&self.supervisor_signing_key)?;
+            self.runtime_applied_frame_authored = true;
+            // A previously committed frame is already in the journal's
+            // pending transport queue. Do not enqueue it a second time after
+            // an ambiguous authoring response.
+            return Ok(newly_authored.map(|frame| frame.canonical().to_owned()));
         }
         Ok(self
             .supervisor
@@ -424,6 +435,7 @@ pub fn launch_external_candidate_supervisor(
         bootstrap_digest,
         ready_frame,
         applied_runtime_recorded: false,
+        runtime_applied_frame_authored: false,
     })
 }
 

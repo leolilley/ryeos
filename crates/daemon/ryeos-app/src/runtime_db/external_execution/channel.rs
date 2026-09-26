@@ -1267,6 +1267,37 @@ impl RuntimeDb {
                 sequence,
                 &digest,
             )?;
+        } else if matches!(
+            verified.frame().payload,
+            ExecutionChannelPayload::RuntimeApplied { .. }
+        ) {
+            // This applies only a retained signed observation to the node's
+            // journal. It neither delivers bytes to Codex nor qualifies the
+            // consumer runtime. A lost response can finish the same claimed
+            // no-effect frame without replaying a native operation.
+            match journal::claim_application(
+                &tx,
+                &NodeJournalOwner,
+                placement,
+                verified.frame().direction,
+                sequence,
+                &digest,
+            )? {
+                journal::ApplicationClaim::New(_) | journal::ApplicationClaim::AlreadyClaimed => {
+                    journal::finish_application(
+                        &tx,
+                        &NodeJournalOwner,
+                        placement,
+                        verified.frame().direction,
+                        sequence,
+                        &digest,
+                    )?;
+                }
+                journal::ApplicationClaim::AlreadyApplied => {}
+                journal::ApplicationClaim::Revoked => {
+                    bail!("runtime-applied observation was revoked as executable input")
+                }
+            }
         }
         let acknowledgement =
             ensure_owner_acknowledgement_tx(&tx, placement, sequence, &digest, signing_key)?;
@@ -1884,17 +1915,19 @@ impl JournalOwner for NodeJournalOwner {
                     .require_startup_time(i64::try_from(lillux::time::timestamp_millis())?)?;
             }
         }
-        let retained_direct_observation = matches!(
-            allocation.reservation.owner,
-            ExternalAllocationOwner::DirectThread { .. }
-        ) && matches!(
-            payload,
-            ExecutionChannelPayload::Ready { .. }
-                | ExecutionChannelPayload::CommandOutput { .. }
-                | ExecutionChannelPayload::CommandTerminated { .. }
-        );
+        let retained_noninput_observation =
+            matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. })
+                || (matches!(
+                    allocation.reservation.owner,
+                    ExternalAllocationOwner::DirectThread { .. }
+                ) && matches!(
+                    payload,
+                    ExecutionChannelPayload::Ready { .. }
+                        | ExecutionChannelPayload::CommandOutput { .. }
+                        | ExecutionChannelPayload::CommandTerminated { .. }
+                ));
         if allocation.phase != ExternalAllocationPhase::Bound
-            && !retained_direct_observation
+            && !retained_noninput_observation
             && !matches!(
                 payload,
                 ExecutionChannelPayload::Cancel
@@ -6279,6 +6312,67 @@ pub(super) mod tests {
         );
         assert!(drained_retry.outbound.is_empty());
         assert!(drained_retry.urgent_revocation.is_none());
+        validate_channels(&db.conn).unwrap();
+    }
+
+    #[test]
+    fn runtime_applied_exchange_retains_one_signed_no_effect_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let (binding, owner, supervisor) = setup(&db);
+        let placement = &binding.placement_thread_id;
+        let ready_digest = ready(&db, &binding, &supervisor);
+        db.admit_external_ready_and_author_release(placement, &owner, test_startup_deadline())
+            .unwrap()
+            .unwrap();
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 101,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+            post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                schema: 1,
+                mount_count: 1,
+                destination_access_sha256: [5; 32],
+            },
+        };
+        let (wire, digest) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            2,
+            Some(ready_digest),
+            1,
+            ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest: "a".repeat(64),
+                candidate_program_digest: binding.candidate_program_digest.clone(),
+                receipt,
+            },
+        );
+        let first = db
+            .exchange_external_supervisor_frame(placement, &wire, &owner, 16, 1024 * 1024)
+            .unwrap();
+        assert!(first.incoming_new);
+        let applied: String = db
+            .conn
+            .query_row(
+                "SELECT application FROM external_execution_frame WHERE frame_digest=?1",
+                [&digest],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, "applied");
+        assert!(
+            !db.exchange_external_supervisor_frame(placement, &wire, &owner, 16, 1024 * 1024)
+                .unwrap()
+                .incoming_new
+        );
         validate_channels(&db.conn).unwrap();
     }
 

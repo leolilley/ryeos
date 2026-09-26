@@ -163,6 +163,14 @@ pub enum ExecutionChannelPayload {
         supervisor_runtime_hash: String,
         base_snapshot_hash: String,
     },
+    /// Exact child-owned pre-exec observation projected from the guest's
+    /// immutable occurrence row. This proves neither exec success nor a
+    /// qualified Worker; both remain separate authority joins.
+    RuntimeApplied {
+        launcher_occurrence_digest: String,
+        candidate_program_digest: String,
+        receipt: lillux::LinuxSandboxAppliedLaunchReceipt,
+    },
     Release,
     ProtocolBytes {
         bytes_base64: String,
@@ -310,6 +318,7 @@ impl ExecutionChannelPayload {
         let supervisor_only = matches!(
             self,
             Ready { .. }
+                | RuntimeApplied { .. }
                 | ProtocolEof
                 | CommandOutput { .. }
                 | CommandTerminated { .. }
@@ -348,6 +357,25 @@ impl ExecutionChannelPayload {
                     supervisor_runtime_hash == &binding.supervisor_runtime_hash
                         && base_snapshot_hash == &binding.base_snapshot_hash,
                     "supervisor readiness changed admitted inputs"
+                );
+            }
+            RuntimeApplied {
+                launcher_occurrence_digest,
+                candidate_program_digest,
+                receipt,
+            } => {
+                hash(launcher_occurrence_digest)?;
+                ensure!(
+                    candidate_program_digest == &binding.candidate_program_digest
+                        && receipt.owned_child_pid > 0
+                        && receipt.namespace_pid == 1
+                        && receipt.effective_uid == 1
+                        && receipt.effective_gid == 1
+                        && receipt.no_new_privs
+                        && receipt.seccomp_mode == 2
+                        && receipt.post_release_mount_view.schema == 1
+                        && receipt.post_release_mount_view.mount_count > 0,
+                    "external runtime-applied frame changed bound native controls"
                 );
             }
             ProtocolBytes { bytes_base64 } => {

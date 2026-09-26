@@ -787,6 +787,72 @@ impl LiveGuestJournal {
         Ok(true)
     }
 
+    /// Project only the already-committed native occurrence row into one
+    /// authenticated supervisor frame. A lost response re-reads the same
+    /// retained frame; it never polls or relaunches the executable again.
+    pub fn ensure_runtime_applied_frame(
+        &self,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> Result<Option<AuthenticatedExecutionFrame>> {
+        ensure_same_file(&self.0.directory, &self.0.database_file)?;
+        let binding_digest = self.0.binding.digest()?;
+        let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
+        self.0.owner().require_owner(&tx, &self.0.binding)?;
+        let (occurrence, program, receipt_json): (String, String, String) = tx.query_row(
+            "SELECT launcher_occurrence_digest,candidate_program_digest,receipt_json
+             FROM external_guest_runtime_applied WHERE binding_digest=?1",
+            [&binding_digest],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        ensure!(
+            occurrence == retained_launcher_occurrence_digest(&tx, &binding_digest)?
+                && program == self.0.binding.candidate_program_digest,
+            "runtime-applied projection lost its native occurrence"
+        );
+        let payload = ExecutionChannelPayload::RuntimeApplied {
+            launcher_occurrence_digest: occurrence,
+            candidate_program_digest: program,
+            receipt: serde_json::from_str(&receipt_json)?,
+        };
+        let mut statement = tx.prepare(
+            "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
+             LIMIT 2",
+        )?;
+        let existing = statement
+            .query_map([&binding_digest], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        ensure!(
+            existing.len() <= 1,
+            "guest authored duplicate runtime-applied frames"
+        );
+        if let Some(wire) = existing.into_iter().next() {
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &self.0.binding,
+                self.0.binding.issued_at_ms,
+            )?;
+            ensure!(
+                frame.frame().payload == payload,
+                "guest runtime-applied frame differs from retained native row"
+            );
+            tx.commit()?;
+            return Ok(None);
+        }
+        let frame = journal::author_frame(
+            &tx,
+            &self.0.owner(),
+            &self.0.binding.placement_thread_id,
+            ChannelDirection::SupervisorToOwner,
+            signing_key,
+            payload,
+        )?;
+        tx.commit()?;
+        Ok(Some(frame))
+    }
+
     pub fn native_capture_for_quiesce(
         &self,
         quiesce_frame_digest: &str,
@@ -996,6 +1062,10 @@ impl LiveGuestJournal {
         signing_key: &lillux::crypto::SigningKey,
         payload: ExecutionChannelPayload,
     ) -> Result<AuthenticatedExecutionFrame> {
+        ensure!(
+            !matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. }),
+            "runtime-applied projection requires its exact native row authoring path"
+        );
         ensure_same_file(&self.0.directory, &self.0.database_file)?;
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         let verified = journal::author_frame(
@@ -1022,6 +1092,10 @@ impl LiveGuestJournal {
         let tx = Transaction::new_unchecked(&self.0.conn, TransactionBehavior::Immediate)?;
         let mut frames = Vec::new();
         for payload in payloads {
+            ensure!(
+                !matches!(payload, ExecutionChannelPayload::RuntimeApplied { .. }),
+                "runtime-applied projection requires its exact native row authoring path"
+            );
             frames.push(journal::author_frame(
                 &tx,
                 &self.0.owner(),
@@ -1865,7 +1939,7 @@ impl GuestStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        if let Some((occurrence, program, digest, receipt_json)) = applied {
+        if let Some((occurrence, program, digest, receipt_json)) = &applied {
             let receipt: lillux::LinuxSandboxAppliedLaunchReceipt =
                 serde_json::from_str(&receipt_json)?;
             let release_applied: bool = self.conn.query_row(
@@ -1881,13 +1955,13 @@ impl GuestStore {
                     && ready_count == 1
                     && release_applied
                     && occurrence
-                        == retained_launcher_occurrence_digest(
+                        == &retained_launcher_occurrence_digest(
                             &self.conn,
                             &self.binding.digest()?,
                         )?
-                    && program == self.binding.candidate_program_digest
-                    && digest == lillux::sha256_hex(receipt_json.as_bytes())
-                    && receipt_json == lillux::canonical_json(&serde_json::to_value(&receipt)?)?
+                    && program == &self.binding.candidate_program_digest
+                    && digest == &lillux::sha256_hex(receipt_json.as_bytes())
+                    && receipt_json == &lillux::canonical_json(&serde_json::to_value(&receipt)?)?
                     && receipt.owned_child_pid > 0
                     && receipt.namespace_pid == 1
                     && receipt.effective_uid == 1
@@ -1897,6 +1971,38 @@ impl GuestStore {
                     && receipt.post_release_mount_view.schema == 1
                     && receipt.post_release_mount_view.mount_count > 0,
                 "external guest applied runtime lost exact occurrence evidence"
+            );
+        }
+        let mut applied_frames = self.conn.prepare(
+            "SELECT frame_json FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied'
+             LIMIT 2",
+        )?;
+        let applied_frames = applied_frames
+            .query_map([self.binding.digest()?], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(
+            applied_frames.len() <= 1,
+            "guest retained duplicate runtime-applied frames"
+        );
+        if let Some(wire) = applied_frames.first() {
+            let Some((occurrence, program, _, receipt_json)) = &applied else {
+                anyhow::bail!("guest runtime-applied frame has no native occurrence row")
+            };
+            let frame = SignedExecutionFrame::decode_and_verify(
+                wire.as_bytes(),
+                &self.binding,
+                self.binding.issued_at_ms,
+            )?;
+            ensure!(
+                frame.frame().payload
+                    == (ExecutionChannelPayload::RuntimeApplied {
+                        launcher_occurrence_digest: occurrence.clone(),
+                        candidate_program_digest: program.clone(),
+                        receipt: serde_json::from_str(receipt_json)?,
+                    }),
+                "guest runtime-applied frame differs from native row"
             );
         }
         journal::validate_channels(&self.conn, &self.owner())?;
@@ -2140,7 +2246,7 @@ impl JournalOwner for GuestOwner<'_> {
     fn authorize_frame(
         &self,
         conn: &Connection,
-        _binding: &ExecutionChannelBinding,
+        binding: &ExecutionChannelBinding,
         payload: &ExecutionChannelPayload,
     ) -> Result<()> {
         let lifecycle: String = conn.query_row(
@@ -2152,6 +2258,33 @@ impl JournalOwner for GuestOwner<'_> {
             lifecycle == "ready" || matches!(payload, ExecutionChannelPayload::Cancel),
             "external guest launcher is not ready"
         );
+        if let ExecutionChannelPayload::RuntimeApplied {
+            launcher_occurrence_digest,
+            candidate_program_digest,
+            receipt,
+        } = payload
+        {
+            let retained: Option<(String, String, String, String)> = conn
+                .query_row(
+                    "SELECT launcher_occurrence_digest,candidate_program_digest,
+                            receipt_digest,receipt_json
+                     FROM external_guest_runtime_applied WHERE binding_digest=?1",
+                    [binding.digest()?],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((occurrence, program, digest, receipt_json)) = retained else {
+                anyhow::bail!("guest runtime-applied frame has no native occurrence row")
+            };
+            ensure!(
+                occurrence == *launcher_occurrence_digest
+                    && program == *candidate_program_digest
+                    && program == binding.candidate_program_digest
+                    && digest == lillux::sha256_hex(receipt_json.as_bytes())
+                    && receipt_json == lillux::canonical_json(&serde_json::to_value(receipt)?)?,
+                "guest runtime-applied frame differs from native occurrence row"
+            );
+        }
         Ok(())
     }
 
@@ -2442,7 +2575,7 @@ mod tests {
     fn applied_runtime_requires_released_exact_occurrence_and_reopens_immutably() {
         let root = tempfile::tempdir().unwrap();
         let (_state_root, authority) = state_authority();
-        let (live, binding, owner, _supervisor, bootstrap, store_identity) =
+        let (live, binding, owner, supervisor, bootstrap, store_identity) =
             live_store(&root, &authority);
         let occurrence =
             retained_launcher_occurrence_digest(&live.0.conn, &binding.digest().unwrap()).unwrap();
@@ -2465,6 +2598,7 @@ mod tests {
         };
         assert!(!live.has_applied_release().unwrap());
         assert!(live.record_applied_runtime(&occurrence, &receipt).is_err());
+        assert!(live.ensure_runtime_applied_frame(&supervisor).is_err());
         let (release, _) = wire(
             &binding,
             &owner,
@@ -2489,6 +2623,41 @@ mod tests {
         let mut changed = receipt.clone();
         changed.environment_sha256[0] ^= 1;
         assert!(live.record_applied_runtime(&occurrence, &changed).is_err());
+        let frame = live
+            .ensure_runtime_applied_frame(&supervisor)
+            .unwrap()
+            .expect("first projection must author one frame");
+        assert!(matches!(
+            &frame.frame().payload,
+            ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest,
+                candidate_program_digest,
+                receipt: observed,
+            } if launcher_occurrence_digest == &occurrence
+                && candidate_program_digest == &binding.candidate_program_digest
+                && observed == &receipt
+        ));
+        assert!(
+            live.author_supervisor_frame(&supervisor, frame.frame().payload.clone())
+                .is_err()
+        );
+        let GuestApplicationClaim::New(token) = live
+            .claim(
+                ChannelDirection::SupervisorToOwner,
+                frame.frame().sequence,
+                frame.digest(),
+            )
+            .unwrap()
+        else {
+            panic!("runtime-applied projection must be claimable once")
+        };
+        let (_, performed) = live.apply_once(token, |_| Ok(())).unwrap();
+        live.finish(performed).unwrap();
+        assert!(
+            live.ensure_runtime_applied_frame(&supervisor)
+                .unwrap()
+                .is_none()
+        );
         for statement in [
             "UPDATE external_guest_runtime_applied SET receipt_digest='other'",
             "DELETE FROM external_guest_runtime_applied",

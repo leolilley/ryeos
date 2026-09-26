@@ -14,7 +14,7 @@ use super::{
     ExecutionChannelPayload, ExecutionFrame, ExecutionFrameApplication, SignedExecutionFrame,
     TERMINAL_CONTROL_BYTES,
 };
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use lillux::crypto::SigningKey;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -338,6 +338,22 @@ pub fn append_frame(
         "SELECT state,completion_request_digest FROM external_execution_channel WHERE placement_thread_id=?1",
         [placement], |row|Ok((row.get(0)?,row.get(1)?)))?;
     owner.authorize_frame(tx, &binding, &frame.payload)?;
+    if matches!(
+        frame.payload,
+        ExecutionChannelPayload::RuntimeApplied { .. }
+    ) {
+        let already_retained: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_execution_frame
+             WHERE binding_digest=?1 AND direction='supervisor_to_owner'
+               AND json_extract(frame_json,'$.frame.payload.kind')='runtime_applied')",
+            [&frame.binding_digest],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !already_retained,
+            "external runtime-applied observation was already retained"
+        );
+    }
     require_direct_command_append(tx, &binding, &frame.payload)?;
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
@@ -1271,16 +1287,17 @@ pub fn claim_application(
         lillux::time::timestamp_millis(),
     )?;
     owner.authorize_frame(tx, &binding, &verified.frame().payload)?;
-    let command_observation = matches!(
+    let non_input_observation = matches!(
         verified.frame().payload,
-        ExecutionChannelPayload::CommandOutput { .. }
+        ExecutionChannelPayload::RuntimeApplied { .. }
+            | ExecutionChannelPayload::CommandOutput { .. }
             | ExecutionChannelPayload::CommandTerminated { .. }
     );
     // Drained target observations are not input authority. Keep normal ordered
     // application (no urgent bypass), and keep channel expiry validation above.
     if revoked(tx, &binding_digest)?
         && !urgent_control(&verified.frame().payload)
-        && !command_observation
+        && !non_input_observation
     {
         bail!("external execution is durably revoked");
     }
