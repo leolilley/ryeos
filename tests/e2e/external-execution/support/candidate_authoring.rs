@@ -59,7 +59,7 @@ description: Execute the exact synthetic runtime's independent qualification pro
 executor_id: "@subprocess"
 execution_protocol: protocol:ryeos/core/opaque
 effects: live
-filesystem_authority: captured_execution
+filesystem_authority: node_policy
 network_authority: isolated
 external_content:
   - id: subject

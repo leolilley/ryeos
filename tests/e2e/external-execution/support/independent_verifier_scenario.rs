@@ -493,6 +493,10 @@ pub(crate) mod tests {
             "bin:independent-runtime-verifier"
         );
         assert_eq!(
+            tool["execution_protocol"],
+            "protocol:ryeos/core/qualification_scoped_callback"
+        );
+        assert_eq!(
             tool["config_schema"]["properties"]["configuration"]["const"],
             scenario.parameters().unwrap()["configuration"]
         );

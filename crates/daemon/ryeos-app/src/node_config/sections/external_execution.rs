@@ -705,8 +705,11 @@ impl RetainedExternalExecutionBinding {
             max_workspace_bytes: 16 * 1024 * 1024,
             max_export_bytes: 8 * 1024 * 1024,
             max_transfer_bytes: 16 * 1024 * 1024,
-            max_guest_package_regular_bytes: 128 * 1024 * 1024,
-            max_guest_package_framed_bytes: 256 * 1024 * 1024,
+            // Debug-built supervisor and launcher fixtures are captured in
+            // full, alongside both distinct admitted runtime destinations.
+            // Bound their aggregate package without changing production policy.
+            max_guest_package_regular_bytes: 768 * 1024 * 1024,
+            max_guest_package_framed_bytes: 1024 * 1024 * 1024,
         };
         document.validate()?;
         let id = "composed-test".to_owned();
