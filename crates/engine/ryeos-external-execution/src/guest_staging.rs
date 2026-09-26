@@ -1543,6 +1543,50 @@ mod tests {
             .is_err(),
             "an ambiguous import cannot restage the same occurrence"
         );
+        let staged_occurrence_dir = tempfile::tempdir().unwrap();
+        let staged_root = lillux::PinnedDirectory::open(staged_occurrence_dir.path())
+            .unwrap()
+            .unwrap();
+        staged_root.tighten_owner_private_directory().unwrap();
+        let staged_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
+            &staged_root,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        let staged_without_install = staged_owner
+            .stage_uploaded_once(
+                &upload,
+                &context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .unwrap();
+        drop(staged_without_install);
+        let recovered_stage = crate::guest_installation::recover_guest_occurrence(
+            &staged_root,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_stage.phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::ImportUncertain,
+            "a finished stage does not grant a post-crash install attempt"
+        );
+        drop(recovered_stage);
+        assert!(
+            crate::guest_installation::GuestOccurrenceOwner::begin(
+                &staged_root,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "a completed pre-install stage cannot reserve a second owner"
+        );
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
             ..context
