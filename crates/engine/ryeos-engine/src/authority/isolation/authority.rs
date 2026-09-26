@@ -194,6 +194,33 @@ impl From<IsolationRealizationMemberCommand> for IsolationAdmittedCommand {
     }
 }
 
+impl IsolationAdmittedCommand {
+    /// Compare complete live command bindings, including the open executable
+    /// and a realization member's pinned tree placement. A code digest alone
+    /// cannot establish that two commands have the same execution authority.
+    pub fn same_binding_as(&self, other: &Self) -> anyhow::Result<bool> {
+        let same_descriptor = |left: &IsolationDescriptorBoundCommand,
+                               right: &IsolationDescriptorBoundCommand| {
+            Ok::<bool, anyhow::Error>(
+                left.identity() == right.identity()
+                    && left.file_identity() == right.file_identity()
+                    && left.executable().same_file_identity(right.executable())?,
+            )
+        };
+        match (self, other) {
+            (Self::DescriptorBound(left), Self::DescriptorBound(right)) => {
+                same_descriptor(left, right)
+            }
+            (Self::RealizationMember(left), Self::RealizationMember(right)) => Ok(
+                left.realization_root() == right.realization_root()
+                    && left.realization_destination() == right.realization_destination()
+                    && same_descriptor(left.command(), right.command())?,
+            ),
+            _ => Ok(false),
+        }
+    }
+}
+
 impl IsolationDescriptorBoundCommand {
     pub fn new(
         identity: IsolationVerifiedCode,
@@ -757,6 +784,61 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn admitted_command_binding_includes_descriptor_variant_and_realization_tree() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first_root = lillux::PinnedDirectory::open(first_root.path()).unwrap().unwrap();
+        let second_root = lillux::PinnedDirectory::open(second_root.path()).unwrap().unwrap();
+        let descriptor = lillux::sealed_memfd(c"admitted-command", b"exact-code").unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: "/runtime/bin/verifier".into(),
+            content_hash: lillux::sha256_hex(b"exact-code"),
+        };
+        let file_identity = IsolationDescriptorFileIdentity {
+            device: 1,
+            inode: 2,
+            size: 10,
+            modified_seconds: 0,
+            modified_nanoseconds: 0,
+            changed_seconds: 0,
+            changed_nanoseconds: 0,
+            mode: 0,
+            file_type: 0,
+        };
+        let command = IsolationDescriptorBoundCommand::new(
+            identity.clone(), descriptor.clone(), file_identity,
+        );
+        let standalone = IsolationAdmittedCommand::DescriptorBound(command.clone());
+        let member = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command.clone(), first_root.identity().unwrap(), "/runtime".into(),
+            ),
+        );
+        assert!(standalone.same_binding_as(&standalone.clone()).unwrap());
+        assert!(member.same_binding_as(&member.clone()).unwrap());
+        assert!(!standalone.same_binding_as(&member).unwrap());
+        let other_descriptor = IsolationAdmittedCommand::DescriptorBound(
+            IsolationDescriptorBoundCommand::new(
+                identity, lillux::sealed_memfd(c"other-command", b"exact-code").unwrap(),
+                file_identity,
+            ),
+        );
+        assert!(!standalone.same_binding_as(&other_descriptor).unwrap());
+        let other_root = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command.clone(), second_root.identity().unwrap(), "/runtime".into(),
+            ),
+        );
+        assert!(!member.same_binding_as(&other_root).unwrap());
+        let other_destination = IsolationAdmittedCommand::RealizationMember(
+            IsolationRealizationMemberCommand::new(
+                command, first_root.identity().unwrap(), "/other".into(),
+            ),
+        );
+        assert!(!member.same_binding_as(&other_destination).unwrap());
+    }
 
     #[cfg(unix)]
     #[test]

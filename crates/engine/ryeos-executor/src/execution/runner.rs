@@ -5212,7 +5212,7 @@ pub async fn run_and_wait(
         let key = ScopedProducerAuthorityKey::new(tid.clone(), owner)
             .map_err(|error| guard.fail_before_spawn(error))?;
         let command = prepared_plan
-            .descriptor_bound_command_for_scoped_producer()
+            .admitted_command_for_scoped_producer()
             .map_err(|error| guard.fail_before_spawn(error))?;
         let (scenario_commands, requires_ingress_handoff) = promoted_scoped_producer_commands(
             &state,
@@ -6639,7 +6639,7 @@ async fn dispatch_detached_bg_task(
         let registration = (|| -> Result<_> {
             let owner: ryeos_app::runtime_db::LaunchOwner = serde_json::from_str(&launch_owner)?;
             let key = ScopedProducerAuthorityKey::new(bg_thread_id.clone(), owner)?;
-            let command = bg_prepared_plan.descriptor_bound_command_for_scoped_producer()?;
+            let command = bg_prepared_plan.admitted_command_for_scoped_producer()?;
             let (scenario_commands, requires_ingress_handoff) = promoted_scoped_producer_commands(
                 &bg_state,
                 purpose,

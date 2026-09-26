@@ -11,10 +11,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail, ensure};
 use ryeos_engine::isolation::{
-    IsolationAdmittedCommand, IsolationCommandAuthority, IsolationDescriptorBoundCommand,
+    IsolationAdmittedCommand, IsolationCommandAuthority,
     IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
     IsolationReadOnlyMountAuthority,
 };
+#[cfg(test)]
+use ryeos_engine::isolation::IsolationDescriptorBoundCommand;
 use ryeos_state::external_content::products::producer_recipe::{
     ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
     ProducerExecutableSource, ProducerStdinSource, ProductProducerRecipe,
@@ -140,7 +142,7 @@ impl ScopedProducerAttemptCoordinate {
 /// Its destruction cannot itself prove process death; the journal and scope
 /// owner must settle the launched child separately.
 pub struct ScopedProducerLiveAuthority {
-    command: IsolationDescriptorBoundCommand,
+    command: IsolationAdmittedCommand,
     scenario_commands: BTreeMap<
         String,
         (
@@ -165,7 +167,7 @@ pub struct ScopedProducerLaunchRequest {
 
 impl ScopedProducerLiveAuthority {
     pub fn new(
-        command: IsolationDescriptorBoundCommand,
+        command: IsolationAdmittedCommand,
         workspace: lillux::PinnedDirectory,
         external_realizations_env: Option<String>,
         read_only_mounts: Vec<IsolationReadOnlyMountAuthority>,
@@ -203,7 +205,7 @@ impl ScopedProducerLiveAuthority {
             .ok_or_else(|| anyhow::anyhow!("scoped producer ingress handoff is not live"))
     }
 
-    pub fn command(&self) -> &IsolationDescriptorBoundCommand {
+    pub fn command(&self) -> &IsolationAdmittedCommand {
         &self.command
     }
 
@@ -242,9 +244,7 @@ impl ScopedProducerLiveAuthority {
         executable: &ProducerExecutableSource,
     ) -> Result<IsolationAdmittedCommand> {
         match executable {
-            ProducerExecutableSource::AdmittedVerifierExecutable => Ok(
-                IsolationAdmittedCommand::DescriptorBound(self.command.clone()),
-            ),
+            ProducerExecutableSource::AdmittedVerifierExecutable => Ok(self.command.clone()),
             ProducerExecutableSource::AdmittedRealizationMember {
                 executable_sha256, ..
             } => {
@@ -288,7 +288,8 @@ impl ScopedProducerLiveAuthority {
     }
 
     /// Compile only the signed producer's process arguments. Isolation must
-    /// still bind `self.command()` and `self.workspace_view()` to this request,
+    /// still bind the selected admitted command and `self.workspace_view()` to
+    /// this request,
     /// while Lillux must install the recipe's scope-wide memory/process limits
     /// before any held spawn. This value alone is not executable authority.
     pub fn request_for_recipe(
@@ -354,10 +355,7 @@ impl ScopedProducerLiveAuthority {
                 ProducerStdinSource::SignedVerifierParameters,
             ) => {
                 ensure!(
-                    matches!(
-                        selected_command,
-                        IsolationAdmittedCommand::DescriptorBound(_)
-                    ) && selected_command.authority().identity() == self.command.identity(),
+                    selected_command.same_binding_as(&self.command)?,
                     "scoped producer selected command differs from admitted verifier"
                 );
                 true
@@ -368,11 +366,19 @@ impl ScopedProducerLiveAuthority {
                 },
                 ProducerStdinSource::InteractiveVerifierChannel { .. },
             ) => {
+                let mut retained_member = false;
+                for (_, command) in self.scenario_commands.values() {
+                    if command.same_binding_as(selected_command)? {
+                        retained_member = true;
+                        break;
+                    }
+                }
                 ensure!(
                     matches!(
                         selected_command,
                         IsolationAdmittedCommand::RealizationMember(_)
-                    ) && selected_command.authority().identity().content_hash == *executable_sha256,
+                    ) && selected_command.authority().identity().content_hash == *executable_sha256
+                        && retained_member,
                     "scoped producer selected command differs from signed realization member"
                 );
                 false
@@ -654,7 +660,7 @@ mod tests {
                 file_type: 0,
             },
         );
-        ScopedProducerLiveAuthority::new(command, workspace, None, Vec::new(), None, Arc::new(root))
+        ScopedProducerLiveAuthority::new(command.into(), workspace, None, Vec::new(), None, Arc::new(root))
             .unwrap()
     }
 
@@ -745,12 +751,33 @@ mod tests {
                     content_hash: "e".repeat(64),
                 },
                 lillux::sealed_memfd(c"scoped-producer-unrelated", b"different").unwrap(),
-                authority.command().file_identity(),
+                match authority.command() {
+                    IsolationAdmittedCommand::DescriptorBound(command) => command.file_identity(),
+                    IsolationAdmittedCommand::RealizationMember(_) => unreachable!(),
+                },
             ));
         assert!(
             authority
                 .request_for_recipe(&recipe, "{\"sealed\":true}", &unrelated)
                 .is_err()
+        );
+        let swapped_descriptor = IsolationAdmittedCommand::DescriptorBound(
+            IsolationDescriptorBoundCommand::new(
+                authority.command().authority().identity().clone(),
+                lillux::sealed_memfd(c"scoped-producer-swapped", b"fixture").unwrap(),
+                match authority.command() {
+                    IsolationAdmittedCommand::DescriptorBound(command) => command.file_identity(),
+                    IsolationAdmittedCommand::RealizationMember(_) => unreachable!(),
+                },
+            ),
+        );
+        assert!(
+            authority
+                .request_for_recipe(&recipe, "{\"sealed\":true}", &swapped_descriptor)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("differs from admitted verifier")
         );
         let mut unprepared = recipe.clone();
         unprepared.environment_bindings.insert(
@@ -940,7 +967,7 @@ mod tests {
                 .request_for_recipe(
                     &recipe,
                     "{\"sealed\":true}",
-                    &IsolationAdmittedCommand::DescriptorBound(authority.command().clone()),
+                    authority.command(),
                 )
                 .err()
                 .unwrap()

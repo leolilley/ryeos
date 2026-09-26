@@ -493,20 +493,15 @@ impl PreparedRealizationCommand {
 }
 
 impl PreparedItemPlan {
-    /// Borrow the exact descriptor-bound command selected for this already
-    /// finalized spawn. A qualification child may clone this authority while
-    /// the parent retains its process inputs; it must never reopen the Bundle
-    /// item or infer an executable from a path after admission.
-    pub fn descriptor_bound_command_for_scoped_producer(
+    /// Borrow the complete admitted command selected for this finalized spawn.
+    /// A qualification child may clone this authority while the parent retains
+    /// its process inputs. Realization members retain their pinned tree binding;
+    /// neither variant may be reconstructed from a path after admission.
+    pub fn admitted_command_for_scoped_producer(
         &self,
-    ) -> Result<ryeos_engine::isolation::IsolationDescriptorBoundCommand> {
+    ) -> Result<ryeos_engine::isolation::IsolationAdmittedCommand> {
         match self.admitted_command.as_ref() {
-            Some(ryeos_engine::isolation::IsolationAdmittedCommand::DescriptorBound(command)) => {
-                Ok(command.clone())
-            }
-            Some(ryeos_engine::isolation::IsolationAdmittedCommand::RealizationMember(_)) => {
-                bail!("scoped producer requires a descriptor-bound verifier executable")
-            }
+            Some(command) => Ok(command.clone()),
             None => bail!("scoped producer verifier executable is not bound"),
         }
     }
