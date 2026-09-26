@@ -109,6 +109,22 @@ input byte against the retained projection and bind that verification to
 of the run-proxy stream. Provider terminal status alone is not guest-writer
 exclusion or hard-isolation qualification.
 
+There is currently no guest-side importer executable joining these stages.
+`ryeos-external-execution::guest_staging::stage_uploaded_guest_package` already
+imports an exact pinned regular inode into a private generation and verifies
+the package, base CAS, limits and manifest. `guest_content` rechecks the
+realized product/source contents. The supervisor's shipped entrypoint instead
+starts **after** its fixed descriptors have been installed; it cannot safely
+serve as the importer. The missing generic guest owner must receive the
+occurrence-bound expected identity independently of the package, pin and
+verify the uploaded inode (or first seal it if the provider can still write
+it), stage and recheck the contents, install the fixed descriptor map, launch
+the exact packaged supervisor, retain the staged generation for its whole
+lifetime, and discard it only after scope and writer settlement. This owner
+belongs in RyeOS guest execution, not in the Render API adapter or Farm.
+Until that joined handoff is implemented and tested, the adapter must continue
+returning `supervisor_pending` even if token minting and upload work locally.
+
 ## Provider operation and uncertainty matrix
 
 | Operation | Stable identity and pre-contact record | Positive evidence and reconciliation | Lost response, negative evidence, and spend |
