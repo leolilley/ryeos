@@ -107,10 +107,37 @@ pub struct AdmittedBundleStructuredWorkerProfile {
     pub publisher_fingerprint: String,
 }
 
+/// Captured source whose CAS roots remain staged until its consumer has
+/// checked the signed-definition join. Dropping it never grants a profile.
+pub struct PreparedBundleStructuredWorkerProfile {
+    admitted: AdmittedBundleStructuredWorkerProfile,
+    publication: Option<PendingCasPublication>,
+}
+
+impl PreparedBundleStructuredWorkerProfile {
+    pub fn admitted(&self) -> &AdmittedBundleStructuredWorkerProfile {
+        &self.admitted
+    }
+
+    pub fn publish(self) -> anyhow::Result<AdmittedBundleStructuredWorkerProfile> {
+        if let Some(publication) = self.publication {
+            publication.publish()?;
+        }
+        Ok(self.admitted)
+    }
+}
+
 pub fn admit_bundle_structured_worker_profile(
     state: &AppState,
     worker_ref: &str,
 ) -> anyhow::Result<AdmittedBundleStructuredWorkerProfile> {
+    prepare_bundle_structured_worker_profile(state, worker_ref)?.publish()
+}
+
+pub fn prepare_bundle_structured_worker_profile(
+    state: &AppState,
+    worker_ref: &str,
+) -> anyhow::Result<PreparedBundleStructuredWorkerProfile> {
     let canonical = CanonicalRef::parse(worker_ref)?;
     ensure!(
         canonical.to_string() == worker_ref
@@ -194,10 +221,10 @@ pub fn admit_bundle_structured_worker_profile(
             captured.into_publication(),
         ))
     })?;
-    if let Some(publication) = publication {
-        publication.publish()?;
-    }
-    Ok(admitted)
+    Ok(PreparedBundleStructuredWorkerProfile {
+        admitted,
+        publication,
+    })
 }
 
 pub fn admit_source_closure(

@@ -9,7 +9,8 @@ use ryeos_state::external_content::products::qualification::{
 };
 
 use super::{
-    consumer_definition_identity, resolve_consumer_definition_in_generation,
+    admit_current_bundle_consumer_worker, consumer_definition_identity,
+    require_consumer_worker_matches_definitions, resolve_consumer_definition_in_generation,
     resolve_current_bundle_consumer_definitions, resolve_current_bundle_qualification_policy,
 };
 
@@ -168,6 +169,42 @@ product_qualification_policy:
             .as_ref()
             .unwrap(),
     )?;
+    let (joined, worker) =
+        admit_current_bundle_consumer_worker(&state, &policy_source, &relationship)?
+            .ok_or_else(|| anyhow::anyhow!("signed consumer Worker admission absent"))?;
+    ensure!(
+        joined == definitions
+            && worker.bundle_generation_identity == joined.bundle_generation_identity
+            && worker.signed_effective_definition_digest
+                == joined.worker.effective_definition_digest
+            && worker.preselection_effective_definition_digest
+                != worker.signed_effective_definition_digest
+            && lillux::valid_hash(&worker.source.binding_hash)
+            && lillux::valid_hash(&worker.source.content_manifest_hash),
+        "signed consumer Worker source did not join its definitions"
+    );
+    let mutations: [fn(&mut ProductQualificationConsumerDefinitionIdentity); 4] = [
+        |identity: &mut ProductQualificationConsumerDefinitionIdentity| {
+            identity.bundle_generation_identity = "a".repeat(64)
+        },
+        |identity: &mut ProductQualificationConsumerDefinitionIdentity| {
+            identity.worker.raw_content_digest = "a".repeat(64)
+        },
+        |identity: &mut ProductQualificationConsumerDefinitionIdentity| {
+            identity.worker.publisher_fingerprint = "a".repeat(64)
+        },
+        |identity: &mut ProductQualificationConsumerDefinitionIdentity| {
+            identity.worker.effective_definition_digest = "a".repeat(64)
+        },
+    ];
+    for mutate in mutations {
+        let mut mismatch = joined.clone();
+        mutate(&mut mismatch);
+        ensure!(
+            require_consumer_worker_matches_definitions(&mismatch, &worker).is_err(),
+            "changed consumer Worker authority was accepted"
+        );
+    }
     let mut changed = policy_source.clone();
     changed
         .policy

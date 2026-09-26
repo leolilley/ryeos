@@ -701,6 +701,48 @@ pub(super) fn resolve_current_bundle_consumer_definitions(
     })
 }
 
+/// Admit the exact signed consumer Worker source against the policy's
+/// same-generation definition coordinates. This binds the source-derived D0
+/// but deliberately does not attest the environment, product or runtime.
+pub(super) fn admit_current_bundle_consumer_worker(
+    state: &AppState,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+) -> anyhow::Result<
+    Option<(
+        ProductQualificationConsumerDefinitionIdentity,
+        crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
+    )>,
+> {
+    let Some(definitions) =
+        resolve_current_bundle_consumer_definitions(state, policy_source, relationship)?
+    else {
+        return Ok(None);
+    };
+    let prepared = crate::source_closure_admission::prepare_bundle_structured_worker_profile(
+        state,
+        &definitions.worker.canonical_ref,
+    )?;
+    let worker = prepared.admitted();
+    require_consumer_worker_matches_definitions(&definitions, worker)?;
+    Ok(Some((definitions, prepared.publish()?)))
+}
+
+fn require_consumer_worker_matches_definitions(
+    definitions: &ProductQualificationConsumerDefinitionIdentity,
+    worker: &crate::source_closure_admission::AdmittedBundleStructuredWorkerProfile,
+) -> anyhow::Result<()> {
+    if definitions.bundle_generation_identity != worker.bundle_generation_identity
+        || definitions.worker.raw_content_digest != worker.raw_content_digest
+        || definitions.worker.publisher_fingerprint != worker.publisher_fingerprint
+        || definitions.worker.effective_definition_digest
+            != worker.signed_effective_definition_digest
+    {
+        bail!("qualification consumer Worker source differs from signed definitions");
+    }
+    Ok(())
+}
+
 fn resolve_consumer_definition_in_generation(
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
     item_ref: &str,
