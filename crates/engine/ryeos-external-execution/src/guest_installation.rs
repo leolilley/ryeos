@@ -1,8 +1,9 @@
 //! One-way, exact guest base-installation intent beneath an external Worker.
 //!
-//! The record is written before the mutable base copy. Recovery only checks
-//! the exact retained intent and import; it cannot repeat installation or
-//! grant supervisor launch. The eventual guest owner must separately journal
+//! The durable owner record is written before private-source import and the
+//! mutable base copy. Recovery checks exact retained intent but cannot
+//! recreate the owner's process-local source, repeat installation, or grant
+//! supervisor launch. The eventual guest owner must separately journal
 //! launch, enforce input writer exclusion and settle the enclosing scope.
 
 use std::ffi::OsStr;
@@ -21,7 +22,7 @@ use ryeos_external_execution_contract::staging_package::{
 use serde::{Deserialize, Serialize};
 
 use crate::guest_staging::{
-    GuestStageIdentity, TicketedGuestImport, recover_ticketed_guest_import,
+    GuestStageIdentity, TicketedGuestImport,
     stage_ticketed_uploaded_guest_package,
 };
 
@@ -100,6 +101,26 @@ pub struct GuestOccurrenceOwner {
 pub struct StagedGuestOccurrence {
     owner: GuestOccurrenceOwner,
     imported: TicketedGuestImport,
+    source: GuestSourceCustody,
+}
+
+/// The production variant retains the dedicated private filesystem owner
+/// through staging, installation and eventual held-supervisor preparation.
+/// An ordinary pinned directory exists only for structural unit fixtures.
+enum GuestSourceCustody {
+    Live(lillux::sandbox::LinuxPrivateSourceFilesystem),
+    #[cfg(test)]
+    StructuralFixture(lillux::PinnedDirectory),
+}
+
+impl GuestSourceCustody {
+    fn root(&self) -> &lillux::PinnedDirectory {
+        match self {
+            Self::Live(source) => source.root(),
+            #[cfg(test)]
+            Self::StructuralFixture(root) => root,
+        }
+    }
 }
 
 /// Retains both the exact owner and stage after base installation. This is
@@ -110,6 +131,7 @@ pub struct InstalledGuestBase {
     runtime: lillux::PinnedDirectory,
     intent_identity: GuestBaseInstallIntentIdentity,
     children: InstalledRuntimeChildren,
+    _source: GuestSourceCustody,
 }
 
 /// One-shot, still-owned staged authorities prepared after the exact installed
@@ -811,7 +833,6 @@ pub struct RecoveredGuestOccurrence {
     _occurrence: lillux::PinnedDirectory,
     _root: lillux::PinnedDirectory,
     _lock: lillux::PinnedDirectoryLock,
-    _imported: Option<TicketedGuestImport>,
     _runtime: Option<lillux::PinnedDirectory>,
     phase: GuestOccurrenceRecoveryPhase,
 }
@@ -875,7 +896,6 @@ pub fn recover_guest_occurrence(
             _occurrence: occurrence.try_clone()?,
             _root: root,
             _lock: lock,
-            _imported: None,
             _runtime: None,
             phase: GuestOccurrenceRecoveryPhase::ImportUncertain,
         });
@@ -898,6 +918,7 @@ pub fn recover_guest_occurrence(
             && intent.journal_directory == root.identity()?,
         "guest installation intent differs from occurrence owner"
     );
+    intent.stage.validate_for_ticket(&ticket.manifest_sha256)?;
     let runtime = occurrence
         .open_child_directory(OsStr::new(CANDIDATE_RUNTIME_DIRECTORY))?
         .context("committed guest installation has no retained runtime")?;
@@ -950,32 +971,24 @@ pub fn recover_guest_occurrence(
             _occurrence: occurrence.try_clone()?,
             _root: root,
             _lock: lock,
-            _imported: None,
             _runtime: Some(runtime),
             phase: GuestOccurrenceRecoveryPhase::LaunchUncertain,
         });
     }
-    let imported = recover_ticketed_guest_import(&root, &intent.stage, ticket, context, inputs)?;
-    runtime.require_disjoint_directory_tree(imported.root())?;
-    let marker = imported
-        .root()
-        .open_pinned_regular(OsStr::new(STAGE_MARKER_NAME), false)?
-        .context("guest stage installation marker is absent")?;
-    let identity = GuestBaseInstallIntentIdentity {
-        schema: 1,
-        journal_directory: root.identity()?,
-        record_file: lillux::pinned_regular_file_identity(&record.try_clone_descriptor()?)?,
-        record_sha256: lillux::sha256_hex(&bytes),
-        stage_marker_file: lillux::pinned_regular_file_identity(&marker.try_clone_descriptor()?)?,
-    };
-    verify_committed_intent(&imported, context, inputs, &root, &runtime, &identity)?;
+    ensure!(
+        intent.candidate_runtime == runtime.identity()?,
+        "committed guest runtime changed inode"
+    );
+    // The staged source belongs to the lost owner's process-private mount.
+    // A child or retained FD may keep that mount alive, but recovery cannot
+    // reconstruct its authority from a durable path. This phase can only be
+    // quarantined, never adopted or copied.
     ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
     ensure_child_binding(occurrence, CANDIDATE_RUNTIME_DIRECTORY, &runtime)?;
     Ok(RecoveredGuestOccurrence {
         _occurrence: occurrence.try_clone()?,
         _root: root,
         _lock: lock,
-        _imported: Some(imported),
         _runtime: Some(runtime),
         phase: GuestOccurrenceRecoveryPhase::InstallationUncertain,
     })
@@ -1076,23 +1089,66 @@ impl GuestOccurrenceOwner {
         Ok(())
     }
 
-    /// Consumes the pre-upload owner. Failure leaves the create-only owner
+    /// Consumes the pre-upload owner and stages only into the dedicated
+    /// process-private source filesystem, disjoint from durable occurrence
+    /// journal and writable runtime. Failure leaves the create-only owner
     /// record in place and exposes no retry method.
     pub fn stage_uploaded_once(
         self,
         upload: &lillux::PinnedRegularFile,
+        source: lillux::sandbox::LinuxPrivateSourceFilesystem,
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<StagedGuestOccurrence> {
+        self.stage_uploaded_into_source_root(
+            upload,
+            GuestSourceCustody::Live(source),
+            context,
+            inputs,
+            deadline,
+        )
+    }
+
+    /// Structural fixture only. Production import must supply the typed
+    /// Lillux process-private source owner above, not an arbitrary directory.
+    #[cfg(test)]
+    pub(crate) fn stage_uploaded_with_source_root_for_test(
+        self,
+        upload: &lillux::PinnedRegularFile,
+        source_root: &lillux::PinnedDirectory,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<StagedGuestOccurrence> {
+        self.stage_uploaded_into_source_root(
+            upload,
+            GuestSourceCustody::StructuralFixture(source_root.try_clone()?),
+            context,
+            inputs,
+            deadline,
+        )
+    }
+
+    fn stage_uploaded_into_source_root(
+        self,
+        upload: &lillux::PinnedRegularFile,
+        source: GuestSourceCustody,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<StagedGuestOccurrence> {
+        let source_root = source.root();
         self.recheck(context, inputs)?;
         ensure!(
             self.root.entry_names()? == vec![std::ffi::OsString::from(OWNER_RECORD_NAME)],
             "guest occurrence already has staged or ambient content"
         );
+        source_root.require_owner_private_directory()?;
+        self.occurrence.require_disjoint_directory_tree(source_root)?;
         let imported = stage_ticketed_uploaded_guest_package(
             upload,
-            &self.root,
+            source_root,
             &self.ticket,
             context,
             inputs,
@@ -1101,13 +1157,15 @@ impl GuestOccurrenceOwner {
         Ok(StagedGuestOccurrence {
             owner: self,
             imported,
+            source,
         })
     }
 }
 
 impl StagedGuestOccurrence {
     /// The owner journal already fences this occurrence against re-staging.
-    /// Commit exact stage/runtime intent, then copy the verified base once.
+    /// Commit exact stage/runtime intent, then copy the verified base once while
+    /// the original process-private source owner remains alive.
     pub fn install_base_once(
         self,
         context: &GuestImportContext<'_>,
@@ -1137,6 +1195,7 @@ impl StagedGuestOccurrence {
             runtime,
             intent_identity,
             children,
+            _source: self.source,
         })
     }
 }

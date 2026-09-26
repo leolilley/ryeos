@@ -34,6 +34,20 @@ pub struct GuestStageIdentity {
 }
 
 impl GuestStageIdentity {
+    /// Validate retained stage coordinates without reconstructing an
+    /// ephemeral source after its owner dies. This grants no stage access or
+    /// recovery permission.
+    pub fn validate_for_ticket(&self, manifest_sha256: &str) -> Result<()> {
+        ensure!(
+            self.schema == 1
+                && canonical_stage_name(&self.name)
+                && lillux::valid_hash(&self.manifest_sha256)
+                && self.manifest_sha256 == manifest_sha256,
+            "guest stage identity differs from retained import ticket"
+        );
+        Ok(())
+    }
+
     /// Resolve only the exact named generation under the separately retained
     /// private parent. This is a point read, never a stage-directory scan.
     pub fn resolve_under(
@@ -391,12 +405,11 @@ pub(crate) fn stage_ticketed_uploaded_guest_package(
     })
 }
 
-/// Reopen only the exact previously journaled stage under the independently
-/// retained private parent. This never reads the uploaded package again and
-/// never authorizes another launch: the guest owner must reconcile its own
-/// launch and scope journal separately. The import-time upload digest is
-/// trusted only through the retained ticket; all installed content is
-/// rechecked from the pinned stage before it can be used again.
+/// Structural fixture for reopening a stage while its independently retained
+/// parent still exists. Production recovery cannot reconstruct the ephemeral
+/// process-private source after owner death and must not use this path to
+/// restage, install, launch, or claim Ready.
+#[cfg(test)]
 pub(crate) fn recover_ticketed_guest_import(
     parent: &lillux::PinnedDirectory,
     identity: &GuestStageIdentity,
@@ -458,6 +471,7 @@ pub(crate) fn recover_ticketed_guest_import(
     Ok(imported)
 }
 
+#[cfg(test)]
 fn read_stage_manifest(
     root: &lillux::PinnedDirectory,
     expected_digest: &str,
@@ -1527,11 +1541,51 @@ mod tests {
             recover_ticketed_guest_import(&parent, &stage_identity, &ticket, &context, &inputs)
                 .unwrap();
         imported.discard().unwrap();
+        let overlapping_dir = tempfile::tempdir().unwrap();
+        let overlapping_occurrence = lillux::PinnedDirectory::open(overlapping_dir.path())
+            .unwrap()
+            .unwrap();
+        overlapping_occurrence.tighten_owner_private_directory().unwrap();
+        let overlapping_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
+            &overlapping_occurrence,
+            &ticket,
+            &context,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            overlapping_owner
+                .stage_uploaded_with_source_root_for_test(
+                    &upload,
+                    &overlapping_occurrence,
+                    &context,
+                    &inputs,
+                    lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+                )
+                .is_err(),
+            "durable occurrence root cannot double as private source"
+        );
+        assert_eq!(
+            crate::guest_installation::recover_guest_occurrence(
+                &overlapping_occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .unwrap()
+            .phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::ImportUncertain
+        );
         let occurrence_dir = tempfile::tempdir().unwrap();
         let occurrence = lillux::PinnedDirectory::open(occurrence_dir.path())
             .unwrap()
             .unwrap();
         occurrence.tighten_owner_private_directory().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_root = lillux::PinnedDirectory::open(source_dir.path())
+            .unwrap()
+            .unwrap();
+        source_root.tighten_owner_private_directory().unwrap();
         let owner = crate::guest_installation::GuestOccurrenceOwner::begin(
             &occurrence,
             &ticket,
@@ -1550,8 +1604,9 @@ mod tests {
             "the exact occurrence cannot reserve a second import owner"
         );
         let staged_occurrence = owner
-            .stage_uploaded_once(
+            .stage_uploaded_with_source_root_for_test(
                 &upload,
+                &source_root,
                 &context,
                 &inputs,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
@@ -1843,7 +1898,14 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let installed_stage = owner_root
+        assert!(
+            owner_root
+                .open_child_directory(OsStr::new(intent_value["stage"]["name"].as_str().unwrap()))
+                .unwrap()
+                .is_none(),
+            "private source stage must not live under the durable owner journal"
+        );
+        let installed_stage = source_root
             .open_child_directory(OsStr::new(intent_value["stage"]["name"].as_str().unwrap()))
             .unwrap()
             .unwrap();
@@ -1852,15 +1914,21 @@ mod tests {
             .unwrap()
             .unwrap();
         install_marker.set_mode(0o644).unwrap();
-        assert!(
+        assert_eq!(
             crate::guest_installation::recover_guest_occurrence(
-                &occurrence,
-                &ticket,
-                &context,
-                &inputs,
+                &occurrence, &ticket, &context, &inputs,
+            )
+            .unwrap()
+            .phase(),
+            &crate::guest_installation::GuestOccurrenceRecoveryPhase::InstallationUncertain,
+            "recovery cannot reopen ephemeral source or grant adoption"
+        );
+        assert!(
+            crate::guest_installation::GuestOccurrenceOwner::begin(
+                &occurrence, &ticket, &context, &inputs,
             )
             .is_err(),
-            "recovery must reject a mode-weakened stage owner marker"
+            "weakened ephemeral marker cannot permit a second import owner"
         );
         install_marker.set_mode(0o600).unwrap();
         owned_runtime.set_mode(0o777).unwrap();
@@ -1997,6 +2065,11 @@ mod tests {
             .unwrap()
             .unwrap();
         staged_root.tighten_owner_private_directory().unwrap();
+        let staged_source_dir = tempfile::tempdir().unwrap();
+        let staged_source_root = lillux::PinnedDirectory::open(staged_source_dir.path())
+            .unwrap()
+            .unwrap();
+        staged_source_root.tighten_owner_private_directory().unwrap();
         let staged_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
             &staged_root,
             &ticket,
@@ -2005,8 +2078,9 @@ mod tests {
         )
         .unwrap();
         let staged_without_install = staged_owner
-            .stage_uploaded_once(
+            .stage_uploaded_with_source_root_for_test(
                 &upload,
+                &staged_source_root,
                 &context,
                 &inputs,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
