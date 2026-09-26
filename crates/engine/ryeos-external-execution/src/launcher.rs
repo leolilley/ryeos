@@ -1039,9 +1039,14 @@ mod tests {
             .unwrap();
         let mut launch_spec = spec();
         let output_observation = workspace_output.regular_file_observation().unwrap();
+        let output_descriptor = workspace_output.inherited_descriptor().unwrap();
+        // This is a process-local descriptor chosen by the OS, so the
+        // fixture's synthetic base coordinate must not assume it is unused.
+        launch_spec.guest_inputs.base_snapshot.descriptor =
+            output_descriptor.max(65).checked_add(1).unwrap();
         launch_spec.guest_inputs.workspace_outputs = Some(
             ryeos_external_execution_contract::GuestWorkspaceOutputAuthorityInput {
-                descriptor: workspace_output.inherited_descriptor().unwrap(),
+                descriptor: output_descriptor,
                 authority_hash: workspace_output
                     .digest_regular_file_stable_exact(&output_observation)
                     .unwrap(),
