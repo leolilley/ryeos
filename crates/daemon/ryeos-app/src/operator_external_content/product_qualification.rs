@@ -232,6 +232,9 @@ fn prove_with_guard(
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
     let policy_source = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
+        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+    }
     let root = state
         .state_store
         .get_authoritative_root_thread_snapshot(&request.verifier_chain_root_id)?

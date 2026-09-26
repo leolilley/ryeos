@@ -129,6 +129,13 @@ pub fn prepare_after_reservation(
         .as_deref()
         .context("selected product relationship has no qualification policy")?;
     let policy_source = super::resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    if let Some(consumer_context) = &policy_source.policy.consumer_execution_context {
+        consumer_context.validate_relationship_consumer(&relationship.consumer)?;
+        // A declaration is not a current admitted Worker/environment/profile
+        // closure. Refuse before verifier or provider contact until that
+        // authenticated join is retained and rechecked at proof/selection.
+        bail!("qualification consumer execution context has no authenticated closure proof");
+    }
     for claim in &relationship.qualification.required_claims {
         if policy_source
             .policy

@@ -13,7 +13,7 @@ use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::composition::ResolvedExternalProductSelections;
+use super::composition::{ProductRelationshipConsumer, ResolvedExternalProductSelections};
 use super::publication::ProductCaptureCoordinate;
 use super::transfer::ProductWitnessSource;
 use super::{validate_canonical_unsuffixed_ref, validate_hash, validate_name};
@@ -66,11 +66,66 @@ pub struct ProductQualificationPolicy {
     pub allowed_claims: Vec<String>,
     pub minimum_verifier_process_settlement: VerifierProcessSettlementAuthority,
     pub verifier_parameters: Value,
+    /// Signed consumer closure that a runtime-qualification verifier must
+    /// exercise. This declaration is not itself evidence of admission: the
+    /// launch and proof owners must resolve these refs from one checked
+    /// Bundle generation and join them to the selected relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_execution_context: Option<ProductQualificationConsumerExecutionContext>,
     /// Finite signed alternatives for one selected producer attempt per
     /// admitted verifier root. A ref is only source identity, not permission
     /// to launch: the daemon must resolve and admit a typed Bundle recipe.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub producer_scenarios: BTreeMap<String, ProductQualificationProducerScenario>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationConsumerExecutionContext {
+    pub worker_ref: String,
+    pub product_declaration_id: String,
+    pub environment_ref: String,
+    pub worker_execution_ref: String,
+    pub environment_binding: String,
+}
+
+impl ProductQualificationConsumerExecutionContext {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (label, reference, kind) in [
+            ("qualification consumer worker", &self.worker_ref, "worker:"),
+            (
+                "qualification consumer environment",
+                &self.environment_ref,
+                "config:",
+            ),
+            (
+                "qualification consumer worker execution",
+                &self.worker_execution_ref,
+                "worker_execution:",
+            ),
+        ] {
+            validate_canonical_unsuffixed_ref(label, reference)?;
+            if !reference.starts_with(kind) {
+                bail!("{label} must be a {kind} ref");
+            }
+        }
+        validate_name(&self.product_declaration_id)?;
+        validate_name(&self.environment_binding)
+    }
+
+    pub fn validate_relationship_consumer(
+        &self,
+        consumer: &ProductRelationshipConsumer,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        consumer.validate()?;
+        if self.worker_ref != consumer.canonical_ref
+            || self.product_declaration_id != consumer.declaration_id
+        {
+            bail!("qualification consumer context differs from signed product relationship");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +158,9 @@ impl ProductQualificationPolicy {
             &self.verifier_parameters,
             "qualification verifier parameters",
         )?;
+        if let Some(context) = &self.consumer_execution_context {
+            context.validate()?;
+        }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");
         }
@@ -346,6 +404,12 @@ impl ProductQualificationResult {
     ) -> anyhow::Result<()> {
         self.validate()?;
         policy.validate()?;
+        // The typed declaration alone is not an admitted Worker closure.
+        // Until launch, proof, and fresh selection all authenticate the same
+        // retained consumer context, no claim may be issued under this field.
+        if policy.consumer_execution_context.is_some() {
+            bail!("qualification consumer execution context has no authenticated closure proof");
+        }
         validate_claims_allow_empty(required)?;
         if self
             .claims

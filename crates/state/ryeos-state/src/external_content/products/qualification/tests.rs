@@ -23,8 +23,82 @@ fn policy() -> ProductQualificationPolicy {
         allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
         minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope":"bounded_fixture"}),
+        consumer_execution_context: None,
         producer_scenarios: BTreeMap::new(),
     }
+}
+
+#[test]
+fn consumer_execution_context_requires_typed_canonical_refs() {
+    let mut policy = policy();
+    policy.consumer_execution_context = Some(ProductQualificationConsumerExecutionContext {
+        worker_ref: "worker:codex/external-hosted-authoring".into(),
+        product_declaration_id: "guest-runtime".into(),
+        environment_ref: "config:codex/environments/external-authoring".into(),
+        worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
+        environment_binding: "environment".into(),
+    });
+    policy.validate().unwrap();
+    let relationship_consumer = ProductRelationshipConsumer {
+        canonical_ref: "worker:codex/external-hosted-authoring".into(),
+        declaration_id: "guest-runtime".into(),
+    };
+    policy
+        .consumer_execution_context
+        .as_ref()
+        .unwrap()
+        .validate_relationship_consumer(&relationship_consumer)
+        .unwrap();
+    let result = ProductQualificationResult {
+        schema: PRODUCT_QUALIFICATION_RESULT_SCHEMA.into(),
+        subject_manifest_hash: "a".repeat(64),
+        claims: vec!["command_probe".into()],
+        probe_evidence: json!({}),
+    };
+    assert!(
+        result
+            .validate_claims_for(&policy, &["command_probe".into()])
+            .is_err()
+    );
+    let mut wrong_consumer = relationship_consumer.clone();
+    wrong_consumer.declaration_id = "other-runtime".into();
+    assert!(
+        policy
+            .consumer_execution_context
+            .as_ref()
+            .unwrap()
+            .validate_relationship_consumer(&wrong_consumer)
+            .is_err()
+    );
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .worker_ref = "tool:codex/external-hosted-authoring".into();
+    assert!(policy.validate().is_err());
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .worker_ref = "worker:codex/external-hosted-authoring".into();
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_ref = "worker:codex/external-authoring".into();
+    assert!(policy.validate().is_err());
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_ref = "config:codex/environments/external-authoring".into();
+    policy
+        .consumer_execution_context
+        .as_mut()
+        .unwrap()
+        .environment_binding
+        .clear();
+    assert!(policy.validate().is_err());
 }
 
 #[cfg(test)]
