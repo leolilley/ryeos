@@ -563,10 +563,50 @@ impl ExternalCandidateRequirement {
             .verifier_parameters
             .get(QUALIFICATION_CONTEXT_PARAMETER)
             .context("external candidate qualification has no sealed use context")?;
-        ensure!(
-            ExternalCandidateQualificationUse::from_value(context)? == *qualification_use,
-            "external candidate qualification tested a different admitted use"
-        );
+        let qualified_use = ExternalCandidateQualificationUse::from_value(context)?;
+        if qualified_use != *qualification_use {
+            let mut changed = Vec::new();
+            for (name, qualified, current) in [
+                (
+                    "requirement",
+                    &qualified_use.requirement_digest,
+                    &qualification_use.requirement_digest,
+                ),
+                (
+                    "profile",
+                    &qualified_use.profile_hash,
+                    &qualification_use.profile_hash,
+                ),
+                (
+                    "source_binding",
+                    &qualified_use.source_binding_hash,
+                    &qualification_use.source_binding_hash,
+                ),
+                (
+                    "source_content",
+                    &qualified_use.source_content_manifest_hash,
+                    &qualification_use.source_content_manifest_hash,
+                ),
+                (
+                    "provider_executable",
+                    &qualified_use.provider_executable_manifest_hash,
+                    &qualification_use.provider_executable_manifest_hash,
+                ),
+                (
+                    "execution_environment",
+                    &qualified_use.execution_environment_digest,
+                    &qualification_use.execution_environment_digest,
+                ),
+            ] {
+                if qualified != current {
+                    changed.push(name);
+                }
+            }
+            anyhow::bail!(
+                "external candidate qualification tested a different admitted use: {}",
+                changed.join(",")
+            );
+        }
         // Selection validation joins the proof to its exact policy and subject.
         // Require these claims in the signed relationship too: an incidental
         // verifier result cannot widen the consumer's qualification allowance.
@@ -1986,11 +2026,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(changed.profile_hash, original.profile_hash);
-        assert!(
-            requirement
-                .resolve_for_use(Some(&selections), &changed)
-                .is_err()
-        );
+        let error = requirement
+            .resolve_for_use(Some(&selections), &changed)
+            .unwrap_err();
+        assert!(error.to_string().contains("different admitted use: profile"));
 
         for field in ["binding_hash", "content_manifest_hash"] {
             let mut changed_source = source.clone();
