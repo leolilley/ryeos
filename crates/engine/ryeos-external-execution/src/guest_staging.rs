@@ -24,6 +24,41 @@ pub struct StagedGuestPackage {
     base: ryeos_project_capture::ProjectSnapshotTransferMeasurement,
 }
 
+/// A staged generation whose uploaded bytes, manifest, and realized content
+/// were checked against the caller's occurrence import ticket and context.
+/// The caller must have obtained those expectations from retained authority.
+/// This is an import-time check, not immutable custody, supervisor adoption,
+/// Ready, whole-scope settlement, or qualification evidence.
+pub struct TicketedGuestImport {
+    staged: StagedGuestPackage,
+    ticket: GuestImportTicket,
+}
+
+impl TicketedGuestImport {
+    pub(crate) fn root(&self) -> &lillux::PinnedDirectory {
+        self.staged.root()
+    }
+
+    pub fn manifest(&self) -> &GuestStagingPackageManifest {
+        self.staged.manifest()
+    }
+
+    pub fn base(&self) -> &ryeos_project_capture::ProjectSnapshotTransferMeasurement {
+        self.staged.base()
+    }
+
+    pub fn ticket(&self) -> &GuestImportTicket {
+        &self.ticket
+    }
+
+    /// Discard an unadopted import after failed preparation. The future guest
+    /// owner must retain an adopted generation until separately proved scope
+    /// and writer settlement; this method does not prove either condition.
+    pub fn discard(self) -> Result<()> {
+        self.staged.discard()
+    }
+}
+
 impl StagedGuestPackage {
     pub fn root(&self) -> &lillux::PinnedDirectory {
         &self.root
@@ -136,7 +171,7 @@ pub fn stage_ticketed_uploaded_guest_package(
     context: &GuestImportContext<'_>,
     inputs: &ExternalGuestInputProjection,
     deadline: lillux::time::MonotonicDeadline,
-) -> Result<StagedGuestPackage> {
+) -> Result<TicketedGuestImport> {
     let expected = ticket.staging_expected(context, inputs)?;
     let staged = stage_uploaded_guest_package(
         upload,
@@ -160,7 +195,10 @@ pub fn stage_ticketed_uploaded_guest_package(
         }
         return Err(error);
     }
-    Ok(staged)
+    Ok(TicketedGuestImport {
+        staged,
+        ticket: ticket.clone(),
+    })
 }
 
 struct DeadlineReader<'a, R> {
@@ -860,6 +898,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(imported.manifest(), &manifest);
+        assert_eq!(imported.ticket(), &ticket);
         imported.discard().unwrap();
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",

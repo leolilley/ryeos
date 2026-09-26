@@ -122,6 +122,19 @@ it), stage and recheck the contents, install the fixed descriptor map, launch
 the exact packaged supervisor, retain the staged generation for its whole
 lifetime, and discard it only after scope and writer settlement. This owner
 belongs in RyeOS guest execution, not in the Render API adapter or Farm.
+The ticket-checked import now has a distinct `TicketedGuestImport` result;
+that type establishes only the supplied ticket-to-bytes/content join. Its
+caller must source the ticket and context from retained occurrence authority;
+the type does not establish that provenance or exclusive custody. It is
+not an installed generation or a settlement witness. The synthetic fixture
+currently copies/moves staged inputs into its occurrence and discards the
+staging directory before launching the supervisor. Its terminal path checks
+the supervisor/server process identities and exits, not an enclosing process
+scope or workspace-writer exclusion. Neither behavior is a qualification
+template for the Render owner. The owner must retain its exact installed
+generation through a Lillux-proved enclosing-scope settlement and separately
+verify the supervisor's signed candidate writer-exclusion/export evidence;
+provider `terminated` and parent process exit cannot substitute for either.
 Until that joined handoff is implemented and tested, the adapter must continue
 returning `supervisor_pending` even if token minting and upload work locally.
 
