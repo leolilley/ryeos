@@ -1833,6 +1833,12 @@ mod tests {
         assert_eq!(native_request["capture_limit"], 4096);
         let direct = staging::stage_direct_target_probe(&selected, &root, &parameters).unwrap();
         direct.recheck_preflight(&parameters).unwrap();
+        let reopened = staging::reopen_direct_target_probe(&selected, &root, &parameters).unwrap();
+        assert_eq!(reopened.request_sha256(), direct.request_sha256());
+        assert_eq!(
+            reopened.environment_configuration_sha256(),
+            direct.environment_configuration_sha256()
+        );
         let direct_home = temp.path().join("prepared/codex-home");
         let direct_guest = temp.path().join("prepared/codex-occurrence/guest");
         let direct_environment: toml::Value =
@@ -1858,11 +1864,14 @@ mod tests {
         );
         std::fs::write(direct_guest.join("candidate/ambient"), b"not frozen").unwrap();
         assert!(direct.recheck_preflight(&parameters).is_err());
+        let reopened = staging::reopen_direct_target_probe(&selected, &root, &parameters).unwrap();
+        assert!(reopened.recheck_preflight(&parameters).is_err());
         std::fs::remove_file(direct_guest.join("candidate/ambient")).unwrap();
         direct.recheck_preflight(&parameters).unwrap();
         let direct_bytes = std::fs::read(direct_home.join("environments.toml")).unwrap();
         std::fs::write(direct_home.join("environments.toml"), b"tampered").unwrap();
         assert!(direct.recheck_preflight(&parameters).is_err());
+        assert!(staging::reopen_direct_target_probe(&selected, &root, &parameters).is_err());
         std::fs::write(direct_home.join("environments.toml"), direct_bytes).unwrap();
         direct.recheck_preflight(&parameters).unwrap();
         std::fs::write(

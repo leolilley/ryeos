@@ -959,6 +959,48 @@ pub fn stage_direct_target_probe(
     Ok(staged)
 }
 
+/// Reopen the fixed direct-target preparation without creating or replacing
+/// anything. The caller must first reconcile the exact retained scoped
+/// attempt; this function proves staged inputs, not permission to START again.
+pub fn reopen_direct_target_probe(
+    selected: &SelectedInput,
+    projectless_scratch: &PinnedDirectory,
+    parameters: &Parameters,
+) -> Result<StagedDirectTargetProbe> {
+    let (roots, request) =
+        selected.prepare_native_probe_request(projectless_scratch, parameters)?;
+    let prepared = projectless_scratch
+        .open_child_directory(OsStr::new("prepared"))?
+        .context("direct prepared root disappeared")?;
+    let occurrence = prepared
+        .open_child_directory(OsStr::new(DIRECT_OCCURRENCE_ID))?
+        .context("direct occurrence disappeared")?;
+    let home = prepared
+        .open_child_directory(OsStr::new(DIRECT_HOME_ID))?
+        .context("direct Codex home disappeared")?;
+    let guest = occurrence
+        .open_child_directory(OsStr::new("guest"))?
+        .context("direct guest disappeared")?;
+    let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
+    let command_environment = materialize_command_environment(
+        &roots.configurations,
+        Path::new(DIRECT_CONTROLLER_EXECUTABLE),
+        &guest_cwd,
+        &parameters.configuration.command_environment_template_sha256,
+    )?;
+    let staged = StagedDirectTargetProbe {
+        prepared,
+        occurrence,
+        guest,
+        home,
+        controller: roots.controller,
+        request_sha256: lillux::sha256_hex(&request),
+        environment_configuration_sha256: lillux::sha256_hex(&command_environment),
+    };
+    staged.recheck_sealed_inputs(parameters)?;
+    Ok(staged)
+}
+
 impl StagedDirectTargetProbe {
     pub fn recheck_preflight(&self, parameters: &Parameters) -> Result<()> {
         self.recheck_sealed_inputs(parameters)?;
@@ -1193,7 +1235,10 @@ mod tests {
 
     #[test]
     fn direct_prepared_paths_are_fixed_namespace_coordinates() {
-        assert_eq!(DIRECT_CONTROLLER_CANARY, "/workspace/verifier-controller/canary");
+        assert_eq!(
+            DIRECT_CONTROLLER_CANARY,
+            "/workspace/verifier-controller/canary"
+        );
         assert_eq!(
             Path::new(DIRECT_CONTROLLER_EXECUTABLE),
             Path::new("/workspace/qualification/controller/bin/ryeos-synthetic-routed-guest")
