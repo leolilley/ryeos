@@ -2157,48 +2157,46 @@ mod tests {
             .is_err(),
             "a completed pre-install stage cannot reserve a second owner"
         );
-        // A separate exact occurrence exercises the production one-way cut,
-        // not merely the canonical record helper used above.
-        let committed_occurrence_dir = tempfile::tempdir().unwrap();
-        let committed_occurrence =
-            lillux::PinnedDirectory::open(committed_occurrence_dir.path())
+        // Separate exact occurrences exercise the production one-way cut and
+        // its pre-record name-binding refusals, not just the record helper.
+        let prepare_launch_occurrence = || {
+            let occurrence_dir = tempfile::tempdir().unwrap();
+            let occurrence = lillux::PinnedDirectory::open(occurrence_dir.path())
                 .unwrap()
                 .unwrap();
-        committed_occurrence
-            .tighten_owner_private_directory()
-            .unwrap();
-        let committed_source_dir = tempfile::tempdir().unwrap();
-        let committed_source = lillux::PinnedDirectory::open(committed_source_dir.path())
+            occurrence.tighten_owner_private_directory().unwrap();
+            let source_dir = tempfile::tempdir().unwrap();
+            let source = lillux::PinnedDirectory::open(source_dir.path())
+                .unwrap()
+                .unwrap();
+            source.tighten_owner_private_directory().unwrap();
+            let prepared = crate::guest_installation::GuestOccurrenceOwner::begin(
+                &occurrence, &ticket, &context, &inputs,
+            )
             .unwrap()
+            .stage_uploaded_with_source_root_for_test(
+                &upload,
+                &source,
+                &context,
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
+            )
+            .unwrap()
+            .install_base_once(&context, &inputs)
+            .unwrap()
+            .prepare_content_for_adoption(&context, &inputs)
+            .unwrap()
+            .create_private_scratch_once(&context, &inputs)
+            .unwrap()
+            .prepare_launch_artifacts_once(&context, &inputs)
+            .unwrap()
+            .prepare_supervisor_request(&context, &inputs, 10.0)
             .unwrap();
-        committed_source.tighten_owner_private_directory().unwrap();
-        let committed = crate::guest_installation::GuestOccurrenceOwner::begin(
-            &committed_occurrence,
-            &ticket,
-            &context,
-            &inputs,
-        )
-        .unwrap()
-        .stage_uploaded_with_source_root_for_test(
-            &upload,
-            &committed_source,
-            &context,
-            &inputs,
-            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
-        )
-        .unwrap()
-        .install_base_once(&context, &inputs)
-        .unwrap()
-        .prepare_content_for_adoption(&context, &inputs)
-        .unwrap()
-        .create_private_scratch_once(&context, &inputs)
-        .unwrap()
-        .prepare_launch_artifacts_once(&context, &inputs)
-        .unwrap()
-        .prepare_supervisor_request(&context, &inputs, 10.0)
-        .unwrap()
-        .commit_outer_launch_intent(&context, &inputs)
-        .unwrap();
+            (occurrence_dir, source_dir, occurrence, prepared)
+        };
+        let (_committed_occurrence_dir, _committed_source_dir, committed_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let committed = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
         let committed_owner = committed_occurrence
             .open_child_directory(OsStr::new("guest-import-owner"))
             .unwrap()
@@ -2233,6 +2231,58 @@ mod tests {
             .phase(),
             &crate::guest_installation::GuestOccurrenceRecoveryPhase::LaunchUncertain,
         );
+        for child in ["candidate-private", "supervisor-state"] {
+            let (occurrence_dir, _source_dir, occurrence, prepared) =
+                prepare_launch_occurrence();
+            let original = occurrence_dir.path().join(child);
+            std::fs::rename(&original, occurrence_dir.path().join(format!("{child}-detached")))
+                .unwrap();
+            assert!(
+                prepared.commit_outer_launch_intent(&context, &inputs).is_err(),
+                "detached {child} must refuse before the one-way launch record"
+            );
+            assert!(occurrence
+                .open_child_directory(OsStr::new("guest-import-owner"))
+                .unwrap()
+                .unwrap()
+                .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+                .unwrap()
+                .is_none());
+        }
+        let (scratch_occurrence_dir, _scratch_source_dir, scratch_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let scratch_path = scratch_occurrence_dir
+            .path()
+            .join("candidate-private/guest-scratch-03");
+        std::fs::rename(&scratch_path, scratch_occurrence_dir.path().join("detached-scratch"))
+            .unwrap();
+        assert!(prepared.commit_outer_launch_intent(&context, &inputs).is_err());
+        assert!(scratch_occurrence
+            .open_child_directory(OsStr::new("guest-import-owner"))
+            .unwrap()
+            .unwrap()
+            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+            .unwrap()
+            .is_none());
+        let (_ambient_occurrence_dir, _ambient_source_dir, ambient_occurrence, prepared) =
+            prepare_launch_occurrence();
+        ambient_occurrence
+            .open_child_directory(OsStr::new("supervisor-state"))
+            .unwrap()
+            .unwrap()
+            .create_child(OsStr::new("ambient"), 0o700)
+            .unwrap();
+        assert!(
+            prepared.commit_outer_launch_intent(&context, &inputs).is_err(),
+            "nonempty supervisor state must refuse before the one-way record"
+        );
+        assert!(ambient_occurrence
+            .open_child_directory(OsStr::new("guest-import-owner"))
+            .unwrap()
+            .unwrap()
+            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+            .unwrap()
+            .is_none());
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
             ..context
