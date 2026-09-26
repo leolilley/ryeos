@@ -200,6 +200,34 @@ product_qualification_policy:
         unavailable.to_string().contains("no retained manifest"),
         "consumer environment refused before its external-content admission boundary: {unavailable}"
     );
+    state.engine.with_checked_bundle_generation(|generation| {
+        let mut worker = resolve_consumer_definition_in_generation(
+            generation,
+            "worker:codex/external-hosted-authoring",
+            "worker",
+        )?;
+        let mut publication = None;
+        let missing_selection =
+            crate::external_content_admission::admit_external_realizations_in_publication(
+                &state,
+                &state.engine,
+                "worker",
+                &mut worker,
+                &state.engine.resolution_roots(None),
+                &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+                None,
+                &mut publication,
+            )
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("Worker realized without its selected product"))?;
+        ensure!(
+            missing_selection
+                .to_string()
+                .contains("product slot has no admitted selection"),
+            "Worker own pins were admitted without the subject product: {missing_selection}"
+        );
+        Ok(())
+    })?;
     let (joined, worker) =
         admit_current_bundle_consumer_worker(&state, &policy_source, &relationship)?
             .ok_or_else(|| anyhow::anyhow!("signed consumer Worker admission absent"))?;

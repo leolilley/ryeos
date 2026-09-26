@@ -791,73 +791,14 @@ pub(super) fn prepare_current_bundle_consumer_environment(
     else {
         return Ok(None);
     };
-    let context = policy_source
-        .policy
-        .consumer_execution_context
-        .as_ref()
-        .context("qualification consumer context is absent")?;
     let (realizations, realized_effective_definition_digest, publication) =
-        state.engine.with_checked_bundle_generation(|generation| {
-            if generation.request_engine_generation_identity()
-                != definition.definitions.bundle_generation_identity
-            {
-                bail!("qualification environment changed Bundle generation before realization");
-            }
-            let mut resolution = resolve_consumer_definition_in_generation(
-                generation,
-                &context.environment_ref,
-                "config",
-            )?;
-            if consumer_definition_identity(&resolution)? != definition.definitions.environment {
-                bail!("qualification environment changed signed definition before realization");
-            }
-            let roots = state.engine.resolution_roots(None);
-            let mut publication = None;
-            let _admitted =
-                crate::external_content_admission::admit_external_realizations_in_publication(
-                    state,
-                    &state.engine,
-                    "config",
-                    &mut resolution,
-                    &roots,
-                    &SubjectResolutionAuthority::Projectless,
-                    None,
-                    &mut publication,
-                )?
-                .context("qualification environment produced no external realization")?;
-            let realizations = ExternalContentRealizationSet::from_value(
-                resolution
-                    .composed
-                    .derived
-                    .get(EXTERNAL_REALIZATIONS_DERIVED_KEY)
-                    .context("qualification environment omitted exact realization projection")?,
-            )?;
-            if realizations.iter().len() != definition.declarations.len() {
-                bail!("qualification environment realization count differs from signed content");
-            }
-            for declaration in &definition.declarations {
-                let realized = realizations
-                    .iter()
-                    .find(|realized| realized.id == declaration.id)
-                    .context("qualification environment realization is absent")?;
-                if realized.kind != declaration.kind
-                    || realized.mode != declaration.mode
-                    || Some(realized.manifest_hash.as_str()) != declaration.digest.as_deref()
-                    || realized.mount_root != declaration.mount_root
-                    || realized.mount != declaration.mount
-                {
-                    bail!("qualification environment realization differs from signed declaration");
-                }
-            }
-            Ok((
-                realizations,
-                resolution
-                    .effective_definition_digest()?
-                    .as_str()
-                    .to_owned(),
-                publication,
-            ))
-        })?;
+        prepare_exact_bundle_consumer_realizations(
+            state,
+            &definition.definitions.bundle_generation_identity,
+            &definition.definitions.environment,
+            "config",
+            &definition.declarations,
+        )?;
     Ok(Some(PreparedBundleConsumerEnvironment {
         admitted: AdmittedBundleConsumerEnvironment {
             definition,
@@ -866,6 +807,75 @@ pub(super) fn prepare_current_bundle_consumer_environment(
         },
         publication,
     }))
+}
+
+fn prepare_exact_bundle_consumer_realizations(
+    state: &AppState,
+    bundle_generation_identity: &str,
+    definition: &ProductQualificationBundleDefinitionIdentity,
+    kind: &str,
+    declarations: &[ryeos_engine::external_content::ExternalContentDeclaration],
+) -> anyhow::Result<(
+    ExternalContentRealizationSet,
+    String,
+    Option<ryeos_state::PendingCasPublication>,
+)> {
+    state.engine.with_checked_bundle_generation(|generation| {
+        if generation.request_engine_generation_identity() != bundle_generation_identity {
+            bail!("qualification consumer changed Bundle generation before realization");
+        }
+        let mut resolution =
+            resolve_consumer_definition_in_generation(generation, &definition.canonical_ref, kind)?;
+        if consumer_definition_identity(&resolution)? != *definition {
+            bail!("qualification consumer changed signed definition before realization");
+        }
+        let roots = state.engine.resolution_roots(None);
+        let mut publication = None;
+        let _admitted =
+            crate::external_content_admission::admit_external_realizations_in_publication(
+                state,
+                &state.engine,
+                kind,
+                &mut resolution,
+                &roots,
+                &SubjectResolutionAuthority::Projectless,
+                None,
+                &mut publication,
+            )?
+            .context("qualification consumer produced no external realization")?;
+        let realizations = ExternalContentRealizationSet::from_value(
+            resolution
+                .composed
+                .derived
+                .get(EXTERNAL_REALIZATIONS_DERIVED_KEY)
+                .context("qualification consumer omitted exact realization projection")?,
+        )?;
+        if realizations.iter().len() != declarations.len() {
+            bail!("qualification consumer realization count differs from signed content");
+        }
+        for declaration in declarations {
+            let realized = realizations
+                .iter()
+                .find(|realized| realized.id == declaration.id)
+                .context("qualification consumer realization is absent")?;
+            if realized.kind != declaration.kind
+                || realized.mode != declaration.mode
+                || Some(realized.manifest_hash.as_str()) != declaration.digest.as_deref()
+                || realized.mount_root != declaration.mount_root
+                || realized.mount != declaration.mount
+            {
+                bail!("qualification consumer realization differs from signed declaration");
+            }
+        }
+        Ok((
+            realizations,
+            resolution
+                .effective_definition_digest()?
+                .as_str()
+                .to_owned(),
+            publication,
+        ))
+    })
 }
 
 pub(super) fn resolve_current_bundle_consumer_environment_definition(
