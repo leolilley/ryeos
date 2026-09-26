@@ -906,6 +906,14 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
+        // The installed signed-bundle resolver passes sealed executable
+        // captures (0500), not the mode of the original bundle files.
+        let supervisor_capture =
+            lillux::sealed_executable_memfd(c"test-supervisor", files.get("supervisor").unwrap())
+                .unwrap();
+        let launcher_capture =
+            lillux::sealed_executable_memfd(c"test-launcher", files.get("launcher").unwrap())
+                .unwrap();
         let config_authority = inherited_file("input-00");
         let product_authority = source_root
             .open_child_directory(OsStr::new("input-01"))
@@ -972,8 +980,8 @@ mod tests {
                 Vec::new(),
                 &retained,
                 &inherited_file("bootstrap"),
-                &inherited_file("supervisor"),
-                &inherited_file("launcher"),
+                &supervisor_capture,
+                &launcher_capture,
                 &produced_expected,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             )
@@ -992,8 +1000,8 @@ mod tests {
                 &parent,
                 &retained,
                 &inherited_file("bootstrap"),
-                &inherited_file("supervisor"),
-                &inherited_file("launcher"),
+                &supervisor_capture,
+                &launcher_capture,
                 &produced_expected,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             )
@@ -1026,8 +1034,8 @@ mod tests {
                 &parent,
                 &retained,
                 &inherited_file("bootstrap"),
-                &inherited_file("supervisor"),
-                &inherited_file("launcher"),
+                &supervisor_capture,
+                &launcher_capture,
                 &produced_expected,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::ZERO),
             )
@@ -1041,8 +1049,8 @@ mod tests {
             Vec::new(),
             &retained,
             &inherited_file("bootstrap"),
-            &inherited_file("supervisor"),
-            &inherited_file("launcher"),
+            &supervisor_capture,
+            &launcher_capture,
             &undersized,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
         )
@@ -1058,8 +1066,8 @@ mod tests {
                 &parent,
                 &retained,
                 &inherited_file("bootstrap"),
-                &inherited_file("supervisor"),
-                &inherited_file("launcher"),
+                &supervisor_capture,
+                &launcher_capture,
                 &short_frame,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             )
@@ -1087,8 +1095,8 @@ mod tests {
                 StopWriter { remaining: 128 },
                 &retained,
                 &inherited_file("bootstrap"),
-                &inherited_file("supervisor"),
-                &inherited_file("launcher"),
+                &supervisor_capture,
+                &launcher_capture,
                 &produced_expected,
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
             )

@@ -70,7 +70,9 @@ fn settle_failed_dedicated_worker_start(
                 &worker,
             ) {
                 Ok(cleanup_state) => {
-                    cleanup_proved = cleanup_state == "reaped";
+                    // Reaping a local worker does not settle a separately
+                    // contacted external occurrence.
+                    cleanup_proved &= cleanup_state == "reaped";
                     if let Err(error) = state.state_store.settle_worker_process(
                         worker_instance_id,
                         placement_thread_id,

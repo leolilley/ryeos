@@ -437,7 +437,7 @@ fn inventory_root_file(
     match path {
         "bootstrap" => ensure!(mode == 0o600, "guest bootstrap must remain owner-private"),
         "supervisor" | "launcher" => ensure!(
-            matches!(mode, 0o700 | 0o755),
+            matches!(mode, 0o500 | 0o700 | 0o755),
             "guest executable artifact lost its executable mode"
         ),
         _ => {}

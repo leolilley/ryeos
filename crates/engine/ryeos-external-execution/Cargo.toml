@@ -17,4 +17,5 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
+ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

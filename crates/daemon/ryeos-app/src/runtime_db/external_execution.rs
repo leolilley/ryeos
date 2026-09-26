@@ -3044,6 +3044,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quarantined_external_start_failure_retains_session_and_credential_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&dir.path().join("runtime.sqlite3")).unwrap();
+        let reserved = reservation(&db, "failed-start");
+        reserve(&db, &reserved).unwrap();
+        db.claim_external_allocation_contact(
+            &reserved.placement_thread_id,
+            &reserved.request_digest,
+        )
+        .unwrap();
+        db.cancel_external_allocation(&reserved.placement_thread_id)
+            .unwrap();
+        assert_eq!(
+            db.external_allocation(&reserved.placement_thread_id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            ExternalAllocationPhase::Quarantined
+        );
+        db.fail_dedicated_session_start(
+            &reserved.placement_thread_id,
+            "worker-failed-start",
+            1,
+            "guest package refused",
+            false,
+        )
+        .unwrap();
+        let session = db
+            .dedicated_session(&reserved.placement_thread_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, "outcome_unknown");
+        assert!(db
+            .fail_dedicated_session_start(
+                &reserved.placement_thread_id,
+                "worker-failed-start",
+                1,
+                "incorrect local-only cleanup claim",
+                true,
+            )
+            .is_err());
+        assert_eq!(
+            db.credential_profile("P-failed-start")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .as_deref(),
+            Some("worker-failed-start")
+        );
+    }
+
+    #[test]
     fn external_contact_is_claimed_once_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.sqlite3");

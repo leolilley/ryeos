@@ -316,7 +316,8 @@ impl GuestStagingPackageManifest {
                     ..
                 } => {
                     ensure!(
-                        matches!(*mode, 0o600 | 0o644 | 0o700 | 0o755),
+                        matches!(*mode, 0o600 | 0o644 | 0o700 | 0o755)
+                            || (*mode == 0o500 && matches!(path, "supervisor" | "launcher")),
                         "guest staging file mode is invalid"
                     );
                     digest(sha256, "guest staging file")?;
@@ -708,6 +709,27 @@ mod tests {
         package
             .validate_for(inputs, &hash('1'), &hash('e'), &hash('0'), &hash('f'), 20)
             .is_ok()
+    }
+
+    #[test]
+    fn sealed_executable_capture_mode_is_limited_to_launcher_and_supervisor() {
+        let (inputs, mut package) = fixture();
+        for entry in &mut package.entries {
+            if let GuestStagingEntry::RegularFile { path, mode, .. } = entry
+                && matches!(path.as_str(), "launcher" | "supervisor")
+            {
+                *mode = 0o500;
+            }
+        }
+        assert!(validates(&inputs, &package));
+        for entry in &mut package.entries {
+            if let GuestStagingEntry::RegularFile { path, mode, .. } = entry
+                && path == "launcher"
+            {
+                *mode = 0o400;
+            }
+        }
+        assert!(!validates(&inputs, &package));
     }
 
     #[test]

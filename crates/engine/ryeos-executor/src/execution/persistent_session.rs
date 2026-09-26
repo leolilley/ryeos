@@ -3341,13 +3341,34 @@ fn await_external_candidate_ready(
     let result = await_external_candidate_ready_inner(state, placement, guest_inputs);
     match result {
         Ok(()) => Ok(()),
-        Err(error) => {
-            let cleanup =
-                ryeos_app::external_placement::request_external_candidate_cleanup(state, placement);
-            Err(error.context(format!(
-                "external candidate startup failed; durable cleanup request={cleanup:?}"
-            )))
-        }
+        Err(error) => Err(fence_external_candidate_start_failure(
+            state,
+            placement,
+            error,
+            "external candidate startup failed",
+        )),
+    }
+}
+
+fn fence_external_candidate_start_failure(
+    state: &AppState,
+    placement: &str,
+    error: anyhow::Error,
+    operation: &str,
+) -> anyhow::Error {
+    let request =
+        ryeos_app::external_placement::request_external_candidate_cleanup(state, placement);
+    let proved = request.is_ok()
+        && ryeos_app::external_placement::external_candidate_cleanup_is_proved(state, placement)
+            .unwrap_or(false);
+    let error = error.context(format!("{operation}; durable cleanup request={request:?}"));
+    if proved {
+        error
+    } else {
+        // A controller process need not have launched yet. The contacted
+        // external occurrence is an independent cleanup obligation and must
+        // still fence the dedicated session, credential and workspace.
+        error.context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved)
     }
 }
 
@@ -3752,11 +3773,12 @@ fn spawn_capsule_process_held(
             state, placement, state_root,
         )
         .map_err(|error| {
-            let cleanup =
-                ryeos_app::external_placement::request_external_candidate_cleanup(state, placement);
-            error.context(format!(
-                "prepare external candidate connector; durable cleanup request={cleanup:?}"
-            ))
+            fence_external_candidate_start_failure(
+                state,
+                placement,
+                error,
+                "prepare external candidate connector",
+            )
         })?;
         let (connector_mounts, connector_descriptors, connector_lifelines, settlement) =
             connector.into_parts();
