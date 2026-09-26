@@ -1092,6 +1092,43 @@ pub(super) fn prepare_current_bundle_consumer_content_inputs(
     }))
 }
 
+/// Fresh selection must use today's signed consumer definitions and exact
+/// content, not merely trust the historical verifier capsule. This check does
+/// not grant a qualification claim; applied-runtime parity remains separate.
+pub(in crate::operator_external_content) fn require_current_consumer_content_for_selection(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    limits: ryeos_state::object_closure::ObjectClosureLimits,
+    policy_source: &ProductQualificationPolicySource,
+    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
+    evidence: &ProductQualificationEvidence,
+    subject_manifest_hash: &str,
+) -> anyhow::Result<()> {
+    let retained = evidence
+        .consumer_content
+        .as_ref()
+        .context("consumer qualification evidence has no retained content")?;
+    let mut current = prepare_current_bundle_consumer_content_inputs(
+        state,
+        policy_source,
+        relationship,
+        &retained.relationship_definition.canonical_ref,
+    )?
+    .context("current signed consumer content is absent")?;
+    current.require_external_runtime_member_alignment(
+        state,
+        authority,
+        guard,
+        limits,
+        subject_manifest_hash,
+    )?;
+    if current.retained_identity()? != *retained {
+        bail!("current consumer source, environment or runtime member changed");
+    }
+    Ok(())
+}
+
 pub(super) fn prepare_current_bundle_consumer_worker_literals(
     state: &AppState,
     policy_source: &ProductQualificationPolicySource,

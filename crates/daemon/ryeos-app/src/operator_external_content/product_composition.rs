@@ -595,7 +595,17 @@ fn admit_selected_qualification(
         qualification::resolve_current_bundle_qualification_policy(state, policy_ref)?;
     if let Some(consumer_context) = &current_policy.policy.consumer_execution_context {
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
-        bail!("qualification consumer execution context has no authenticated closure proof");
+        qualification::require_current_consumer_content_for_selection(
+            state,
+            authority,
+            guard,
+            limits,
+            &current_policy,
+            relationship,
+            &proof.evidence,
+            &product.evidence.manifest_hash,
+        )?;
+        bail!("qualification consumer execution context has no applied runtime parity proof");
     }
     let current_verifier = qualification::resolve_current_bundle_verifier_identity_for_evidence(
         state,
