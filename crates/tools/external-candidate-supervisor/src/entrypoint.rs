@@ -3,15 +3,17 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution_contract::guest_supervisor_descriptors::{
+    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
+    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
+    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD, rebind_fixed_guest_descriptors,
+};
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
 };
 
 use crate::runtime::{
-    ExternalCandidateSupervisorInputs, ExternalCandidateSupervisorOutcome, SUPERVISOR_BOOTSTRAP_FD,
-    SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE, SUPERVISOR_LAUNCHER_FD,
-    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE, SUPERVISOR_STATE_ROOT_FD,
-    SUPERVISOR_WORKSPACE_OUTPUT_FD, rebind_fixed_guest_descriptors,
+    ExternalCandidateSupervisorInputs, ExternalCandidateSupervisorOutcome,
     run_external_candidate_supervisor,
 };
 
@@ -108,7 +110,7 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::runtime::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD;
+    use ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD;
     use ryeos_external_execution_contract::{
         ExternalGuestInputProjection, GuestBaseSnapshotInput, GuestMountAccess,
         GuestMountContentAuthority, GuestMountInput, GuestMountKind, GuestMountRole,

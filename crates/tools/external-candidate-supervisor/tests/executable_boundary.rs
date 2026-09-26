@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ryeos_external_candidate_supervisor::runtime::{
+use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
     SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
     SUPERVISOR_STATE_ROOT_FD,
