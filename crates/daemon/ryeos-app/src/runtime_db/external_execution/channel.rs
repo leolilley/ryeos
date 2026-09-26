@@ -6342,7 +6342,7 @@ pub(super) mod tests {
                 destination_access_sha256: [5; 32],
             },
         };
-        let (wire, digest) = wire(
+        let (first_wire, digest) = wire(
             &binding,
             &supervisor,
             ChannelDirection::SupervisorToOwner,
@@ -6352,11 +6352,11 @@ pub(super) mod tests {
             ExecutionChannelPayload::RuntimeApplied {
                 launcher_occurrence_digest: "a".repeat(64),
                 candidate_program_digest: binding.candidate_program_digest.clone(),
-                receipt,
+                receipt: receipt.clone(),
             },
         );
         let first = db
-            .exchange_external_supervisor_frame(placement, &wire, &owner, 16, 1024 * 1024)
+            .exchange_external_supervisor_frame(placement, &first_wire, &owner, 16, 1024 * 1024)
             .unwrap();
         assert!(first.incoming_new);
         let applied: String = db
@@ -6369,9 +6369,31 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(applied, "applied");
         assert!(
-            !db.exchange_external_supervisor_frame(placement, &wire, &owner, 16, 1024 * 1024)
+            !db.exchange_external_supervisor_frame(placement, &first_wire, &owner, 16, 1024 * 1024)
                 .unwrap()
                 .incoming_new
+        );
+        let (duplicate, _) = wire(
+            &binding,
+            &supervisor,
+            ChannelDirection::SupervisorToOwner,
+            3,
+            Some(digest.clone()),
+            1,
+            ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest: "a".repeat(64),
+                candidate_program_digest: binding.candidate_program_digest.clone(),
+                receipt,
+            },
+        );
+        let duplicate_error = db
+            .exchange_external_supervisor_frame(placement, &duplicate, &owner, 16, 1024 * 1024)
+            .err()
+            .expect("second signed observation must be refused");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("runtime-applied observation was already retained")
         );
         validate_channels(&db.conn).unwrap();
     }
