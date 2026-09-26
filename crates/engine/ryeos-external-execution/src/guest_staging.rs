@@ -51,6 +51,70 @@ impl TicketedGuestImport {
         &self.ticket
     }
 
+    /// Recheck the mutable private generation immediately before fixed-FD
+    /// adoption. The caller still has to exclude concurrent writers while it
+    /// binds the checked descriptors, and retain those descriptors through
+    /// whole-scope settlement.
+    pub fn recheck_for_adoption(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<()> {
+        self.ticket.staging_expected(context, inputs)?;
+        ensure!(
+            self.staged.manifest().identity_digest()? == self.ticket.manifest_sha256,
+            "guest import manifest changed before adoption"
+        );
+        let base_root = self
+            .staged
+            .root()
+            .open_child_directory(OsStr::new("base"))?
+            .context("guest base transfer disappeared before adoption")?;
+        let base = ryeos_project_capture::inspect_project_snapshot_transfer(
+            &base_root,
+            &inputs.base_snapshot.snapshot_hash,
+        )?;
+        ensure!(
+            base.snapshot_hash == self.staged.base().snapshot_hash
+                && base.closure_digest == self.staged.base().closure_digest
+                && base.object_count == self.staged.base().object_count
+                && base.blob_count == self.staged.base().blob_count
+                && base.total_bytes == self.staged.base().total_bytes,
+            "guest base transfer changed before adoption"
+        );
+        for (name, expected) in [
+            ("bootstrap", &self.ticket.bootstrap_sha256),
+            ("supervisor", &self.ticket.supervisor_sha256),
+            ("launcher", &self.ticket.launcher_sha256),
+        ] {
+            let (expected_bytes, expected_mode) = self
+                .staged
+                .manifest()
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    GuestStagingEntry::RegularFile {
+                        path, bytes, mode, ..
+                    } if path == name => Some((*bytes, *mode)),
+                    _ => None,
+                })
+                .with_context(|| format!("guest {name} is absent from the import manifest"))?;
+            let file = self
+                .staged
+                .root()
+                .open_pinned_regular(OsStr::new(name), false)?
+                .with_context(|| format!("guest {name} disappeared before adoption"))?;
+            let observation = file.observation()?;
+            ensure!(
+                observation.size() == expected_bytes
+                    && file.permission_mode()? == expected_mode
+                    && file.digest_stable_exact(&observation)? == *expected,
+                "guest {name} changed before adoption"
+            );
+        }
+        crate::guest_content::recheck_staged_guest_content(&self.staged, inputs)
+    }
+
     /// Discard an unadopted import after failed preparation. The future guest
     /// owner must retain an adopted generation until separately proved scope
     /// and writer settlement; this method does not prove either condition.
@@ -899,6 +963,60 @@ mod tests {
         .unwrap();
         assert_eq!(imported.manifest(), &manifest);
         assert_eq!(imported.ticket(), &ticket);
+        imported.recheck_for_adoption(&context, &inputs).unwrap();
+        assert!(
+            imported
+                .recheck_for_adoption(
+                    &GuestImportContext {
+                        binding_hash: context.binding_hash,
+                        allocation_request_digest: context.allocation_request_digest,
+                        occurrence_id: "occ-other",
+                        activation_request_digest: context.activation_request_digest,
+                    },
+                    &inputs,
+                )
+                .is_err()
+        );
+        let mut changed = imported
+            .root()
+            .open_regular_create(OsStr::new("input-00"), true, false, 0o600)
+            .unwrap();
+        changed.write_all(b"bad").unwrap();
+        changed.sync_all().unwrap();
+        drop(changed);
+        assert!(imported.recheck_for_adoption(&context, &inputs).is_err());
+        let mut restored = imported
+            .root()
+            .open_regular_create(OsStr::new("input-00"), true, false, 0o600)
+            .unwrap();
+        restored.write_all(&config).unwrap();
+        restored.sync_all().unwrap();
+        drop(restored);
+        imported.recheck_for_adoption(&context, &inputs).unwrap();
+        let mut changed_bootstrap = imported
+            .root()
+            .open_regular_create(OsStr::new("bootstrap"), true, false, 0o600)
+            .unwrap();
+        changed_bootstrap.write_all(b"evil").unwrap();
+        changed_bootstrap.sync_all().unwrap();
+        drop(changed_bootstrap);
+        assert!(imported.recheck_for_adoption(&context, &inputs).is_err());
+        let mut restored_bootstrap = imported
+            .root()
+            .open_regular_create(OsStr::new("bootstrap"), true, false, 0o600)
+            .unwrap();
+        restored_bootstrap.write_all(&bootstrap).unwrap();
+        restored_bootstrap.sync_all().unwrap();
+        drop(restored_bootstrap);
+        imported.recheck_for_adoption(&context, &inputs).unwrap();
+        imported
+            .root()
+            .open_pinned_regular(OsStr::new("supervisor"), false)
+            .unwrap()
+            .unwrap()
+            .set_mode(0o600)
+            .unwrap();
+        assert!(imported.recheck_for_adoption(&context, &inputs).is_err());
         imported.discard().unwrap();
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
