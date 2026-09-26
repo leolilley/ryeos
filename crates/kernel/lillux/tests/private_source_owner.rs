@@ -8,7 +8,7 @@ use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-fn child(name: &str) -> Result<(), String> {
+fn child(name: &str, hold_writer: bool) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
             .bytes()
@@ -40,6 +40,31 @@ fn child(name: &str) -> Result<(), String> {
         .atomic_create_pinned_regular(OsStr::new("payload"), b"private-source", 0o600)
         .map_err(|error| error.to_string())?
         .ok_or("private source payload already exists")?;
+    let preopened = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/tmp/{name}/payload"))
+        .map_err(|error| format!("open private source before seal: {error}"))?;
+    if hold_writer {
+        let _held = preopened;
+        let _ = owner.seal_read_only()?;
+        return Err("private source seal accepted an open writable descriptor".into());
+    }
+    drop(preopened);
+    let owner = owner.seal_read_only()?;
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/tmp/{name}/payload"))
+        .is_ok()
+    {
+        return Err("sealed private source accepted a new writable descriptor".into());
+    }
+    if owner
+        .root()
+        .create_child(OsStr::new("post-seal"), 0o700)
+        .is_ok()
+    {
+        return Err("sealed private source accepted a new child".into());
+    }
     std::io::stdout()
         .write_all(b"READY\n")
         .map_err(|error| error.to_string())?;
@@ -58,6 +83,44 @@ fn child(name: &str) -> Result<(), String> {
 
 fn parent() -> Result<(), String> {
     let name = format!("lillux-private-source-{:032x}", rand::random::<u128>());
+    let mut writer_probe =
+        Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+            .arg("child-held-writer")
+            .arg(&name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    let writer_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if writer_probe
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            break;
+        }
+        if std::time::Instant::now() >= writer_deadline {
+            let _ = writer_probe.kill();
+            let _ = writer_probe.wait();
+            return Err("private source held-writer refusal deadline expired".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let writer_output = writer_probe
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    if writer_output.status.code() != Some(125)
+        || !String::from_utf8_lossy(&writer_output.stderr)
+            .contains("seal private source mount read-only")
+    {
+        return Err(format!(
+            "held writable descriptor did not fail closed: exit={}, stderr={}",
+            writer_output.status,
+            String::from_utf8_lossy(&writer_output.stderr)
+        ));
+    }
     let mut process = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
         .arg("child")
         .arg(&name)
@@ -184,7 +247,9 @@ fn parent() -> Result<(), String> {
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     let result = if args.get(1).is_some_and(|arg| arg == "child") {
-        child(args.get(2).map(String::as_str).unwrap_or(""))
+        child(args.get(2).map(String::as_str).unwrap_or(""), false)
+    } else if args.get(1).is_some_and(|arg| arg == "child-held-writer") {
+        child(args.get(2).map(String::as_str).unwrap_or(""), true)
     } else if std::env::var("LILLUX_PRIVATE_SOURCE_NATIVE").as_deref() == Ok("1") {
         parent()
     } else {

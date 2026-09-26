@@ -233,6 +233,31 @@ impl LinuxPrivateSourceFilesystem {
     pub fn root(&self) -> &crate::secure_fs::PinnedDirectory {
         &self.root
     }
+
+    /// Recursively make this private source mount read-only before any
+    /// untrusted execution is launched. This does not prove that the caller
+    /// avoided making a writable bind alias beforehand; that remains an
+    /// owner-construction invariant checked by the joined launch contract.
+    pub fn seal_read_only(self) -> Result<LinuxSealedPrivateSourceFilesystem, String> {
+        imp::seal_private_source_filesystem(&self.root)?;
+        Ok(LinuxSealedPrivateSourceFilesystem {
+            root: self.root,
+            _thread_bound: std::marker::PhantomData,
+        })
+    }
+}
+
+/// A private source mount whose current mount tree was recursively sealed
+/// read-only. This is not, by itself, whole-execution writer exclusion.
+pub struct LinuxSealedPrivateSourceFilesystem {
+    root: crate::secure_fs::PinnedDirectory,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl LinuxSealedPrivateSourceFilesystem {
+    pub fn root(&self) -> &crate::secure_fs::PinnedDirectory {
+        &self.root
+    }
 }
 
 /// Enter a fresh private filesystem view in a dedicated single-threaded
@@ -1253,6 +1278,12 @@ pub fn exit_with_linux_sandbox_status(status: LinuxSandboxExit) -> ! {
 mod imp {
     use super::*;
 
+    pub fn seal_private_source_filesystem(
+        _root: &crate::secure_fs::PinnedDirectory,
+    ) -> Result<(), String> {
+        Err("private source filesystem sealing is unavailable on this platform".into())
+    }
+
     pub fn enter_private_source_filesystem(
         _limits: LinuxPrivateSourceLimits,
     ) -> Result<crate::secure_fs::PinnedDirectory, String> {
@@ -1978,6 +2009,42 @@ mod imp {
         let root = transition().unwrap_or_else(|error| fatal_private_source_transition(&error));
         drop(former);
         Ok(root)
+    }
+
+    pub(super) fn seal_private_source_filesystem(
+        root: &crate::secure_fs::PinnedDirectory,
+    ) -> Result<(), String> {
+        let seal = || -> Result<(), String> {
+            let current = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
+                .map_err(|error| format!("reopen private source root before seal: {error}"))?
+                .ok_or("private source root disappeared before seal")?;
+            if current
+                .identity()
+                .map_err(|error| format!("identify private source root before seal: {error}"))?
+                != root.identity().map_err(|error| error.to_string())?
+            {
+                return Err("private source root changed before seal".into());
+            }
+            let descriptor = root
+                .try_clone_descriptor()
+                .map_err(|error| format!("retain private source seal descriptor: {error}"))?;
+            set_mount_attributes_fd(descriptor.as_raw_fd(), true, true, true)
+                .map_err(|error| format!("seal private source mount read-only: {error}"))?;
+            let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            syscall_zero(
+                unsafe { libc::statvfs(c"/tmp".as_ptr(), stat.as_mut_ptr()) },
+                "inspect sealed private source mount",
+            )?;
+            if unsafe { stat.assume_init() }.f_flag & libc::ST_RDONLY == 0 {
+                return Err("private source root did not become read-only".into());
+            }
+            // The kernel refuses this remount while a writable source file
+            // descriptor remains open. The owner must close such descriptors
+            // before sealing; failure here is fatal, never a usable source.
+            Ok(())
+        };
+        seal().unwrap_or_else(|error| fatal_private_source_transition(&error));
+        Ok(())
     }
 
     fn fatal_private_source_transition(error: &str) -> ! {
