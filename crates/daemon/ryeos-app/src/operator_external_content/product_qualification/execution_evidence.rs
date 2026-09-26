@@ -426,20 +426,11 @@ pub(super) fn prove(
             bail!("zero-participant qualification requires a callback-free subprocess contract");
         };
         let protocol = state.engine.protocols.require(protocol_ref)?;
-        match (
-            &scoped_proof,
+        require_zero_participant_lane(
+            scoped_proof.is_some(),
             protocol.descriptor.requires_qualification_purpose,
-        ) {
-            (None, false)
-                if protocol.descriptor.callback_channel
-                    == ryeos_engine::protocol_vocabulary::CallbackChannel::None => {}
-            (Some(_), true)
-                if protocol.descriptor.callback_channel
-                    == ryeos_engine::protocol_vocabulary::CallbackChannel::Http => {}
-            _ => bail!(
-                "zero-participant qualification protocol has unaccounted callback authority or scoped attempt"
-            ),
-        }
+            protocol.descriptor.callback_channel,
+        )?;
     }
     Ok((
         result,
@@ -452,6 +443,23 @@ pub(super) fn prove(
         },
         root_settlement_digest,
     ))
+}
+
+fn require_zero_participant_lane(
+    has_scoped_attempt: bool,
+    requires_qualification_purpose: bool,
+    callback_channel: ryeos_engine::protocol_vocabulary::CallbackChannel,
+) -> anyhow::Result<()> {
+    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+    if !matches!(
+        (has_scoped_attempt, requires_qualification_purpose, callback_channel),
+        (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
+    ) {
+        bail!(
+            "zero-participant qualification protocol has unaccounted callback authority or scoped attempt"
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -682,6 +690,19 @@ pub(in crate::operator_external_content) fn verify_current(
     )?)?;
     if required.len() != proof.participants.len() {
         bail!("qualification required participant set changed");
+    }
+    if required.is_empty() {
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor { protocol_ref, .. } =
+            &current.artifact_identity
+        else {
+            bail!("zero-participant qualification no longer has direct execution");
+        };
+        let protocol = state.engine.protocols.require(protocol_ref)?;
+        require_zero_participant_lane(
+            proof.scoped_attempt.is_some(),
+            protocol.descriptor.requires_qualification_purpose,
+            protocol.descriptor.callback_channel,
+        )?;
     }
     if let Some(scoped) = &proof.scoped_attempt {
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor { protocol_ref, .. } =

@@ -7,6 +7,31 @@ use ryeos_engine::resolution::{KindComposedView, ResolutionStepName, ResolvedAnc
 use serde_json::json;
 
 #[test]
+fn zero_participant_qualification_requires_exact_scoped_witness_shape() {
+    use ryeos_engine::protocol_vocabulary::CallbackChannel;
+
+    assert!(require_zero_participant_lane(false, false, CallbackChannel::None).is_ok());
+    assert!(require_zero_participant_lane(true, true, CallbackChannel::Http).is_ok());
+    for scoped in [false, true] {
+        for purpose in [false, true] {
+            for channel in [CallbackChannel::None, CallbackChannel::Http] {
+                if matches!(
+                    (scoped, purpose, channel),
+                    (false, false, CallbackChannel::None)
+                        | (true, true, CallbackChannel::Http)
+                ) {
+                    continue;
+                }
+                assert!(
+                    require_zero_participant_lane(scoped, purpose, channel).is_err(),
+                    "accepted scoped={scoped}, purpose={purpose}, channel={channel:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn direct_settlement_requires_one_signed_terminal_digest() {
     let event = |payload| {
         ryeos_state::objects::thread_event::NewEvent::new(
