@@ -597,6 +597,21 @@ pub struct HeldLinuxSandboxProcess {
     release_succeeded: bool,
 }
 
+/// Held target whose dedicated launcher remains the non-dumpable custodian of
+/// one exact sealed private-source handle. This keeps the retained handle
+/// alive; it does not prove sole custody, mount selection, alias exclusion or
+/// the absence of writable descriptors in an independently authored request.
+pub struct HeldPrivateSourceSandboxProcess {
+    held: HeldLinuxSandboxProcess,
+    _source: LinuxSealedPrivateSourceFilesystem,
+}
+
+impl HeldPrivateSourceSandboxProcess {
+    pub fn held(&mut self) -> &mut HeldLinuxSandboxProcess {
+        &mut self.held
+    }
+}
+
 /// Protected supervisor ends of candidate-only protocol pipes. They carry no
 /// activation or bootstrap material. Ends are nonblocking so a finite relay
 /// can enforce cancellation/backpressure without blocking on the candidate.
@@ -656,7 +671,7 @@ pub fn prepare_linux_sandbox_piped(
                 ));
             }
         }
-        let process = prepare_linux_sandbox_inner(request, Some(&[input, output, error]))?;
+        let process = prepare_linux_sandbox_inner(request, Some(&[input, output, error]), None)?;
         Ok((
             process,
             LinuxSandboxPipes {
@@ -671,6 +686,14 @@ pub fn prepare_linux_sandbox_piped(
 }
 
 impl HeldLinuxSandboxProcess {
+    pub fn mount_preparation_receipt(&self) -> Result<LinuxSandboxMountPreparationReceipt, String> {
+        self.process.mount_preparation_receipt()
+    }
+
+    pub fn child_pid(&self) -> u32 {
+        self.process.child_pid()
+    }
+
     /// Poll the exact child-only applied-launch channel. `None` means the
     /// child has not reached the pre-exec boundary. EOF without a complete
     /// record is refusal, including a child killed before reaching it.
@@ -784,12 +807,37 @@ impl HeldLinuxSandboxProcess {
 pub fn prepare_linux_sandbox(
     request: LinuxSandboxRequest,
 ) -> Result<HeldLinuxSandboxProcess, String> {
-    prepare_linux_sandbox_inner(request, None)
+    prepare_linux_sandbox_inner(request, None, None)
+}
+
+/// Prepare a held target in the same dedicated source-owner process without
+/// re-entering a user namespace or changing UID while sealed source FDs are
+/// live. `source_child` is an exact immediate child of the sealed root, bound
+/// to one read-only mount at `source_destination`; aliases of the private
+/// source filesystem are refused. Any failure terminates that dedicated
+/// process; callers must not run this in a shared daemon. This protects source
+/// integrity, not confidentiality from a same-UID peer after target exec.
+/// Whole-scope settlement and product-policy checks remain separate gates.
+pub fn prepare_linux_sandbox_from_sealed_source(
+    source: LinuxSealedPrivateSourceFilesystem,
+    source_child: &std::ffi::OsStr,
+    source_destination: &Path,
+    request: LinuxSandboxRequest,
+) -> HeldPrivateSourceSandboxProcess {
+    imp::validate_private_source_request(&source, source_child, source_destination, &request)
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let held = prepare_linux_sandbox_inner(request, None, Some(&source))
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    HeldPrivateSourceSandboxProcess {
+        held,
+        _source: source,
+    }
 }
 
 fn prepare_linux_sandbox_inner(
     mut request: LinuxSandboxRequest,
     stdio: Option<&[std::fs::File; 3]>,
+    private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
 ) -> Result<HeldLinuxSandboxProcess, String> {
     if request.lifecycle != LinuxSandboxLifecycle::Run {
         return Err("held native preparation owns its release channel".into());
@@ -830,7 +878,7 @@ fn prepare_linux_sandbox_inner(
             release_keepalive_fd: u32::try_from(writer.as_raw_fd())
                 .map_err(|error| error.to_string())?,
         };
-        let mut process = imp::launch_with_stdio(request, stdio)?;
+        let mut process = imp::launch_with_stdio(request, stdio, private_source)?;
         // Only held execution requests the stronger terminal-export primitive.
         // Ordinary native launch retains its existing capability floor. The
         // child remains blocked on release while its exact lifetime is pinned.
@@ -1278,6 +1326,19 @@ pub fn exit_with_linux_sandbox_status(status: LinuxSandboxExit) -> ! {
 mod imp {
     use super::*;
 
+    pub(super) fn validate_private_source_request(
+        _source: &LinuxSealedPrivateSourceFilesystem,
+        _source_child: &std::ffi::OsStr,
+        _source_destination: &Path,
+        _request: &LinuxSandboxRequest,
+    ) -> Result<(), String> {
+        Err("private source held preparation is unavailable on this platform".into())
+    }
+
+    pub(super) fn fatal_private_source_transition(error: &str) -> ! {
+        panic!("private source sandbox unavailable on this platform: {error}")
+    }
+
     pub fn seal_private_source_filesystem(
         _root: &crate::secure_fs::PinnedDirectory,
     ) -> Result<(), String> {
@@ -1453,7 +1514,7 @@ mod imp {
                     // child PID 1 of our pending namespace; its exit would make
                     // subsequent forks fail instead of probing view reuse.
                     probe_overlay()?;
-                    enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                    enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                     let directory = reanchor_mount_source(inherited_directory.file().as_raw_fd())?;
                     mount_private_root()?;
                     create_minimal_devices(nested)?;
@@ -1512,7 +1573,7 @@ mod imp {
     }
 
     pub fn launch(request: LinuxSandboxRequest) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio(request, None)
+        launch_with_stdio(request, None, None)
     }
 
     pub fn launch_with_loopback_ingress(
@@ -1529,7 +1590,7 @@ mod imp {
         // uniquely. The signed launch request supplies its exact coordinate.
         let sender = unsafe { crate::take_inherited_descriptor_transfer_sender(transfer_fd) }
             .map_err(|error| format!("adopt loopback transfer endpoint: {error}"))?;
-        let (process, source) = launch_with_stdio_and_loopback(request, None, Some(address))?;
+        let (process, source) = launch_with_stdio_and_loopback(request, None, Some(address), None)?;
         let source = source.ok_or("isolated loopback listener was not created")?;
         source
             .transfer(sender, payload, deadline)
@@ -1540,14 +1601,17 @@ mod imp {
     pub(super) fn launch_with_stdio(
         request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
+        private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
     ) -> Result<LinuxSandboxProcess, String> {
-        launch_with_stdio_and_loopback(request, stdio, None).map(|(process, _)| process)
+        launch_with_stdio_and_loopback(request, stdio, None, private_source)
+            .map(|(process, _)| process)
     }
 
     fn launch_with_stdio_and_loopback(
         mut request: LinuxSandboxRequest,
         stdio: Option<&[std::fs::File; 3]>,
         ingress: Option<std::net::SocketAddr>,
+        private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
     ) -> Result<
         (
             LinuxSandboxProcess,
@@ -1561,7 +1625,10 @@ mod imp {
                 "aggregate resource isolation requires a delegated cgroup-v2 authority".to_string(),
             );
         }
-        enter_namespaces(request.network)?;
+        let pre_transition_paths = private_source
+            .map(|_| pre_transition_source_paths(&request))
+            .transpose()?;
+        enter_namespaces(request.network, private_source)?;
         let loopback_source = if let Some(address) = ingress {
             if request.network != LinuxSandboxNetwork::Isolated {
                 return Err("loopback ingress requires a new isolated network namespace".into());
@@ -1578,7 +1645,7 @@ mod imp {
         // Re-prove the same inherited filesystem objects in the cloned
         // namespace before the private root hides /tmp. The retained original
         // descriptors remain the identity authority, never a caller pathname.
-        let mut sources = reanchor_request_sources(&request)?;
+        let mut sources = reanchor_request_sources(&request, pre_transition_paths.as_ref())?;
         mount_private_root()?;
         let sealed_staging = request
             .mounts
@@ -2047,7 +2114,63 @@ mod imp {
         Ok(())
     }
 
-    fn fatal_private_source_transition(error: &str) -> ! {
+    pub(super) fn validate_private_source_request(
+        source: &LinuxSealedPrivateSourceFilesystem,
+        source_child: &std::ffi::OsStr,
+        source_destination: &Path,
+        request: &LinuxSandboxRequest,
+    ) -> Result<(), String> {
+        if request.overlay.is_some() {
+            return Err("private source held target cannot adopt an unqualified overlay".into());
+        }
+        let root = source
+            .root
+            .try_clone_descriptor()
+            .map_err(|error| format!("inspect sealed source descriptor: {error}"))?;
+        let source_device = mount_source_stat(root.as_raw_fd())?.st_dev;
+        let child = source
+            .root
+            .open_child_directory(source_child)
+            .map_err(|error| format!("resolve exact sealed source child: {error}"))?
+            .ok_or("exact sealed source child is absent")?;
+        let child_fd = child
+            .try_clone_descriptor()
+            .map_err(|error| format!("inspect exact sealed source child: {error}"))?;
+        let expected_child = mount_source_stat(child_fd.as_raw_fd())?;
+        let expected_mount = mount_source_id(root.as_raw_fd())?;
+        if mount_source_id(child_fd.as_raw_fd())? != expected_mount {
+            return Err("selected source child crosses the sealed root mount".into());
+        }
+        let mut selected = false;
+        for mount in &request.mounts {
+            let observed = mount_source_stat(raw_fd(mount.source_fd)?)?;
+            if observed.st_dev == source_device {
+                if selected
+                    || mount.destination != source_destination
+                    || observed.st_ino != expected_child.st_ino
+                    || mount_source_id(raw_fd(mount.source_fd)?)? != expected_mount
+                {
+                    return Err("private source mount is not the exact selected child and destination".into());
+                }
+                selected = true;
+                if mount.access != LinuxSandboxMountAccess::ReadOnly {
+                    return Err("private source mount cannot grant writable target access".into());
+                }
+            }
+        }
+        if !selected {
+            return Err("held target did not select a sealed private source mount".into());
+        }
+        for (descriptor, _) in &request.target_channels {
+            let fd = raw_fd(*descriptor)?;
+            if mount_source_stat(fd)?.st_dev == source_device {
+                return Err("private source cannot be exposed through a target channel".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn fatal_private_source_transition(error: &str) -> ! {
         let message = format!("lillux private source transition failed: {error}\n");
         let bytes = message.as_bytes();
         let bytes = &bytes[..bytes.len().min(512)];
@@ -2059,8 +2182,41 @@ mod imp {
         }
     }
 
-    fn enter_namespaces(network: LinuxSandboxNetwork) -> Result<(), String> {
-        enter_mapped_user_namespace()?;
+    fn enter_namespaces(
+        network: LinuxSandboxNetwork,
+        private_source: Option<&LinuxSealedPrivateSourceFilesystem>,
+    ) -> Result<(), String> {
+        if let Some(source) = private_source {
+            let task_count = std::fs::read_dir("/proc/self/task")
+                .map_err(|error| format!("inspect private source owner threads: {error}"))?
+                .count();
+            if task_count != 1 {
+                return Err("private source owner must be single-threaded".into());
+            }
+            let current = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
+                .map_err(|error| format!("reopen sealed source root: {error}"))?
+                .ok_or("sealed source root is absent")?;
+            if current
+                .identity()
+                .map_err(|error| format!("identify sealed source root: {error}"))?
+                != source.root.identity().map_err(|error| error.to_string())?
+            {
+                return Err("sealed source root changed before held preparation".into());
+            }
+            let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            syscall_zero(
+                unsafe { libc::statvfs(c"/tmp".as_ptr(), stat.as_mut_ptr()) },
+                "inspect held source mount",
+            )?;
+            if unsafe { stat.assume_init() }.f_flag & libc::ST_RDONLY == 0 {
+                return Err("held source mount is not read-only".into());
+            }
+            if unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+                return Err("sealed source owner became dumpable before held preparation".into());
+            }
+        } else {
+            enter_mapped_user_namespace()?;
+        }
         let mut flags =
             libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS | libc::CLONE_NEWPID;
         if network == LinuxSandboxNetwork::Isolated {
@@ -2068,7 +2224,13 @@ mod imp {
         }
         syscall_zero(unsafe { libc::unshare(flags) }, "create sandbox namespaces")?;
         mount_raw(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)
-            .map_err(|error| format!("make sandbox mount propagation private: {error}"))
+            .map_err(|error| format!("make sandbox mount propagation private: {error}"))?;
+        if private_source.is_some()
+            && unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0
+        {
+            return Err("sealed source owner became dumpable during held preparation".into());
+        }
+        Ok(())
     }
 
     fn write_proc_mapping(path: &str, value: &str, missing_is_ok: bool) -> Result<(), String> {
@@ -2105,6 +2267,23 @@ mod imp {
             "inspect mount source",
         )?;
         Ok(unsafe { stat.assume_init() })
+    }
+
+    fn mount_source_id(fd: RawFd) -> Result<u64, String> {
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}"))
+            .map_err(|error| format!("inspect mount-source descriptor mount: {error}"))?;
+        let mut ids = info
+            .lines()
+            .filter_map(|line| line.strip_prefix("mnt_id:").map(str::trim));
+        let id = ids
+            .next()
+            .ok_or("mount-source descriptor lacks mount identity")?
+            .parse::<u64>()
+            .map_err(|error| format!("invalid mount-source descriptor mount identity: {error}"))?;
+        if ids.next().is_some() {
+            return Err("mount-source descriptor has duplicate mount identities".into());
+        }
+        Ok(id)
     }
 
     fn reanchor_mount_source(fd: RawFd) -> Result<crate::InheritedDescriptorAuthority, String> {
@@ -2159,8 +2338,27 @@ mod imp {
         Ok(seals & required == required)
     }
 
+    fn pre_transition_source_paths(
+        request: &LinuxSandboxRequest,
+    ) -> Result<BTreeMap<u32, PathBuf>, String> {
+        let mut paths = BTreeMap::new();
+        for descriptor in request.mounts.iter().map(|mount| mount.source_fd) {
+            let fd = raw_fd(descriptor)?;
+            if descriptor_kind(descriptor)? == DescriptorKind::Regular
+                && mount_source_is_sealed(fd)?
+            {
+                continue;
+            }
+            let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))
+                .map_err(|error| format!("locate source before private namespace entry: {error}"))?;
+            paths.insert(descriptor, path);
+        }
+        Ok(paths)
+    }
+
     fn reanchor_request_sources(
         request: &LinuxSandboxRequest,
+        pre_transition_paths: Option<&BTreeMap<u32, PathBuf>>,
     ) -> Result<BTreeMap<u32, crate::InheritedDescriptorAuthority>, String> {
         let descriptors = request
             .mounts
@@ -2184,8 +2382,15 @@ mod imp {
                 }
                 continue;
             }
-            let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))
-                .map_err(|error| format!("locate inherited request source: {error}"))?;
+            let path = if let Some(paths) = pre_transition_paths {
+                paths
+                    .get(&descriptor)
+                    .cloned()
+                    .ok_or("private source request lost pre-transition locator")?
+            } else {
+                std::fs::read_link(format!("/proc/self/fd/{fd}"))
+                    .map_err(|error| format!("locate inherited request source: {error}"))?
+            };
             // A recursive directory clone of the construction root (or its
             // ancestor) would also clone our new private setup mounts. Those
             // are backend authority, never part of an admitted source. This
@@ -5907,7 +6112,7 @@ mod imp {
             assert!(pid >= 0);
             if pid == 0 {
                 let result = (|| {
-                    enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                    enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                     let source = reanchor_mount_source(original.file().as_raw_fd())?;
                     mount_private_root()?;
                     create_private_tmp()?;
@@ -6069,7 +6274,7 @@ mod imp {
                 },
             ];
             assert!(
-                reanchor_request_sources(&request)
+                reanchor_request_sources(&request, None)
                     .unwrap_err()
                     .contains("cannot grant writable")
             );
@@ -6087,7 +6292,7 @@ mod imp {
                     layer: 0,
                 });
                 assert!(
-                    reanchor_request_sources(&request)
+                    reanchor_request_sources(&request, None)
                         .unwrap_err()
                         .contains("contains the sandbox construction root")
                 );
@@ -6101,7 +6306,7 @@ mod imp {
                 access: LinuxSandboxMountAccess::ReadOnly,
                 layer: 0,
             });
-            assert!(reanchor_request_sources(&request).is_ok());
+            assert!(reanchor_request_sources(&request, None).is_ok());
         }
 
         #[test]

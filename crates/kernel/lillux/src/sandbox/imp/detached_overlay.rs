@@ -274,7 +274,7 @@ pub(super) fn probe() -> Result<(), String> {
             descriptors.pop().unwrap().for_child()?,
         )?;
         bounded_probe_child(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             create_directory_target(&rooted(&PathBuf::from("/project"))?)?;
             mount_overlay(&LinuxSandboxOverlay {
@@ -298,7 +298,7 @@ pub(super) fn probe() -> Result<(), String> {
                 .map_err(|error| error.to_string())
         })?;
         bounded_probe_child(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             create_directory_target(&rooted(&PathBuf::from("/project"))?)?;
             mount_overlay(&LinuxSandboxOverlay {
@@ -496,7 +496,7 @@ mod tests {
         // Both borrowers begin at the original host-side owner, not by
         // joining or nesting below the now-dead creator's user namespace.
         isolated_probe(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             attach_probe_clone(&template)?;
             let source = reanchor_overlay_descendant_source(
@@ -523,7 +523,7 @@ mod tests {
         })
         .unwrap();
         isolated_probe(|| {
-            enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+            enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
             mount_private_root()?;
             attach_probe_clone(&template)?;
             assert_bytes("/tmp/project/seed", b"first borrower")?;
@@ -610,7 +610,7 @@ mod tests {
                 mount_source_stat(File::open("/proc/self/ns/mnt").unwrap().as_raw_fd())?.st_ino;
 
             isolated_probe(|| {
-                enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                 let user =
                     mount_source_stat(File::open("/proc/self/ns/user").unwrap().as_raw_fd())?
                         .st_ino;
@@ -646,7 +646,7 @@ mod tests {
                 return Err("child deletion or private-mount isolation failed".to_string());
             }
             isolated_probe(|| {
-                enter_namespaces(LinuxSandboxNetwork::Isolated)?;
+                enter_namespaces(LinuxSandboxNetwork::Isolated, None)?;
                 mount_private_root()?;
                 attach_probe_clone(&template)?;
                 assert_bytes("/tmp/project/seed", b"child")?;
