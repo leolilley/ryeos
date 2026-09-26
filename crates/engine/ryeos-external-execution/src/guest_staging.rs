@@ -1068,6 +1068,19 @@ mod tests {
                     },
                     bytes: source_manifest.totals.total_bytes,
                 },
+                GuestMountInput {
+                    role: GuestMountRole::PrivateScratch,
+                    authority_id: "scratch-TMPDIR".into(),
+                    descriptor: 70,
+                    destination: "/ryeos/runtime-views/TMPDIR".into(),
+                    kind: GuestMountKind::Directory,
+                    access: GuestMountAccess::PrivateWritable,
+                    normalized_mode: None,
+                    content_authority: GuestMountContentAuthority::PrivateScratch {
+                        binding_hash: "a".repeat(64),
+                    },
+                    bytes: 0,
+                },
             ],
             executable_search: Vec::new(),
             environment: BTreeMap::new(),
@@ -1535,9 +1548,28 @@ mod tests {
             prepared.handles.content_records.len(),
             inputs.record_descriptors().count()
         );
-        assert!(prepared.handles.runtime_mounts.iter().all(Option::is_some));
+        assert!(prepared.handles.runtime_mounts[..3].iter().all(Option::is_some));
+        assert!(prepared.handles.runtime_mounts[3].is_none());
         assert!(prepared.handles.workspace_outputs.is_none());
-        drop(prepared);
+        let private = prepared.create_private_scratch_once(&context, &inputs).unwrap();
+        assert_eq!(private.observation.scratch.len(), 1);
+        assert_eq!(private.observation.scratch[0].input_index, 3);
+        assert!(private.content.handles.runtime_mounts.iter().all(Option::is_some));
+        let scratch = private
+            .private_parent
+            .open_child_directory(OsStr::new("guest-scratch-03"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(scratch.identity().unwrap(), private.observation.scratch[0].directory);
+        assert!(scratch.entries_no_follow_bounded(0).unwrap().is_empty());
+        assert!(
+            private
+                .private_parent
+                .create_child(OsStr::new("guest-scratch-03"), 0o700)
+                .is_err(),
+            "a second scratch directory must not replace the first identity"
+        );
+        drop(private);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
             &ticket,
@@ -1874,6 +1906,11 @@ mod tests {
             .unwrap()
             .inherited_descriptor_authority()
             .unwrap();
+        let scratch_authority = source_root
+            .create_child(OsStr::new("scratch-03"), 0o700)
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
         let records = ["record-00", "record-01", "record-02"]
             .into_iter()
             .map(inherited_file)
@@ -1885,6 +1922,7 @@ mod tests {
             &config_authority,
             &product_authority,
             &source_authority,
+            &scratch_authority,
         ]) {
             input.descriptor = authority.inherited_descriptor().unwrap();
         }
@@ -1908,7 +1946,7 @@ mod tests {
             retained_inputs.clone(),
             transfer.descriptor().clone(),
             None,
-            vec![config_authority, product_authority, source_authority],
+            vec![config_authority, product_authority, source_authority, scratch_authority],
             records,
             vec![],
         )

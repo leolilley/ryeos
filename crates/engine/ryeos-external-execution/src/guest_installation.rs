@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution_contract::ExternalGuestInputProjection;
+use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::staging_package::{GuestImportContext, GuestImportTicket};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,7 @@ use crate::guest_staging::{
 const OWNER_DIRECTORY: &str = "guest-import-owner";
 const OWNER_RECORD_NAME: &str = "occurrence-owner.json";
 const CANDIDATE_RUNTIME_DIRECTORY: &str = "candidate-runtime";
+const CANDIDATE_PRIVATE_DIRECTORY: &str = "candidate-private";
 const RECORD_NAME: &str = "guest-base-install-intent.json";
 const STAGE_MARKER_NAME: &str = "guest-base-install-owner.json";
 const MAX_RECORD_BYTES: u64 = 8 * 1024;
@@ -86,6 +87,101 @@ pub struct PreparedGuestContent {
     pub(crate) _installed: InstalledGuestBase,
     pub(crate) observation: InstalledGuestBaseObservation,
     pub(crate) handles: crate::guest_content::VerifiedGuestContentHandles,
+}
+
+/// Exact fresh private scratch created after verified staged-content custody.
+/// This point observation is not writer exclusion or supervisor launch proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestPrivateInputObservation {
+    pub schema: u32,
+    pub private_parent: lillux::PinnedDirectoryIdentity,
+    pub scratch: Vec<GuestScratchIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestScratchIdentity {
+    pub input_index: usize,
+    pub binding_hash: String,
+    pub directory: lillux::PinnedDirectoryIdentity,
+}
+
+/// Retains the exact private parent and every completed runtime-mount slot.
+/// The next owner must still bind the fixed descriptors, exclude writers and
+/// commit an outer one-way launch intent before any native spawn.
+pub struct PreparedGuestPrivateInputs {
+    pub(crate) content: PreparedGuestContent,
+    pub(crate) private_parent: lillux::PinnedDirectory,
+    pub(crate) observation: GuestPrivateInputObservation,
+}
+
+impl PreparedGuestContent {
+    /// Create fresh scratch under the same one-shot occurrence owner. No
+    /// package byte or provider pathname can select these child names.
+    pub fn create_private_scratch_once(
+        mut self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<PreparedGuestPrivateInputs> {
+        self._installed.recheck_for_adoption(context, inputs)?;
+        ensure!(
+            self.handles.runtime_mounts.len() == inputs.inputs.len(),
+            "prepared guest content slot count changed"
+        );
+        let private_parent = self
+            ._installed
+            .owner
+            .occurrence
+            .create_child(OsStr::new(CANDIDATE_PRIVATE_DIRECTORY), 0o700)?;
+        private_parent.require_owner_private_directory()?;
+        private_parent.require_disjoint_directory_tree(&self._installed.runtime)?;
+        private_parent.require_disjoint_directory_tree(self._installed.imported.root())?;
+        let mut scratch = Vec::new();
+        for (index, input) in inputs.inputs.iter().enumerate() {
+            match &input.content_authority {
+                GuestMountContentAuthority::PrivateScratch { binding_hash } => {
+                    ensure!(
+                        self.handles.runtime_mounts[index].is_none(),
+                        "private scratch slot was populated by staged content"
+                    );
+                    let name = format!("guest-scratch-{index:02}");
+                    let directory = private_parent.create_child(OsStr::new(&name), 0o700)?;
+                    directory.require_owner_private_directory()?;
+                    ensure!(
+                        directory.entries_no_follow_bounded(0)?.is_empty(),
+                        "new private scratch contains ambient content"
+                    );
+                    let identity = directory.identity()?;
+                    self.handles.runtime_mounts[index] =
+                        Some(directory.inherited_descriptor_authority()?);
+                    scratch.push(GuestScratchIdentity {
+                        input_index: index,
+                        binding_hash: binding_hash.clone(),
+                        directory: identity,
+                    });
+                }
+                _ => ensure!(
+                    self.handles.runtime_mounts[index].is_some(),
+                    "verified immutable guest input slot is absent"
+                ),
+            }
+        }
+        ensure!(
+            self.handles.runtime_mounts.iter().all(Option::is_some),
+            "guest runtime mount inventory is incomplete"
+        );
+        let observation = GuestPrivateInputObservation {
+            schema: 1,
+            private_parent: private_parent.identity()?,
+            scratch,
+        };
+        Ok(PreparedGuestPrivateInputs {
+            content: self,
+            private_parent,
+            observation,
+        })
+    }
 }
 
 /// Exact installed child inodes observed before handoff. This is a point
