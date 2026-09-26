@@ -6,7 +6,8 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
     SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
-    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD, rebind_fixed_guest_descriptors,
+    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
+    fixed_guest_supervisor_descriptor_plan, rebind_fixed_guest_descriptors,
 };
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
@@ -35,7 +36,6 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
         "external supervisor bootstrap is not canonical"
     );
     bootstrap.validate()?;
-    let runtime_mount_count = bootstrap.guest_inputs.inputs.len();
     // SAFETY: the admitted lifecycle adapter uniquely maps each fixed
     // descriptor and this executable adopts every coordinate exactly once.
     let state_root = unsafe {
@@ -69,23 +69,16 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
                 .map_err(anyhow::Error::msg)
         })
         .transpose()?;
-    let mut execution_guest_inputs = bootstrap.guest_inputs.clone();
-    rebind_fixed_guest_descriptors(&mut execution_guest_inputs)?;
-    let mut runtime_mounts = Vec::with_capacity(runtime_mount_count);
-    for index in 0..runtime_mount_count {
-        let descriptor = SUPERVISOR_RUNTIME_MOUNT_FD_BASE
-            .checked_add(u32::try_from(index)?)
-            .context("external supervisor runtime mount descriptor overflow")?;
+    let plan = fixed_guest_supervisor_descriptor_plan(&bootstrap.guest_inputs)?;
+    let mut runtime_mounts = Vec::with_capacity(plan.runtime_mount_descriptors.len());
+    for descriptor in plan.runtime_mount_descriptors {
         runtime_mounts.push(
             unsafe { lillux::take_inherited_descriptor_authority(descriptor) }
                 .map_err(anyhow::Error::msg)?,
         );
     }
-    let mut content_records = Vec::new();
-    for (index, _) in bootstrap.guest_inputs.record_descriptors().enumerate() {
-        let descriptor = SUPERVISOR_CONTENT_RECORD_FD_BASE
-            .checked_add(u32::try_from(index)?)
-            .context("external supervisor content record descriptor overflow")?;
+    let mut content_records = Vec::with_capacity(plan.content_record_descriptors.len());
+    for descriptor in plan.content_record_descriptors {
         // SAFETY: the admitted adapter installs each content record exactly
         // once in flattened input order (source binding before manifest).
         content_records.push(
@@ -95,7 +88,7 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
     }
     run_external_candidate_supervisor(ExternalCandidateSupervisorInputs {
         bootstrap,
-        execution_guest_inputs,
+        execution_guest_inputs: plan.execution_inputs,
         state_root,
         candidate_runtime,
         candidate_private_parent,

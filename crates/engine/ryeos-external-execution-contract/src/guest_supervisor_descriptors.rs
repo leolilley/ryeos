@@ -1,6 +1,8 @@
 //! Fixed inherited-descriptor coordinates shared by guest activation and the
 //! protected supervisor. This is a pure protocol mapping, not descriptor I/O.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context as _, Result, ensure};
 
 use crate::{ExternalGuestInputProjection, GuestMountContentAuthority, MAX_GUEST_INPUTS};
@@ -18,6 +20,62 @@ pub const SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD: u32 = 56;
 pub const SUPERVISOR_RUNTIME_MOUNT_FD_BASE: u32 = 64;
 pub const SUPERVISOR_CONTENT_RECORD_FD_BASE: u32 =
     SUPERVISOR_RUNTIME_MOUNT_FD_BASE + MAX_GUEST_INPUTS as u32;
+
+/// Complete inherited descriptor coordinates for one supervisor launch. The
+/// consumed base-snapshot coordinate is retained only in the rebound semantic
+/// projection and is never included in `inherited_descriptors`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSupervisorDescriptorPlan {
+    pub execution_inputs: ExternalGuestInputProjection,
+    pub inherited_descriptors: Vec<u32>,
+    pub runtime_mount_descriptors: Vec<u32>,
+    pub content_record_descriptors: Vec<u32>,
+}
+
+/// Derive the one fixed mapping that both the guest owner and supervisor must
+/// use. This does not open, inspect, or grant any descriptor authority.
+pub fn fixed_guest_supervisor_descriptor_plan(
+    inputs: &ExternalGuestInputProjection,
+) -> Result<GuestSupervisorDescriptorPlan> {
+    let mut execution_inputs = inputs.clone();
+    rebind_fixed_guest_descriptors(&mut execution_inputs)?;
+    let runtime_mount_descriptors = execution_inputs
+        .inputs
+        .iter()
+        .map(|input| input.descriptor)
+        .collect::<Vec<_>>();
+    let content_record_descriptors = execution_inputs
+        .record_descriptors()
+        .map(|(descriptor, _, _)| descriptor)
+        .collect::<Vec<_>>();
+    let mut inherited_descriptors = vec![
+        SUPERVISOR_BOOTSTRAP_FD,
+        SUPERVISOR_STATE_ROOT_FD,
+        SUPERVISOR_CANDIDATE_RUNTIME_FD,
+        SUPERVISOR_PRIVATE_PARENT_FD,
+        SUPERVISOR_LAUNCHER_FD,
+    ];
+    if execution_inputs.workspace_outputs.is_some() {
+        inherited_descriptors.push(SUPERVISOR_WORKSPACE_OUTPUT_FD);
+    }
+    inherited_descriptors.extend(&runtime_mount_descriptors);
+    inherited_descriptors.extend(&content_record_descriptors);
+    let unique = inherited_descriptors
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    ensure!(
+        unique.len() == inherited_descriptors.len()
+            && !unique.contains(&SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD),
+        "fixed supervisor descriptor plan contains a collision or consumed base authority"
+    );
+    Ok(GuestSupervisorDescriptorPlan {
+        execution_inputs,
+        inherited_descriptors,
+        runtime_mount_descriptors,
+        content_record_descriptors,
+    })
+}
 
 /// Normalize transport-local coordinates to the supervisor's fixed slots.
 /// Descriptor numbers are not part of guest-input semantic identity. Activation

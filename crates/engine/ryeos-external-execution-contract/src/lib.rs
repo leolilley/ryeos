@@ -1896,6 +1896,39 @@ mod tests {
     }
 
     #[test]
+    fn fixed_supervisor_plan_excludes_consumed_base_and_preserves_source_order() {
+        use crate::guest_supervisor_descriptors::{
+            SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
+            SUPERVISOR_RUNTIME_MOUNT_FD_BASE, fixed_guest_supervisor_descriptor_plan,
+        };
+
+        let projection = source_projection();
+        let semantic_identity = projection.identity_digest().unwrap();
+        let plan = fixed_guest_supervisor_descriptor_plan(&projection).unwrap();
+        assert_eq!(plan.execution_inputs.identity_digest().unwrap(), semantic_identity);
+        assert_eq!(projection.base_snapshot.descriptor, 10);
+        assert_eq!(
+            plan.execution_inputs.base_snapshot.descriptor,
+            SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD
+        );
+        assert!(!plan
+            .inherited_descriptors
+            .contains(&SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
+        assert_eq!(
+            plan.runtime_mount_descriptors,
+            vec![SUPERVISOR_RUNTIME_MOUNT_FD_BASE, SUPERVISOR_RUNTIME_MOUNT_FD_BASE + 1]
+        );
+        assert_eq!(
+            plan.content_record_descriptors,
+            vec![
+                SUPERVISOR_CONTENT_RECORD_FD_BASE,
+                SUPERVISOR_CONTENT_RECORD_FD_BASE + 1,
+                SUPERVISOR_CONTENT_RECORD_FD_BASE + 2,
+            ]
+        );
+    }
+
+    #[test]
     fn source_closure_has_exact_ordered_records_and_no_product_alias() {
         let projection = source_projection();
         projection.validate().unwrap();
