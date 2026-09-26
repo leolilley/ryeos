@@ -214,6 +214,17 @@ async fn main() -> Result<()> {
             &parameters.configuration.scripted_baseline_sha256,
             direct_stage.environment_configuration_sha256(),
         )?;
+        if running_relay.is_some() {
+            // Refuse a different daemon launch expectation before this
+            // verifier sends its first Codex protocol frame. START may have
+            // already released the target; this is not proof of zero startup
+            // provider contact. The applied receipt must still match later.
+            check_scoped_direct_expected_environment_and_cwd(
+                &parameters.configuration.expected_producer_recipe,
+                &realizations,
+                &locator.expected_applied_launch,
+            )?;
+        }
         if let Some(relay) = &running_relay {
             ensure!(
                 relay.handoff().attempt_id == locator.attempt_id,
@@ -871,6 +882,33 @@ fn check_scoped_direct_environment_and_cwd(
     admitted_realizations: &str,
     receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
 ) -> Result<()> {
+    let expected = signed_direct_environment_cwd_commitments(recipe, admitted_realizations)?;
+    ensure!(
+        receipt.environment_sha256 == expected.environment_sha256
+            && receipt.cwd_sha256 == expected.cwd_sha256,
+        "direct Codex applied environment or cwd differs from signed recipe and admitted realizations"
+    );
+    Ok(())
+}
+
+fn check_scoped_direct_expected_environment_and_cwd(
+    recipe: &ProductProducerRecipe,
+    admitted_realizations: &str,
+    launch: &lillux::LinuxSandboxAppliedLaunchCommitments,
+) -> Result<()> {
+    let expected = signed_direct_environment_cwd_commitments(recipe, admitted_realizations)?;
+    ensure!(
+        launch.environment_sha256 == expected.environment_sha256
+            && launch.cwd_sha256 == expected.cwd_sha256,
+        "direct Codex pre-conversation launch environment or cwd differs from signed recipe and admitted realizations"
+    );
+    Ok(())
+}
+
+fn signed_direct_environment_cwd_commitments(
+    recipe: &ProductProducerRecipe,
+    admitted_realizations: &str,
+) -> Result<lillux::LinuxSandboxAppliedLaunchCommitments> {
     let environment = signed_direct_environment(recipe, admitted_realizations)?;
     // Lillux exposes the canonical applied environment and cwd commitments
     // through the same target projection as its pre-exec receipt. Executable
@@ -886,7 +924,7 @@ fn check_scoped_direct_environment_and_cwd(
             bail!("direct Codex cwd cannot be verifier-private")
         }
     };
-    let expected = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+    lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
         lillux::LinuxSandboxAppliedLaunchTarget {
             executable,
             argv0: &argv0,
@@ -894,13 +932,7 @@ fn check_scoped_direct_environment_and_cwd(
             cwd: &cwd,
             environment: &environment,
         },
-    ).map_err(anyhow::Error::msg)?;
-    ensure!(
-        receipt.environment_sha256 == expected.environment_sha256
-            && receipt.cwd_sha256 == expected.cwd_sha256,
-        "direct Codex applied environment or cwd differs from signed recipe and admitted realizations"
-    );
-    Ok(())
+    ).map_err(anyhow::Error::msg)
 }
 
 fn signed_direct_environment(
@@ -1273,6 +1305,14 @@ mod tests {
                 environment: &environment,
             },
         ).unwrap();
+        check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &commitment).unwrap();
+        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, "different", &commitment).is_err());
+        let mut changed_precontact = commitment.clone();
+        changed_precontact.environment_sha256[0] ^= 1;
+        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &changed_precontact).is_err());
+        let mut changed_precontact_cwd = commitment.clone();
+        changed_precontact_cwd.cwd_sha256[0] ^= 1;
+        assert!(check_scoped_direct_expected_environment_and_cwd(&recipe, admitted, &changed_precontact_cwd).is_err());
         let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
             owned_child_pid:42, namespace_pid:1, effective_uid:1, effective_gid:1,
             no_new_privs:true, seccomp_mode:2,
@@ -1295,11 +1335,13 @@ mod tests {
         altered_recipe.environment_bindings.insert(
             "LANG".into(), ProducerEnvironmentBinding::Literal { value:"POSIX".into() }
         );
+        assert!(check_scoped_direct_expected_environment_and_cwd(&altered_recipe, admitted, &commitment).is_err());
         assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
         let mut different_cwd = recipe.clone();
         different_cwd.cwd_source = ProducerCwdSource::PreparedDirectory {
             id:"different-occurrence".into(),
         };
+        assert!(check_scoped_direct_expected_environment_and_cwd(&different_cwd, admitted, &commitment).is_err());
         assert!(check_scoped_direct_environment_and_cwd(&different_cwd, admitted, &receipt).is_err());
         altered_recipe.environment_sources.clear();
         assert!(check_scoped_direct_environment_and_cwd(&altered_recipe, admitted, &receipt).is_err());
