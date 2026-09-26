@@ -1865,6 +1865,21 @@ mod tests {
         std::fs::set_permissions(&direct_home, std::fs::Permissions::from_mode(0o770)).unwrap();
         assert!(staging::reopen_direct_target_probe(&selected, &root, &parameters).is_err());
         std::fs::set_permissions(&direct_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for directory in [
+            temp.path().join("prepared"),
+            temp.path().join("prepared/codex-occurrence"),
+            direct_guest.clone(),
+        ] {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o770))
+                .unwrap();
+            assert!(
+                staging::reopen_direct_target_probe(&selected, &root, &parameters).is_err(),
+                "mode-weakened {} cannot be reopened",
+                directory.display()
+            );
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
         std::fs::write(direct_guest.join("candidate/ambient"), b"not frozen").unwrap();
         assert!(direct.recheck_preflight(&parameters).is_err());
         let reopened = staging::reopen_direct_target_probe(&selected, &root, &parameters).unwrap();
