@@ -320,6 +320,15 @@ impl GuestStagingPackageManifest {
                             || (*mode == 0o500 && matches!(path, "supervisor" | "launcher")),
                         "guest staging file mode is invalid"
                     );
+                    if matches!(path, "supervisor" | "launcher") {
+                        ensure!(
+                            matches!(*mode, 0o500 | 0o700 | 0o755),
+                            "guest executable root lost its executable mode"
+                        );
+                    }
+                    if path == "bootstrap" {
+                        ensure!(*mode == 0o600, "guest bootstrap must remain owner-private");
+                    }
                     digest(sha256, "guest staging file")?;
                     total = total
                         .checked_add(*bytes)
@@ -666,7 +675,7 @@ mod tests {
             },
             GuestStagingEntry::RegularFile {
                 path: "bootstrap".to_owned(),
-                mode: 0o755,
+                mode: 0o600,
                 bytes: 4,
                 sha256: hash('e'),
             },
@@ -727,6 +736,30 @@ mod tests {
                 && path == "launcher"
             {
                 *mode = 0o400;
+            }
+        }
+        assert!(!validates(&inputs, &package));
+        for mode in [0o600, 0o644] {
+            let (inputs, mut package) = fixture();
+            for entry in &mut package.entries {
+                if let GuestStagingEntry::RegularFile {
+                    path,
+                    mode: entry_mode,
+                    ..
+                } = entry
+                    && path == "supervisor"
+                {
+                    *entry_mode = mode;
+                }
+            }
+            assert!(!validates(&inputs, &package));
+        }
+        let (inputs, mut package) = fixture();
+        for entry in &mut package.entries {
+            if let GuestStagingEntry::RegularFile { path, mode, .. } = entry
+                && path == "bootstrap"
+            {
+                *mode = 0o644;
             }
         }
         assert!(!validates(&inputs, &package));
