@@ -828,6 +828,127 @@ impl PreparedBundleConsumerContentInputs {
         self.publication
             .context("prepared consumer content has no staged CAS publication")
     }
+
+    /// Align the direct probe with the signed external Worker route before
+    /// verifier contact. This proves only executable-member identity, not
+    /// hosted exec-server, placement, or candidate-lifecycle qualification.
+    fn require_external_runtime_member_alignment(
+        &self,
+        state: &AppState,
+        authority: &ryeos_state::PinnedStateAuthority,
+        guard: &ryeos_state::CasMutationGuard,
+        limits: ryeos_state::object_closure::ObjectClosureLimits,
+        subject_manifest_hash: &str,
+    ) -> anyhow::Result<()> {
+        authority.ensure_guard(guard)?;
+        let context = self
+            .policy_source
+            .policy
+            .consumer_execution_context
+            .as_ref()
+            .context("external runtime alignment has no signed consumer context")?;
+        let requirement = self
+            .worker_source
+            .profile
+            .external_candidate_requirement()?
+            .context("consumer Worker has no external candidate requirement")?;
+        if requirement.runtime_product_declaration_id != context.product_declaration_id {
+            bail!("external Worker runtime product differs from qualification subject");
+        }
+        if self.policy_source.policy.producer_scenarios.is_empty() {
+            bail!("external runtime qualification has no signed direct probe");
+        }
+        let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            &authority.cas_store()?,
+            subject_manifest_hash,
+            limits
+                .max_object_bytes
+                .min(ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64),
+        )?;
+        let executable_hash = exact_runtime_member_hash(
+            &manifest,
+            &requirement.runtime_recipe.executable_relative_path,
+        )?;
+        state.engine.with_checked_bundle_generation(|generation| {
+            if generation.request_engine_generation_identity()
+                != self.definitions.bundle_generation_identity
+            {
+                bail!("external runtime alignment changed Bundle generation");
+            }
+            for scenario in self.policy_source.policy.producer_scenarios.values() {
+                let recipe = resolve_bundle_producer_recipe_in_generation(
+                    state,
+                    generation.request_engine_generation_identity(),
+                    &scenario.recipe_ref,
+                )?;
+                require_direct_consumer_target(
+                    &self.policy_source,
+                    &recipe,
+                    subject_manifest_hash,
+                )?;
+                let ProducerExecutableSource::AdmittedRealizationMember {
+                    relative_path,
+                    executable_sha256,
+                    ..
+                } = &recipe.recipe.executable_source
+                else {
+                    bail!("external runtime probe does not target a retained product member");
+                };
+                if relative_path != &requirement.runtime_recipe.executable_relative_path
+                    || executable_sha256 != &executable_hash
+                {
+                    bail!("external runtime probe differs from the Worker product executable");
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+fn exact_runtime_member_hash(
+    manifest: &serde_json::Value,
+    relative_path: &str,
+) -> anyhow::Result<String> {
+    use ryeos_state::objects::ExternalContentManifestEntryKind;
+    let member = match manifest.get("kind").and_then(serde_json::Value::as_str) {
+        Some(ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND) => {
+            let manifest =
+                ryeos_state::objects::ExternalContentManifestObject::from_value(manifest)?;
+            let entry = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == relative_path)
+                .context("external runtime product has no selected executable member")?;
+            if entry.kind != ExternalContentManifestEntryKind::File || entry.mode != Some(0o755) {
+                bail!("external runtime product member is not an executable file");
+            }
+            entry
+                .blob_hash
+                .as_deref()
+                .context("external runtime product member has no exact file digest")?
+                .to_owned()
+        }
+        Some(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND) => {
+            let manifest =
+                ryeos_state::objects::ExternalLargeContentManifestObject::from_value(manifest)?;
+            let entry = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == relative_path)
+                .context("external runtime product has no selected executable member")?;
+            if entry.kind != ExternalContentManifestEntryKind::File || entry.mode != Some(0o755) {
+                bail!("external runtime product member is not an executable file");
+            }
+            entry
+                .file_sha256
+                .as_deref()
+                .or(entry.blob_hash.as_deref())
+                .context("external runtime product member has no exact file digest")?
+                .to_owned()
+        }
+        _ => bail!("external runtime product has no supported exact manifest"),
+    };
+    Ok(member)
 }
 
 impl PreparedBundleConsumerEnvironment {
@@ -2158,6 +2279,40 @@ fn require_bounded_name(label: &str, value: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_runtime_member_requires_exact_executable_file_in_both_manifest_tiers() {
+        let executable = "a".repeat(64);
+        for (kind, schema) in [
+            (
+                ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND,
+                ryeos_state::objects::EXTERNAL_CONTENT_TREE_SCHEMA,
+            ),
+            (
+                ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND,
+                ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA,
+            ),
+        ] {
+            let mut manifest = serde_json::json!({
+                "kind":kind,
+                "schema":schema,
+                "entry_count":2,
+                "total_bytes":4,
+                "entries":[
+                    {"path":"bin","kind":"dir"},
+                    {"path":"bin/codex","kind":"file","mode":493,
+                     "blob_hash":executable,"size":4}
+                ],
+            });
+            assert_eq!(
+                super::exact_runtime_member_hash(&manifest, "bin/codex").unwrap(),
+                executable
+            );
+            assert!(super::exact_runtime_member_hash(&manifest, "bin/other").is_err());
+            manifest["entries"][1]["mode"] = serde_json::json!(420);
+            assert!(super::exact_runtime_member_hash(&manifest, "bin/codex").is_err());
+        }
+    }
+
     #[test]
     fn verifier_consistency_diagnostics_refuse_without_disclosing_values() {
         super::require_verifier_consistency("policy.admitted_parameters_digest", true).unwrap();

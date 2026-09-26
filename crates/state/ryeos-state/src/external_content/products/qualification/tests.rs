@@ -112,6 +112,23 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         environment_binding: "environment".into(),
     };
     purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+    purpose.policy_source.policy.producer_scenarios.insert(
+        "direct_codex".into(),
+        ProductQualificationProducerScenario {
+            recipe_ref: "config:codex/direct-probe".into(),
+        },
+    );
+    purpose.producer_recipe_sources.insert(
+        "direct_codex".into(),
+        ProductProducerRecipeSourceIdentity {
+            bundle_generation_identity: "generation-1".into(),
+            canonical_ref: "config:codex/direct-probe".into(),
+            raw_content_digest: "a".repeat(64),
+            effective_definition_digest: "b".repeat(64),
+            publisher_fingerprint: "c".repeat(64),
+            recipe_digest: "d".repeat(64),
+        },
+    );
     assert!(purpose.validate().is_err());
     let definition = |reference: &str| ProductQualificationBundleDefinitionIdentity {
         canonical_ref: reference.into(),
@@ -172,6 +189,22 @@ fn launch_purpose_retains_same_generation_consumer_definitions() {
         }],
         process_environment: BTreeMap::new(),
     });
+    purpose.validate().unwrap();
+    let mut no_scenarios = purpose.clone();
+    no_scenarios.policy_source.policy.producer_scenarios.clear();
+    no_scenarios.producer_recipe_sources.clear();
+    assert!(no_scenarios.validate().is_err());
+    purpose
+        .producer_recipe_sources
+        .get_mut("direct_codex")
+        .unwrap()
+        .bundle_generation_identity = "another-generation".into();
+    assert!(purpose.validate().is_err());
+    purpose
+        .producer_recipe_sources
+        .get_mut("direct_codex")
+        .unwrap()
+        .bundle_generation_identity = "generation-1".into();
     purpose.validate().unwrap();
     purpose
         .consumer_content

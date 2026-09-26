@@ -460,6 +460,9 @@ impl ProductQualificationLaunchPurpose {
             (Some(context), Some(definitions), Some(content)) => {
                 definitions.validate_for(context)?;
                 content.validate_for(context, definitions)?;
+                if self.policy_source.policy.producer_scenarios.is_empty() {
+                    bail!("consumer qualification has no signed direct producer scenario");
+                }
             }
             (None, None, None) => {}
             _ => bail!("qualification purpose consumer definitions differ from signed policy"),
@@ -476,6 +479,11 @@ impl ProductQualificationLaunchPurpose {
             source.validate()?;
             if source.canonical_ref != scenario.recipe_ref {
                 bail!("qualification purpose producer source differs from signed scenario");
+            }
+            if let Some(definitions) = &self.consumer_definitions
+                && source.bundle_generation_identity != definitions.bundle_generation_identity
+            {
+                bail!("qualification producer and consumer use different Bundle generations");
             }
         }
         validate_name(&self.subject_declaration_id)?;

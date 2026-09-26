@@ -163,6 +163,13 @@ pub fn prepare_after_reservation(
                 &product.evidence.recipe_ref,
             )?
             .context("signed consumer content is absent")?;
+            prepared.require_external_runtime_member_alignment(
+                state,
+                &authority,
+                &guard,
+                limits,
+                &product.evidence.manifest_hash,
+            )?;
             Some(prepared)
         } else {
             None
