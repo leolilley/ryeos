@@ -8,6 +8,78 @@ use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+fn sealed_exec_child(name: &str) -> Result<(), String> {
+    if !name.starts_with("lillux-private-source-")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("invalid sealed exec child name".into());
+    }
+    let path = std::path::Path::new("/tmp").join(name).join("payload");
+    let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+    if dumpable < 0 {
+        return Err(format!(
+            "inspect exec child dumpability: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if dumpable != 0 {
+        // This is a negative architectural probe, not a safe recovery path:
+        // source authority is already exposed during the exec transition.
+        std::process::exit(77);
+    }
+    if std::fs::read(&path).map_err(|error| error.to_string())? != b"private-source" {
+        return Err("exec child observed different sealed source bytes".into());
+    }
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        return Err("exec child acquired writable sealed source descriptor".into());
+    }
+    if std::fs::create_dir(std::path::Path::new("/tmp").join(name).join("exec-write")).is_ok() {
+        return Err("exec child created content under sealed source".into());
+    }
+    // Ordinary open refusal is insufficient if exec retained mount authority.
+    // The test child must also fail to turn the source mount writable again.
+    let remount = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/tmp".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+            std::ptr::null(),
+        )
+    };
+    if remount == 0 {
+        return Err("exec child regained writable source mount authority".into());
+    }
+    let remount_error = std::io::Error::last_os_error();
+    if remount_error.raw_os_error() != Some(libc::EPERM) {
+        return Err(format!(
+            "exec child remount refusal was not a privilege boundary: {remount_error}"
+        ));
+    }
+    Ok(())
+}
+
+fn wait_bounded(process: &mut std::process::Child, label: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if process
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(format!("{label} deadline expired"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn child(name: &str, hold_writer: bool) -> Result<(), String> {
     if !name.starts_with("lillux-private-source-")
         || !name
@@ -65,6 +137,30 @@ fn child(name: &str, hold_writer: bool) -> Result<(), String> {
     {
         return Err("sealed private source accepted a new child".into());
     }
+    let mut exec_child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        .arg("child-sealed-view")
+        .arg(name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn sealed-source exec child: {error}"))?;
+    wait_bounded(&mut exec_child, "sealed-source exec child")?;
+    let exec_output = exec_child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    let exec_stderr = String::from_utf8_lossy(&exec_output.stderr);
+    if exec_output.status.success() {
+        // A future platform may preserve non-dumpability across this exec.
+        // The child then verifies the inherited mount remains read-only.
+    } else if exec_output.status.code() == Some(77) {
+        // Refusal is expected on kernels that reset dumpability at exec.
+    } else {
+        return Err(format!(
+            "sealed-source exec child failed: exit={}, stderr={}",
+            exec_output.status, exec_stderr
+        ));
+    }
     std::io::stdout()
         .write_all(b"READY\n")
         .map_err(|error| error.to_string())?;
@@ -92,22 +188,7 @@ fn parent() -> Result<(), String> {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| error.to_string())?;
-    let writer_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if writer_probe
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            break;
-        }
-        if std::time::Instant::now() >= writer_deadline {
-            let _ = writer_probe.kill();
-            let _ = writer_probe.wait();
-            return Err("private source held-writer refusal deadline expired".into());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_bounded(&mut writer_probe, "private source held-writer refusal")?;
     let writer_output = writer_probe
         .wait_with_output()
         .map_err(|error| error.to_string())?;
@@ -250,6 +331,8 @@ fn main() {
         child(args.get(2).map(String::as_str).unwrap_or(""), false)
     } else if args.get(1).is_some_and(|arg| arg == "child-held-writer") {
         child(args.get(2).map(String::as_str).unwrap_or(""), true)
+    } else if args.get(1).is_some_and(|arg| arg == "child-sealed-view") {
+        sealed_exec_child(args.get(2).map(String::as_str).unwrap_or(""))
     } else if std::env::var("LILLUX_PRIVATE_SOURCE_NATIVE").as_deref() == Ok("1") {
         parent()
     } else {

@@ -195,6 +195,17 @@ does not make or prove that reservation and remains fail-closed.
 Until that joined handoff is implemented and tested, the adapter must continue
 returning `supervisor_pending` even if token minting and upload work locally.
 
+The native Lillux private-source probe also ruled out a tempting shortcut:
+ordinary same-namespace fork/exec from a non-dumpable source owner reset the
+exec child's dumpability to `1` on the tested host. The child refused before
+reading even synthetic source bytes. A read-only source mount does not close
+the resulting transient `/proc` exposure, descriptor-custody or writable-alias
+questions. Supervisor activation therefore needs a separately protected
+launcher with the exact descriptor map and read-only realization applied
+before untrusted code can observe the source; it cannot use a direct
+`Command`-style exec within the source owner's namespace. The native probe
+is negative architecture evidence, not installed Render qualification.
+
 ## Provider operation and uncertainty matrix
 
 | Operation | Stable identity and pre-contact record | Positive evidence and reconciliation | Lost response, negative evidence, and spend |
