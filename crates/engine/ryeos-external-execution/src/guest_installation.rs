@@ -87,6 +87,7 @@ pub enum GuestOccurrenceRecoveryPhase {
 }
 
 pub struct RecoveredGuestOccurrence {
+    _occurrence: lillux::PinnedDirectory,
     _root: lillux::PinnedDirectory,
     _lock: lillux::PinnedDirectoryLock,
     _imported: Option<TicketedGuestImport>,
@@ -144,7 +145,9 @@ pub fn recover_guest_occurrence(
         "guest occurrence owner differs from retained placement"
     );
     let Some(record) = root.open_pinned_regular(OsStr::new(RECORD_NAME), false)? else {
+        ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
         return Ok(RecoveredGuestOccurrence {
+            _occurrence: occurrence.try_clone()?,
             _root: root,
             _lock: lock,
             _imported: None,
@@ -189,13 +192,32 @@ pub fn recover_guest_occurrence(
         stage_marker_file: lillux::pinned_regular_file_identity(&marker.try_clone_descriptor()?)?,
     };
     verify_committed_intent(&imported, context, inputs, &root, &runtime, &identity)?;
+    ensure_child_binding(occurrence, OWNER_DIRECTORY, &root)?;
+    ensure_child_binding(occurrence, CANDIDATE_RUNTIME_DIRECTORY, &runtime)?;
     Ok(RecoveredGuestOccurrence {
+        _occurrence: occurrence.try_clone()?,
         _root: root,
         _lock: lock,
         _imported: Some(imported),
         _runtime: Some(runtime),
         phase: GuestOccurrenceRecoveryPhase::InstallationUncertain,
     })
+}
+
+fn ensure_child_binding(
+    parent: &lillux::PinnedDirectory,
+    name: &str,
+    child: &lillux::PinnedDirectory,
+) -> Result<()> {
+    ensure!(
+        parent
+            .open_child_directory(OsStr::new(name))?
+            .context("retained guest occurrence child disappeared")?
+            .identity()?
+            == child.identity()?,
+        "retained guest occurrence child changed inode"
+    );
+    Ok(())
 }
 
 impl GuestOccurrenceOwner {
@@ -518,6 +540,33 @@ fn canonical_owner_record(record: &GuestOccurrenceOwnerRecord) -> Result<Vec<u8>
         "guest occurrence owner record exceeds bound"
     );
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod recovery_binding_tests {
+    use super::*;
+
+    #[test]
+    fn retained_child_binding_refuses_detached_or_replaced_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let occurrence = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let child = occurrence
+            .create_child(OsStr::new("retained"), 0o700)
+            .unwrap();
+        ensure_child_binding(&occurrence, "retained", &child).unwrap();
+        std::fs::rename(
+            temporary.path().join("retained"),
+            temporary.path().join("detached"),
+        )
+        .unwrap();
+        assert!(ensure_child_binding(&occurrence, "retained", &child).is_err());
+        occurrence
+            .create_child(OsStr::new("retained"), 0o700)
+            .unwrap();
+        assert!(ensure_child_binding(&occurrence, "retained", &child).is_err());
+    }
 }
 
 fn canonical_record(intent: &GuestBaseInstallIntent) -> Result<Vec<u8>> {
