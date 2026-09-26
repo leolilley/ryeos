@@ -27,6 +27,10 @@ pub struct RunningScriptedRelay {
     interrupt: LoopbackInterrupt,
     local_interrupt: LocalConnectInterrupt,
     finish: Arc<AtomicBool>,
+    provider_permitted: Arc<AtomicBool>,
+    /// Test-visible synchronization witness; never authorizes contact.
+    #[allow(dead_code)]
+    request_buffered: Arc<AtomicBool>,
     task: Option<HostTask<Result<usize>>>,
 }
 
@@ -41,6 +45,19 @@ impl Drop for RunningScriptedRelay {
 }
 
 impl RunningScriptedRelay {
+    /// Open the one-way provider-contact gate only after the caller has
+    /// checked its independently admitted launch coordinate. A target may
+    /// connect and send a bounded request before this point, but none of its
+    /// bytes can reach the controller-owned provider socket.
+    pub fn permit_provider_contact(&self) -> Result<()> {
+        ensure!(
+            !self.finish.load(Ordering::Acquire)
+                && !self.provider_permitted.swap(true, Ordering::AcqRel),
+            "scripted provider contact permit was already consumed or cancelled"
+        );
+        Ok(())
+    }
+
     /// Interrupt a pending accept or local provider exchange and join only
     /// within the caller's deadline. Cancellation never supplies a successful
     /// scripted-contact result; expiry returns the same live owner.
@@ -96,7 +113,9 @@ pub fn start(
         "scripted relay origin is not an exact loopback address"
     );
     let listener = ExactLoopbackListener::bind_exact(address)?;
-    start_from_transferred(origin, listener, directory, socket_name, deadline)
+    let relay = start_from_transferred(origin, listener, directory, socket_name, deadline)?;
+    relay.permit_provider_contact()?;
+    Ok(relay)
 }
 
 /// Start the same bounded scripted relay using the exact listener transferred
@@ -124,7 +143,11 @@ pub fn start_from_transferred(
     let interrupt = listener.interrupt_handle();
     let local_interrupt = LocalConnectInterrupt::default();
     let finish = Arc::new(AtomicBool::new(false));
+    let provider_permitted = Arc::new(AtomicBool::new(false));
+    let request_buffered = Arc::new(AtomicBool::new(false));
     let task_finish = Arc::clone(&finish);
+    let task_provider_permitted = Arc::clone(&provider_permitted);
+    let task_request_buffered = Arc::clone(&request_buffered);
     let task_local_interrupt = local_interrupt.clone();
     let task = spawn_host_task("verifier-scripted-relay", move || {
         serve(
@@ -133,6 +156,8 @@ pub fn start_from_transferred(
             socket_name,
             deadline,
             task_finish,
+            task_provider_permitted,
+            task_request_buffered,
             task_local_interrupt,
         )
     })?;
@@ -140,6 +165,8 @@ pub fn start_from_transferred(
         interrupt,
         local_interrupt,
         finish,
+        provider_permitted,
+        request_buffered,
         task: Some(task),
     })
 }
@@ -150,6 +177,8 @@ fn serve(
     socket_name: OsString,
     deadline: MonotonicDeadline,
     finish: Arc<AtomicBool>,
+    provider_permitted: Arc<AtomicBool>,
+    request_buffered: Arc<AtomicBool>,
     local_interrupt: LocalConnectInterrupt,
 ) -> Result<usize> {
     let mut connections = Vec::with_capacity(REQUEST_COUNT);
@@ -165,6 +194,18 @@ fn serve(
             lillux::time::sleep(Duration::from_millis(1));
         };
         let request = read_request(&mut client, address_from_listener(&listener)?)?;
+        request_buffered.store(true, Ordering::Release);
+        while !provider_permitted.load(Ordering::Acquire) {
+            ensure!(
+                !finish.load(Ordering::Acquire) && !deadline.has_elapsed(),
+                "scripted provider contact was never permitted"
+            );
+            lillux::time::sleep(Duration::from_millis(1));
+        }
+        ensure!(
+            !finish.load(Ordering::Acquire),
+            "scripted provider contact was cancelled"
+        );
         let mut provider = LocalDuplexStream::connect_at_until(
             &directory,
             &socket_name,
@@ -443,6 +484,61 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native loopback socket authority"]
+    fn transferred_relay_withholds_provider_contact_until_permitted() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(temporary.path()).unwrap().unwrap();
+        let provider = lillux::OwnerPrivateLocalDuplexListener::bind_pinned(&directory, "provider")
+            .unwrap();
+        let provider_name = provider.endpoint_name().to_os_string();
+        let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let origin = format!("http://{address}");
+        let relay = start_from_transferred(
+            &origin,
+            ExactLoopbackListener::bind_exact(address).unwrap(),
+            directory,
+            provider_name,
+            MonotonicDeadline::after(Duration::from_secs(10)),
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST /responses HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\n\r\n{{}}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let buffered = MonotonicDeadline::after(Duration::from_secs(2));
+        while !relay.request_buffered.load(Ordering::Acquire) {
+            assert!(!buffered.has_elapsed(), "relay did not buffer bounded request");
+            lillux::time::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            provider
+                .accept_before(MonotonicDeadline::after(Duration::from_millis(100)))
+                .unwrap()
+                .is_none(),
+            "provider was contacted before the exact launch permit"
+        );
+        relay.permit_provider_contact().unwrap();
+        assert!(
+            provider
+                .accept_before(MonotonicDeadline::after(Duration::from_secs(2)))
+                .unwrap()
+                .is_some(),
+            "permitted relay did not contact the exact provider"
+        );
+        let outcome = relay
+            .cancel_until(MonotonicDeadline::after(Duration::from_secs(2)))
+            .unwrap_or_else(|_| panic!("interrupted held relay did not join"));
+        assert!(outcome.is_err());
+    }
+
+    #[test]
     #[ignore = "requires native loopback and Unix socket authority"]
     fn finite_relay_reaches_parent_owned_pinned_provider() {
         let temporary = tempfile::tempdir().unwrap();
@@ -471,6 +567,8 @@ mod tests {
             deadline,
         )
         .unwrap();
+        relay.permit_provider_contact().unwrap();
+        assert!(relay.permit_provider_contact().is_err());
         for number in 0..REQUEST_COUNT {
             let body = format!("{{\"number\":{number}}}");
             let request = format!(

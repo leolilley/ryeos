@@ -267,6 +267,22 @@ async fn main() -> Result<()> {
             return Err(error);
         }
     };
+    // This prevents contact before the independently derived signed launch
+    // coordinate is checked. It is not yet the applied-receipt pre-contact
+    // gate required for consumer qualification; the daemon must expose and
+    // corroborate that exact live observation before claims can be enabled.
+    if let Some(relay) = running_relay.as_ref()
+        && let Err(error) = relay.permit_provider_contact()
+    {
+        let abort = abort_exact_scoped_child(&client, &thread_id, &locator.attempt_id).await;
+        let relay_cancel = running_relay
+            .take()
+            .map(cancel_scoped_relay)
+            .context("direct-target provider gate lost its owned relay")?;
+        return Err(error.context(format!(
+            "direct-target provider gate refused; exact scoped abort={abort:?}; relay cancellation={relay_cancel}"
+        )));
+    }
     let direct_conversation = if running_relay.is_some() {
         let transport =
             ryeos_independent_runtime_verifier::scoped_app_server::ScopedAppServerTransport::new(

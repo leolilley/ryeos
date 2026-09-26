@@ -30,6 +30,13 @@ impl RunningScopedRelay {
         &self.handoff
     }
 
+    /// The listener is live for held-target readiness, but the scripted
+    /// provider remains unreachable until the verifier checks the daemon's
+    /// exact launch coordinate and explicitly opens this one-way gate.
+    pub fn permit_provider_contact(&self) -> Result<()> {
+        self.relay.permit_provider_contact()
+    }
+
     /// Only the daemon's settled target and joined observation permit a
     /// provider transcript to be accepted. Retain the exact peer channel
     /// while the relay is settling; timeout returns both live owners rather
