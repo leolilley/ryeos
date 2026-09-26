@@ -78,6 +78,16 @@ pub struct InstalledGuestBase {
     children: InstalledRuntimeChildren,
 }
 
+/// One-shot, still-owned staged authorities prepared after the exact installed
+/// base was rechecked. This is descriptor custody, not writer exclusion or a
+/// launch permission; the outer owner must still create private scratch,
+/// commit launch intent, and use Lillux's exact-inheritance spawn.
+pub struct PreparedGuestContent {
+    pub(crate) _installed: InstalledGuestBase,
+    pub(crate) observation: InstalledGuestBaseObservation,
+    pub(crate) handles: crate::guest_content::VerifiedGuestContentHandles,
+}
+
 /// Exact installed child inodes observed before handoff. This is a point
 /// coordinate, not a lock or evidence that untrusted writers were excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +116,26 @@ pub struct InstalledGuestBaseObservation {
 }
 
 impl InstalledGuestBase {
+    /// Consume the live installed owner while retaining the exact opened
+    /// staged descriptors that a later outer launch owner will bind.
+    pub fn prepare_content_for_adoption(
+        self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<PreparedGuestContent> {
+        self.recheck_for_adoption(context, inputs)?;
+        let handles = crate::guest_content::open_verified_staged_guest_content(
+            self.imported.staged(),
+            inputs,
+        )?;
+        let observation = self.recheck_for_adoption(context, inputs)?;
+        Ok(PreparedGuestContent {
+            _installed: self,
+            observation,
+            handles,
+        })
+    }
+
     /// Recheck the original stage, installation journal, and copied base
     /// immediately before a future descriptor-bound supervisor adoption.
     /// The caller must separately exclude writers across that handoff.

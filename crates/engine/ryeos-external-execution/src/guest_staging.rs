@@ -109,6 +109,10 @@ pub struct TicketedGuestImport {
 }
 
 impl TicketedGuestImport {
+    pub(crate) fn staged(&self) -> &StagedGuestPackage {
+        &self.staged
+    }
+
     pub fn stage_identity(&self) -> Result<GuestStageIdentity> {
         let identity = GuestStageIdentity {
             schema: 1,
@@ -1522,7 +1526,18 @@ mod tests {
             .unwrap(),
             measurement
         );
-        drop(installed_occurrence);
+        let prepared = installed_occurrence
+            .prepare_content_for_adoption(&context, &inputs)
+            .unwrap();
+        assert_eq!(prepared.observation.occurrence_id, context.occurrence_id);
+        assert_eq!(prepared.handles.runtime_mounts.len(), inputs.inputs.len());
+        assert_eq!(
+            prepared.handles.content_records.len(),
+            inputs.record_descriptors().count()
+        );
+        assert!(prepared.handles.runtime_mounts.iter().all(Option::is_some));
+        assert!(prepared.handles.workspace_outputs.is_none());
+        drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
             &ticket,
@@ -1724,6 +1739,11 @@ mod tests {
         assert_eq!(staged.base(), &measurement);
         assert_eq!(staged.manifest(), &manifest);
         crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        let opened = crate::guest_content::open_verified_staged_guest_content(&staged, &inputs)
+            .unwrap();
+        assert_eq!(opened.runtime_mounts.len(), inputs.inputs.len());
+        assert_eq!(opened.content_records.len(), inputs.record_descriptors().count());
+        drop(opened);
         let config_source = staged
             .root()
             .open_pinned_regular(OsStr::new("input-00"), false)
@@ -1731,6 +1751,7 @@ mod tests {
             .unwrap();
         config_source.set_mode(0o600).unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
         config_source.set_mode(0o644).unwrap();
         let mut writable_config = staged
             .root()
@@ -1740,6 +1761,7 @@ mod tests {
         writable_config.write_all(b"bad").unwrap();
         writable_config.sync_all().unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
         use std::io::Seek as _;
         writable_config.rewind().unwrap();
         writable_config.write_all(&config).unwrap();
@@ -1753,6 +1775,7 @@ mod tests {
         writable_record.write_all(b"x").unwrap();
         writable_record.sync_all().unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
         writable_record.rewind().unwrap();
         writable_record.write_all(&product_manifest).unwrap();
         writable_record.sync_all().unwrap();

@@ -151,8 +151,12 @@ not retried. The live owner can now recheck that retained intent, the staged
 input and installed base CAS, empty refs/recovery roots, and the original
 runtime child/lock inodes immediately before a future descriptor handoff. Its
 serialized observation is a point coordinate, not writer exclusion or a
-launch permission. This is not yet a full installed generation, supervisor launch
-intent, or immutable custody proof. The synthetic
+launch permission. A subsequent one-shot preparation now retains the exact
+opened product/source/raw-file descriptors after checking those handles against
+the retained input projection; private-scratch slots remain unfilled. Those
+handles are still mutable point observations until the outer owner excludes
+writers and commits its launch. This is not yet a full installed generation,
+supervisor launch intent, or immutable custody proof. The synthetic
 fixture currently copies/moves staged inputs into its occurrence and discards the
 staging directory before launching the supervisor. Its terminal path checks
 the supervisor/server process identities and exits, not an enclosing process
