@@ -198,6 +198,39 @@ mod tests {
                 .unwrap()
                 .manifest_hash()
         );
+        let different_root = SigningKey::from_bytes(&[44; 32]).verifying_key();
+        let changed_controller = produce_guest_owner_runtime(
+            &parent,
+            OsStr::new("changed-controller"),
+            &authority,
+            bytes.len() as u64,
+            &digest,
+            &different_root,
+            &profile,
+        )
+        .unwrap();
+        assert_ne!(
+            product.manifest_hash(),
+            changed_controller.manifest_hash(),
+            "a different controller trust root must change the runtime identity"
+        );
+        let mut changed_profile = profile.clone();
+        changed_profile.owner_timeout_seconds -= 1;
+        let changed_policy = produce_guest_owner_runtime(
+            &parent,
+            OsStr::new("changed-profile"),
+            &authority,
+            bytes.len() as u64,
+            &digest,
+            &key,
+            &changed_profile,
+        )
+        .unwrap();
+        assert_ne!(
+            product.manifest_hash(),
+            changed_policy.manifest_hash(),
+            "a different owner profile must change the runtime identity"
+        );
         assert_eq!(
             std::fs::read(parent.path().join("runtime/bin").join(OWNER_NAME)).unwrap(),
             bytes
