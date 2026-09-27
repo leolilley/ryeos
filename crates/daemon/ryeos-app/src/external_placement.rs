@@ -7227,7 +7227,10 @@ mod tests {
 
     #[test]
     fn controller_signed_import_joins_exact_activation_and_guest_runtime() {
-        use ryeos_external_execution_contract::guest_import_authorization::GuestOccurrenceAssignment;
+        use ryeos_external_execution_contract::guest_import_authorization::{
+            GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA, GuestOccurrenceAssignment,
+            GuestOccurrenceAssignmentDocument,
+        };
         use ryeos_external_execution_contract::staging_package::{
             GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
         };
@@ -7302,26 +7305,48 @@ mod tests {
             guest_runtime_manifest_hash: &contract.guest_runtime_manifest_hash,
             attachment_deadline_ms: intent.attachment_deadline_ms,
         };
-        ryeos_external_execution::guest_import_authorization::verify_guest_import_authorization(
-            signed.clone(),
-            &authority.owner_signing_key().verifying_key(),
-            &assignment,
+        let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
+        let signed_assignment =
+            ryeos_external_execution::guest_import_authorization::sign_guest_occurrence_assignment(
+                GuestOccurrenceAssignmentDocument {
+                    schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+                    placement_thread_id: assignment.placement_thread_id.into(),
+                    admitted_capsule_hash: assignment.admitted_capsule_hash.into(),
+                    base_snapshot_hash: assignment.base_snapshot_hash.into(),
+                    execution_binding_hash: assignment.execution_binding_hash.into(),
+                    allocation_request_digest: assignment.allocation_request_digest.into(),
+                    occurrence_id: assignment.occurrence_id.into(),
+                    activation_request_digest: assignment.activation_request_digest.into(),
+                    supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
+                    guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
+                    owner_public_key_hex: hex::encode(
+                        authority.owner_signing_key().verifying_key().to_bytes(),
+                    ),
+                    attachment_deadline_ms: assignment.attachment_deadline_ms,
+                },
+                &root,
+            )
+            .unwrap();
+        let import_bytes = ryeos_external_execution_contract::canonical_json(&signed).unwrap();
+        let assignment_bytes =
+            ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
+        ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
+            &import_bytes,
+            &root.verifying_key(),
+            assignment.guest_runtime_manifest_hash,
+            &assignment_bytes,
         )
         .unwrap();
         assert_ne!(
             signed.authorization.guest_runtime_manifest_hash,
             signed.authorization.supervisor_runtime_hash
         );
-        let changed_runtime = "7".repeat(64);
-        let wrong_assignment = GuestOccurrenceAssignment {
-            guest_runtime_manifest_hash: &changed_runtime,
-            ..assignment
-        };
         assert!(
-            ryeos_external_execution::guest_import_authorization::verify_guest_import_authorization(
-                signed,
-                &authority.owner_signing_key().verifying_key(),
-                &wrong_assignment,
+            ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
+                &import_bytes,
+                &root.verifying_key(),
+                &"7".repeat(64),
+                &assignment_bytes,
             )
             .is_err()
         );

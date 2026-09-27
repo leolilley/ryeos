@@ -11,13 +11,15 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution::guest_import_authorization::{
-    sign_guest_import_authorization, verify_guest_import_authorization,
+    sign_guest_import_authorization, sign_guest_occurrence_assignment,
+    verify_guest_import_documents,
 };
 use ryeos_external_execution::guest_installation::{
     GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase, recover_guest_occurrence_authorized,
 };
 use ryeos_external_execution_contract::guest_import_authorization::{
-    GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization, GuestOccurrenceAssignment,
+    GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+    GuestImportAuthorization, GuestOccurrenceAssignment, GuestOccurrenceAssignmentDocument,
     SignedGuestImportAuthorization,
 };
 use ryeos_external_execution_contract::staging_package::{
@@ -150,6 +152,44 @@ fn occurrence_assignment(
         guest_runtime_manifest_hash: "9999999999999999999999999999999999999999999999999999999999999999",
         attachment_deadline_ms,
     }
+}
+
+fn signed_native_assignment(
+    assignment: &GuestOccurrenceAssignment<'_>,
+    owner: &lillux::crypto::SigningKey,
+) -> Result<Vec<u8>> {
+    let document = GuestOccurrenceAssignmentDocument {
+        schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+        placement_thread_id: assignment.placement_thread_id.into(),
+        admitted_capsule_hash: assignment.admitted_capsule_hash.into(),
+        base_snapshot_hash: assignment.base_snapshot_hash.into(),
+        execution_binding_hash: assignment.execution_binding_hash.into(),
+        allocation_request_digest: assignment.allocation_request_digest.into(),
+        occurrence_id: assignment.occurrence_id.into(),
+        activation_request_digest: assignment.activation_request_digest.into(),
+        supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
+        guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
+        owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
+        attachment_deadline_ms: assignment.attachment_deadline_ms,
+    };
+    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
+    let signed = sign_guest_occurrence_assignment(document, &root)?;
+    ryeos_external_execution_contract::canonical_json(&signed)
+}
+
+fn verify_native_import(
+    signed: &SignedGuestImportAuthorization,
+    signed_assignment: &[u8],
+    installed_runtime_manifest_hash: &str,
+) -> Result<ryeos_external_execution::guest_import_authorization::VerifiedGuestImportAuthorization>
+{
+    let root = lillux::crypto::SigningKey::from_bytes(&[43; 32]);
+    verify_guest_import_documents(
+        &ryeos_external_execution_contract::canonical_json(signed)?,
+        &root.verifying_key(),
+        installed_runtime_manifest_hash,
+        signed_assignment,
+    )
 }
 
 fn run(
@@ -381,16 +421,24 @@ fn run(
     };
     let controller = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
     let signed = sign_guest_import_authorization(authorization, &controller, &assignment)?;
+    let signed_assignment = signed_native_assignment(&assignment, &controller)?;
     std::fs::write(
         fixture_path.join("signed-authorization.json"),
         serde_json::to_vec(&signed)?,
     )?;
     std::fs::write(
+        fixture_path.join("signed-assignment.json"),
+        &signed_assignment,
+    )?;
+    std::fs::write(
         fixture_path.join("assignment-deadline.txt"),
         assignment.attachment_deadline_ms.to_string(),
     )?;
-    let verified =
-        verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)?;
+    let verified = verify_native_import(
+        &signed,
+        &signed_assignment,
+        assignment.guest_runtime_manifest_hash,
+    )?;
     let owner = GuestOccurrenceOwner::begin_authorized(&occurrence, verified)?;
     // No test-harness thread exists here. The old /tmp is replaced, while the
     // exact upload and durable occurrence remain pinned outside that mount.
@@ -653,20 +701,25 @@ fn main() {
         let assignment =
             occurrence_assignment(&inputs.base_snapshot.snapshot_hash, attachment_deadline_ms);
         let controller = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let signed_assignment = std::fs::read(fixture.path().join("signed-assignment.json"))
+            .expect("retained root-signed native occurrence assignment");
         let mut competing_authorization = signed.authorization.clone();
         competing_authorization.nonce_sha256 = "9".repeat(64);
         let competing_signed =
             sign_guest_import_authorization(competing_authorization, &controller, &assignment)
                 .expect("sign competing native occurrence authorization");
-        let competing_verified = verify_guest_import_authorization(
-            competing_signed,
-            &controller.verifying_key(),
-            &assignment,
+        let competing_verified = verify_native_import(
+            &competing_signed,
+            &signed_assignment,
+            assignment.guest_runtime_manifest_hash,
         )
         .expect("verify competing native occurrence authorization");
-        let verified =
-            verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)
-                .expect("verify retained guest authorization");
+        let verified = verify_native_import(
+            &signed,
+            &signed_assignment,
+            assignment.guest_runtime_manifest_hash,
+        )
+        .expect("verify retained guest authorization");
         let occurrence = lillux::PinnedDirectory::open(&fixture.path().join("occurrence"))
             .expect("open retained occurrence")
             .expect("retained occurrence exists");

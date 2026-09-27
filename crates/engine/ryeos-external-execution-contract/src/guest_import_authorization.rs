@@ -1,8 +1,9 @@
 //! Controller-authorized, provider-neutral guest import intent.
 //!
 //! The uploaded package is not an authority source. A guest importer verifies
-//! this signed document against a separately provisioned controller key and
-//! protected occurrence assignment before creating its one-shot owner.
+//! the root-signed occurrence assignment against its installed trust root,
+//! then the import authorization against the delegated owner key before
+//! creating its one-shot owner.
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,11 @@ use crate::{ExternalGuestInputProjection, canonical_json};
 pub const GUEST_IMPORT_AUTHORIZATION_SCHEMA: u32 = 1;
 pub const GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA: u32 = 1;
 pub const MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize = 4 * 1024;
+pub const MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize =
+    MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES + 256;
 pub const MAX_GUEST_IMPORT_AUTHORIZATION_BYTES: usize = 256 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-import-authorization.v1\0";
+const ASSIGNMENT_SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-occurrence-assignment.v1\0";
 
 /// Independent placement coordinates held by the guest's trusted runtime.
 /// Constructing this from the ticket, upload, or signed document itself would
@@ -33,10 +37,10 @@ pub struct GuestOccurrenceAssignment<'a> {
     pub attachment_deadline_ms: i64,
 }
 
-/// Wire form for an occurrence assignment delivered independently by the
-/// trusted guest runtime. Parsing this value does not establish its origin:
-/// the importer must pin and verify the protected assignment source before
-/// comparing it with an uploaded package or signed authorization.
+/// Wire form for an occurrence assignment delivered separately from the
+/// uploaded package. Parsing it does not establish origin: the qualified
+/// guest runtime must pin a controller root and verify the enclosing
+/// signature before this assignment delegates the temporary owner key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestOccurrenceAssignmentDocument {
@@ -50,7 +54,17 @@ pub struct GuestOccurrenceAssignmentDocument {
     pub activation_request_digest: String,
     pub supervisor_runtime_hash: String,
     pub guest_runtime_manifest_hash: String,
+    /// Per-occurrence channel owner delegated by an independently trusted
+    /// controller root. Never take this key from the uploaded package.
+    pub owner_public_key_hex: String,
     pub attachment_deadline_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedGuestOccurrenceAssignment {
+    pub assignment: GuestOccurrenceAssignmentDocument,
+    pub signature_hex: String,
 }
 
 impl GuestOccurrenceAssignmentDocument {
@@ -88,6 +102,7 @@ impl GuestOccurrenceAssignmentDocument {
             &self.activation_request_digest,
             &self.supervisor_runtime_hash,
             &self.guest_runtime_manifest_hash,
+            &self.owner_public_key_hex,
         ] {
             ensure!(
                 canonical_digest(digest),
@@ -97,6 +112,31 @@ impl GuestOccurrenceAssignmentDocument {
         ensure!(
             canonical_json(self)?.len() <= MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
             "guest occurrence assignment exceeds byte bound"
+        );
+        Ok(())
+    }
+
+    pub fn signing_bytes(&self) -> Result<Vec<u8>> {
+        self.validate_shape()?;
+        let document = canonical_json(self)?;
+        let mut bytes = Vec::with_capacity(ASSIGNMENT_SIGNATURE_DOMAIN.len() + document.len());
+        bytes.extend_from_slice(ASSIGNMENT_SIGNATURE_DOMAIN);
+        bytes.extend_from_slice(&document);
+        Ok(bytes)
+    }
+}
+
+impl SignedGuestOccurrenceAssignment {
+    pub fn validate_shape(&self) -> Result<()> {
+        self.assignment.validate_shape()?;
+        ensure!(
+            self.signature_hex.len() == 128
+                && self
+                    .signature_hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                && canonical_json(self)?.len() <= MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+            "signed guest occurrence assignment has invalid shape"
         );
         Ok(())
     }
@@ -119,6 +159,7 @@ mod assignment_tests {
             activation_request_digest: "e".repeat(64),
             supervisor_runtime_hash: "f".repeat(64),
             guest_runtime_manifest_hash: "1".repeat(64),
+            owner_public_key_hex: "2".repeat(64),
             attachment_deadline_ms: 1_800_000_000_000,
         }
     }
@@ -150,6 +191,15 @@ mod assignment_tests {
         let mut malformed = source;
         malformed.guest_runtime_manifest_hash = "A".repeat(64);
         assert!(malformed.validate_shape().is_err());
+
+        let mut missing_owner = serde_json::to_value(document()).unwrap();
+        missing_owner
+            .as_object_mut()
+            .unwrap()
+            .remove("owner_public_key_hex");
+        assert!(
+            serde_json::from_value::<GuestOccurrenceAssignmentDocument>(missing_owner).is_err()
+        );
     }
 }
 

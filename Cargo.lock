@@ -2640,6 +2640,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "directories",
+ "hex",
  "libc",
  "lillux",
  "once_cell",
