@@ -324,6 +324,35 @@ mod tests {
                 .unwrap()
                 .manifest_hash()
         );
+        let ignore =
+            ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
+                patterns: vec![],
+            })
+            .unwrap();
+        let capture_policy = ryeos_state::ExternalCapturePolicy::new(
+            "products/external-guest-owner-runtime".to_owned(),
+            &ignore,
+        )
+        .unwrap();
+        let mut capture_budget = ryeos_state::LaunchCaptureBudget::bounded(
+            3,
+            4,
+            32 * 1024 * 1024,
+            32 * 1024 * 1024 + 4096,
+        )
+        .unwrap();
+        let captured = ryeos_state::external_content::capture_tree(
+            product.root(),
+            &[],
+            &capture_policy,
+            &mut capture_budget,
+            &mut ryeos_state::DigestOnlyExternalContentSink,
+        )
+        .unwrap();
+        assert_eq!(
+            ryeos_state::external_content_manifest_digest(&captured).unwrap(),
+            product.manifest_hash()
+        );
         let manifest = ryeos_state::observe_external_content_tree_exact(product.root()).unwrap();
         let manifest_value = serde_json::to_value(&manifest).unwrap();
         let identity = derive_guest_owner_runtime_manifest_identity(&manifest_value, &key).unwrap();
