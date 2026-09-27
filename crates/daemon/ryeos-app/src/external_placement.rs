@@ -947,10 +947,10 @@ impl ExternalPlacementBackendRegistry {
         mut required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
-        // A signed coordinate is not a qualification. Until fresh admission
-        // loads and verifies the published independent witness, it cannot be
-        // used as a startup permission. Retained cleanup does not reapply this
-        // startup gate to an already contacted occurrence.
+        // Current and retained product witnesses now join at session admission
+        // and contact, but a signed coordinate is still not a provider probe.
+        // Keep activation closed until exact guest snapshot comparison is
+        // implemented. Retained cleanup does not reapply this startup gate.
         if require_activation {
             ensure!(
                 contract.runtime_qualification.is_none(),
@@ -1055,6 +1055,86 @@ fn require_current_runtime_qualification_for_start(
     Ok(())
 }
 
+/// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
+/// binding before opening credentials. Historical recovery authenticates this
+/// retained proof, never a newly selected product head.
+fn require_retained_session_runtime_qualification(
+    state: &AppState,
+    capsule: &ryeos_state::objects::AdmittedPersistentSessionCapsule,
+    binding: &RetainedExternalExecutionBinding,
+) -> Result<()> {
+    let contract = binding.backend_contract();
+    let Some(retained) = match_retained_session_runtime_qualification(
+        capsule.retained_external_runtime_qualification.as_ref(),
+        &contract,
+        binding.digest(),
+    )?
+    else {
+        return Ok(());
+    };
+    verify_retained_runtime_proof(state, retained)
+}
+
+/// Recovery validates only the capsule's historical CAS-owned witness. First
+/// contact separately requires the current binding and current qualification;
+/// already-contacted occurrences must not be rebound to a later product head.
+pub fn verify_retained_external_candidate_capsule(
+    state: &AppState,
+    capsule: &ryeos_state::objects::AdmittedPersistentSessionCapsule,
+) -> Result<()> {
+    let Some(program) = capsule.external_candidate.as_ref() else {
+        bail!("retained external candidate verification requires its admitted program");
+    };
+    program.verify_selections(capsule.retained_product_selections.as_ref())?;
+    if let Some(retained) = capsule.retained_external_runtime_qualification.as_ref() {
+        verify_retained_runtime_proof(state, retained)?;
+    }
+    Ok(())
+}
+
+fn verify_retained_runtime_proof(
+    state: &AppState,
+    retained: &ryeos_state::objects::RetainedExternalRuntimeQualification,
+) -> Result<()> {
+    retained.validate()?;
+    let limits = state
+        .node_policy
+        .require::<crate::node_policy::sections::object_closure::NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    crate::operator_external_content::product_qualification::verify_retained_qualification_guarded(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &retained.proof,
+        &retained.owner_principal,
+    )
+}
+
+fn match_retained_session_runtime_qualification<'a>(
+    retained: Option<&'a ryeos_state::objects::RetainedExternalRuntimeQualification>,
+    contract: &ExternalPlacementBackendContract,
+    binding_hash: &str,
+) -> Result<Option<&'a ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    match (retained, contract.runtime_qualification.as_ref()) {
+        (None, None) => Ok(None),
+        (Some(retained), Some(selected)) => {
+            retained.validate()?;
+            ensure!(
+                retained.binding_hash == binding_hash
+                    && retained.guest_runtime_manifest_hash == contract.guest_runtime_manifest_hash
+                    && retained.owner_principal == selected.owner_principal
+                    && retained.proof.attestation_hash == selected.attestation_hash,
+                "retained external runtime proof differs from signed placement binding"
+            );
+            Ok(Some(retained))
+        }
+        _ => bail!("session runtime proof presence differs from signed placement binding"),
+    }
+}
+
 fn preflight_external_direct_dependencies(
     bindings: &[InstalledExternalExecutionBinding],
     backends: &ExternalPlacementBackendRegistry,
@@ -1106,9 +1186,31 @@ fn preflight_external_direct_dependencies(
 pub fn preflight_external_candidate_program(
     state: &AppState,
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-) -> Result<()> {
+) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
     let binding = select_binding(&state.node_config.external_execution, program)?;
-    require_current_runtime_qualification_for_start(state, &binding.backend_contract())?;
+    let contract = binding.backend_contract();
+    let runtime_proof = contract
+        .runtime_qualification
+        .as_ref()
+        .map(|qualification| {
+            let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
+                state,
+                qualification,
+                &contract.guest_runtime_manifest_hash,
+            )?;
+            let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
+                binding_hash: binding.digest().to_owned(),
+                guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+                owner_principal: qualification.owner_principal.clone(),
+                proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
+                    attestation_hash: witness.attestation_hash,
+                    evidence: witness.evidence,
+                },
+            };
+            retained.validate()?;
+            Ok::<_, anyhow::Error>(retained)
+        })
+        .transpose()?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -1125,7 +1227,8 @@ pub fn preflight_external_candidate_program(
                     .context("read protected external placement credential")?,
             )
         },
-    )
+    )?;
+    Ok(runtime_proof)
 }
 
 fn preflight_external_candidate_dependencies(
@@ -1606,6 +1709,7 @@ fn retained_external_channel_program(
                 .as_ref()
                 .context("external channel capsule has no admitted candidate program")?;
             program.verify_selections(capsule.retained_product_selections.as_ref())?;
+            require_retained_session_runtime_qualification(state, &capsule, retained)?;
             retained.check_program(program)?;
             AdmittedExternalExecutionProgram::StructuredSession(program.clone())
         }
@@ -2212,6 +2316,9 @@ impl<'a> ExternalPlacementOwner<'a> {
             let access = installed.credential_access()?;
             (binding, contract, access)
         };
+        if !cleanup_only {
+            require_retained_session_runtime_qualification(self.state, &capsule, &binding)?;
+        }
         if !cleanup_only
             && existing
                 .as_ref()
@@ -6398,6 +6505,101 @@ mod tests {
                 std::slice::from_ref(&current),
                 &program(),
                 &"e".repeat(64),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_guest_runtime_proof_matches_only_its_signed_binding() {
+        let binding = RetainedExternalExecutionBinding::test_fixture();
+        let mut contract = binding.backend_contract();
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
+            &contract.guest_runtime_manifest_hash,
+        )
+        .unwrap();
+        let proof = selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .clone()
+            .unwrap();
+        let owner_principal = format!("fp:{}", "7".repeat(64));
+        contract.runtime_qualification = Some(
+            crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+                attestation_hash: proof.attestation_hash.clone(),
+                owner_principal: owner_principal.clone(),
+                qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                    policy_ref: Some("config:render/snapshot-qualification".into()),
+                    required_claims: vec!["render_snapshot_v1".into()],
+                },
+            },
+        );
+        let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
+            binding_hash: binding.digest().to_owned(),
+            guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+            owner_principal,
+            proof,
+        };
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&retained),
+                &contract,
+                binding.digest()
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            match_retained_session_runtime_qualification(None, &contract, binding.digest())
+                .is_err()
+        );
+        let mut changed = retained.clone();
+        changed.binding_hash = "8".repeat(64);
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&changed),
+                &contract,
+                binding.digest()
+            )
+            .is_err()
+        );
+        changed = retained.clone();
+        changed.proof.attestation_hash = "9".repeat(64);
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&changed),
+                &contract,
+                binding.digest()
+            )
+            .is_err()
+        );
+        changed = retained.clone();
+        changed.owner_principal = format!("fp:{}", "a".repeat(64));
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&changed),
+                &contract,
+                binding.digest()
+            )
+            .is_err()
+        );
+        changed = retained.clone();
+        changed.guest_runtime_manifest_hash = "b".repeat(64);
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&changed),
+                &contract,
+                binding.digest()
+            )
+            .is_err()
+        );
+        contract.runtime_qualification = None;
+        assert!(
+            match_retained_session_runtime_qualification(
+                Some(&retained),
+                &contract,
+                binding.digest()
             )
             .is_err()
         );

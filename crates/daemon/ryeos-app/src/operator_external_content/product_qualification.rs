@@ -2401,7 +2401,7 @@ pub(crate) fn verify_current_external_runtime_qualification(
 /// Recovery authenticates the exact retained proof under its caller's CAS
 /// guard. It deliberately does not reapply current-head, current-policy, or
 /// wall-clock eligibility.
-pub(super) fn verify_retained_qualification_guarded(
+pub(crate) fn verify_retained_qualification_guarded(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,

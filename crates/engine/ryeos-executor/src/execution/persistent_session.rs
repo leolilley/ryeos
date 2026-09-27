@@ -2282,14 +2282,16 @@ fn admit_session_capsule(
                 || supports_private_descriptor_realizations(session),
         )?;
     }
-    if let Some(program) = external_candidate.as_ref() {
+    let retained_external_runtime_qualification = if let Some(program) = external_candidate.as_ref()
+    {
         // This capsule is never booted under the controller's local process
         // scope. Its signed connector route and external placement
         // incarnation own start, cleanup, and death proof instead.
-        ryeos_app::external_placement::preflight_external_candidate_program(state, program)?;
+        ryeos_app::external_placement::preflight_external_candidate_program(state, program)?
     } else {
         validate_session_process_control(state, session)?;
-    }
+        None
+    };
     let execution_closure = {
         let _permit = state
             .write_barrier
@@ -2337,7 +2339,7 @@ fn admit_session_capsule(
         exact_program: exact_program_value,
         exact_program_hash,
         retained_product_selections,
-        retained_external_runtime_qualification: None,
+        retained_external_runtime_qualification,
         lifecycle,
         wire,
         artifact_identity,
@@ -2388,8 +2390,8 @@ fn verify_session_capsule(
 ) -> Result<AdmittedPersistentSessionCapsule> {
     let capsule =
         load_capsule(state, capsule_hash).context(SessionCapsuleVerificationStage::Load)?;
-    if let Some(program) = capsule.external_candidate.as_ref() {
-        ryeos_app::external_placement::preflight_external_candidate_program(state, program)
+    if capsule.external_candidate.is_some() {
+        ryeos_app::external_placement::verify_retained_external_candidate_capsule(state, &capsule)
             .context(SessionCapsuleVerificationStage::Load)?;
     } else {
         validate_session_process_control(

@@ -33,7 +33,9 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // process plan; an external command environment is not provider placement.
 // v17 separately owns the exact guest-runtime product proof. The candidate
 // executable product selection is not a substitute for placement qualification.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 17;
+// v18 also binds the published product owner's principal, so retained proof
+// authentication never guesses the owner from a later node configuration.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 18;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -691,6 +693,7 @@ impl PersistentSessionAuthority {
 pub struct RetainedExternalRuntimeQualification {
     pub binding_hash: String,
     pub guest_runtime_manifest_hash: String,
+    pub owner_principal: String,
     pub proof: crate::external_content::products::composition::AdmittedProductQualification,
 }
 
@@ -708,6 +711,10 @@ impl RetainedExternalRuntimeQualification {
             "external runtime qualification attestation",
             &self.proof.attestation_hash,
         )?;
+        let owner = self.owner_principal.strip_prefix("fp:").ok_or_else(|| {
+            anyhow::anyhow!("external runtime qualification owner must be a fingerprint principal")
+        })?;
+        super::thread_snapshot::validate_canonical_hash("external runtime owner", owner)?;
         self.proof.evidence.validate()?;
         if self.proof.evidence.result.subject_manifest_hash != self.guest_runtime_manifest_hash {
             anyhow::bail!("retained external runtime proof differs from guest manifest");
