@@ -377,6 +377,12 @@ captured product manifest and give `bundle_generation_hash` an explicit
 authenticated producer-source meaning. The signed placement binding does not
 name that latter field; copying it from `probe_evidence` into the expectation
 would compare the provider claim with itself and prove nothing.
+RyeOS now re-verifies the retained product witness and its complete content
+closure, then derives the expected owner executable digest and controller-root
+file digest from the exact product manifest under the node's current public
+key. Both ordinary and large-content manifest tiers are supported. The
+credential-free adapter hook receives these source-derived values; the Render
+executable still defaults to refusal until its sealed invocation is implemented.
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot

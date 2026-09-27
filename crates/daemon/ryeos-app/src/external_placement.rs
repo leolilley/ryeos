@@ -72,6 +72,7 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         &self,
         _contract: &ExternalPlacementBackendContract,
         _proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        _source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
     ) -> Result<()> {
         bail!("external lifecycle adapter does not verify runtime qualification probes")
     }
@@ -861,6 +862,7 @@ impl ExternalPlacementBackendRegistry {
         &self,
         contract: &ExternalPlacementBackendContract,
         proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+        source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
     ) -> Result<()> {
         let backend = self
             .backends
@@ -869,7 +871,7 @@ impl ExternalPlacementBackendRegistry {
                 contract.backend_artifact_hash.clone(),
             ))
             .context("exact signed external placement backend generation is not installed")?;
-        backend.verify_runtime_probe(contract, proof)
+        backend.verify_runtime_probe(contract, proof, source)
     }
 
     pub(crate) fn from_backends(backends: Vec<Arc<dyn ExternalPlacementBackend>>) -> Result<Self> {
@@ -1099,10 +1101,10 @@ fn require_retained_session_runtime_qualification(
     else {
         return Ok(());
     };
-    verify_retained_runtime_proof(state, retained)?;
+    let source = verify_retained_runtime_proof(state, retained)?;
     state
         .external_placement_backends
-        .verify_runtime_probe(&contract, &retained.proof)
+        .verify_runtime_probe(&contract, &retained.proof, &source)
 }
 
 /// Recovery validates only the capsule's historical CAS-owned witness. First
@@ -1125,7 +1127,7 @@ pub fn verify_retained_external_candidate_capsule(
 fn verify_retained_runtime_proof(
     state: &AppState,
     retained: &ryeos_state::objects::RetainedExternalRuntimeQualification,
-) -> Result<()> {
+) -> Result<ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity> {
     retained.validate()?;
     let limits = state
         .node_policy
@@ -1140,7 +1142,41 @@ fn verify_retained_runtime_proof(
         limits,
         &retained.proof,
         &retained.owner_principal,
-    )
+    )?;
+    let product = crate::operator_external_content::product_receipt::load_product_source(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &retained.owner_principal,
+        &retained.proof.evidence.product_witness_hash,
+        &retained.proof.evidence.witness_source,
+        crate::operator_external_content::product_receipt::ProductSourceVerification::Retained,
+    )?;
+    let manifest_hash = &retained.proof.evidence.result.subject_manifest_hash;
+    ensure!(
+        product.attestation_hash == retained.proof.evidence.product_witness_hash
+            && product.evidence.manifest_hash == *manifest_hash
+            && ryeos_state::external_content::products::publication::ProductCaptureCoordinate::from_evidence(&product.evidence)?
+                == retained.proof.evidence.product_coordinate,
+        "retained guest runtime qualification differs from its product source"
+    );
+    let manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        manifest_hash,
+        (ryeos_state::objects::MAX_LARGE_CONTENT_MANIFEST_BYTES as u64)
+            .min(limits.max_object_bytes),
+    )?;
+    let source = ryeos_external_execution::guest_runtime_product::derive_guest_owner_runtime_manifest_identity(
+        &manifest,
+        state.identity.verifying_key(),
+    )?;
+    ensure!(
+        source.manifest_hash == *manifest_hash
+            && source.manifest_hash == retained.guest_runtime_manifest_hash,
+        "retained guest runtime manifest differs from the qualified product"
+    );
+    Ok(source)
 }
 
 fn match_retained_session_runtime_qualification<'a>(
@@ -1242,9 +1278,10 @@ pub fn preflight_external_candidate_program(
         })
         .transpose()?;
     if let Some(proof) = runtime_proof.as_ref() {
+        let source = verify_retained_runtime_proof(state, proof)?;
         state
             .external_placement_backends
-            .verify_runtime_probe(&contract, &proof.proof)?;
+            .verify_runtime_probe(&contract, &proof.proof, &source)?;
     }
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
@@ -6654,9 +6691,16 @@ mod tests {
             .qualification
             .as_ref()
             .unwrap();
+        let source =
+            ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
+                manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+                owner_executable_sha256: "7".repeat(64),
+                controller_root_blob_sha256: "8".repeat(64),
+                controller_public_root: format!("ed25519:{}", "A".repeat(44)),
+            };
         assert!(
             ExternalPlacementBackendRegistry::default()
-                .verify_runtime_probe(&contract, proof)
+                .verify_runtime_probe(&contract, proof, &source)
                 .is_err()
         );
         let registry =
@@ -6664,7 +6708,11 @@ mod tests {
                 artifact: contract.backend_artifact_hash.clone(),
             })])
             .unwrap();
-        assert!(registry.verify_runtime_probe(&contract, proof).is_err());
+        assert!(
+            registry
+                .verify_runtime_probe(&contract, proof, &source)
+                .is_err()
+        );
     }
 
     #[test]
