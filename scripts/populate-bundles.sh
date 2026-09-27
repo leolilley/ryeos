@@ -511,46 +511,15 @@ static_build_labels=()
 if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_update "building selected static worker binaries" "${static_build_labels[*]}"
   ryeos_term_suspend
-  if (( build_static_session_exec == 1 )); then
-    ryeos_term_info "static worker build: ryeos-session-exec (separate self-contained binary)"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-session-exec
-  fi
-  if (( build_static_structured_session == 1 )); then
-    ryeos_term_info "static worker build: ryeos-structured-session (separate self-contained binary)"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-structured-session
-  fi
-  if (( build_static_lillux_isolation_adapter == 1 )); then
-    ryeos_term_info "static isolation build: ryeos-lillux-isolation-adapter (self-contained adapter)"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-lillux-isolation-adapter
-  fi
-  if (( build_static_external_candidate_connector == 1 )); then
-    ryeos_term_info "static external execution build: ryeos-external-candidate-connector"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-candidate-connector
-  fi
-  if (( build_static_external_guest_occurrence_owner == 1 )); then
-    ryeos_term_info "static external guest owner build: ryeos-external-guest-occurrence-owner"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-guest-occurrence-owner
-  fi
-  if (( build_static_external_guest_runtime_producer == 1 )); then
-    ryeos_term_info "static external guest runtime producer build: ryeos-external-guest-runtime-producer"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-guest-runtime-producer
-  fi
-  if (( build_static_codex_external_configuration == 1 )); then
-    ryeos_term_info "static external execution build: ryeos-codex-external-configuration"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-codex-external-configuration
-  fi
-  if (( build_static_codex_guest_runtime_producer == 1 )); then
-    ryeos_term_info "static Codex guest runtime producer build: ryeos-codex-guest-runtime-producer"
-    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-codex-guest-runtime-producer
-  fi
+  # These packages share the same target and flags. One Cargo graph reuses
+  # their common dependencies and runs publication only after all succeed.
+  static_build_args=()
+  for package in "${static_build_labels[@]}"; do
+    static_build_args+=(-p "$package")
+  done
+  ryeos_term_info "static worker build: ${static_build_labels[*]}"
+  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+    "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"

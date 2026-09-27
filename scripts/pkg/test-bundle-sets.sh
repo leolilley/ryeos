@@ -247,6 +247,26 @@ for package_case in "${static_package_cases[@]}"; do
   test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 done
 
+# Multiple selected static packages must share one Cargo invocation. This
+# prevents repeated dependency-graph setup while retaining exact target paths.
+set +e
+combined_static_output="$(
+  RYEOS_TTY=never \
+  CARGO=/bin/echo \
+  CARGO_TARGET_DIR="$scope_tmp/target" \
+    "$scope_tmp/repo/scripts/populate-bundles.sh" \
+      --key "$scope_tmp/publisher.pem" \
+      --owner test \
+      --bundle-set full \
+      --crates 'ryeos-session-exec ryeos-structured-session ryeos-external-candidate-connector' 2>&1
+)"
+combined_static_status=$?
+set -e
+[[ "$combined_static_status" -eq 2 ]]
+[[ "$(sed -n '/^build /p' <<<"$combined_static_output")" \
+  == 'build --release --target x86_64-unknown-linux-gnu -p ryeos-session-exec -p ryeos-structured-session -p ryeos-external-candidate-connector' ]]
+test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
+
 # Exercise the real population control flow with disposable retained payloads.
 # Cargo remains inert. The deletion fence aborts before source signing or
 # publication if an invalid payload incorrectly passes static qualification.
