@@ -1698,24 +1698,51 @@ async fn signed_independent_verifier_runs_direct_codex_and_refuses_unqualified_c
         .as_str()
         .context("direct Codex target has no daemon-retained app-server output")?;
     let mut response_ids = std::collections::BTreeSet::new();
+    let mut started_thread = None;
+    let mut started_turn = None;
     let mut completed_turns = 0usize;
     for line in output.lines() {
         let frame: Value = serde_json::from_str(line)
             .context("daemon-retained direct Codex output contains a non-JSON frame")?;
         ensure!(frame.is_object(), "direct Codex emitted a non-object frame");
         if let Some(id) = frame["id"].as_u64() {
-            response_ids.insert(id);
+            ensure!(
+                (1..=3).contains(&id) && response_ids.insert(id) && frame.get("error").is_none()
+                    && frame.get("result").is_some(),
+                "direct Codex emitted a duplicate, error, or unexpected response: {frame}"
+            );
+            if id == 2 {
+                ensure!(response_ids.contains(&1), "thread response preceded initialization");
+                started_thread = frame
+                    .pointer("/result/thread/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            if id == 3 {
+                ensure!(started_thread.is_some(), "turn response preceded thread start");
+                started_turn = frame
+                    .pointer("/result/turn/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
         }
-        if frame["method"] == "turn/completed"
-            && frame["params"]["turn"]["status"] == "completed"
-            && frame["params"]["threadId"].as_str().is_some()
-            && frame["params"]["turn"]["id"].as_str().is_some()
-        {
+        if frame["method"] == "turn/completed" {
+            ensure!(
+                started_thread.is_some()
+                    && started_turn.is_some()
+                    && frame["params"]["turn"]["status"] == "completed"
+                    && frame["params"]["threadId"].as_str() == started_thread.as_deref()
+                    && frame["params"]["turn"]["id"].as_str() == started_turn.as_deref(),
+                "direct Codex completed a different or unsuccessful turn: {frame}"
+            );
             completed_turns += 1;
         }
     }
     ensure!(
-        response_ids == [1, 2, 3].into() && completed_turns == 1,
+        response_ids == [1, 2, 3].into()
+            && started_thread.is_some()
+            && started_turn.is_some()
+            && completed_turns == 1,
         "daemon-retained direct target did not exchange the exact scripted app-server turn"
     );
     eprintln!(
