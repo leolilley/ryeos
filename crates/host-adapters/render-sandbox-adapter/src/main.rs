@@ -336,7 +336,11 @@ fn operate() -> Result<()> {
         request.canonical_bytes()? == request_bytes,
         "operation request is noncanonical"
     );
-    if matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }) {
+    let _guest_package_authority = if let LifecycleAdapterRequest::ActivateSupervisor {
+        guest_package,
+        ..
+    } = &request
+    {
         let signed_bytes = read_sealed_env(
             LIFECYCLE_SIGNED_IMPORT_FD_ENV,
             ryeos_external_execution_contract::guest_import_authorization::MAX_GUEST_IMPORT_AUTHORIZATION_BYTES
@@ -352,13 +356,22 @@ fn operate() -> Result<()> {
         // exact, non-secret argv now; actual run contact remains disabled
         // until the installed snapshot and lost-stream behavior qualify.
         let _owner_command = guest_owner_run_command(&assignment_bytes)?;
+        // SAFETY: the trusted runner transferred this exact package descriptor
+        // once into the adapter before any provider contact. It is distinct
+        // from the controller's original descriptor coordinate.
+        let package =
+            unsafe { lillux::take_inherited_descriptor_authority(guest_package.descriptor) }
+                .map_err(anyhow::Error::msg)?;
+        verify_guest_package_handoff(&package, guest_package)?;
+        Some(package)
     } else {
         ensure!(
             std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
                 && std::env::var_os(LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV).is_none(),
             "signed guest import or assignment was supplied outside first activation"
         );
-    }
+        None
+    };
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
         deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
     }
@@ -566,6 +579,25 @@ fn guest_owner_run_command(signed_assignment_bytes: &[u8]) -> Result<String> {
     Ok(format!(
         "exec {GUEST_OWNER_EXECUTABLE} --assignment-b64 {encoded}"
     ))
+}
+
+fn verify_guest_package_handoff(
+    package: &lillux::InheritedDescriptorAuthority,
+    delivery: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
+) -> Result<()> {
+    // This is a pre-contact point check, not writer exclusion. A future
+    // upload must stream this same registered inode with Lillux's stable
+    // reader and retain the producer's private-generation custody.
+    delivery.validate()?;
+    package.require_owned_regular()?;
+    let observation = package.regular_file_observation()?;
+    ensure!(
+        observation.full_permission_mode()? == 0o400
+            && observation.size() == delivery.framed_bytes
+            && package.digest_regular_file_stable_exact(&observation)? == delivery.payload_sha256,
+        "inherited guest package changed its declared delivery identity"
+    );
+    Ok(())
 }
 
 fn parse_provider_spec_bytes(
@@ -1362,6 +1394,44 @@ fn write_response<T: Serialize>(response: &T) -> Result<()> {
 #[cfg(test)]
 mod offline_fixture_tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn package_handoff_requires_original_mode_0400_inode_and_exact_bytes() {
+        use ryeos_external_execution_contract::LifecycleGuestPackageDelivery;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("package");
+        let bytes = [b'p'; 32];
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let root = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let file = root
+            .open_pinned_regular(OsStr::new("package"), false)
+            .unwrap()
+            .unwrap();
+        let authority = file.inherited_descriptor_authority().unwrap();
+        let delivery = LifecycleGuestPackageDelivery {
+            descriptor: authority.inherited_descriptor().unwrap(),
+            payload_sha256: lillux::sha256_hex(&bytes),
+            manifest_sha256: "a".repeat(64),
+            regular_bytes: 1,
+            framed_bytes: bytes.len() as u64,
+        };
+        verify_guest_package_handoff(&authority, &delivery).unwrap();
+        let mut wrong = delivery.clone();
+        wrong.payload_sha256 = "b".repeat(64);
+        assert!(verify_guest_package_handoff(&authority, &wrong).is_err());
+        let mut wrong_length = delivery.clone();
+        wrong_length.framed_bytes += 1;
+        assert!(verify_guest_package_handoff(&authority, &wrong_length).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(verify_guest_package_handoff(&authority, &delivery).is_err());
+        std::fs::write(&path, [b'q'; 32]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(verify_guest_package_handoff(&authority, &delivery).is_err());
+    }
 
     #[test]
     fn signed_import_descriptor_is_correlated_but_not_guest_trust() {

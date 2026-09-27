@@ -120,8 +120,13 @@ The controller now authors a node-root-signed occurrence assignment from the
 original bound allocation and seals it into the first activation contact with
 the separately signed import authorization and exact package. This adapter
 checks canonical shape, coordinate alignment, and the import signature against
-the assigned occurrence key, but cannot authenticate the controller root or
-establish guest trust. A qualified guest runtime must independently pin the controller
+the assigned occurrence key. It also adopts the inherited package descriptor
+and checks its current owner, `0400` mode, exact length, and payload digest
+before any provider contact. This is a point check, not exclusion of concurrent
+writers; the eventual upload must stream the same registered inode under
+Lillux's stable-reader check while the producer retains private-generation
+custody. The adapter cannot authenticate the controller root or establish
+guest trust. A qualified guest runtime must independently pin the controller
 root and its own runtime manifest hash, verify the assignment first, and then
 verify the import under the delegated occurrence-owner key. The final
 assignment cannot be placed in Sandbox create-time environment: its occurrence

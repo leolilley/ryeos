@@ -20,6 +20,9 @@ signal-hook = { workspace = true }
 url = "2"
 zeroize = "1"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [[bin]]
 name = "ryeos-render-sandbox-lifecycle-adapter"
 path = "src/main.rs"
