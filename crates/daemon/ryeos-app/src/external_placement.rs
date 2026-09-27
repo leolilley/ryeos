@@ -879,6 +879,25 @@ impl ExternalPlacementBackendRegistry {
         credential: &PlacementCredential,
         program: &AdmittedExternalExecutionProgram,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        self.qualify_for_purpose(contract, credential, program, false)
+    }
+
+    fn qualify_for_cleanup(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        program: &AdmittedExternalExecutionProgram,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        self.qualify_for_purpose(contract, credential, program, true)
+    }
+
+    fn qualify_for_purpose(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        credential: &PlacementCredential,
+        program: &AdmittedExternalExecutionProgram,
+        cleanup_only: bool,
+    ) -> Result<Arc<dyn ExternalPlacementBackend>> {
         program.validate()?;
         let required = match program {
             AdmittedExternalExecutionProgram::StructuredSession(program) => {
@@ -905,7 +924,18 @@ impl ExternalPlacementBackendRegistry {
                 BTreeSet::new()
             }
         };
-        self.qualify_dependencies(contract, credential, required)
+        // Retained cleanup must remain possible when startup capability is
+        // absent. Individual reconciliation claims are checked at settlement.
+        self.qualify_dependencies(
+            contract,
+            credential,
+            if cleanup_only {
+                BTreeSet::new()
+            } else {
+                required
+            },
+            !cleanup_only,
+        )
     }
 
     /// Offline installed lifecycle qualification, independent of born-thread
@@ -915,6 +945,7 @@ impl ExternalPlacementBackendRegistry {
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
         mut required: BTreeSet<LifecycleCapability>,
+        require_activation: bool,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
         let backend = self
             .backends
@@ -935,7 +966,9 @@ impl ExternalPlacementBackendRegistry {
         );
         // Allocation without an installed activation operation strands a paid
         // occurrence. Require startup capability before any provider contact.
-        required.insert(LifecycleCapability::SupervisorActivation);
+        if require_activation {
+            required.insert(LifecycleCapability::SupervisorActivation);
+        }
         // This is inherent to the admitted cleanup proof. Reconciliation is
         // optional: an unknown outcome may remain quarantined with its capacity
         // reserved, but cannot be converted into an unsupported stronger fact.
@@ -1031,7 +1064,7 @@ fn preflight_external_direct_dependencies(
         "external direct preflight exceeds its signed execution budget"
     );
     let credential = load_credential(binding)?;
-    backends.qualify_dependencies(&contract, &credential, BTreeSet::new())?;
+    backends.qualify_dependencies(&contract, &credential, BTreeSet::new(), true)?;
     Ok(retained)
 }
 
@@ -1712,6 +1745,21 @@ impl<'a> ExternalPlacementOwner<'a> {
     /// Reentry uses the original journal owner and program, never a replacement
     /// compiler claim or reconstructed descriptor inventory.
     fn prepare_retained_direct(&self, placement: &str) -> Result<PreparedExternalPlacement> {
+        self.prepare_retained_direct_for_purpose(placement, false)
+    }
+
+    fn prepare_retained_direct_for_cleanup(
+        &self,
+        placement: &str,
+    ) -> Result<PreparedExternalPlacement> {
+        self.prepare_retained_direct_for_purpose(placement, true)
+    }
+
+    fn prepare_retained_direct_for_purpose(
+        &self,
+        placement: &str,
+        cleanup_only: bool,
+    ) -> Result<PreparedExternalPlacement> {
         let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
         controller_lifetime.ensure_protects_app_root(&self.state.config.app_root)?;
         let record = self
@@ -1749,10 +1797,17 @@ impl<'a> ExternalPlacementOwner<'a> {
         let program = AdmittedExternalExecutionProgram::DirectCommand(program.clone());
         let access = binding.credential_access()?;
         let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
-        let backend =
+        let backend = if cleanup_only {
+            self.state.external_placement_backends.qualify_for_cleanup(
+                &contract,
+                &credential,
+                &program,
+            )?
+        } else {
             self.state
                 .external_placement_backends
-                .qualify(&contract, &credential, &program)?;
+                .qualify(&contract, &credential, &program)?
+        };
         let authority_access =
             ExternalChannelAuthorityAccess::new(&record.reservation.channel_authority_generation)?;
         let channel_authority = authority_access.decode(
@@ -1996,6 +2051,18 @@ impl<'a> ExternalPlacementOwner<'a> {
     /// already-born dedicated session; no caller-authored allocation shape is
     /// accepted at this boundary.
     pub(crate) fn prepare(&self, placement: &str) -> Result<PreparedExternalPlacement> {
+        self.prepare_for_purpose(placement, false)
+    }
+
+    fn prepare_for_cleanup(&self, placement: &str) -> Result<PreparedExternalPlacement> {
+        self.prepare_for_purpose(placement, true)
+    }
+
+    fn prepare_for_purpose(
+        &self,
+        placement: &str,
+        cleanup_only: bool,
+    ) -> Result<PreparedExternalPlacement> {
         let controller_lifetime = Arc::clone(&self.state.controller_lifetime);
         controller_lifetime
             .ensure_protects_app_root(&self.state.config.app_root)
@@ -2110,11 +2177,22 @@ impl<'a> ExternalPlacementOwner<'a> {
                 .placement_credential(&credential_access)
                 .context("read protected external placement credential")?,
         )?;
-        let backend = self.state.external_placement_backends.qualify(
-            &contract,
-            &credential,
-            &AdmittedExternalExecutionProgram::StructuredSession(program.clone()),
-        )?;
+        let admitted = AdmittedExternalExecutionProgram::StructuredSession(program.clone());
+        let backend = if cleanup_only {
+            ensure!(
+                existing.is_some(),
+                "external cleanup has no retained allocation"
+            );
+            self.state.external_placement_backends.qualify_for_cleanup(
+                &contract,
+                &credential,
+                &admitted,
+            )?
+        } else {
+            self.state
+                .external_placement_backends
+                .qualify(&contract, &credential, &admitted)?
+        };
         if existing.is_none() {
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
         }
@@ -2634,7 +2712,8 @@ pub fn advance_external_direct_settlement(
     if record.phase == ExternalAllocationPhase::Terminated {
         return Ok(ExternalCandidateCleanupProgress::Proved);
     }
-    let prepared = ExternalPlacementOwner::new(state).prepare_retained_direct(placement)?;
+    let prepared =
+        ExternalPlacementOwner::new(state).prepare_retained_direct_for_cleanup(placement)?;
     let reconciliation = match prepared.claim()? {
         ExternalPlacementContactDecision::Reconcile(reconciliation) => reconciliation,
         ExternalPlacementContactDecision::Settled(_) => {
@@ -2703,8 +2782,10 @@ pub fn advance_external_candidate_cleanup(
     }
     let owner = ExternalPlacementOwner::new(state);
     let prepared = match &current.reservation.owner {
-        ExternalAllocationOwner::DedicatedSession(_) => owner.prepare(placement)?,
-        ExternalAllocationOwner::DirectThread { .. } => owner.prepare_retained_direct(placement)?,
+        ExternalAllocationOwner::DedicatedSession(_) => owner.prepare_for_cleanup(placement)?,
+        ExternalAllocationOwner::DirectThread { .. } => {
+            owner.prepare_retained_direct_for_cleanup(placement)?
+        }
     };
     let reconciliation = match prepared.claim()? {
         ExternalPlacementContactDecision::Reconcile(reconciliation) => reconciliation,
@@ -6305,6 +6386,23 @@ mod tests {
             0
         );
 
+        let terminal_only = Arc::new(FaultBackend {
+            capabilities: BTreeSet::from([LifecycleCapability::ExactTerminalObservation]),
+            ..FaultBackend::new()
+        });
+        let cleanup_registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![terminal_only.clone()]).unwrap();
+        let admitted = AdmittedExternalExecutionProgram::StructuredSession(program());
+        assert!(
+            cleanup_registry
+                .qualify(&contract, &credential, &admitted)
+                .is_err()
+        );
+        cleanup_registry
+            .qualify_for_cleanup(&contract, &credential, &admitted)
+            .unwrap();
+        assert_eq!(terminal_only.allocate_calls.load(Ordering::SeqCst), 0);
+
         for missing in all_lifecycle_capabilities() {
             let mut required_program = program();
             // Activation and terminal evidence are required by placement
@@ -6895,25 +6993,32 @@ mod tests {
         let mut contract = binding.backend_contract();
         contract.workload = crate::node_config::sections::external_execution::ExternalWorkloadBinding::DirectCommand {};
         contract.max_export_bytes = 0;
-        for terminal in [false, true] {
+        for capabilities in [
+            BTreeSet::new(),
+            BTreeSet::from([LifecycleCapability::ExactTerminalObservation]),
+            BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
+        ] {
             let backend = Arc::new(FaultBackend {
-                capabilities: if terminal {
-                    BTreeSet::from([
-                        LifecycleCapability::SupervisorActivation,
-                        LifecycleCapability::ExactTerminalObservation,
-                    ])
-                } else {
-                    BTreeSet::new()
-                },
+                capabilities: capabilities.clone(),
                 ..FaultBackend::new()
             });
             let registry =
                 ExternalPlacementBackendRegistry::from_backends(vec![backend.clone()]).unwrap();
             assert_eq!(
                 registry.qualify(&contract, &credential, &program).is_ok(),
-                terminal
+                capabilities.contains(&LifecycleCapability::SupervisorActivation)
+                    && capabilities.contains(&LifecycleCapability::ExactTerminalObservation)
             );
-            assert_eq!(backend.qualification_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                registry
+                    .qualify_for_cleanup(&contract, &credential, &program)
+                    .is_ok(),
+                capabilities.contains(&LifecycleCapability::ExactTerminalObservation)
+            );
+            assert_eq!(backend.qualification_calls.load(Ordering::SeqCst), 2);
             assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 0);
             assert_eq!(backend.allocation_observations.load(Ordering::SeqCst), 0);
             assert_eq!(backend.activation_calls.load(Ordering::SeqCst), 0);
