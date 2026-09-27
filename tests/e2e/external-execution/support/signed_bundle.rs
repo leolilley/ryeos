@@ -131,6 +131,7 @@ external_lifecycle_adapters:
       sha256: {provider_spec_sha256}
     settings_schema_digest: '{}'
     capabilities:
+      - supervisor_activation
       - exact_allocation_reconciliation
       - authoritative_no_occurrence
       - exact_activation_reconciliation

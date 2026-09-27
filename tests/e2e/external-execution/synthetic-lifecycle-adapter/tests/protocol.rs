@@ -2933,45 +2933,70 @@ fn composed_controller_fixture_reaches_the_real_authenticated_attachment() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_tls_supervisor_exports_and_imports_exact_candidate_c() {
-    run_production_tls_candidate(None, false, PublicationScenario::Publish).await;
+fn run_production_tls_candidate_with_test_stack(
+    codex: Option<(PathBuf, String)>,
+    scripted_turn: bool,
+    publication: PublicationScenario,
+) {
+    std::thread::Builder::new()
+        .name("external-candidate-e2e".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(run_production_tls_candidate(
+                codex,
+                scripted_turn,
+                publication,
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
-    run_production_tls_candidate(None, false, PublicationScenario::PublicDispatch).await;
+#[test]
+fn production_tls_supervisor_exports_and_imports_exact_candidate_c() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Publish);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_tls_stale_base_refuses_candidate_publication() {
-    run_production_tls_candidate(None, false, PublicationScenario::StaleBase).await;
+#[test]
+fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::PublicDispatch);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
+fn production_tls_stale_base_refuses_candidate_publication() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::StaleBase);
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
 #[ignore = "requires explicit RYEOS_TEST_PINNED_CODEX matching the authored activation digest; no model turn"]
-async fn pinned_codex_handshake_uses_authenticated_remote_tls_environment() {
-    run_production_tls_candidate(
+fn pinned_codex_handshake_uses_authenticated_remote_tls_environment() {
+    run_production_tls_candidate_with_test_stack(
         Some(pinned_codex_artifact()),
         false,
         PublicationScenario::Publish,
-    )
-    .await;
+    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "requires explicit RYEOS_TEST_PINNED_CODEX; credential-free scripted model turn"]
-async fn pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base() {
-    run_production_tls_candidate(
+fn pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base() {
+    run_production_tls_candidate_with_test_stack(
         Some(pinned_codex_artifact()),
         true,
         PublicationScenario::PublicDispatch,
-    )
-    .await;
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
