@@ -334,7 +334,7 @@ pub struct ReleasedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
-    request: lillux::LinuxSandboxRequest,
+    expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
 }
 
@@ -365,6 +365,16 @@ impl HeldGuestMountedSandbox {
         // The exact launch record was sealed into a retained control FD
         // before Lillux entered the source-owner mount namespace. Reopening
         // its former host pathname here is neither possible nor authority.
+        let expected_launch = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+            lillux::LinuxSandboxAppliedLaunchTarget {
+                executable: &self.request.executable,
+                argv0: &self.request.argv0,
+                arguments: &self.request.arguments,
+                cwd: &self.request.cwd,
+                environment: &self.request.environment,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
         let expected_mounts =
             lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
                 &self.request.mounts,
@@ -386,7 +396,7 @@ impl HeldGuestMountedSandbox {
             _committed: self._committed,
             _source_copy: self._source_copy,
             _controls: self._controls,
-            request: self.request,
+            expected_launch,
             expected_mounts,
         })
     }
@@ -407,16 +417,29 @@ impl ReleasedGuestMountedSandbox {
         else {
             return Ok(None);
         };
-        ensure!(
-            receipt
-                .matches_request(&self.request)
-                .map_err(anyhow::Error::msg)?
-                && receipt.matches_post_release_mounts(&self.expected_mounts)
-                && receipt.owned_child_pid == self.held.held().child_pid(),
-            "released supervisor applied target or mounts differ from committed request"
-        );
+        check_applied_supervisor_receipt(
+            &receipt,
+            &self.expected_launch,
+            &self.expected_mounts,
+            self.held.held().child_pid(),
+        )?;
         Ok(Some(receipt))
     }
+}
+
+fn check_applied_supervisor_receipt(
+    receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
+    expected_launch: &lillux::LinuxSandboxAppliedLaunchCommitments,
+    expected_mounts: &lillux::LinuxSandboxMountPreparationCommitments,
+    child_pid: u32,
+) -> Result<()> {
+    ensure!(
+        receipt.matches_commitments(expected_launch)
+            && receipt.matches_post_release_mounts(expected_mounts)
+            && receipt.owned_child_pid == child_pid,
+        "released supervisor applied target or mounts differ from committed request"
+    );
+    Ok(())
 }
 
 impl CommittedGuestSupervisorLaunchIntent {
@@ -2061,6 +2084,86 @@ pub(crate) fn create_launch_intent_record_for_test(
 #[cfg(test)]
 mod recovery_binding_tests {
     use super::*;
+
+    #[test]
+    fn released_supervisor_receipt_rejects_wrong_process_target_or_mounts() {
+        let target = lillux::LinuxSandboxAppliedLaunchCommitments {
+            executable_sha256: [1; 32],
+            argv_sha256: [2; 32],
+            environment_sha256: [3; 32],
+            cwd_sha256: [4; 32],
+        };
+        let mounts = lillux::LinuxSandboxMountPreparationCommitments {
+            schema: 1,
+            mount_count: 1,
+            destination_access_sha256: [5; 32],
+        };
+        let receipt = lillux::LinuxSandboxAppliedLaunchReceipt {
+            owned_child_pid: 42,
+            namespace_pid: 1,
+            effective_uid: 1,
+            effective_gid: 1,
+            no_new_privs: true,
+            seccomp_mode: 2,
+            executable_sha256: target.executable_sha256,
+            argv_sha256: target.argv_sha256,
+            environment_sha256: target.environment_sha256,
+            cwd_sha256: target.cwd_sha256,
+            post_release_mount_view: mounts.clone(),
+        };
+        check_applied_supervisor_receipt(&receipt, &target, &mounts, 42).unwrap();
+        assert!(check_applied_supervisor_receipt(&receipt, &target, &mounts, 43).is_err());
+        for changed in [
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                executable_sha256: [9; 32],
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                argv_sha256: [9; 32],
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                environment_sha256: [9; 32],
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                cwd_sha256: [9; 32],
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                    destination_access_sha256: [9; 32],
+                    ..mounts.clone()
+                },
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                    mount_count: 2,
+                    ..mounts.clone()
+                },
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                namespace_pid: 2,
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                effective_uid: 2,
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                no_new_privs: false,
+                ..receipt.clone()
+            },
+            lillux::LinuxSandboxAppliedLaunchReceipt {
+                seccomp_mode: 0,
+                ..receipt.clone()
+            },
+        ] {
+            assert!(check_applied_supervisor_receipt(&changed, &target, &mounts, 42).is_err());
+        }
+    }
 
     #[test]
     fn retained_child_binding_refuses_detached_or_replaced_inode() {
