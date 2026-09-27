@@ -4,15 +4,18 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
-use ryeos_external_execution::guest_installation::decode_mounted_supervisor_handoff;
+use ryeos_external_execution::guest_installation::{
+    MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES, decode_mounted_supervisor_handoff,
+};
 use ryeos_external_execution::guest_content::{
     BoundGuestMountedContent, open_verified_mounted_guest_content,
 };
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCHER_FD,
-    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
-    fixed_guest_supervisor_descriptor_plan,
+    SUPERVISOR_LAUNCH_INTENT_FD, SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
+    SUPERVISOR_WORKSPACE_OUTPUT_FD, fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
@@ -106,6 +109,61 @@ pub fn adopt_mounted_supervisor_inputs(
         runtime_mounts,
         content_records,
     })
+}
+
+/// Sole shipped mounted-source entrypoint. The trusted outer owner must have
+/// selected the exact sealed-source child as the read-only stage mount and
+/// applied the schema-2 control-channel profile before target release.
+pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
+    let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
+        SUPERVISOR_BOOTSTRAP_FD,
+        MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let bootstrap: ExternalSupervisorBootstrap = serde_json::from_slice(&bootstrap_bytes)
+        .context("decode sealed external supervisor bootstrap")?;
+    ensure!(
+        bootstrap.canonical_bytes()? == bootstrap_bytes,
+        "external supervisor bootstrap is not canonical"
+    );
+    let launch_record = lillux::read_sealed_inherited_descriptor(
+        SUPERVISOR_LAUNCH_INTENT_FD,
+        MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES,
+    )
+    .map_err(anyhow::Error::msg)?;
+    // SAFETY: the held outer owner maps only the four non-source controls at
+    // their fixed coordinates. Each directory descriptor is adopted once.
+    let state_root = unsafe {
+        lillux::PinnedDirectory::take_inherited_directory(
+            PathBuf::from("<external-supervisor-state>"),
+            SUPERVISOR_STATE_ROOT_FD,
+        )
+    }?;
+    let candidate_runtime = unsafe {
+        lillux::PinnedDirectory::take_inherited_directory(
+            PathBuf::from("<external-candidate-runtime>"),
+            SUPERVISOR_CANDIDATE_RUNTIME_FD,
+        )
+    }?;
+    let candidate_private_parent = unsafe {
+        lillux::PinnedDirectory::take_inherited_directory(
+            PathBuf::from("<external-candidate-private-parent>"),
+            SUPERVISOR_PRIVATE_PARENT_FD,
+        )
+    }?;
+    let staged_root = lillux::PinnedDirectory::open(std::path::Path::new(
+        SUPERVISOR_STAGE_MOUNT_DESTINATION,
+    ))?
+    .context("mounted guest stage is absent")?;
+    let inputs = adopt_mounted_supervisor_inputs(
+        bootstrap,
+        &launch_record,
+        &staged_root,
+        state_root,
+        candidate_runtime,
+        candidate_private_parent,
+    )?;
+    run_external_candidate_supervisor(inputs)
 }
 
 /// Adopt the exact fixed descriptor contract and run one supervisor.

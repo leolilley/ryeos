@@ -1,14 +1,15 @@
 //! Protected external-candidate supervisor executable.
 //!
 //! A provider adapter may only launch this executable after arranging the
-//! fixed descriptor contract below. It accepts no authority through argv,
-//! ambient environment, project paths, provider credentials, or node grants.
+//! held read-only stage mount and exact non-source control channels. It
+//! accepts no authority through argv, ambient environment, project paths,
+//! provider credentials, or node grants.
 
 use ryeos_external_candidate_supervisor::runtime::ExternalCandidateSupervisorOutcome;
 use std::io::Write as _;
 
 fn main() {
-    match ryeos_external_candidate_supervisor::entrypoint::run_from_inherited() {
+    match ryeos_external_candidate_supervisor::entrypoint::run_from_mounted_inherited() {
         Ok(outcome) => {
             let code = match &outcome {
                 ExternalCandidateSupervisorOutcome::ExportApplied
