@@ -84,6 +84,7 @@ pub(crate) fn first_activation_contact(
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
 ) -> Result<()> {
+    preflight_delivery_before_credential(delivery, signed_import, package)?;
     let credential = read_credential()?;
     let mut contact = RenderContact {
         network,
@@ -95,6 +96,42 @@ pub(crate) fn first_activation_contact(
         cancellation,
     };
     contact_once(&mut contact, delivery, signed_import, package)
+}
+
+fn preflight_delivery_before_credential(
+    delivery: &ActivationDeliveryPlan,
+    signed_import: &[u8],
+    package: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    ensure!(
+        signed_import.len() as u64 == delivery.signed_import_bytes
+            && lillux::sha256_hex(signed_import) == delivery.signed_import_sha256,
+        "signed import changed before Render credential access"
+    );
+    verify_package_before_contact(
+        package,
+        delivery.guest_package_bytes,
+        &delivery.guest_package_sha256,
+    )
+}
+
+/// Recheck the original sealed package descriptor immediately before any
+/// credential access or provider token mint. This is a point observation, not
+/// writer exclusion; the streaming body independently checks its exact digest.
+pub(crate) fn verify_package_before_contact(
+    package: &lillux::InheritedDescriptorAuthority,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    package.require_owned_regular()?;
+    let observation = package.regular_file_observation()?;
+    ensure!(
+        observation.full_permission_mode()? == 0o400
+            && observation.size() == expected_bytes
+            && package.digest_regular_file_stable_exact(&observation)? == expected_sha256,
+        "inherited guest package changed its declared delivery identity"
+    );
+    Ok(())
 }
 
 struct RenderContact<'a> {
@@ -325,6 +362,7 @@ impl OneShotContact for RenderContact<'_> {
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     fn proxy_settings() -> Settings {
         Settings {
@@ -518,5 +556,50 @@ mod tests {
         };
         assert!(contact_once(&mut contact, &plan, b"changed", &package).is_err());
         assert!(contact.calls.is_empty());
+    }
+
+    #[test]
+    fn source_drift_refuses_before_credential_or_token_mint() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("package");
+        std::fs::write(&path, b"exact-package").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let root = lillux::PinnedDirectory::open(parent.path()).unwrap().unwrap();
+        let package = root
+            .open_pinned_regular(std::ffi::OsStr::new("package"), false)
+            .unwrap()
+            .unwrap()
+            .inherited_descriptor_authority()
+            .unwrap();
+        let signed_import = b"signed-import";
+        let plan = ActivationDeliveryPlan {
+            signed_import_remote_path: "/ryeos/activation/signed-import.json",
+            signed_import_sha256: lillux::sha256_hex(signed_import),
+            signed_import_bytes: signed_import.len() as u64,
+            guest_package_remote_path: "/ryeos/activation/guest-package",
+            guest_package_sha256: lillux::sha256_hex(b"exact-package"),
+            guest_package_bytes: b"exact-package".len() as u64,
+            owner_command: "fixed-owner-command".into(),
+        };
+        preflight_delivery_before_credential(&plan, signed_import, &package).unwrap();
+        assert!(preflight_delivery_before_credential(&plan, b"changed", &package).is_err());
+        let mut changed_digest = plan;
+        changed_digest.guest_package_sha256 = "a".repeat(64);
+        assert!(
+            preflight_delivery_before_credential(&changed_digest, signed_import, &package)
+                .is_err()
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            preflight_delivery_before_credential(
+                &ActivationDeliveryPlan {
+                    guest_package_sha256: lillux::sha256_hex(b"exact-package"),
+                    ..changed_digest
+                },
+                signed_import,
+                &package,
+            )
+            .is_err()
+        );
     }
 }

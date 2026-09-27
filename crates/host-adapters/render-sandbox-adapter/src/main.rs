@@ -723,15 +723,11 @@ fn verify_guest_package_handoff(
     // upload must stream this same registered inode with Lillux's stable
     // reader and retain the producer's private-generation custody.
     delivery.validate()?;
-    package.require_owned_regular()?;
-    let observation = package.regular_file_observation()?;
-    ensure!(
-        observation.full_permission_mode()? == 0o400
-            && observation.size() == delivery.framed_bytes
-            && package.digest_regular_file_stable_exact(&observation)? == delivery.payload_sha256,
-        "inherited guest package changed its declared delivery identity"
-    );
-    Ok(())
+    activation_contact::verify_package_before_contact(
+        package,
+        delivery.framed_bytes,
+        &delivery.payload_sha256,
+    )
 }
 
 fn parse_provider_spec_bytes(
