@@ -34,6 +34,7 @@ const RECORD_NAME: &str = "guest-base-install-intent.json";
 const SUPERVISOR_LAUNCH_RECORD_NAME: &str = "guest-supervisor-launch-intent.json";
 const STAGE_MARKER_NAME: &str = "guest-base-install-owner.json";
 const MAX_RECORD_BYTES: u64 = 8 * 1024;
+pub const MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES: usize = 8 * 1024;
 
 /// Recovery-only outer owner→supervisor intent. The only future production
 /// writer must hold continuous writer exclusion and commit this before spawn.
@@ -60,6 +61,67 @@ struct GuestSupervisorLaunchIntent {
     launch_timeout_bits: u64,
     stage_mount_destination: String,
     control_descriptors: Vec<u32>,
+}
+
+/// Supervisor-side interpretation of the sealed post-import record. This is
+/// an exact content/handle join, not evidence that the outer mount was applied
+/// read-only or that the held target may be released.
+pub struct MountedGuestSupervisorHandoff {
+    stage: GuestStageIdentity,
+    launcher_sha256: String,
+    record_sha256: String,
+}
+
+impl MountedGuestSupervisorHandoff {
+    pub fn stage_directory_identity(&self) -> lillux::PinnedDirectoryIdentity {
+        self.stage.directory_identity()
+    }
+
+    pub fn launcher_sha256(&self) -> &str {
+        &self.launcher_sha256
+    }
+
+    pub fn record_sha256(&self) -> &str {
+        &self.record_sha256
+    }
+}
+
+pub fn decode_mounted_supervisor_handoff(
+    sealed_record: &[u8],
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    state_root: &lillux::PinnedDirectory,
+    candidate_runtime: &lillux::PinnedDirectory,
+    private_parent: &lillux::PinnedDirectory,
+) -> Result<MountedGuestSupervisorHandoff> {
+    ensure!(
+        sealed_record.len() <= MAX_GUEST_SUPERVISOR_LAUNCH_RECORD_BYTES,
+        "sealed guest supervisor launch record exceeds bound"
+    );
+    bootstrap.validate()?;
+    let record: GuestSupervisorLaunchIntent = serde_json::from_slice(sealed_record)?;
+    ensure!(
+        record.schema == 2
+            && canonical_launch_record(&record)? == sealed_record
+            && record.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
+            && record.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
+            && record.occurrence_id == bootstrap.occurrence_id
+            && record.bootstrap_sha256 == lillux::sha256_hex(&bootstrap.canonical_bytes()?)
+            && record.launcher_sha256 == bootstrap.launcher_artifact_hash
+            && record.guest_input_identity == bootstrap.guest_input_identity
+            && record.supervisor_state_root == state_root.identity()?
+            && record.candidate_runtime == candidate_runtime.identity()?
+            && record.private_parent == private_parent.identity()?
+            && f64::from_bits(record.launch_timeout_bits).is_finite()
+            && f64::from_bits(record.launch_timeout_bits) > 0.0,
+        "sealed guest supervisor launch record differs from bootstrap or private handles"
+    );
+    record.stage.validate()?;
+    recheck_scratch_bindings(private_parent, &record.scratch, &bootstrap.guest_inputs)?;
+    Ok(MountedGuestSupervisorHandoff {
+        stage: record.stage,
+        launcher_sha256: record.launcher_sha256,
+        record_sha256: lillux::sha256_hex(sealed_record),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -34,15 +34,23 @@ pub struct GuestStageIdentity {
 }
 
 impl GuestStageIdentity {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1
+                && canonical_stage_name(&self.name)
+                && lillux::valid_hash(&self.manifest_sha256),
+            "guest stage identity is invalid"
+        );
+        Ok(())
+    }
+
     /// Validate retained stage coordinates without reconstructing an
     /// ephemeral source after its owner dies. This grants no stage access or
     /// recovery permission.
     pub fn validate_for_ticket(&self, manifest_sha256: &str) -> Result<()> {
+        self.validate()?;
         ensure!(
-            self.schema == 1
-                && canonical_stage_name(&self.name)
-                && lillux::valid_hash(&self.manifest_sha256)
-                && self.manifest_sha256 == manifest_sha256,
+            self.manifest_sha256 == manifest_sha256,
             "guest stage identity differs from retained import ticket"
         );
         Ok(())
@@ -54,12 +62,7 @@ impl GuestStageIdentity {
         &self,
         parent: &lillux::PinnedDirectory,
     ) -> Result<lillux::PinnedDirectory> {
-        ensure!(
-            self.schema == 1
-                && canonical_stage_name(&self.name)
-                && lillux::valid_hash(&self.manifest_sha256),
-            "guest stage identity is invalid"
-        );
+        self.validate()?;
         parent.require_owner_private_directory()?;
         let root = parent
             .open_child_directory(OsStr::new(&self.name))?
@@ -2388,6 +2391,53 @@ mod tests {
         let sealed = committed.seal_record_for_supervisor().unwrap();
         let (sealed_bytes, _) = sealed.read_regular_file_stable_bounded(8 * 1024).unwrap();
         assert_eq!(sealed_bytes, committed_bytes);
+        let decoded_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bootstrap).unwrap();
+        let committed_state = committed_occurrence
+            .open_child_directory(OsStr::new("supervisor-state"))
+            .unwrap()
+            .unwrap();
+        let committed_runtime = committed_occurrence
+            .open_child_directory(OsStr::new("candidate-runtime"))
+            .unwrap()
+            .unwrap();
+        let committed_private = committed_occurrence
+            .open_child_directory(OsStr::new("candidate-private"))
+            .unwrap()
+            .unwrap();
+        let handoff = crate::guest_installation::decode_mounted_supervisor_handoff(
+            &sealed_bytes,
+            &decoded_bootstrap,
+            &committed_state,
+            &committed_runtime,
+            &committed_private,
+        )
+        .unwrap();
+        assert_eq!(handoff.record_sha256(), committed.record_sha256());
+        assert_eq!(handoff.launcher_sha256(), decoded_bootstrap.launcher_artifact_hash);
+        let wrong_private_dir = tempfile::tempdir().unwrap();
+        let wrong_private = lillux::PinnedDirectory::open(wrong_private_dir.path())
+            .unwrap()
+            .unwrap();
+        wrong_private.tighten_owner_private_directory().unwrap();
+        assert!(crate::guest_installation::decode_mounted_supervisor_handoff(
+            &sealed_bytes,
+            &decoded_bootstrap,
+            &committed_state,
+            &committed_runtime,
+            &wrong_private,
+        )
+        .is_err());
+        let mut wrong_profile: serde_json::Value = serde_json::from_slice(&sealed_bytes).unwrap();
+        wrong_profile["control_descriptors"] = serde_json::json!([50, 51, 52, 53, 54]);
+        assert!(crate::guest_installation::decode_mounted_supervisor_handoff(
+            lillux::canonical_json(&wrong_profile).unwrap().as_bytes(),
+            &decoded_bootstrap,
+            &committed_state,
+            &committed_runtime,
+            &committed_private,
+        )
+        .is_err());
         assert_eq!(
             committed.record_file(),
             &lillux::pinned_regular_file_identity(

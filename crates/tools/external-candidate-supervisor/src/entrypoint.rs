@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution::guest_installation::decode_mounted_supervisor_handoff;
 use ryeos_external_execution::guest_content::{
     BoundGuestMountedContent, open_verified_mounted_guest_content,
 };
@@ -63,6 +64,48 @@ pub fn adopt_mounted_supervisor_content(
         }
     }
     Ok((launcher, opened.bind_execution_inputs(retained, scratch)?))
+}
+
+/// Join the sealed post-import record, bootstrap, pinned private roots and
+/// opened mounted source into the supervisor's existing runtime input type.
+/// The outer owner must separately prove the exact applied read-only stage
+/// mount, one-way release and continuous writer exclusion before invoking the
+/// shipped entrypoint; this helper cannot manufacture those facts.
+pub fn adopt_mounted_supervisor_inputs(
+    bootstrap: ExternalSupervisorBootstrap,
+    sealed_launch_record: &[u8],
+    staged_root: &lillux::PinnedDirectory,
+    state_root: lillux::PinnedDirectory,
+    candidate_runtime: lillux::PinnedDirectory,
+    candidate_private_parent: lillux::PinnedDirectory,
+) -> Result<ExternalCandidateSupervisorInputs> {
+    let handoff = decode_mounted_supervisor_handoff(
+        sealed_launch_record,
+        &bootstrap,
+        &state_root,
+        &candidate_runtime,
+        &candidate_private_parent,
+    )?;
+    let (launcher, content) = adopt_mounted_supervisor_content(
+        staged_root,
+        &handoff.stage_directory_identity(),
+        &candidate_private_parent,
+        &bootstrap.guest_inputs,
+        handoff.launcher_sha256(),
+    )?;
+    let (execution_guest_inputs, workspace_outputs, runtime_mounts, content_records) =
+        content.into_parts();
+    Ok(ExternalCandidateSupervisorInputs {
+        bootstrap,
+        execution_guest_inputs,
+        state_root,
+        candidate_runtime,
+        candidate_private_parent,
+        launcher,
+        workspace_outputs,
+        runtime_mounts,
+        content_records,
+    })
 }
 
 /// Adopt the exact fixed descriptor contract and run one supervisor.
