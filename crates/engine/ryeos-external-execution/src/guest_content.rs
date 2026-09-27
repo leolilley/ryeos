@@ -190,7 +190,20 @@ pub fn recheck_staged_guest_content(
         retained.identity_digest()? == staged.manifest().guest_input_identity,
         "staged guest content contradicts retained input identity"
     );
-    let root = staged.root();
+    recheck_mounted_guest_content(staged.root(), retained)
+}
+
+/// Verify the exact staged content from a pinned read-only guest mount.
+///
+/// This deliberately does not establish the mounted stage's identity or the
+/// mount's read-only status. The outer source owner must prove both before the
+/// trusted supervisor opens this root; the signed projection supplies the
+/// expected content identities. It grants no candidate launch permission.
+pub fn recheck_mounted_guest_content(
+    root: &lillux::PinnedDirectory,
+    retained: &ExternalGuestInputProjection,
+) -> Result<()> {
+    retained.validate()?;
     if let Some(output) = &retained.workspace_outputs {
         let bytes = read_staged_record(
             root,

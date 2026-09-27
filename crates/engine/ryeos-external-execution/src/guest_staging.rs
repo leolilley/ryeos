@@ -2338,6 +2338,7 @@ mod tests {
         assert_eq!(staged.base(), &measurement);
         assert_eq!(staged.manifest(), &manifest);
         crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
+        crate::guest_content::recheck_mounted_guest_content(staged.root(), &inputs).unwrap();
         let opened = crate::guest_content::open_verified_staged_guest_content(&staged, &inputs)
             .unwrap();
         assert_eq!(opened.runtime_mounts.len(), inputs.inputs.len());
@@ -2350,6 +2351,9 @@ mod tests {
             .unwrap();
         config_source.set_mode(0o600).unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
+        assert!(
+            crate::guest_content::recheck_mounted_guest_content(staged.root(), &inputs).is_err()
+        );
         assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
         config_source.set_mode(0o644).unwrap();
         let mut writable_config = staged
