@@ -471,6 +471,46 @@ pub fn start_scoped_producer(
                 }
                 anyhow::anyhow!("scoped producer release failed: {error}")
             })?;
+        // START cannot expose the live locator, and the verifier cannot open
+        // its provider relay, until this exact child's post-chdir pre-exec
+        // receipt has been checked against the independently compiled target
+        // and held mount view. The receipt channel is one-shot; observation
+        // later reuses the value retained with this process owner.
+        let applied_wait = natural_wait_deadline
+            .remaining()
+            .min(release_deadline.remaining());
+        let applied_launch = match running.wait_applied_launch_receipt(applied_wait) {
+            Ok(receipt)
+                if receipt.matches_commitments(&expected_applied_launch)
+                    && receipt.matches_post_release_mounts(&expected_mount_preparation)
+                    && receipt.owned_child_pid == running.pid
+                    && receipt.namespace_pid == 1
+                    && receipt.effective_uid == 1
+                    && receipt.effective_gid == 1
+                    && receipt.no_new_privs
+                    && receipt.seccomp_mode == 2 =>
+            {
+                receipt
+            }
+            Ok(_) => {
+                let abort = running.abort_and_reap_checked();
+                if abort.is_err() {
+                    wrapper_reap_uncertain = true;
+                }
+                return Err(anyhow::anyhow!(
+                    "scoped producer applied target differs before locator exposure; checked abort: {abort:?}"
+                ));
+            }
+            Err(error) => {
+                let abort = running.abort_and_reap_checked();
+                if abort.is_err() {
+                    wrapper_reap_uncertain = true;
+                }
+                return Err(anyhow::anyhow!(
+                    "scoped producer applied receipt absent before locator exposure: {error}; checked abort: {abort:?}"
+                ));
+            }
+        };
         let interactive_io = if let Some(parent) = interactive_parent {
             let prepared = running
                 .take_stdout_reader()
@@ -510,6 +550,7 @@ pub fn start_scoped_producer(
                 maximum_stderr_bytes: selected.recipe.bounds.maximum_stderr_bytes,
                 isolation_provenance: provenance,
                 expected_applied_launch,
+                applied_launch,
             },
         ) {
             let abort = error.child.process.abort_and_reap_checked();

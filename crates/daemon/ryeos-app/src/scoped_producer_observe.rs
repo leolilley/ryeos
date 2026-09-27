@@ -337,7 +337,7 @@ fn observe_owned_scoped_producer(
     state: &AppState,
     key: &ScopedProducerProcessKey,
     record: &ScopedChildAttemptRecord,
-    mut child: crate::scoped_producer_process::ScopedProducerRunningChild,
+    child: crate::scoped_producer_process::ScopedProducerRunningChild,
     callback_deadline: lillux::time::MonotonicDeadline,
 ) -> Result<serde_json::Value> {
     if let Some(channel) = child.ingress_handoff.as_ref()
@@ -370,16 +370,7 @@ fn observe_owned_scoped_producer(
     // Retain the admitted command/workspace/mount lifeline until the exact
     // natural wait has consumed the process owner.
     let _authority = child.authority;
-    let applied_launch = match child.process.wait_applied_launch_receipt(wait) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            let abort = child.process.abort_and_reap_checked();
-            let settlement = settle_cleanup_only(state, record);
-            bail!(
-                "scoped producer has no exact applied-launch receipt: {error}; abort={abort:?}; cleanup={settlement:?}"
-            );
-        }
-    };
+    let applied_launch = child.applied_launch;
     let retained_mounts = record
         .mount_preparation_evidence
         .as_ref()

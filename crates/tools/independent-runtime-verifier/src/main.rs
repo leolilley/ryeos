@@ -242,6 +242,12 @@ async fn main() -> Result<()> {
                 &realizations,
                 &locator.expected_applied_launch,
             )?;
+            check_scoped_applied_target(&locator, &locator.applied_launch)?;
+            check_scoped_direct_environment_and_cwd(
+                &parameters.configuration.expected_producer_recipe,
+                &realizations,
+                &locator.applied_launch,
+            )?;
         }
         if let Some(relay) = &running_relay {
             ensure!(
@@ -267,10 +273,10 @@ async fn main() -> Result<()> {
             return Err(error);
         }
     };
-    // This prevents contact before the independently derived signed launch
-    // coordinate is checked. It is not yet the applied-receipt pre-contact
-    // gate required for consumer qualification; the daemon must expose and
-    // corroborate that exact live observation before claims can be enabled.
+    // The provider relay stays closed until the daemon's live child-origin
+    // applied receipt agrees with the independently derived signed target,
+    // mount, environment and CWD commitments. This is direct-probe evidence,
+    // not yet hosted Worker lifecycle parity or a qualification claim.
     if let Some(relay) = running_relay.as_ref()
         && let Err(error) = relay.permit_provider_contact()
     {
@@ -461,6 +467,10 @@ async fn main() -> Result<()> {
         _ => bail!("scoped relay handoff presence differs from signed recipe"),
     }
     check_scoped_applied_target(&locator, &observation.applied_launch)?;
+    ensure!(
+        observation.applied_launch == locator.applied_launch,
+        "settled scoped observation differs from pre-contact applied launch"
+    );
     check_scoped_direct_environment_and_cwd(
         expected_recipe,
         &realizations,
@@ -1098,6 +1108,7 @@ struct ScopedAttemptLocator {
     scenario_digest: String,
     isolation_plan_digest: String,
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     held_mount_preparation: lillux::LinuxSandboxMountPreparationReceipt,
     prepared_immutable_sha256: BTreeMap<String, String>,
@@ -1106,7 +1117,7 @@ struct ScopedAttemptLocator {
 impl ScopedAttemptLocator {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.scoped_producer_locator.v5"
+            self.schema == "ryeos.scoped_producer_locator.v6"
                 && self.attempt_id.starts_with("scoped-")
                 && self.attempt_id.len() == 71
                 && self.attempt_id[7..]
@@ -1122,6 +1133,14 @@ impl ScopedAttemptLocator {
                 && self.recipe_generation.len() <= 256
                 && self.expected_mount_preparation.mount_count > 0
                 && self.held_mount_preparation.matches_commitments(&self.expected_mount_preparation)
+                && self.applied_launch.matches_commitments(&self.expected_applied_launch)
+                && self.applied_launch.matches_post_release_mounts(&self.expected_mount_preparation)
+                && self.applied_launch.owned_child_pid == self.held_mount_preparation.owned_child_pid
+                && self.applied_launch.namespace_pid == 1
+                && self.applied_launch.effective_uid == 1
+                && self.applied_launch.effective_gid == 1
+                && self.applied_launch.no_new_privs
+                && self.applied_launch.seccomp_mode == 2
                 && self.prepared_immutable_sha256.len()
                     <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_IMMUTABLE_FILES
                 && self.prepared_immutable_sha256.values().all(|digest| lillux::valid_hash(digest)),
@@ -1492,7 +1511,7 @@ mod tests {
             recipe_digest: digest.clone(),
         };
         let locator = ScopedAttemptLocator {
-            schema: "ryeos.scoped_producer_locator.v5".into(),
+            schema: "ryeos.scoped_producer_locator.v6".into(),
             attempt_id: format!("scoped-{}", "d".repeat(64)),
             recipe_digest: digest.clone(),
             recipe_generation: source.bundle_generation_identity.clone(),
@@ -1503,6 +1522,23 @@ mod tests {
                 argv_sha256: [2; 32],
                 environment_sha256: [3; 32],
                 cwd_sha256: [4; 32],
+            },
+            applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt {
+                owned_child_pid: 42,
+                namespace_pid: 1,
+                effective_uid: 1,
+                effective_gid: 1,
+                no_new_privs: true,
+                seccomp_mode: 2,
+                executable_sha256: [1; 32],
+                argv_sha256: [2; 32],
+                environment_sha256: [3; 32],
+                cwd_sha256: [4; 32],
+                post_release_mount_view: lillux::LinuxSandboxMountPreparationCommitments {
+                    schema: 1,
+                    mount_count: 1,
+                    destination_access_sha256: [0; 32],
+                },
             },
             expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments {
                 schema: 1,
@@ -1578,7 +1614,7 @@ mod tests {
     #[test]
     fn scoped_locator_binds_attempt_to_retained_recipe_coordinate() {
         let valid = json!({
-            "schema": "ryeos.scoped_producer_locator.v5",
+            "schema": "ryeos.scoped_producer_locator.v6",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
@@ -1589,6 +1625,23 @@ mod tests {
                 "argv_sha256": vec![2; 32],
                 "environment_sha256": vec![3; 32],
                 "cwd_sha256": vec![4; 32],
+            },
+            "applied_launch": {
+                "owned_child_pid": 42,
+                "namespace_pid": 1,
+                "effective_uid": 1,
+                "effective_gid": 1,
+                "no_new_privs": true,
+                "seccomp_mode": 2,
+                "executable_sha256": vec![1; 32],
+                "argv_sha256": vec![2; 32],
+                "environment_sha256": vec![3; 32],
+                "cwd_sha256": vec![4; 32],
+                "post_release_mount_view": {
+                    "schema": 1,
+                    "mount_count": 1,
+                    "destination_access_sha256": vec![0; 32],
+                },
             },
             "expected_mount_preparation": {
                 "schema": 1,
@@ -1605,6 +1658,37 @@ mod tests {
         });
         let locator: ScopedAttemptLocator = serde_json::from_value(valid.clone()).unwrap();
         locator.validate().unwrap();
+        for field in ["executable_sha256", "argv_sha256", "environment_sha256", "cwd_sha256"] {
+            let mut changed = valid.clone();
+            changed["applied_launch"][field][0] = json!(255);
+            assert!(
+                serde_json::from_value::<ScopedAttemptLocator>(changed)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "applied {field} drift reached provider permit"
+            );
+        }
+        for (field, value) in [
+            ("namespace_pid", json!(2)),
+            ("effective_uid", json!(0)),
+            ("effective_gid", json!(0)),
+            ("no_new_privs", json!(false)),
+            ("seccomp_mode", json!(0)),
+        ] {
+            let mut changed = valid.clone();
+            changed["applied_launch"][field] = value;
+            assert!(
+                serde_json::from_value::<ScopedAttemptLocator>(changed)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "applied {field} control drift reached provider permit"
+            );
+        }
+        let mut missing_applied = valid.clone();
+        missing_applied.as_object_mut().unwrap().remove("applied_launch");
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_applied).is_err());
         let home = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
             staging::DIRECT_HOME_ID,
         )
@@ -1755,11 +1839,11 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        let mut legacy = valid;
-        legacy.as_object_mut().unwrap().remove("recipe_digest");
-        assert!(serde_json::from_value::<ScopedAttemptLocator>(legacy).is_err());
+        let mut missing_recipe = valid;
+        missing_recipe.as_object_mut().unwrap().remove("recipe_digest");
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_recipe).is_err());
         let mut no_prelaunch_target = json!({
-            "schema": "ryeos.scoped_producer_locator.v5",
+            "schema": "ryeos.scoped_producer_locator.v6",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",

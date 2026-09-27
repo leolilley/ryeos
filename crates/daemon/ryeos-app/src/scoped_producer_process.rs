@@ -74,6 +74,9 @@ pub struct ScopedProducerRunningChild {
     /// Independently compiled before adapter contact; never copied from the
     /// child's receipt or its later observation envelope.
     pub expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
+    /// Exact child-origin post-chdir pre-exec receipt checked before START
+    /// exposes the live locator. The underlying Lillux channel is one-shot.
+    pub applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
 }
 
 /// Registration failure retains ownership so the caller can settle or abort
@@ -177,16 +180,23 @@ impl ScopedProducerProcessRegistry {
     /// Read-only lost-ACK lookup. A retained journal row by itself is not a
     /// live child: after restart the registry is empty and this refuses.
     pub fn contains_exact(&self, record: &ScopedChildAttemptRecord) -> Result<bool> {
-        Ok(self.prelaunch_evidence_exact(record)?.is_some())
+        Ok(self.live_applied_evidence_exact(record)?.is_some())
     }
 
-    /// Return the engine-compiled target and concrete isolation plan for the
-    /// exact live, owner-bound attempt. Neither the journal nor a later child
-    /// observation can manufacture these after process ownership is gone.
-    pub fn prelaunch_evidence_exact(
+    /// Return the independently compiled target, child-origin applied receipt,
+    /// and concrete isolation plan for the exact live, owner-bound attempt.
+    /// Neither the journal nor a later child observation can manufacture these
+    /// after process ownership is gone.
+    pub fn live_applied_evidence_exact(
         &self,
         record: &ScopedChildAttemptRecord,
-    ) -> Result<Option<(lillux::LinuxSandboxAppliedLaunchCommitments, String)>> {
+    ) -> Result<
+        Option<(
+            lillux::LinuxSandboxAppliedLaunchCommitments,
+            lillux::LinuxSandboxAppliedLaunchReceipt,
+            String,
+        )>,
+    > {
         let key = ScopedProducerProcessKey::new(
             record.initial.attempt_id.clone(),
             record.initial.owner.clone(),
@@ -215,12 +225,28 @@ impl ScopedProducerProcessRegistry {
         if !exact {
             return Ok(None);
         }
+        ensure!(
+            child
+                .applied_launch
+                .matches_commitments(&child.expected_applied_launch)
+                && child.applied_launch.owned_child_pid == child.process.pid
+                && child.applied_launch.namespace_pid == 1
+                && child.applied_launch.effective_uid == 1
+                && child.applied_launch.effective_gid == 1
+                && child.applied_launch.no_new_privs
+                && child.applied_launch.seccomp_mode == 2,
+            "live scoped producer lost its exact applied target"
+        );
         let plan_digest = child
             .isolation_provenance
             .plan_digest
             .clone()
             .context("exact scoped producer has no concrete isolation plan")?;
-        Ok(Some((child.expected_applied_launch.clone(), plan_digest)))
+        Ok(Some((
+            child.expected_applied_launch.clone(),
+            child.applied_launch.clone(),
+            plan_digest,
+        )))
     }
 
     /// Register the in-flight attempt before allocating a scope. A stop that

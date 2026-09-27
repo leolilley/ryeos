@@ -518,9 +518,9 @@ fn scoped_attempt_locator(
     state: &AppState,
     record: &ryeos_app::runtime_db::scoped_child_attempt::ScopedChildAttemptRecord,
 ) -> Result<Value> {
-    let (expected, isolation_plan_digest) = state
+    let (expected, applied, isolation_plan_digest) = state
         .scoped_producer_processes
-        .prelaunch_evidence_exact(record)?
+        .live_applied_evidence_exact(record)?
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no exact live prelaunch target"))?;
     let held_mounts = record.mount_preparation_evidence.as_ref()
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no retained held mount preparation"))?;
@@ -530,13 +530,14 @@ fn scoped_attempt_locator(
         "scoped locator held mount preparation differs from compiled plan"
     );
     Ok(serde_json::json!({
-        "schema": "ryeos.scoped_producer_locator.v5",
+        "schema": "ryeos.scoped_producer_locator.v6",
         "attempt_id": record.initial.attempt_id,
         "recipe_digest": record.initial.recipe_digest,
         "recipe_generation": record.initial.recipe_generation,
         "scenario_digest": record.initial.scenario_digest,
         "isolation_plan_digest": isolation_plan_digest,
         "expected_applied_launch": expected,
+        "applied_launch": applied,
         "expected_mount_preparation": held_mounts.expected,
         "held_mount_preparation": held_mounts.observed,
         "prepared_immutable_sha256": held_mounts.prepared_immutable_sha256,
