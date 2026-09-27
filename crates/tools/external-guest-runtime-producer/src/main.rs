@@ -95,7 +95,6 @@ fn produce(
         "guest-owner input exceeds file bound"
     );
     let digest = authority.digest_regular_file_stable_exact(&observation)?;
-    project_root.require_owner_private_directory()?;
     let products = project_root.open_or_create_child(OsStr::new(PRODUCTS_NAME), 0o700)?;
     products.require_owner_private_directory()?;
     let product = produce_guest_owner_runtime(
@@ -153,7 +152,7 @@ mod tests {
     fn exact_pinned_input_produces_one_private_runtime() {
         let source = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let input = source.path().join(INPUT_NAME);
         std::fs::write(&input, b"exact-owner-fixture").unwrap();
         std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -172,6 +171,15 @@ mod tests {
             "products/external-guest-owner-runtime/bin/ryeos-external-guest-occurrence-owner",
         );
         assert_eq!(std::fs::read(&output).unwrap(), b"exact-owner-fixture");
+        for directory in [
+            project.path().join(PRODUCTS_NAME),
+            project.path().join("products/external-guest-owner-runtime"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]
