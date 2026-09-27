@@ -332,9 +332,19 @@ snapshot. Similar names or a successful production graph do not establish
 that join. The owner runtime product uses ordinary `content` storage: its
 captured manifest coordinate must equal the tree manifest the guest observes.
 The large-content manifest format is a distinct hash even for equivalent
-files and cannot be substituted in this qualification. The hosted-workflow
-source bundles have been refreshed; this
-newly authored Tool/graph has not been installed or runtime-qualified.
+files and cannot be substituted in this qualification. The signed owner
+Tool/graph has completed once on an isolated disposable development node at
+source revision `50e6ba975`: graph thread
+`T-a159bd74-018f-a497-4b77-c6d014407f61` produced manifest
+`7d897e8ccc37ac621bef3decd7c5ff85e01c397ca5ff439117bfd968b1331c88`,
+and ordinary product capture retained witness
+`45ce16beec6f684dfa46ddf4c8a3cea382c2c325bfb867d371e8364c6eae1e47`.
+The exact owner executable `c5f67f106e17c5a1f894fd0b04626c5047f92c72181253c0923fb770182ff395`
+also ran a bounded fail-closed argument probe in a disposable Render Sandbox.
+These are source-production and native-execution observations, not an installed
+Render snapshot or runtime qualification. The product witness must be carried
+through an admitted product-to-provider staging path; the artifact-blob export
+command does not export external-content manifests.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,
