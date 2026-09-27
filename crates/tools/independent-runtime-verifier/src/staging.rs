@@ -1031,8 +1031,12 @@ impl StagedDirectTargetProbe {
         Ok(())
     }
 
-    /// Caller must first join the daemon's whole-scope settlement and writer
-    /// exclusion. Matching bytes while a target can still write are not a
+    /// Caller must first join the daemon's whole-scope settlement and the
+    /// installed workload isolation that excludes other untrusted writers.
+    /// Namespace death excludes the target's descendants; it cannot revoke a
+    /// writable descriptor already held by an unconfined same-host-UID peer.
+    /// The admitted host product must exclude such peers; this post-scope
+    /// byte check cannot infer their absence. Matching bytes alone are not a
     /// frozen candidate or an effective-environment claim.
     pub fn inspect_frozen_after_scope_empty(
         &self,
