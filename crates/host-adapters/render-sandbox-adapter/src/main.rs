@@ -2,6 +2,7 @@
 //! Sandbox schema. The Sandbox proxy is deliberately not invoked: its URL
 //! validation contract and RyeOS bootstrap mapping are not established.
 
+mod activation_contact;
 mod provider_spec;
 mod proxy_route;
 

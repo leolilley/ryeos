@@ -12,7 +12,7 @@ use serde::Deserialize;
 use url::Url;
 use zeroize::Zeroizing;
 
-const MAX_CONNECT_RESPONSE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_CONNECT_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

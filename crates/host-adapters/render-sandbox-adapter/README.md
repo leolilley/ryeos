@@ -115,6 +115,17 @@ input byte against the retained projection and bind that verification to
 of the run-proxy stream. Provider terminal status alone is not guest-writer
 exclusion or hard-isolation qualification.
 
+`src/activation_contact.rs` now contains the disabled one-shot contact sequence:
+mint a bounded token and upload the signed import, mint and stream the exact
+inherited package inode, then mint and send the fixed owner run command. It
+uses no retry, validates each returned bearer against the exact Sandbox proxy
+route, and preserves only a `Pending` interpretation of the run response. A
+focused failure-order test proves it stops after the first uncertain stage.
+The signed provider spec still declares activation `unsupported_pending`, so
+none of this code is reachable as a live mutation. Enabling it requires the
+installed snapshot, upload mode, process survival after stream loss, and
+authenticated supervisor `Ready` qualification described above.
+
 The source tree now contains a dedicated guest occurrence-owner executable
 that composes the one-shot import through held native supervisor launch. It
 is not yet packaged into a qualified Render runtime snapshot, and this adapter
