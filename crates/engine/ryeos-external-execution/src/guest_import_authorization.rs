@@ -11,6 +11,84 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
     SignedGuestImportAuthorization, SignedGuestOccurrenceAssignment,
 };
+use std::ffi::OsStr;
+
+const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
+
+/// Exact point observation of an installed guest runtime. The provider
+/// snapshot-to-runtime qualification and writer exclusion remain separate;
+/// this type never promotes a mutable directory to trusted installed content.
+pub struct ObservedGuestRuntime {
+    root: lillux::PinnedDirectory,
+    root_identity: lillux::PinnedDirectoryIdentity,
+    manifest_hash: String,
+    controller_root: VerifyingKey,
+}
+
+impl ObservedGuestRuntime {
+    pub fn observe(root: &lillux::PinnedDirectory) -> Result<Self> {
+        let root_identity = root.identity()?;
+        let manifest = ryeos_state::observe_external_content_tree_exact(root)?;
+        let manifest_hash = ryeos_state::external_content_manifest_digest(&manifest)?;
+        let root_file = root
+            .open_pinned_regular(OsStr::new(CONTROLLER_ROOT_FILE), false)?
+            .context("installed guest runtime has no controller root")?;
+        ensure!(
+            matches!(root_file.permission_mode()?, 0o444 | 0o644),
+            "installed controller root has unexpected file mode"
+        );
+        let observation = root_file.observation()?;
+        ensure!(
+            observation.size() == 64,
+            "installed controller root has wrong length"
+        );
+        let bytes = root_file.read_stable_bounded(&observation, 64)?;
+        let root_bytes: [u8; 32] = hex::decode(&bytes)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("installed controller root changed length"))?;
+        let controller_root = VerifyingKey::from_bytes(&root_bytes)?;
+        ensure!(
+            !controller_root.is_weak(),
+            "installed controller root is weak"
+        );
+        Ok(Self {
+            root: root.try_clone()?,
+            root_identity,
+            manifest_hash,
+            controller_root,
+        })
+    }
+
+    pub fn manifest_hash(&self) -> &str {
+        &self.manifest_hash
+    }
+
+    /// Refuse drift immediately before admitting the exact one-shot import.
+    /// This does not prove that Render supplied the qualified snapshot or that
+    /// the installed tree cannot change after this point.
+    pub fn verify_import_documents(
+        &self,
+        signed_import_bytes: &[u8],
+        signed_assignment_bytes: &[u8],
+    ) -> Result<VerifiedGuestImportAuthorization> {
+        ensure!(
+            self.root.identity()? == self.root_identity,
+            "installed guest runtime root changed identity"
+        );
+        let current = Self::observe(&self.root)?;
+        ensure!(
+            current.manifest_hash == self.manifest_hash
+                && current.controller_root == self.controller_root,
+            "installed guest runtime drifted before import admission"
+        );
+        verify_guest_import_documents(
+            signed_import_bytes,
+            &self.controller_root,
+            &self.manifest_hash,
+            signed_assignment_bytes,
+        )
+    }
+}
 
 /// Root-authenticated delegation of the exact per-occurrence owner key.
 /// The root key must be pinned by the qualified guest runtime, not supplied
@@ -189,6 +267,7 @@ fn sign_guest_import_authorization_at(
 mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
     use crate::guest_installation::{
@@ -282,6 +361,80 @@ mod tests {
                 attachment_deadline_ms: 20_000,
             },
         )
+    }
+
+    #[test]
+    fn installed_runtime_observation_rechecks_root_and_all_content_before_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let root_key = SigningKey::from_bytes(&[43; 32]);
+        let root_file = directory.path().join(CONTROLLER_ROOT_FILE);
+        std::fs::write(&root_file, hex::encode(root_key.verifying_key().to_bytes())).unwrap();
+        let runtime = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let observed = ObservedGuestRuntime::observe(&runtime).unwrap();
+        let (mut authorization, original_assignment) = fixture();
+        let manifest_hash = observed.manifest_hash().to_owned();
+        authorization.guest_runtime_manifest_hash = manifest_hash.clone();
+        let assignment = GuestOccurrenceAssignment {
+            guest_runtime_manifest_hash: &manifest_hash,
+            ..original_assignment
+        };
+        let owner_key = SigningKey::from_bytes(&[41; 32]);
+        let signed_import =
+            sign_guest_import_authorization_at(authorization, &owner_key, &assignment, 1).unwrap();
+        let signed_assignment = sign_guest_occurrence_assignment(
+            GuestOccurrenceAssignmentDocument {
+                schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+                placement_thread_id: assignment.placement_thread_id.into(),
+                admitted_capsule_hash: assignment.admitted_capsule_hash.into(),
+                base_snapshot_hash: assignment.base_snapshot_hash.into(),
+                execution_binding_hash: assignment.execution_binding_hash.into(),
+                allocation_request_digest: assignment.allocation_request_digest.into(),
+                occurrence_id: assignment.occurrence_id.into(),
+                activation_request_digest: assignment.activation_request_digest.into(),
+                supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
+                guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
+                owner_public_key_hex: hex::encode(owner_key.verifying_key().to_bytes()),
+                attachment_deadline_ms: assignment.attachment_deadline_ms,
+            },
+            &root_key,
+        )
+        .unwrap();
+        let import_bytes =
+            ryeos_external_execution_contract::canonical_json(&signed_import).unwrap();
+        let assignment_bytes =
+            ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
+        assert_eq!(
+            observed
+                .verify_import_documents(&import_bytes, &assignment_bytes)
+                .unwrap()
+                .authorization()
+                .occurrence_id,
+            "occ-1"
+        );
+        std::fs::write(directory.path().join("ambient-entry"), b"drift").unwrap();
+        assert!(
+            observed
+                .verify_import_documents(&import_bytes, &assignment_bytes)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("drifted")
+        );
+        std::fs::remove_file(directory.path().join("ambient-entry")).unwrap();
+        std::fs::write(
+            &root_file,
+            hex::encode(SigningKey::from_bytes(&[44; 32]).verifying_key().to_bytes()),
+        )
+        .unwrap();
+        assert!(
+            observed
+                .verify_import_documents(&import_bytes, &assignment_bytes)
+                .is_err()
+        );
+        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ObservedGuestRuntime::observe(&runtime).is_err());
     }
 
     #[test]

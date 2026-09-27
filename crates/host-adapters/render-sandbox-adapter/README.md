@@ -124,6 +124,11 @@ assignment cannot be placed in Sandbox create-time environment: its occurrence
 ID and activation digest do not exist until after allocation. A future
 one-shot owner launch must carry it as bounded post-allocation input, and an
 ambiguous launch response must not cause another launch.
+The generic guest verifier can now observe the exact installed runtime tree,
+read its pinned controller-root file, and recheck the full tree immediately
+before import admission. This is a point measurement only: the Render snapshot
+must still be independently qualified against that manifest/root, and the
+owner must exclude writers through descriptor adoption and execution.
 `ryeos-external-execution::guest_staging::stage_uploaded_guest_package` already
 imports an exact pinned regular inode into a private generation and verifies
 the package, base CAS, limits and manifest. `guest_content` rechecks the
