@@ -921,7 +921,9 @@ pub struct ExecutionHooksDecl {
 pub struct KindExternalContentDecl {
     /// Reserved derived slot populated only by launch-time realization.
     pub realization_derived: String,
-    /// Named-root classes this kind permits its items to declare.
+    /// Signed source classes this kind permits its items to declare. Most
+    /// select named file roots; `bundle_binary:own` selects only a binary in
+    /// the declaring Bundle's verified executor manifest.
     pub allowed_roots: Vec<String>,
     /// Target namespaces admitted by this signed kind. Unlike named source
     /// roots, these control where verified content appears in the sandbox.
