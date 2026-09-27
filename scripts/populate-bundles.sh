@@ -305,6 +305,7 @@ staged_payload_records_for_set() {
     full|hosted-workflow|release-artifacts)
       printf '%s\t%s\t%s\t%s\n' \
         codex ryeos-external-candidate-connector ryeos-external-candidate-connector static \
+        codex ryeos-external-guest-occurrence-owner ryeos-external-guest-occurrence-owner static \
         codex ryeos-codex-external-configuration ryeos-codex-external-configuration static \
         codex ryeos-codex-guest-runtime-producer ryeos-codex-guest-runtime-producer static
       ;;
@@ -416,6 +417,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
           ryeos-external-candidate-connector ryeos-codex-external-configuration \
+          ryeos-external-guest-occurrence-owner \
           ryeos-codex-guest-runtime-producer)
     ;;
   central-host)
@@ -432,7 +434,8 @@ case "$BUNDLE_SET" in
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \
-          ryeos-codex-external-configuration ryeos-codex-guest-runtime-producer)
+          ryeos-external-guest-occurrence-owner ryeos-codex-external-configuration \
+          ryeos-codex-guest-runtime-producer)
     ;;
   hosted-node)
     pkgs=(lillux ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-session-exec \
@@ -453,6 +456,7 @@ build_static_session_exec=0
 build_static_structured_session=0
 build_static_lillux_isolation_adapter=0
 build_static_external_candidate_connector=0
+build_static_external_guest_occurrence_owner=0
 build_static_codex_external_configuration=0
 build_static_codex_guest_runtime_producer=0
 for p in "${pkgs[@]}"; do
@@ -461,6 +465,7 @@ for p in "${pkgs[@]}"; do
     ryeos-structured-session) build_static_structured_session=1 ;;
     ryeos-lillux-isolation-adapter) build_static_lillux_isolation_adapter=1 ;;
     ryeos-external-candidate-connector) build_static_external_candidate_connector=1 ;;
+    ryeos-external-guest-occurrence-owner) build_static_external_guest_occurrence_owner=1 ;;
     ryeos-codex-external-configuration) build_static_codex_external_configuration=1 ;;
     ryeos-codex-guest-runtime-producer) build_static_codex_guest_runtime_producer=1 ;;
     *) host_pkgs+=("$p") ;;
@@ -511,6 +516,7 @@ static_build_labels=()
 (( build_static_structured_session == 1 )) && static_build_labels+=(ryeos-structured-session)
 (( build_static_lillux_isolation_adapter == 1 )) && static_build_labels+=(ryeos-lillux-isolation-adapter)
 (( build_static_external_candidate_connector == 1 )) && static_build_labels+=(ryeos-external-candidate-connector)
+(( build_static_external_guest_occurrence_owner == 1 )) && static_build_labels+=(ryeos-external-guest-occurrence-owner)
 (( build_static_codex_external_configuration == 1 )) && static_build_labels+=(ryeos-codex-external-configuration)
 (( build_static_codex_guest_runtime_producer == 1 )) && static_build_labels+=(ryeos-codex-guest-runtime-producer)
 if (( ${#static_build_labels[@]} > 0 )); then
@@ -535,6 +541,11 @@ if (( ${#static_build_labels[@]} > 0 )); then
     ryeos_term_info "static external execution build: ryeos-external-candidate-connector"
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
       "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-candidate-connector
+  fi
+  if (( build_static_external_guest_occurrence_owner == 1 )); then
+    ryeos_term_info "static external guest owner build: ryeos-external-guest-occurrence-owner"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --target "$TRIPLE" "${jobs_args[@]}" -p ryeos-external-guest-occurrence-owner
   fi
   if (( build_static_codex_external_configuration == 1 )); then
     ryeos_term_info "static external execution build: ryeos-codex-external-configuration"
@@ -563,6 +574,7 @@ require_static_payload "$PAYLOAD_STAGE/core/ryeos-structured-session-bridge"
 require_static_payload "$PAYLOAD_STAGE/core/ryeos-lillux-isolation-adapter"
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-workflow" || "$BUNDLE_SET" == "release-artifacts" ]]; then
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-candidate-connector"
+  require_static_payload "$PAYLOAD_STAGE/codex/ryeos-external-guest-occurrence-owner"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-external-configuration"
   require_static_payload "$PAYLOAD_STAGE/codex/ryeos-codex-guest-runtime-producer"
 fi
