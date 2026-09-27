@@ -20,6 +20,16 @@ are **not yet complete**, and the Render adapter must still return
 `SupervisorPending`. This owner has no Kaggle, project signing, provider, or
 controller credential.
 
+Inbound import and package files must be current-owner pinned regular files
+beneath the owner-private `0700` activation directory. Their modes may be
+`0600`, `0640`, or `0644`, with no special or executable bits: only the owner
+may write, and the private parent denies other users path traversal. Read
+bits do not authorize content; the owner still verifies the signed assignment,
+import and exact package bytes before sealing a private source. Render's
+upload API does not document its resulting file mode, so an
+installed qualification must observe the actual mode and refuse any other
+shape. The source tree does not infer this from a successful upload response.
+
 A code-zero native exit proves only Lillux's exact target and namespace
 settlement. The controller must separately join the authenticated supervisor
 channel, frozen candidate closure, writer-exclusion/export evidence, provider

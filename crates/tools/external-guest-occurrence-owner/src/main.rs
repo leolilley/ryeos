@@ -64,14 +64,28 @@ fn open_private_root(path: &str) -> Result<lillux::PinnedDirectory> {
     Ok(root)
 }
 
+fn admissible_inbound_mode(mode: u32) -> bool {
+    // Render's file upload API does not specify the resulting mode. The
+    // enclosing activation directory is owner-private; group/other read
+    // bits do not grant traversal, while any non-owner write bit would add
+    // an unnecessary mutation path before the signed-byte import.
+    mode & !0o777 == 0 && mode & 0o700 == 0o600 && mode & 0o077 == mode & 0o044
+}
+
+fn require_admissible_inbound_file(file: &lillux::PinnedRegularFile) -> Result<()> {
+    lillux::require_effective_user_owned_regular(&file.try_clone_descriptor()?)?;
+    ensure!(
+        admissible_inbound_mode(file.observation()?.full_permission_mode()?),
+        "guest owner inbound file has unexpected mode"
+    );
+    Ok(())
+}
+
 fn read_signed_import(activation: &lillux::PinnedDirectory) -> Result<Vec<u8>> {
     let file = activation
         .open_pinned_regular(OsStr::new(IMPORT_NAME), false)?
         .context("guest owner has no separately delivered signed import")?;
-    ensure!(
-        file.permission_mode()? == 0o600,
-        "guest owner signed import has unexpected file mode"
-    );
+    require_admissible_inbound_file(&file)?;
     let observation = file.observation()?;
     file.read_stable_bounded(
         &observation,
@@ -95,10 +109,10 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     let upload = activation
         .open_pinned_regular(OsStr::new(PACKAGE_NAME), false)?
         .context("guest owner has no exact uploaded package")?;
+    require_admissible_inbound_file(&upload)?;
     ensure!(
-        upload.permission_mode()? == 0o600
-            && upload.observation()?.size() == admitted.authorization().ticket.framed_bytes,
-        "guest owner upload changed its exact signed size or file mode"
+        upload.observation()?.size() == admitted.authorization().ticket.framed_bytes,
+        "guest owner upload changed its exact signed size"
     );
     let occurrence =
         occurrences.create_child(OsStr::new(&admitted.authorization().occurrence_id), 0o700)?;
@@ -172,6 +186,39 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn inbound_file_mode_allows_only_owner_writes_inside_private_activation_root() {
+        for mode in [0o600, 0o640, 0o644] {
+            assert!(admissible_inbound_mode(mode));
+        }
+        for mode in [
+            0o000, 0o400, 0o500, 0o606, 0o620, 0o622, 0o666, 0o755, 0o777, 0o1600, 0o2600, 0o4600,
+        ] {
+            assert!(!admissible_inbound_mode(mode));
+        }
+    }
+
+    #[test]
+    fn private_activation_import_accepts_readable_upload_but_refuses_other_writers() {
+        let activation = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(activation.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let upload = activation.path().join(IMPORT_NAME);
+        std::fs::write(&upload, b"signed-import-fixture").unwrap();
+        let root = lillux::PinnedDirectory::open(activation.path())
+            .unwrap()
+            .unwrap();
+        root.require_owner_private_directory().unwrap();
+        std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(read_signed_import(&root).unwrap(), b"signed-import-fixture");
+        std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(read_signed_import(&root).is_err());
+        std::fs::set_permissions(activation.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(root.require_owner_private_directory().is_err());
+    }
 
     #[test]
     fn assignment_argument_is_canonical_bounded_and_single_use() {

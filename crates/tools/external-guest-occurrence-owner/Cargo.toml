@@ -13,3 +13,6 @@ lillux = { workspace = true }
 ryeos-external-execution = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }
 signal-hook = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
