@@ -322,6 +322,18 @@ placement binding are still missing. A self-described `qualified` field, a
 matching create response, or a signed expectation alone must not grant
 startup capability.
 
+`src/snapshot_qualification.rs` now defines the bounded Render-specific probe
+shape and exact comparison against those expected coordinates. It rejects
+unknown fields, changed snapshot/root/manifest, weak or noncanonical controller
+keys, changed file modes, and missing terminal evidence identities. This is only the
+provider-edge interpretation of probe data: it neither authenticates a
+qualification attestation nor runs an independent verifier, and it is not
+called by placement admission. The signed provider spec therefore still
+refuses activation. The next implementation cut must load the current
+published qualification through RyeOS's existing product witness machinery,
+verify the independently admitted execution, and apply this comparison before
+any new allocation; retained cleanup must remain possible afterward.
+
 The required implementation order is: publish and pin the exact owner input;
 sign the bounded producer Tool and capture its runtime product; run and retain the installed independent
 snapshot qualification; join its exact evidence to the current placement
