@@ -3296,6 +3296,7 @@ dependencies = [
  "chrono",
  "hex",
  "lillux",
+ "ryeos-external-execution",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
  "serde",
