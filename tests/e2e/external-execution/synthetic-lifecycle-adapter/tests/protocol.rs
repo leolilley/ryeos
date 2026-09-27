@@ -5767,6 +5767,43 @@ fn exercise_activation_fault(fault: &str) {
             framed_bytes: package.bytes(),
         },
     };
+    if fault == "lose_first_activation_response" {
+        // Descriptor relocation leaves the semantic digest intact, but this
+        // activation must consume the exact projection handed to the adapter.
+        let mut displaced = activate.clone();
+        if let LifecycleAdapterRequest::ActivateSupervisor {
+            guest_input_projection,
+            ..
+        } = &mut displaced
+        {
+            guest_input_projection.base_snapshot.descriptor += 100;
+        }
+        displaced.validate().unwrap();
+        let refused = try_invoke_operation(
+            &adapter,
+            &supervisor,
+            &launcher,
+            &settings,
+            credential,
+            &displaced,
+            Some(&bootstrap),
+            vec![package_authority.clone()],
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("unsuccessful_exit"),
+            "{refused:#}"
+        );
+        assert!(
+            !state
+                .path()
+                .join(&occurrence.occurrence_id)
+                .join("activation.json")
+                .exists(),
+            "displaced input authority crossed the activation intent boundary"
+        );
+    }
     // This fixture stages unstripped debug supervisor/launcher binaries. It
     // hashes and reads over a gigabyte before the SpawnIntent fault boundary.
     // Give that exact operation a bounded harness allowance; production signed

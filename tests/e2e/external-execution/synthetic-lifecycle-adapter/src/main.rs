@@ -507,6 +507,7 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
             occurrence,
             activation,
             guest_input_identity,
+            guest_input_projection,
             guest_package,
             import_ticket,
             ..
@@ -518,6 +519,7 @@ fn operate(adapter_executable: &lillux::InheritedDescriptorAuthority) -> Result<
             occurrence,
             activation,
             guest_input_identity,
+            guest_input_projection,
             guest_package,
             import_ticket,
         )?,
@@ -625,6 +627,7 @@ fn activate(
     occurrence: &BoundOccurrence,
     activation: &ryeos_external_execution_contract::SupervisorActivationIntent,
     guest_input_identity: &str,
+    guest_input_projection: &ryeos_external_execution_contract::ExternalGuestInputProjection,
     guest_package: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
     import_ticket: &ryeos_external_execution_contract::staging_package::GuestImportTicket,
 ) -> Result<LifecycleAdapterResponse> {
@@ -666,7 +669,8 @@ fn activate(
             && bootstrap.supervisor_runtime_hash == activation.supervisor_runtime_hash
             && bootstrap.launcher_artifact_hash == activation.launcher_artifact_hash
             && bootstrap.guest_input_identity == *guest_input_identity
-            && bootstrap.guest_input_identity == bootstrap.guest_inputs.identity_digest()?,
+            && bootstrap.guest_inputs == *guest_input_projection
+            && bootstrap.guest_input_identity == guest_input_projection.identity_digest()?,
         "synthetic activation changed its retained occurrence or guest authority"
     );
 
@@ -714,10 +718,10 @@ fn activate(
     );
     ensure_document_bytes(&occurrence_root, BOOTSTRAP_FILE, &bootstrap_bytes, 0o600)?;
 
-    // The request carries only semantic input identity. Descriptor numbers in
-    // the bootstrap were allocated in the controller and are never adopted as
-    // adapter-local authority. Import the one inherited package under its
-    // durable digest and independently retained bootstrap/artifact coordinates.
+    // The request carries the protected input projection as well as its
+    // semantic identity. Descriptor numbers were allocated in the controller;
+    // the adapter does not open them as local authority. Import the inherited
+    // package under the exact joined projection and retained coordinates.
     let package = unsafe {
         lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_GUEST_PACKAGE_FD_ENV)
     }
@@ -739,7 +743,7 @@ fn activate(
             && import_ticket.launcher_sha256 == retained.launcher_digest,
         "synthetic import ticket changed retained bootstrap or executable authority"
     );
-    let expected = import_ticket.staging_expected(&import_context, &bootstrap.guest_inputs)?;
+    let expected = import_ticket.staging_expected(&import_context, guest_input_projection)?;
     let mut reader = package.stable_regular_reader_exact(
         guest_package.framed_bytes,
         &guest_package.payload_sha256,
@@ -765,9 +769,9 @@ fn activate(
         )?;
         ryeos_external_execution::guest_content::recheck_staged_guest_content(
             &staged,
-            &bootstrap.guest_inputs,
+            guest_input_projection,
         )?;
-        let guest_inputs = &bootstrap.guest_inputs;
+        let guest_inputs = guest_input_projection;
         let staged_root = staged.root();
         let runtime = occurrence_root.create_child(OsStr::new(CANDIDATE_RUNTIME_DIR), 0o700)?;
         let base = staged_root
