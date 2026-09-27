@@ -1931,6 +1931,100 @@ mod tests {
     }
 
     #[test]
+    fn mounted_supervisor_rebinds_only_opened_coordinates() {
+        use crate::guest_supervisor_descriptors::rebind_opened_guest_descriptors;
+
+        let original = source_projection();
+        let identity = original.identity_digest().unwrap();
+        let mut mounted = original.clone();
+        rebind_opened_guest_descriptors(&mut mounted, None, &[80, 81], &[90, 91, 92]).unwrap();
+        assert_eq!(mounted.identity_digest().unwrap(), identity);
+        assert_eq!(mounted.base_snapshot.descriptor, 93);
+        assert_eq!(mounted.inputs.iter().map(|input| input.descriptor).collect::<Vec<_>>(), vec![80, 81]);
+        assert_eq!(mounted.record_descriptors().map(|(fd, _, _)| fd).collect::<Vec<_>>(), vec![90, 91, 92]);
+
+        for (output, mounts, records) in [
+            (Some(77), vec![80, 81], vec![90, 91, 92]),
+            (None, vec![80], vec![90, 91, 92]),
+            (None, vec![80, 81, 82], vec![90, 91, 92]),
+            (None, vec![80, 81], vec![90, 91]),
+            (None, vec![80, 81], vec![90, 91, 92, 93]),
+            (None, vec![80, 80], vec![90, 91, 92]),
+            (None, vec![80, 81], vec![90, 91, 81]),
+            (None, vec![0, 81], vec![90, 91, 92]),
+            (None, vec![80, 1], vec![90, 91, 92]),
+            (None, vec![80, 81], vec![2, 91, 92]),
+            (None, vec![80, 81], vec![90, 91, u32::MAX]),
+        ] {
+            let mut invalid = original.clone();
+            assert!(
+                rebind_opened_guest_descriptors(&mut invalid, output, &mounts, &records).is_err()
+            );
+            assert_eq!(invalid, original, "failed rebinding changed its input");
+        }
+        let mut invalid_original = original.clone();
+        invalid_original.inputs[0].descriptor = 1;
+        let unchanged = invalid_original.clone();
+        assert!(rebind_opened_guest_descriptors(
+            &mut invalid_original,
+            None,
+            &[80, 81],
+            &[90, 91, 92],
+        )
+        .is_err());
+        assert_eq!(invalid_original, unchanged);
+    }
+
+    #[test]
+    fn mounted_supervisor_rebinds_workspace_and_scratch_without_extra_records() {
+        use crate::guest_supervisor_descriptors::rebind_opened_guest_descriptors;
+
+        let mut inputs = source_projection();
+        inputs.workspace_outputs = Some(GuestWorkspaceOutputAuthorityInput {
+            descriptor: 16,
+            authority_hash: "6".repeat(64),
+            bytes: 128,
+            producer_chain_root_id: "T-root".into(),
+            producer_thread_id: "T-child".into(),
+            admitted_launch_capsule_hash: "7".repeat(64),
+        });
+        inputs.inputs.push(GuestMountInput {
+            role: GuestMountRole::PrivateScratch,
+            authority_id: "scratch".into(),
+            descriptor: 17,
+            destination: "/scratch".into(),
+            kind: GuestMountKind::Directory,
+            access: GuestMountAccess::PrivateWritable,
+            normalized_mode: None,
+            content_authority: GuestMountContentAuthority::PrivateScratch {
+                binding_hash: "8".repeat(64),
+            },
+            bytes: 0,
+        });
+        inputs.validate().unwrap();
+        let original = inputs.clone();
+        for (output, mounts, records) in [
+            (None, vec![80, 81, 82], vec![90, 91, 92]),
+            (Some(80), vec![80, 81, 82], vec![90, 91, 92]),
+            (Some(90), vec![80, 81, 82], vec![90, 91, 92]),
+            (Some(0), vec![80, 81, 82], vec![90, 91, 92]),
+        ] {
+            let mut invalid = original.clone();
+            assert!(
+                rebind_opened_guest_descriptors(&mut invalid, output, &mounts, &records).is_err()
+            );
+            assert_eq!(invalid, original);
+        }
+        let identity = inputs.identity_digest().unwrap();
+        rebind_opened_guest_descriptors(&mut inputs, Some(70), &[80, 81, 82], &[90, 91, 92])
+            .unwrap();
+        assert_eq!(inputs.identity_digest().unwrap(), identity);
+        assert_eq!(inputs.workspace_outputs.as_ref().unwrap().descriptor, 70);
+        assert_eq!(inputs.inputs[2].descriptor, 82);
+        assert_eq!(inputs.record_descriptors().count(), 3);
+    }
+
+    #[test]
     fn source_closure_has_exact_ordered_records_and_no_product_alias() {
         let projection = source_projection();
         projection.validate().unwrap();

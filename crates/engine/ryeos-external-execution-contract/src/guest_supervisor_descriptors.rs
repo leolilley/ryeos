@@ -130,3 +130,67 @@ pub fn rebind_fixed_guest_descriptors(inputs: &mut ExternalGuestInputProjection)
     );
     Ok(())
 }
+
+/// Rebind the supervisor's semantic projection to descriptors it opened from
+/// an independently attested read-only staged mount. The base transfer was
+/// consumed before supervisor entry, so its descriptor is an unused sentinel
+/// chosen beyond every opened coordinate. This is a pure process-local
+/// mapping: the caller must verify each opened authority against the retained
+/// projection and the outer owner must attest the exact mounted stage.
+pub fn rebind_opened_guest_descriptors(
+    inputs: &mut ExternalGuestInputProjection,
+    workspace_output: Option<u32>,
+    runtime_mounts: &[u32],
+    content_records: &[u32],
+) -> Result<()> {
+    inputs.validate()?;
+    let identity = inputs.identity_digest()?;
+    let mut rebound = inputs.clone();
+    ensure!(
+        workspace_output.is_some() == inputs.workspace_outputs.is_some()
+            && runtime_mounts.len() == inputs.inputs.len()
+            && content_records.len() == inputs.record_descriptors().count(),
+        "opened supervisor descriptor inventory differs from guest projection"
+    );
+    if let (Some(output), Some(descriptor)) = (&mut rebound.workspace_outputs, workspace_output) {
+        output.descriptor = descriptor;
+    }
+    let mut records = content_records.iter().copied();
+    for (input, descriptor) in rebound.inputs.iter_mut().zip(runtime_mounts.iter().copied()) {
+        input.descriptor = descriptor;
+        match &mut input.content_authority {
+            GuestMountContentAuthority::ProductManifest {
+                manifest_descriptor, ..
+            } => {
+                *manifest_descriptor = records.next().context("opened product record is absent")?;
+            }
+            GuestMountContentAuthority::SourceClosure {
+                binding_descriptor,
+                manifest_descriptor,
+                ..
+            } => {
+                *binding_descriptor = records.next().context("opened source binding is absent")?;
+                *manifest_descriptor = records.next().context("opened source manifest is absent")?;
+            }
+            GuestMountContentAuthority::RawFile { .. }
+            | GuestMountContentAuthority::PrivateScratch { .. } => {}
+        }
+    }
+    ensure!(records.next().is_none(), "opened supervisor content record is extra");
+    let highest = workspace_output
+        .into_iter()
+        .chain(runtime_mounts.iter().copied())
+        .chain(content_records.iter().copied())
+        .max()
+        .context("opened supervisor descriptor inventory is empty")?;
+    rebound.base_snapshot.descriptor = highest
+        .checked_add(1)
+        .context("consumed guest base descriptor sentinel overflow")?;
+    rebound.validate()?;
+    ensure!(
+        rebound.identity_digest()? == identity,
+        "opened supervisor descriptor binding changed guest-input identity"
+    );
+    *inputs = rebound;
+    Ok(())
+}
