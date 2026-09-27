@@ -3083,6 +3083,7 @@ dependencies = [
  "base64 0.22.1",
  "lillux",
  "ryeos-external-execution",
+ "serde",
  "serde_json",
  "tempfile",
 ]

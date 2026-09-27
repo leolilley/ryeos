@@ -1472,7 +1472,7 @@ fn verify_item_source_sidecar(
 ///   - leading `.` (hidden file)
 ///   - any control char or NUL
 ///   - spaces
-fn validate_bin_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
+pub(crate) fn validate_bin_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
     if name.is_empty() {
         return Err(EngineError::InvalidBinPrefix {
             raw: raw_ref.to_string(),

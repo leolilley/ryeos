@@ -1057,6 +1057,7 @@ mod tests {
             id: "runtime".to_owned(),
             kind: ryeos_engine::external_content::ExternalContentKind::File,
             locator: None,
+            bundle_binary: None,
             mode: ryeos_engine::external_content::ExternalContentMode::Pinned,
             digest: Some("c".repeat(64)),
             exclude: Vec::new(),

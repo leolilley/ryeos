@@ -3505,7 +3505,10 @@ fn validate_execution_external_content_decl(
     }
     let mut seen = std::collections::BTreeSet::new();
     for root in &declaration.allowed_roots {
-        if !matches!(root.as_str(), "project_files" | "node_files" | "bundle:own") {
+        if !matches!(
+            root.as_str(),
+            "project_files" | "node_files" | "bundle:own" | "bundle_binary:own"
+        ) {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: {field}.allowed_roots contains unsupported root class `{root}`"
@@ -6405,7 +6408,7 @@ metadata:
         let registry = load_external_content_schema(&[
             "realization_derived: effective_external_realizations",
             "allowed_mount_roots: [project]",
-            "allowed_roots: [\"project_files\", \"bundle:own\"]",
+            "allowed_roots: [\"project_files\", \"bundle:own\", \"bundle_binary:own\"]",
             "max_declarations: 4",
         ])
         .unwrap();
@@ -6417,7 +6420,10 @@ metadata:
             contract.realization_derived,
             "effective_external_realizations"
         );
-        assert_eq!(contract.allowed_roots, ["project_files", "bundle:own"]);
+        assert_eq!(
+            contract.allowed_roots,
+            ["project_files", "bundle:own", "bundle_binary:own"]
+        );
         assert_eq!(contract.max_declarations, 4);
     }
 

@@ -1444,6 +1444,7 @@ fn captured_target_content_declarations(
                 kind: entry.kind,
                 mode: ryeos_state::objects::ExternalContentMode::Pinned,
                 locator: None,
+                bundle_binary: None,
                 digest: Some(entry.manifest_hash.clone()),
                 exclude: Vec::new(),
                 metadata_hint: None,

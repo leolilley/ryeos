@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-26T08:50:30Z:a7deb022425fa661d3cfe9c744fd8276995ff38e897727bb11b6dc0dcdc5224f:jSkpfKNKun+jX/VX0CHvsA+5F/dANflx1kFP50NTQSFqn+1zxrsZCszMrGftZ2rTSBAkim1u4dwXqUBgAp4MCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T10:40:53Z:fd61cc2cfcd7a7902f88a00bd0b6683f6fc0fa803f3f1f5e2ff535b9aa124319:hlIvhDpWYJ6FepPw10DUtWV6LqGawRQ91doBGzgiISrmJkWp/dqHXkFSYXkt0Qdy2PDcd7V+wcQEKjBzb7ycCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -84,7 +84,7 @@ execution:
   # environments for tools that may be dispatched later.
   external_content:
     realization_derived: effective_external_realizations
-    allowed_roots: [project_files]
+    allowed_roots: [project_files, bundle_binary:own]
     allowed_mount_roots: [project, execution_runtime]
     max_declarations: 8
     large_content:

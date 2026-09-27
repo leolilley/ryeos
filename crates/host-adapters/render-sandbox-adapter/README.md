@@ -319,19 +319,18 @@ recipe. Its producer needs the exact owner executable as a **data input**, the
 node's public assignment-verification root, and a signed owner profile. It
 writes a fresh credential-free tree; RyeOS captures that tree as a product
 and checks its manifest against the guest's `ObservedGuestRuntime` algorithm.
-The current recipe/tool input contract cannot yet pass a signed Bundle
-executable as data. The initial path therefore uses a separately published,
-exactly pinned external-content file, admitted under the Tool's normal
-realization mount. `ryeos-external-guest-runtime-producer` consumes only that
-fixed input, verifies its executable shape and stable digest, and creates the
-private output once. The independent qualification must join the resulting
-owner digest to the executable actually installed in the Render snapshot.
-It must not infer that equality merely because the pin and a Bundle binary
-have similar names. Reading an installed `.ai/bin` path or selecting an
-arbitrary host executable is not an alternative. A future generic signed
-Bundle-artifact data input can replace the separate publication without
-changing the product or snapshot qualification contract. No exact owner pin
-or signed producer Tool/graph is installed yet.
+The signed Tool now declares `bundle_binary: bin:ryeos-external-guest-occurrence-owner`
+under the narrow `bundle_binary:own` kind grant. Admission captures the
+declaring Bundle's signature-verified executable into a sealed descriptor and
+then into an exact retained file realization; the producer never opens the
+installed `.ai/bin` path. The signed production graph reads the current node's
+public identity through `service:identity/public_key` and passes it to the
+producer. No credential or submission authority enters that workspace.
+Independent qualification must still join the resulting owner digest and
+public root to the executable and root actually installed in the Render
+snapshot. Similar names or a successful production graph do not establish
+that join. Source bundle manifests must be refreshed before this newly
+authored Tool/graph is installable.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,
