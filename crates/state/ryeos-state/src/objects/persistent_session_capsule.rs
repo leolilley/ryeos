@@ -31,7 +31,9 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // v14 retains external candidate program requirements separately from placement authority.
 // v16 requires endpoint intent/selection in the retained ordinary provider
 // process plan; an external command environment is not provider placement.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 16;
+// v17 separately owns the exact guest-runtime product proof. The candidate
+// executable product selection is not a substitute for placement qualification.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 17;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES: usize = 4_096;
@@ -684,6 +686,36 @@ impl PersistentSessionAuthority {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedExternalRuntimeQualification {
+    pub binding_hash: String,
+    pub guest_runtime_manifest_hash: String,
+    pub proof: crate::external_content::products::composition::AdmittedProductQualification,
+}
+
+impl RetainedExternalRuntimeQualification {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        super::thread_snapshot::validate_canonical_hash(
+            "external runtime binding",
+            &self.binding_hash,
+        )?;
+        super::thread_snapshot::validate_canonical_hash(
+            "external guest runtime manifest",
+            &self.guest_runtime_manifest_hash,
+        )?;
+        super::thread_snapshot::validate_canonical_hash(
+            "external runtime qualification attestation",
+            &self.proof.attestation_hash,
+        )?;
+        self.proof.evidence.validate()?;
+        if self.proof.evidence.result.subject_manifest_hash != self.guest_runtime_manifest_hash {
+            anyhow::bail!("retained external runtime proof differs from guest manifest");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedPersistentSessionCapsule {
@@ -699,6 +731,9 @@ pub struct AdmittedPersistentSessionCapsule {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub retained_product_selections:
         Option<crate::external_content::products::composition::ResolvedExternalProductSelections>,
+    /// Separate CAS-owned proof of the placement guest runtime, if applicable.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub retained_external_runtime_qualification: Option<RetainedExternalRuntimeQualification>,
     pub lifecycle: PersistentSessionLifecycleContract,
     pub wire: PersistentSessionWireContract,
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
@@ -796,6 +831,12 @@ impl AdmittedPersistentSessionCapsule {
             anyhow::bail!("persistent-session retained program exceeds its byte bound");
         }
         self.authority().validate()?;
+        if let Some(proof) = &self.retained_external_runtime_qualification {
+            if self.external_candidate.is_none() {
+                anyhow::bail!("external runtime proof has no external candidate");
+            }
+            proof.validate()?;
+        }
         super::thread_snapshot::validate_canonical_hash(
             "persistent-session execution realization hash",
             &self.execution_realization_hash,

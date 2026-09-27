@@ -101,6 +101,7 @@ fn store_structured_session_capsule_with_schema(
         execution_realization_hash: "8".repeat(64),
         source_binding_hash: None,
         retained_product_selections: None,
+        retained_external_runtime_qualification: None,
         structured_session_profile: Some(AdmittedStructuredSessionProfile {
             profile_hash: profile_hash.clone(),
             contract,

@@ -1321,6 +1321,7 @@ pub mod test_support {
             exact_program_hash: canonical_value_digest(&exact_program)?,
             exact_program,
             retained_product_selections: Some(selections),
+            retained_external_runtime_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,
@@ -2563,6 +2564,7 @@ mod tests {
             exact_program_hash: canonical_value_digest(&exact_program).unwrap(),
             exact_program,
             retained_product_selections: Some(selections),
+            retained_external_runtime_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,

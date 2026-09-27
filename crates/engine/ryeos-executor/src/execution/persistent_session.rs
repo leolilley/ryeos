@@ -2337,6 +2337,7 @@ fn admit_session_capsule(
         exact_program: exact_program_value,
         exact_program_hash,
         retained_product_selections,
+        retained_external_runtime_qualification: None,
         lifecycle,
         wire,
         artifact_identity,
@@ -5385,6 +5386,7 @@ session:
             exact_program,
             exact_program_hash,
             retained_product_selections: None,
+            retained_external_runtime_qualification: None,
             lifecycle: PersistentSessionLifecycleContract {
                 max_processes: 1,
                 max_inflight_per_process: 1,

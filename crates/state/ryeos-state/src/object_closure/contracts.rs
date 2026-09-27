@@ -972,6 +972,21 @@ fn links_persistent_session_capsule(value: &Value) -> Result<ContractLinks, Stri
             return Err("persistent-session capsule missing retained product selections".into());
         }
     }
+    match value.get("retained_external_runtime_qualification") {
+        Some(Value::Null) => {}
+        Some(proof) => super::push_required_object_edge(
+            proof.get("proof").ok_or_else(|| {
+                "persistent-session external runtime qualification missing proof".to_owned()
+            })?,
+            "attestation_hash",
+            ExpectedObject::Kind("attestation"),
+            None,
+            &mut links.object_edges,
+        )?,
+        None => {
+            return Err("persistent-session capsule missing external runtime qualification".into());
+        }
+    }
     push_evidence_attachment_event_edges(
         value.pointer("/exact_program/evidence_attachments"),
         &mut links,
