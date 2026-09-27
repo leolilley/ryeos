@@ -62,6 +62,13 @@ support, signing, installation, or provider qualification.
   The adapter does not treat list absence or a GET 404 as proof of no
   occurrence.
 - Activation and activation reconciliation always return `supervisor_pending`.
+  The installed provider spec therefore advertises no
+  `supervisor_activation` lifecycle capability. RyeOS requires that capability
+  at offline placement admission, before Sandbox allocation or other provider
+  contact; this incomplete adapter cannot strand a paid occurrence merely to
+  discover that startup is unavailable. The capability must be derived from
+  a genuinely implemented signed activation operation, not added to the
+  declaration as a claim.
   The pinned CLI source exposes a connect-token POST for a run, returning an
   execution ID, expiry, method, proxy URI, and short-lived bearer token. The CLI
   then sends a command to that URI using the returned method and parses

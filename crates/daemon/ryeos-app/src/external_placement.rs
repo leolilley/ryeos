@@ -933,6 +933,9 @@ impl ExternalPlacementBackendRegistry {
             contract.cleanup_proof == "provider_terminal_occurrence_v1",
             "external placement has an unsupported cleanup evidence contract"
         );
+        // Allocation without an installed activation operation strands a paid
+        // occurrence. Require startup capability before any provider contact.
+        required.insert(LifecycleCapability::SupervisorActivation);
         // This is inherent to the admitted cleanup proof. Reconciliation is
         // optional: an unknown outcome may remain quarantined with its capacity
         // reserved, but cannot be converted into an unsupported stronger fact.
@@ -5245,6 +5248,7 @@ mod tests {
 
     fn all_lifecycle_capabilities() -> BTreeSet<LifecycleCapability> {
         BTreeSet::from([
+            LifecycleCapability::SupervisorActivation,
             LifecycleCapability::ExactAllocationReconciliation,
             LifecycleCapability::AuthoritativeNoOccurrence,
             LifecycleCapability::ExactActivationReconciliation,
@@ -6275,12 +6279,16 @@ mod tests {
         let binding = InstalledExternalExecutionBinding::test_fixture();
         let contract = binding.backend_contract();
         let credential = credential(&binding);
-        let terminal_only = Arc::new(FaultBackend {
-            capabilities: BTreeSet::from([LifecycleCapability::ExactTerminalObservation]),
+        let activation_and_terminal = Arc::new(FaultBackend {
+            capabilities: BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
             ..FaultBackend::new()
         });
         let registry =
-            ExternalPlacementBackendRegistry::from_backends(vec![terminal_only.clone()]).unwrap();
+            ExternalPlacementBackendRegistry::from_backends(vec![activation_and_terminal.clone()])
+                .unwrap();
         // No reconciliation demand is legitimate, but conveys no right to
         // resolve an unknown allocation or release its reservation.
         registry
@@ -6290,17 +6298,31 @@ mod tests {
                 &AdmittedExternalExecutionProgram::StructuredSession(program()),
             )
             .unwrap();
-        assert_eq!(terminal_only.allocate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            activation_and_terminal
+                .allocate_calls
+                .load(Ordering::SeqCst),
+            0
+        );
 
         for missing in all_lifecycle_capabilities() {
             let mut required_program = program();
-            // Exact terminal evidence follows from the binding even when the
-            // workload requests no additional capability.
-            if missing != LifecycleCapability::ExactTerminalObservation {
+            // Activation and terminal evidence are required by placement
+            // itself, even when the workload requests no additional claim.
+            if !matches!(
+                missing,
+                LifecycleCapability::SupervisorActivation
+                    | LifecycleCapability::ExactTerminalObservation
+            ) {
                 required_program
                     .requirement
                     .required_lifecycle_capabilities
                     .insert(missing);
+                required_program.qualification_use =
+                    ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+                        &required_program.requirement,
+                    )
+                    .unwrap();
             }
             let mut capabilities = all_lifecycle_capabilities();
             capabilities.remove(&missing);
@@ -6726,7 +6748,10 @@ mod tests {
             };
             let backend = Arc::new(FaultBackend {
                 capabilities: if terminal {
-                    BTreeSet::from([LifecycleCapability::ExactTerminalObservation])
+                    BTreeSet::from([
+                        LifecycleCapability::SupervisorActivation,
+                        LifecycleCapability::ExactTerminalObservation,
+                    ])
                 } else {
                     BTreeSet::new()
                 },
@@ -6873,7 +6898,10 @@ mod tests {
         for terminal in [false, true] {
             let backend = Arc::new(FaultBackend {
                 capabilities: if terminal {
-                    BTreeSet::from([LifecycleCapability::ExactTerminalObservation])
+                    BTreeSet::from([
+                        LifecycleCapability::SupervisorActivation,
+                        LifecycleCapability::ExactTerminalObservation,
+                    ])
                 } else {
                     BTreeSet::new()
                 },

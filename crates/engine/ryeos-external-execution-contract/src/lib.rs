@@ -717,6 +717,9 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCapability {
+    /// The exact installed adapter can start the admitted supervisor in an
+    /// occurrence. Admission must require this before allocating one.
+    SupervisorActivation,
     ExactAllocationReconciliation,
     /// Exact evidence that this allocation request created no occurrence.
     /// This may be provider testimony or a transport-owned proof that no
