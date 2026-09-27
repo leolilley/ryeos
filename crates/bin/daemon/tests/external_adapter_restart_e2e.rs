@@ -1620,6 +1620,20 @@ fn direct_qualification_preflight_requires_host_scope_not_trusted_process_group(
 }
 
 #[cfg(all(unix, feature = "handoff-test-support"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn fast_daemon_fixture_cannot_impersonate_qualified_direct_host() -> anyhow::Result<()> {
+    use anyhow::ensure;
+
+    let (harness, _) = DaemonHarness::start_fast().await?;
+    let status = production_service(&harness, "service:node/status", json!({})).await?;
+    ensure!(
+        require_direct_qualification_process_scope(&status).is_err(),
+        "unbound fast daemon fixture unexpectedly claimed qualified host process scopes"
+    );
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "handoff-test-support"))]
 fn require_exact_direct_scripted_turn(output: &str) -> anyhow::Result<()> {
     use anyhow::{Context as _, ensure};
 
