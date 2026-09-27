@@ -33,12 +33,15 @@ pub struct StagedNativeProbe {
 /// Parent-owned inputs for the daemon's direct Codex target. These are placed
 /// at the fixed signed prepared-directory coordinates before START; unlike the
 /// scenario driver, no verifier-owned descriptor path is embedded in Codex's
-/// configuration. This object proves prepared bytes only, not their applied
-/// mount or the absence of a concurrent writer.
+/// configuration. The candidate directory stays pinned across the live
+/// conversation, so a pathname replacement cannot become the frozen result.
+/// This object alone still does not prove the daemon's applied mount or the
+/// absence of a concurrent writer.
 pub struct StagedDirectTargetProbe {
     prepared: PinnedDirectory,
     occurrence: PinnedDirectory,
     guest: PinnedDirectory,
+    candidate: PinnedDirectory,
     home: PinnedDirectory,
     controller: PinnedDirectory,
     request_sha256: String,
@@ -911,7 +914,7 @@ pub fn stage_direct_target_probe(
     let guest = occurrence.create_child(OsStr::new("guest"), 0o700)?;
     let tools = guest.create_child(OsStr::new("tools"), 0o700)?;
     stage_selected_tools(&roots.tools, &tools, &scenario.tools_manifest_hash)?;
-    guest.create_child(OsStr::new("candidate"), 0o700)?;
+    let candidate = guest.create_child(OsStr::new("candidate"), 0o700)?;
     let request_sha256 = lillux::sha256_hex(&request);
     guest
         .atomic_create_pinned_regular(OsStr::new("guest-request.json"), &request, 0o600)?
@@ -950,6 +953,7 @@ pub fn stage_direct_target_probe(
         prepared,
         occurrence,
         guest,
+        candidate,
         home,
         controller: roots.controller,
         request_sha256,
@@ -981,6 +985,9 @@ pub fn reopen_direct_target_probe(
     let guest = occurrence
         .open_child_directory(OsStr::new("guest"))?
         .context("direct guest disappeared")?;
+    let candidate = guest
+        .open_child_directory(OsStr::new("candidate"))?
+        .context("direct candidate disappeared")?;
     let guest_cwd = direct_prepared_destination(DIRECT_OCCURRENCE_ID)?.join("guest");
     let command_environment = materialize_command_environment(
         &roots.configurations,
@@ -992,6 +999,7 @@ pub fn reopen_direct_target_probe(
         prepared,
         occurrence,
         guest,
+        candidate,
         home,
         controller: roots.controller,
         request_sha256: lillux::sha256_hex(&request),
@@ -1004,15 +1012,11 @@ pub fn reopen_direct_target_probe(
 impl StagedDirectTargetProbe {
     pub fn recheck_preflight(&self, parameters: &Parameters) -> Result<()> {
         self.recheck_sealed_inputs(parameters)?;
-        let candidate = self
-            .guest
-            .open_child_directory(OsStr::new("candidate"))?
-            .context("direct candidate disappeared")?;
         ensure!(
-            candidate.entries_no_follow_bounded(1)?.is_empty(),
+            self.candidate.entries_no_follow_bounded(1)?.is_empty(),
             "direct candidate is not empty before START"
         );
-        candidate.ensure_path_binding()?;
+        self.candidate.ensure_path_binding()?;
         Ok(())
     }
 
@@ -1024,11 +1028,7 @@ impl StagedDirectTargetProbe {
         parameters: &Parameters,
     ) -> Result<FrozenScopedOccurrence> {
         self.recheck_sealed_inputs(parameters)?;
-        let candidate = self
-            .guest
-            .open_child_directory(OsStr::new("candidate"))?
-            .context("direct candidate disappeared")?;
-        let candidate_sha256 = check_exact_candidate(&candidate)?;
+        let candidate_sha256 = check_exact_candidate(&self.candidate)?;
         let guest_file = self
             .guest
             .open_pinned_regular(OsStr::new("guest-observation.json"), false)?
@@ -1040,8 +1040,8 @@ impl StagedDirectTargetProbe {
         );
         let guest_observation =
             serde_json::from_slice(&guest_file.read_stable_bounded(&observed, 4 * 1024 * 1024)?)?;
-        candidate.ensure_path_binding()?;
         self.guest.ensure_path_binding()?;
+        self.candidate.ensure_path_binding()?;
         Ok(FrozenScopedOccurrence {
             guest_observation,
             candidate_sha256,
@@ -1054,6 +1054,7 @@ impl StagedDirectTargetProbe {
         self.prepared.ensure_path_binding()?;
         self.occurrence.ensure_path_binding()?;
         self.guest.ensure_path_binding()?;
+        self.candidate.ensure_path_binding()?;
         self.home.ensure_path_binding()?;
         self.prepared.require_owner_private_directory()?;
         self.occurrence.require_owner_private_directory()?;
@@ -1349,6 +1350,27 @@ mod tests {
                 .unwrap();
             assert!(check_exact_candidate(&candidate).is_err());
         }
+    }
+
+    #[test]
+    fn pinned_frozen_candidate_rejects_same_byte_directory_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let candidate = root.create_child(OsStr::new("candidate"), 0o700).unwrap();
+        let content = crate::scripted_provider::CANDIDATE_CONTENT.as_bytes();
+        let leaf = OsStr::new(crate::scripted_provider::CANDIDATE_RELATIVE_PATH);
+        candidate
+            .atomic_create_pinned_regular(leaf, content, 0o644)
+            .unwrap();
+        check_exact_candidate(&candidate).unwrap();
+
+        std::fs::rename(root.path().join("candidate"), root.path().join("displaced")).unwrap();
+        let replacement = root.create_child(OsStr::new("candidate"), 0o700).unwrap();
+        replacement
+            .atomic_create_pinned_regular(leaf, content, 0o644)
+            .unwrap();
+        check_exact_candidate(&replacement).unwrap();
+        assert!(check_exact_candidate(&candidate).is_err());
     }
 
     #[test]
