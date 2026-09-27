@@ -10,6 +10,7 @@ description = "Unqualified early-access Render Sandbox lifecycle adapter"
 anyhow = "1"
 base64 = "0.22"
 chrono = "0.4"
+hex = { workspace = true }
 lillux = { path = "../../kernel/lillux" }
 ryeos-external-execution-contract = { path = "../../engine/ryeos-external-execution-contract" }
 ryeos-http-transport = { path = "../../engine/ryeos-http-transport" }

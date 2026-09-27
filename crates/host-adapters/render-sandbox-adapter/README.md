@@ -115,8 +115,9 @@ There is currently no guest-side importer executable joining these stages.
 The controller now authors a node-root-signed occurrence assignment from the
 original bound allocation and seals it into the first activation contact with
 the separately signed import authorization and exact package. This adapter
-checks canonical shape and coordinate alignment only; it does not establish
-guest trust. A qualified guest runtime must independently pin the controller
+checks canonical shape, coordinate alignment, and the import signature against
+the assigned occurrence key, but cannot authenticate the controller root or
+establish guest trust. A qualified guest runtime must independently pin the controller
 root and its own runtime manifest hash, verify the assignment first, and then
 verify the import under the delegated occurrence-owner key. The final
 assignment cannot be placed in Sandbox create-time environment: its occurrence

@@ -525,6 +525,24 @@ fn verify_signed_assignment_handoff(
             && assignment.attachment_deadline_ms == authorization.attachment_deadline_ms,
         "signed guest assignment changed the exact import coordinates"
     );
+    use lillux::crypto::{Signature, Verifier as _, VerifyingKey};
+    let owner_bytes: [u8; 32] = hex::decode(&assignment.owner_public_key_hex)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signed guest assignment owner key changed length"))?;
+    let owner_key = VerifyingKey::from_bytes(&owner_bytes)?;
+    ensure!(
+        !owner_key.is_weak(),
+        "signed guest assignment owner key is weak"
+    );
+    let signature_bytes: [u8; 64] = hex::decode(&import.signature_hex)?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signed guest import signature changed length"))?;
+    owner_key
+        .verify(
+            &authorization.signing_bytes()?,
+            &Signature::from_bytes(&signature_bytes),
+        )
+        .context("signed guest import differs from the assigned occurrence owner")?;
     Ok(())
 }
 
@@ -1325,6 +1343,7 @@ mod offline_fixture_tests {
 
     #[test]
     fn signed_import_descriptor_is_correlated_but_not_guest_trust() {
+        use lillux::crypto::{Signer as _, SigningKey};
         use ryeos_external_execution_contract::guest_import_authorization::{
             GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
             GuestImportAuthorization, GuestOccurrenceAssignmentDocument,
@@ -1424,7 +1443,8 @@ mod offline_fixture_tests {
             import_ticket: ticket.clone(),
         };
         request.validate().unwrap();
-        let signed = SignedGuestImportAuthorization {
+        let owner = SigningKey::from_bytes(&[41; 32]);
+        let mut signed = SignedGuestImportAuthorization {
             authorization: GuestImportAuthorization {
                 schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
                 placement_thread_id: "T-fixture".into(),
@@ -1444,8 +1464,13 @@ mod offline_fixture_tests {
             },
             // The adapter checks transport correlation, not the cryptographic
             // trust decision made by the independently provisioned guest.
-            signature_hex: "0".repeat(128),
+            signature_hex: String::new(),
         };
+        signed.signature_hex = hex::encode(
+            owner
+                .sign(&signed.authorization.signing_bytes().unwrap())
+                .to_bytes(),
+        );
         let canonical = canonical_json(&signed).unwrap();
         verify_signed_import_handoff(&canonical, &request).unwrap();
         let authorization = &signed.authorization;
@@ -1461,13 +1486,23 @@ mod offline_fixture_tests {
                 activation_request_digest: authorization.activation_request_digest.clone(),
                 supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
                 guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
-                owner_public_key_hex: "1".repeat(64),
+                owner_public_key_hex: hex::encode(owner.verifying_key().to_bytes()),
                 attachment_deadline_ms: authorization.attachment_deadline_ms,
             },
             signature_hex: "0".repeat(128),
         };
         let assignment_bytes = canonical_json(&assignment).unwrap();
         verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
+        let mut bad_signature = signed.clone();
+        bad_signature.signature_hex = "0".repeat(128);
+        assert!(verify_signed_assignment_handoff(&assignment_bytes, &bad_signature).is_err());
+        let mut bad_owner = assignment.clone();
+        bad_owner.assignment.owner_public_key_hex =
+            hex::encode(SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes());
+        assert!(
+            verify_signed_assignment_handoff(&canonical_json(&bad_owner).unwrap(), &signed)
+                .is_err()
+        );
         let mut changed_assignment = assignment.clone();
         changed_assignment.assignment.occurrence_id = "occ-other".into();
         assert!(
