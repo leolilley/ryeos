@@ -112,6 +112,17 @@ of the run-proxy stream. Provider terminal status alone is not guest-writer
 exclusion or hard-isolation qualification.
 
 There is currently no guest-side importer executable joining these stages.
+The controller now authors a node-root-signed occurrence assignment from the
+original bound allocation and seals it into the first activation contact with
+the separately signed import authorization and exact package. This adapter
+checks canonical shape and coordinate alignment only; it does not establish
+guest trust. A qualified guest runtime must independently pin the controller
+root and its own runtime manifest hash, verify the assignment first, and then
+verify the import under the delegated occurrence-owner key. The final
+assignment cannot be placed in Sandbox create-time environment: its occurrence
+ID and activation digest do not exist until after allocation. A future
+one-shot owner launch must carry it as bounded post-allocation input, and an
+ambiguous launch response must not cause another launch.
 `ryeos-external-execution::guest_staging::stage_uploaded_guest_package` already
 imports an exact pinned regular inode into a private generation and verifies
 the package, base CAS, limits and manifest. `guest_content` rechecks the
