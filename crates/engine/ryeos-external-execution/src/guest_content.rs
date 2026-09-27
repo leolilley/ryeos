@@ -19,10 +19,29 @@ use crate::guest_staging::StagedGuestPackage;
 /// handoff. Private scratch has no staged source and is represented by `None`;
 /// the occurrence owner must create and verify that slot separately. These
 /// handles do not exclude concurrent writers or authorize supervisor launch.
-pub(crate) struct VerifiedGuestContentHandles {
-    pub workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
-    pub runtime_mounts: Vec<Option<lillux::InheritedDescriptorAuthority>>,
-    pub content_records: Vec<lillux::InheritedDescriptorAuthority>,
+pub struct VerifiedGuestContentHandles {
+    pub(crate) workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
+    pub(crate) runtime_mounts: Vec<Option<lillux::InheritedDescriptorAuthority>>,
+    pub(crate) content_records: Vec<lillux::InheritedDescriptorAuthority>,
+}
+
+impl VerifiedGuestContentHandles {
+    /// Consume the checked handles for a trusted supervisor's subsequent
+    /// descriptor binding. These handles are content custody only: no caller
+    /// may infer stage identity, read-only mount or writer exclusion from them.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<lillux::InheritedDescriptorAuthority>,
+        Vec<Option<lillux::InheritedDescriptorAuthority>>,
+        Vec<lillux::InheritedDescriptorAuthority>,
+    ) {
+        (
+            self.workspace_outputs,
+            self.runtime_mounts,
+            self.content_records,
+        )
+    }
 }
 
 /// Verify the exact opened authorities, not merely their stage pathnames.
@@ -33,7 +52,20 @@ pub(crate) fn open_verified_staged_guest_content(
     retained: &ExternalGuestInputProjection,
 ) -> Result<VerifiedGuestContentHandles> {
     recheck_staged_guest_content(staged, retained)?;
-    let root = staged.root();
+    open_verified_mounted_guest_content(staged.root(), retained)
+}
+
+/// Open exact staged inputs from an already pinned guest source mount.
+///
+/// The owner must independently prove the mounted stage identity, read-only
+/// access and continuous exclusion of other writers. This checks the opened
+/// content against the retained projection and holds those same descriptors;
+/// it does not grant supervisor or candidate launch authority.
+pub fn open_verified_mounted_guest_content(
+    root: &lillux::PinnedDirectory,
+    retained: &ExternalGuestInputProjection,
+) -> Result<VerifiedGuestContentHandles> {
+    recheck_mounted_guest_content(root, retained)?;
     let workspace_outputs = retained
         .workspace_outputs
         .as_ref()

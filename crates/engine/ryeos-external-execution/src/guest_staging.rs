@@ -2344,6 +2344,30 @@ mod tests {
         assert_eq!(opened.runtime_mounts.len(), inputs.inputs.len());
         assert_eq!(opened.content_records.len(), inputs.record_descriptors().count());
         drop(opened);
+        let mounted =
+            crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
+                .unwrap();
+        assert_eq!(mounted.runtime_mounts.len(), inputs.inputs.len());
+        assert_eq!(mounted.content_records.len(), inputs.record_descriptors().count());
+        for (opened, (_, hash, bytes)) in mounted
+            .content_records
+            .iter()
+            .zip(inputs.record_descriptors())
+        {
+            let (actual, _) = opened.read_regular_file_stable_bounded(bytes).unwrap();
+            assert_eq!(actual.len() as u64, bytes);
+            assert_eq!(lillux::sha256_hex(&actual), hash);
+        }
+        for (opened, input) in mounted.runtime_mounts.iter().zip(&inputs.inputs) {
+            assert_eq!(
+                opened.is_none(),
+                matches!(
+                    input.content_authority,
+                    ryeos_external_execution_contract::GuestMountContentAuthority::PrivateScratch { .. }
+                )
+            );
+        }
+        drop(mounted);
         let config_source = staged
             .root()
             .open_pinned_regular(OsStr::new("input-00"), false)
@@ -2353,6 +2377,10 @@ mod tests {
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
         assert!(
             crate::guest_content::recheck_mounted_guest_content(staged.root(), &inputs).is_err()
+        );
+        assert!(
+            crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
+                .is_err()
         );
         assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
         config_source.set_mode(0o644).unwrap();
@@ -2379,6 +2407,10 @@ mod tests {
         writable_record.sync_all().unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
         assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
+        assert!(
+            crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
+                .is_err()
+        );
         writable_record.rewind().unwrap();
         writable_record.write_all(&product_manifest).unwrap();
         writable_record.sync_all().unwrap();
