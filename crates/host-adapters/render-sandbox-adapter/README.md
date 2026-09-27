@@ -372,6 +372,11 @@ The Render adapter interprets the bounded `probe_evidence` against the same
 binding's owner/account/snapshot/plan/region, controller public root, owner
 executable and runtime manifest. Neither a caller-provided JSON probe nor a
 synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
+Before wiring that comparison, derive `installed_owner_hash` from the exact
+captured product manifest and give `bundle_generation_hash` an explicit
+authenticated producer-source meaning. The signed placement binding does not
+name that latter field; copying it from `probe_evidence` into the expectation
+would compare the provider claim with itself and prove nothing.
 The proof must be rechecked at the fresh reservation/contact cut, while
 recovery of an already contacted occurrence uses its retained exact proof and
 does not select a newer witness. The existing `guest-runtime` Worker slot
