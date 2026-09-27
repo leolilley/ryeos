@@ -650,8 +650,8 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use ryeos_external_execution_contract::staging_package::{
         GUEST_STAGING_PACKAGE_SCHEMA, GuestStagingStreamWriter,
     };
@@ -672,8 +672,8 @@ mod tests {
         };
         use ryeos_state::external_execution::transport::{
             EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
-            ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
-            ExternalSupervisorBootstrap, external_tls_root_bundle_digest,
+            ExternalNetworkInputPolicy, ExternalNetworkInputSelection, ExternalSupervisorBootstrap,
+            external_tls_root_bundle_digest,
         };
 
         let roots = vec![STANDARD.encode(b"fixture DER root")];
@@ -1213,9 +1213,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.path() == "bootstrap")
             .unwrap();
-        let GuestStagingEntry::RegularFile {
-            bytes, sha256, ..
-        } = bootstrap_entry else {
+        let GuestStagingEntry::RegularFile { bytes, sha256, .. } = bootstrap_entry else {
             panic!("bootstrap fixture lost regular-file inventory");
         };
         *bytes = bootstrap.len() as u64;
@@ -1548,7 +1546,9 @@ mod tests {
         let overlapping_occurrence = lillux::PinnedDirectory::open(overlapping_dir.path())
             .unwrap()
             .unwrap();
-        overlapping_occurrence.tighten_owner_private_directory().unwrap();
+        overlapping_occurrence
+            .tighten_owner_private_directory()
+            .unwrap();
         let overlapping_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
             &overlapping_occurrence,
             &ticket,
@@ -1724,19 +1724,35 @@ mod tests {
             prepared.handles.content_records.len(),
             inputs.record_descriptors().count()
         );
-        assert!(prepared.handles.runtime_mounts[..3].iter().all(Option::is_some));
+        assert!(
+            prepared.handles.runtime_mounts[..3]
+                .iter()
+                .all(Option::is_some)
+        );
         assert!(prepared.handles.runtime_mounts[3].is_none());
         assert!(prepared.handles.workspace_outputs.is_none());
-        let private = prepared.create_private_scratch_once(&context, &inputs).unwrap();
+        let private = prepared
+            .create_private_scratch_once(&context, &inputs)
+            .unwrap();
         assert_eq!(private.observation.scratch.len(), 1);
         assert_eq!(private.observation.scratch[0].input_index, 3);
-        assert!(private.content.handles.runtime_mounts.iter().all(Option::is_some));
+        assert!(
+            private
+                .content
+                .handles
+                .runtime_mounts
+                .iter()
+                .all(Option::is_some)
+        );
         let scratch = private
             .private_parent
             .open_child_directory(OsStr::new("guest-scratch-03"))
             .unwrap()
             .unwrap();
-        assert_eq!(scratch.identity().unwrap(), private.observation.scratch[0].directory);
+        assert_eq!(
+            scratch.identity().unwrap(),
+            private.observation.scratch[0].directory
+        );
         assert!(scratch.entries_no_follow_bounded(0).unwrap().is_empty());
         let mounted_root = private
             .content
@@ -1744,17 +1760,13 @@ mod tests {
             .stage
             .resolve_under(&source_root)
             .unwrap();
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         assert!(opened.bind_execution_inputs(&inputs, vec![]).is_err());
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         assert!(
             opened
                 .bind_execution_inputs(
@@ -1767,11 +1779,9 @@ mod tests {
                 .is_err()
         );
         for index in [0, 4] {
-            let opened = crate::guest_content::open_verified_mounted_guest_content(
-                &mounted_root,
-                &inputs,
-            )
-            .unwrap();
+            let opened =
+                crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                    .unwrap();
             assert!(
                 opened
                     .bind_execution_inputs(
@@ -1788,11 +1798,9 @@ mod tests {
         let regular = regular_parent
             .open_pinned_regular_create(OsStr::new("not-scratch"), false, true, 0o600)
             .unwrap();
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         assert!(
             opened
                 .bind_execution_inputs(
@@ -1802,11 +1810,9 @@ mod tests {
                 .is_err()
         );
         scratch.set_mode(0o755).unwrap();
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         assert!(
             opened
                 .bind_execution_inputs(
@@ -1817,11 +1823,9 @@ mod tests {
         );
         scratch.set_mode(0o700).unwrap();
         let ambient_scratch = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         assert!(
             opened
                 .bind_execution_inputs(
@@ -1830,12 +1834,14 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch).unwrap());
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        assert!(
+            scratch
+                .remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch)
+                .unwrap()
+        );
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         let mut wrong_inputs = inputs.clone();
         wrong_inputs.inputs[0].authority_id = "different-authority".into();
         assert!(
@@ -1846,11 +1852,9 @@ mod tests {
                 )
                 .is_err()
         );
-        let opened = crate::guest_content::open_verified_mounted_guest_content(
-            &mounted_root,
-            &inputs,
-        )
-        .unwrap();
+        let opened =
+            crate::guest_content::open_verified_mounted_guest_content(&mounted_root, &inputs)
+                .unwrap();
         let bound = opened
             .bind_execution_inputs(
                 &inputs,
@@ -1858,7 +1862,10 @@ mod tests {
             )
             .unwrap();
         let (rebound, outputs, mounts, records) = bound.into_parts();
-        assert_eq!(rebound.identity_digest().unwrap(), inputs.identity_digest().unwrap());
+        assert_eq!(
+            rebound.identity_digest().unwrap(),
+            inputs.identity_digest().unwrap()
+        );
         assert!(outputs.is_none());
         assert_eq!(mounts.len(), inputs.inputs.len());
         assert_eq!(records.len(), inputs.record_descriptors().count());
@@ -1895,8 +1902,14 @@ mod tests {
         let (bound, plan) = private
             .bind_content_to_supervisor_request(&context, &inputs, request)
             .unwrap();
-        assert_eq!(plan.execution_inputs.identity_digest().unwrap(), inputs.identity_digest().unwrap());
-        assert_eq!(bound.inherited_fd_mappings.len(), 2 + inputs.inputs.len() + inputs.record_descriptors().count());
+        assert_eq!(
+            plan.execution_inputs.identity_digest().unwrap(),
+            inputs.identity_digest().unwrap()
+        );
+        assert_eq!(
+            bound.inherited_fd_mappings.len(),
+            2 + inputs.inputs.len() + inputs.record_descriptors().count()
+        );
         let mut expected_targets = vec![
             ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CANDIDATE_RUNTIME_FD,
             ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_PRIVATE_PARENT_FD,
@@ -1904,20 +1917,30 @@ mod tests {
         expected_targets.extend(&plan.runtime_mount_descriptors);
         expected_targets.extend(&plan.content_record_descriptors);
         assert_eq!(
-            bound.inherited_fd_mappings.iter().map(lillux::InheritedDescriptorMapping::target_descriptor).collect::<Vec<_>>(),
+            bound
+                .inherited_fd_mappings
+                .iter()
+                .map(lillux::InheritedDescriptorMapping::target_descriptor)
+                .collect::<Vec<_>>(),
             expected_targets
         );
         for (mapping, handle) in bound.inherited_fd_mappings[2..2 + inputs.inputs.len()]
             .iter()
             .zip(&private.content.handles.runtime_mounts)
         {
-            assert_eq!(mapping.source_descriptor().unwrap(), handle.as_ref().unwrap().inherited_descriptor().unwrap());
+            assert_eq!(
+                mapping.source_descriptor().unwrap(),
+                handle.as_ref().unwrap().inherited_descriptor().unwrap()
+            );
         }
         for (mapping, handle) in bound.inherited_fd_mappings[2 + inputs.inputs.len()..]
             .iter()
             .zip(&private.content.handles.content_records)
         {
-            assert_eq!(mapping.source_descriptor().unwrap(), handle.inherited_descriptor().unwrap());
+            assert_eq!(
+                mapping.source_descriptor().unwrap(),
+                handle.inherited_descriptor().unwrap()
+            );
         }
         assert!(!expected_targets.contains(&ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
         assert!(
@@ -1946,23 +1969,71 @@ mod tests {
                 .is_err(),
             "ambient private scratch content must refuse descriptor binding"
         );
-        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient).unwrap());
-        let artifacts = private.prepare_launch_artifacts_once(&context, &inputs).unwrap();
+        assert!(
+            scratch
+                .remove_empty_child_if_same(OsStr::new("ambient"), &ambient)
+                .unwrap()
+        );
+        let artifacts = private
+            .prepare_launch_artifacts_once(&context, &inputs)
+            .unwrap();
         assert_eq!(artifacts.observation.schema, 1);
-        assert_eq!(artifacts.observation.state_root, artifacts.state_root.identity().unwrap());
-        assert_eq!(artifacts.bootstrap_source.regular_file_observation().unwrap().size(), bootstrap.len() as u64);
-        assert_eq!(artifacts.supervisor.regular_file_observation().unwrap().size(), supervisor.len() as u64);
-        assert_eq!(artifacts.launcher.regular_file_observation().unwrap().size(), launcher.len() as u64);
-        assert!(artifacts.state_root.entries_no_follow_bounded(0).unwrap().is_empty());
-        assert!(artifacts.private.private_parent.entries_no_follow_bounded(1).is_ok());
+        assert_eq!(
+            artifacts.observation.state_root,
+            artifacts.state_root.identity().unwrap()
+        );
+        assert_eq!(
+            artifacts
+                .bootstrap_source
+                .regular_file_observation()
+                .unwrap()
+                .size(),
+            bootstrap.len() as u64
+        );
+        assert_eq!(
+            artifacts
+                .supervisor
+                .regular_file_observation()
+                .unwrap()
+                .size(),
+            supervisor.len() as u64
+        );
+        assert_eq!(
+            artifacts
+                .launcher
+                .regular_file_observation()
+                .unwrap()
+                .size(),
+            launcher.len() as u64
+        );
+        assert!(
+            artifacts
+                .state_root
+                .entries_no_follow_bounded(0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            artifacts
+                .private
+                .private_parent
+                .entries_no_follow_bounded(1)
+                .is_ok()
+        );
         let wrong_context = GuestImportContext {
             binding_hash: context.binding_hash,
             allocation_request_digest: context.allocation_request_digest,
             occurrence_id: "different-occurrence",
             activation_request_digest: context.activation_request_digest,
         };
-        assert!(artifacts.seal_supervisor_bootstrap(&wrong_context, &inputs).is_err());
-        let sealed = artifacts.seal_supervisor_bootstrap(&context, &inputs).unwrap();
+        assert!(
+            artifacts
+                .seal_supervisor_bootstrap(&wrong_context, &inputs)
+                .is_err()
+        );
+        let sealed = artifacts
+            .seal_supervisor_bootstrap(&context, &inputs)
+            .unwrap();
         assert_eq!(
             lillux::read_sealed_inherited_descriptor(
                 sealed.inherited_descriptor().unwrap(),
@@ -2011,7 +2082,8 @@ mod tests {
             lillux::read_sealed_inherited_descriptor(
                 sealed_mapping.source_descriptor().unwrap(),
                 ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
-            ).unwrap(),
+            )
+            .unwrap(),
             bootstrap
         );
         let executable = request.inherited_fd_mappings.iter().find(|mapping| {
@@ -2087,7 +2159,10 @@ mod tests {
         install_marker.set_mode(0o644).unwrap();
         assert_eq!(
             crate::guest_installation::recover_guest_occurrence(
-                &occurrence, &ticket, &context, &inputs,
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
             )
             .unwrap()
             .phase(),
@@ -2096,7 +2171,10 @@ mod tests {
         );
         assert!(
             crate::guest_installation::GuestOccurrenceOwner::begin(
-                &occurrence, &ticket, &context, &inputs,
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
             )
             .is_err(),
             "weakened ephemeral marker cannot permit a second import owner"
@@ -2131,11 +2209,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(launch_sha256, lillux::sha256_hex(&synthetic_launch_intent));
-        assert!(crate::guest_installation::create_launch_intent_record_for_test(
-            &owner_root,
-            &synthetic_launch_intent,
-        )
-        .is_err());
+        assert!(
+            crate::guest_installation::create_launch_intent_record_for_test(
+                &owner_root,
+                &synthetic_launch_intent,
+            )
+            .is_err()
+        );
         assert_eq!(
             launch_file,
             lillux::pinned_regular_file_identity(
@@ -2222,7 +2302,10 @@ mod tests {
         std::fs::rename(&scratch_path, &detached_scratch).unwrap();
         assert!(
             crate::guest_installation::recover_guest_occurrence(
-                &occurrence, &ticket, &context, &inputs,
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
             )
             .is_err(),
             "recovery must reject detached private scratch"
@@ -2230,7 +2313,10 @@ mod tests {
         std::fs::create_dir(&scratch_path).unwrap();
         assert!(
             crate::guest_installation::recover_guest_occurrence(
-                &occurrence, &ticket, &context, &inputs,
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
             )
             .is_err(),
             "recovery must reject replacement private scratch"
@@ -2281,7 +2367,9 @@ mod tests {
         let staged_source_root = lillux::PinnedDirectory::open(staged_source_dir.path())
             .unwrap()
             .unwrap();
-        staged_source_root.tighten_owner_private_directory().unwrap();
+        staged_source_root
+            .tighten_owner_private_directory()
+            .unwrap();
         let staged_owner = crate::guest_installation::GuestOccurrenceOwner::begin(
             &staged_root,
             &ticket,
@@ -2336,7 +2424,10 @@ mod tests {
                 .unwrap();
             source.tighten_owner_private_directory().unwrap();
             let prepared = crate::guest_installation::GuestOccurrenceOwner::begin(
-                &occurrence, &ticket, &context, &inputs,
+                &occurrence,
+                &ticket,
+                &context,
+                &inputs,
             )
             .unwrap()
             .stage_uploaded_with_source_root_for_test(
@@ -2377,7 +2468,9 @@ mod tests {
         );
         let (_committed_occurrence_dir, _committed_source_dir, committed_occurrence, prepared) =
             prepare_launch_occurrence();
-        let committed = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let committed = prepared
+            .commit_outer_launch_intent(&context, &inputs)
+            .unwrap();
         let committed_owner = committed_occurrence
             .open_child_directory(OsStr::new("guest-import-owner"))
             .unwrap()
@@ -2387,7 +2480,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let committed_bytes = committed_file.read_bounded(8 * 1024).unwrap();
-        assert_eq!(committed.record_sha256(), lillux::sha256_hex(&committed_bytes));
+        assert_eq!(
+            committed.record_sha256(),
+            lillux::sha256_hex(&committed_bytes)
+        );
         let sealed = committed.seal_record_for_supervisor().unwrap();
         let (sealed_bytes, _) = sealed.read_regular_file_stable_bounded(8 * 1024).unwrap();
         assert_eq!(sealed_bytes, committed_bytes);
@@ -2414,42 +2510,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(handoff.record_sha256(), committed.record_sha256());
-        assert_eq!(handoff.launcher_sha256(), decoded_bootstrap.launcher_artifact_hash);
+        assert_eq!(
+            handoff.launcher_sha256(),
+            decoded_bootstrap.launcher_artifact_hash
+        );
         let wrong_private_dir = tempfile::tempdir().unwrap();
         let wrong_private = lillux::PinnedDirectory::open(wrong_private_dir.path())
             .unwrap()
             .unwrap();
         wrong_private.tighten_owner_private_directory().unwrap();
-        assert!(crate::guest_installation::decode_mounted_supervisor_handoff(
-            &sealed_bytes,
-            &decoded_bootstrap,
-            &committed_state,
-            &committed_runtime,
-            &wrong_private,
-        )
-        .is_err());
+        assert!(
+            crate::guest_installation::decode_mounted_supervisor_handoff(
+                &sealed_bytes,
+                &decoded_bootstrap,
+                &committed_state,
+                &committed_runtime,
+                &wrong_private,
+            )
+            .is_err()
+        );
         let mut wrong_profile: serde_json::Value = serde_json::from_slice(&sealed_bytes).unwrap();
         wrong_profile["control_descriptors"] = serde_json::json!([50, 51, 52, 53, 54]);
-        assert!(crate::guest_installation::decode_mounted_supervisor_handoff(
-            lillux::canonical_json(&wrong_profile).unwrap().as_bytes(),
-            &decoded_bootstrap,
-            &committed_state,
-            &committed_runtime,
-            &committed_private,
-        )
-        .is_err());
+        assert!(
+            crate::guest_installation::decode_mounted_supervisor_handoff(
+                lillux::canonical_json(&wrong_profile).unwrap().as_bytes(),
+                &decoded_bootstrap,
+                &committed_state,
+                &committed_runtime,
+                &committed_private,
+            )
+            .is_err()
+        );
         assert_eq!(
             committed.record_file(),
-            &lillux::pinned_regular_file_identity(
-                &committed_file.try_clone_descriptor().unwrap()
-            )
-            .unwrap()
+            &lillux::pinned_regular_file_identity(&committed_file.try_clone_descriptor().unwrap())
+                .unwrap()
         );
-        assert!(crate::guest_installation::create_launch_intent_record_for_test(
-            &committed_owner,
-            &committed_bytes,
-        )
-        .is_err(), "committed launch intent cannot be replaced");
+        assert!(
+            crate::guest_installation::create_launch_intent_record_for_test(
+                &committed_owner,
+                &committed_bytes,
+            )
+            .is_err(),
+            "committed launch intent cannot be replaced"
+        );
         let mounted = committed
             .prepare_mounted_sandbox_request(&context, &inputs)
             .unwrap();
@@ -2474,14 +2578,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
         );
-        assert!(mounted_request
-            .target_channels
-            .iter()
-            .all(|(source, _)| *source != mounted_request.mounts[0].source_fd));
         assert!(
-            mounted.prepare_held_in_dedicated_owner().is_err(),
-            "a structural source fixture must not reach native held launch"
+            mounted_request
+                .target_channels
+                .iter()
+                .all(|(source, _)| *source != mounted_request.mounts[0].source_fd)
         );
+        let native_refusal = mounted
+            .prepare_held_in_dedicated_owner()
+            .err()
+            .expect("a structural source fixture must not reach native held launch");
+        assert!(format!("{native_refusal:#}").contains("source was not sealed"));
         assert_eq!(
             crate::guest_installation::recover_guest_occurrence(
                 &committed_occurrence,
@@ -2495,7 +2602,9 @@ mod tests {
         );
         let (changed_dir, _changed_source, _changed_occurrence, prepared) =
             prepare_launch_occurrence();
-        let changed = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let changed = prepared
+            .commit_outer_launch_intent(&context, &inputs)
+            .unwrap();
         std::fs::write(
             changed_dir
                 .path()
@@ -2509,11 +2618,17 @@ mod tests {
         );
         let (replaced_dir, _replaced_source, _replaced_occurrence, prepared) =
             prepare_launch_occurrence();
-        let replaced = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let replaced = prepared
+            .commit_outer_launch_intent(&context, &inputs)
+            .unwrap();
         let original = replaced_dir
             .path()
             .join("guest-import-owner/guest-supervisor-launch-intent.json");
-        std::fs::rename(&original, replaced_dir.path().join("detached-launch-record")).unwrap();
+        std::fs::rename(
+            &original,
+            replaced_dir.path().join("detached-launch-record"),
+        )
+        .unwrap();
         std::fs::write(&original, &committed_bytes).unwrap();
         assert!(
             replaced.seal_record_for_supervisor().is_err(),
@@ -2521,7 +2636,9 @@ mod tests {
         );
         let (predecessor_dir, _predecessor_source, predecessor_occurrence, prepared) =
             prepare_launch_occurrence();
-        let predecessor = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let predecessor = prepared
+            .commit_outer_launch_intent(&context, &inputs)
+            .unwrap();
         let predecessor_path = predecessor_dir
             .path()
             .join("guest-import-owner/guest-supervisor-launch-intent.json");
@@ -2545,38 +2662,53 @@ mod tests {
             "predecessor fixed-descriptor launch record cannot recover as mounted launch"
         );
         for child in ["candidate-private", "supervisor-state"] {
-            let (occurrence_dir, _source_dir, occurrence, prepared) =
-                prepare_launch_occurrence();
+            let (occurrence_dir, _source_dir, occurrence, prepared) = prepare_launch_occurrence();
             let original = occurrence_dir.path().join(child);
-            std::fs::rename(&original, occurrence_dir.path().join(format!("{child}-detached")))
-                .unwrap();
+            std::fs::rename(
+                &original,
+                occurrence_dir.path().join(format!("{child}-detached")),
+            )
+            .unwrap();
             assert!(
-                prepared.commit_outer_launch_intent(&context, &inputs).is_err(),
+                prepared
+                    .commit_outer_launch_intent(&context, &inputs)
+                    .is_err(),
                 "detached {child} must refuse before the one-way launch record"
             );
-            assert!(occurrence
-                .open_child_directory(OsStr::new("guest-import-owner"))
-                .unwrap()
-                .unwrap()
-                .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
-                .unwrap()
-                .is_none());
+            assert!(
+                occurrence
+                    .open_child_directory(OsStr::new("guest-import-owner"))
+                    .unwrap()
+                    .unwrap()
+                    .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+                    .unwrap()
+                    .is_none()
+            );
         }
         let (scratch_occurrence_dir, _scratch_source_dir, scratch_occurrence, prepared) =
             prepare_launch_occurrence();
         let scratch_path = scratch_occurrence_dir
             .path()
             .join("candidate-private/guest-scratch-03");
-        std::fs::rename(&scratch_path, scratch_occurrence_dir.path().join("detached-scratch"))
-            .unwrap();
-        assert!(prepared.commit_outer_launch_intent(&context, &inputs).is_err());
-        assert!(scratch_occurrence
-            .open_child_directory(OsStr::new("guest-import-owner"))
-            .unwrap()
-            .unwrap()
-            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
-            .unwrap()
-            .is_none());
+        std::fs::rename(
+            &scratch_path,
+            scratch_occurrence_dir.path().join("detached-scratch"),
+        )
+        .unwrap();
+        assert!(
+            prepared
+                .commit_outer_launch_intent(&context, &inputs)
+                .is_err()
+        );
+        assert!(
+            scratch_occurrence
+                .open_child_directory(OsStr::new("guest-import-owner"))
+                .unwrap()
+                .unwrap()
+                .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+                .unwrap()
+                .is_none()
+        );
         let (_ambient_occurrence_dir, _ambient_source_dir, ambient_occurrence, prepared) =
             prepare_launch_occurrence();
         ambient_occurrence
@@ -2586,16 +2718,20 @@ mod tests {
             .create_child(OsStr::new("ambient"), 0o700)
             .unwrap();
         assert!(
-            prepared.commit_outer_launch_intent(&context, &inputs).is_err(),
+            prepared
+                .commit_outer_launch_intent(&context, &inputs)
+                .is_err(),
             "nonempty supervisor state must refuse before the one-way record"
         );
-        assert!(ambient_occurrence
-            .open_child_directory(OsStr::new("guest-import-owner"))
-            .unwrap()
-            .unwrap()
-            .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
-            .unwrap()
-            .is_none());
+        assert!(
+            ambient_occurrence
+                .open_child_directory(OsStr::new("guest-import-owner"))
+                .unwrap()
+                .unwrap()
+                .open_pinned_regular(OsStr::new("guest-supervisor-launch-intent.json"), false)
+                .unwrap()
+                .is_none()
+        );
         let wrong_context = GuestImportContext {
             occurrence_id: "occ-other",
             ..context
@@ -2652,16 +2788,22 @@ mod tests {
         assert_eq!(staged.manifest(), &manifest);
         crate::guest_content::recheck_staged_guest_content(&staged, &inputs).unwrap();
         crate::guest_content::recheck_mounted_guest_content(staged.root(), &inputs).unwrap();
-        let opened = crate::guest_content::open_verified_staged_guest_content(&staged, &inputs)
-            .unwrap();
+        let opened =
+            crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).unwrap();
         assert_eq!(opened.runtime_mounts.len(), inputs.inputs.len());
-        assert_eq!(opened.content_records.len(), inputs.record_descriptors().count());
+        assert_eq!(
+            opened.content_records.len(),
+            inputs.record_descriptors().count()
+        );
         drop(opened);
         let mounted =
             crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
                 .unwrap();
         assert_eq!(mounted.runtime_mounts.len(), inputs.inputs.len());
-        assert_eq!(mounted.content_records.len(), inputs.record_descriptors().count());
+        assert_eq!(
+            mounted.content_records.len(),
+            inputs.record_descriptors().count()
+        );
         for (opened, (_, hash, bytes)) in mounted
             .content_records
             .iter()
@@ -2695,7 +2837,9 @@ mod tests {
             crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
                 .is_err()
         );
-        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
+        assert!(
+            crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err()
+        );
         config_source.set_mode(0o644).unwrap();
         let mut writable_config = staged
             .root()
@@ -2705,7 +2849,9 @@ mod tests {
         writable_config.write_all(b"bad").unwrap();
         writable_config.sync_all().unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
-        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
+        assert!(
+            crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err()
+        );
         use std::io::Seek as _;
         writable_config.rewind().unwrap();
         writable_config.write_all(&config).unwrap();
@@ -2719,7 +2865,9 @@ mod tests {
         writable_record.write_all(b"x").unwrap();
         writable_record.sync_all().unwrap();
         assert!(crate::guest_content::recheck_staged_guest_content(&staged, &inputs).is_err());
-        assert!(crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err());
+        assert!(
+            crate::guest_content::open_verified_staged_guest_content(&staged, &inputs).is_err()
+        );
         assert!(
             crate::guest_content::open_verified_mounted_guest_content(staged.root(), &inputs)
                 .is_err()
@@ -2862,7 +3010,12 @@ mod tests {
             retained_inputs.clone(),
             transfer.descriptor().clone(),
             None,
-            vec![config_authority, product_authority, source_authority, scratch_authority],
+            vec![
+                config_authority,
+                product_authority,
+                source_authority,
+                scratch_authority,
+            ],
             records,
             vec![],
         )

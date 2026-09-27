@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
-    SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD,
-    SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS, SUPERVISOR_STAGE_MOUNT_DESTINATION,
-    SUPERVISOR_STATE_ROOT_FD, fixed_guest_supervisor_descriptor_plan,
+    SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
+    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD,
+    fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::staging_package::{
     GuestImportContext, GuestImportTicket, GuestStagingEntry,
@@ -307,6 +307,7 @@ pub struct CommittedGuestSupervisorLaunchIntent {
 /// next transition must join the Lillux held/applied receipts and release.
 pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
+    _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
     request: lillux::LinuxSandboxRequest,
 }
@@ -315,10 +316,13 @@ pub struct PreparedGuestMountedSandbox {
 /// has not been released or adopted as a Ready guest. Dropping this value
 /// terminates the held target through Lillux.
 pub struct HeldGuestMountedSandbox {
+    // Fields drop in declaration order: settle the held namespace before
+    // releasing the committed occurrence lock and descriptor custody.
+    held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
     _committed: CommittedGuestSupervisorLaunchIntent,
+    _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
     request: lillux::LinuxSandboxRequest,
-    held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
 }
 
 impl HeldGuestMountedSandbox {
@@ -327,9 +331,15 @@ impl HeldGuestMountedSandbox {
     pub fn mount_preparation_receipt(
         &mut self,
     ) -> Result<lillux::LinuxSandboxMountPreparationReceipt> {
-        let receipt = self.held.held().mount_preparation_receipt().map_err(anyhow::Error::msg)?;
+        let receipt = self
+            .held
+            .held()
+            .mount_preparation_receipt()
+            .map_err(anyhow::Error::msg)?;
         ensure!(
-            receipt.matches_request(&self.request).map_err(anyhow::Error::msg)?,
+            receipt
+                .matches_request(&self.request)
+                .map_err(anyhow::Error::msg)?,
             "held supervisor mount preparation differs from committed request"
         );
         Ok(receipt)
@@ -413,22 +423,40 @@ impl CommittedGuestSupervisorLaunchIntent {
         let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
         let state = artifacts.state_root.inherited_descriptor_authority()?;
         let runtime = installed.runtime.inherited_descriptor_authority()?;
-        let private = artifacts.private.private_parent.inherited_descriptor_authority()?;
+        let private = artifacts
+            .private
+            .private_parent
+            .inherited_descriptor_authority()?;
         let launch_record = self.seal_record_for_supervisor()?;
-        let controls = [bootstrap, state, runtime, private, launch_record];
+        let controls: [lillux::InheritedDescriptorAuthority; 5] =
+            [bootstrap, state, runtime, private, launch_record]
+                .into_iter()
+                .map(|authority| {
+                    authority
+                        .duplicate_at_or_above(59)
+                        .map_err(anyhow::Error::msg)
+                })
+                .collect::<Result<Vec<_>>>()?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("supervisor control inventory changed length"))?;
         let channels = controls
             .iter()
             .zip(SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS)
             .map(|(authority, target)| {
                 Ok::<_, anyhow::Error>((
-                    authority.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                    authority
+                        .inherited_descriptor()
+                        .map_err(anyhow::Error::msg)?,
                     target,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let source_fd = self
+        let source_copy = self
             ._source_mount
             .mount_authority()
+            .duplicate_at_or_above(59)
+            .map_err(anyhow::Error::msg)?;
+        let source_fd = source_copy
             .inherited_descriptor()
             .map_err(anyhow::Error::msg)?;
         ensure!(
@@ -462,6 +490,7 @@ impl CommittedGuestSupervisorLaunchIntent {
         };
         Ok(PreparedGuestMountedSandbox {
             _committed: self,
+            _source_copy: source_copy,
             _controls: controls,
             request,
         })
@@ -473,7 +502,13 @@ impl PreparedGuestMountedSandbox {
     /// owner process. Lillux exits that process on a source mismatch or failed
     /// namespace transition; this must never run on a shared daemon worker.
     pub fn prepare_held_in_dedicated_owner(mut self) -> Result<HeldGuestMountedSandbox> {
-        let installed = &mut self._committed._prepared._artifacts.private.content._installed;
+        let installed = &mut self
+            ._committed
+            ._prepared
+            ._artifacts
+            .private
+            .content
+            ._installed;
         let stage_name = self._committed._source_mount.stage().name().to_owned();
         let source = match installed._source.take() {
             Some(GuestSourceCustody::Sealed(source)) => source,
@@ -486,16 +521,22 @@ impl PreparedGuestMountedSandbox {
             std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
             self.request.clone(),
         );
-        let receipt = held.held().mount_preparation_receipt().map_err(anyhow::Error::msg)?;
+        let receipt = held
+            .held()
+            .mount_preparation_receipt()
+            .map_err(anyhow::Error::msg)?;
         ensure!(
-            receipt.matches_request(&self.request).map_err(anyhow::Error::msg)?,
+            receipt
+                .matches_request(&self.request)
+                .map_err(anyhow::Error::msg)?,
             "held supervisor mount preparation differs from committed request"
         );
         Ok(HeldGuestMountedSandbox {
+            held,
             _committed: self._committed,
+            _source_copy: self._source_copy,
             _controls: self._controls,
             request: self.request,
-            held,
         })
     }
 }

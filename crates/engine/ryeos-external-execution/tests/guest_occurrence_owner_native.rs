@@ -9,6 +9,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution::guest_installation::{
     GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase, recover_guest_occurrence,
 };
@@ -23,15 +24,115 @@ use ryeos_external_execution_contract::{
 };
 use ryeos_state::objects::{ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 
-fn run() -> Result<()> {
+fn supervisor_bootstrap(
+    inputs: &ExternalGuestInputProjection,
+    launcher_hash: &str,
+    occurrence_id: &str,
+) -> Result<Vec<u8>> {
+    use ryeos_state::external_execution::admission::{
+        AdmittedExternalCandidateProgram, ExternalCandidateExecutionRoute,
+        ExternalCandidateProcFilesystem, ExternalCandidateRequirement,
+        ExternalCandidateRuntimeRecipe, PROTOCOL,
+    };
+    use ryeos_state::external_execution::transport::{
+        EXTERNAL_CHANNEL_ROUTE_CONTRACT, ExternalControllerTransportContract,
+        ExternalNetworkInputPolicy, ExternalNetworkInputSelection, ExternalSupervisorBootstrap,
+        external_tls_root_bundle_digest,
+    };
+    let roots = vec![STANDARD.encode(b"fixture DER root")];
+    let recipe = ExternalCandidateRuntimeRecipe {
+        schema: 2,
+        runtime_mount_destination: "/runtime/product".into(),
+        executable_relative_path: "bin/tool".into(),
+        argv0: "tool".into(),
+        arguments: vec!["exec-server".into(), "--listen".into(), "stdio".into()],
+        cwd: "/workspace".into(),
+        environment: BTreeMap::new(),
+        max_stdout_bytes: 1024 * 1024,
+        max_stderr_bytes: 1024 * 1024,
+        proc_filesystem: ExternalCandidateProcFilesystem::PidNamespaceNested,
+        contain_process_group: false,
+        nested_sandbox: true,
+    };
+    let recipe_digest = recipe.digest()?;
+    let requirement = ExternalCandidateRequirement {
+        schema: 6,
+        protocol: PROTOCOL.into(),
+        connector_protocol: ryeos_state::external_execution::admission::CONNECTOR_PROTOCOL.into(),
+        execution_route: ExternalCandidateExecutionRoute::ConnectorOnly,
+        required_lifecycle_capabilities: Default::default(),
+        provider_declaration_id: "codex-hosted".into(),
+        provider_configuration_destination: "environments.toml".into(),
+        runtime_product_declaration_id: "product".into(),
+        runtime_recipe: recipe,
+    };
+    let qualification_use =
+        ryeos_state::external_execution::admission::test_support::fixture_qualification_use(
+            &requirement,
+        )?;
+    let network_inputs = ExternalNetworkInputPolicy {
+        resolver: ExternalNetworkInputSelection {
+            source: "/etc/resolv.conf".into(),
+            max_bytes: 65_536,
+        },
+        hosts: ExternalNetworkInputSelection {
+            source: "/etc/hosts".into(),
+            max_bytes: 65_536,
+        },
+    };
+    ExternalSupervisorBootstrap {
+        schema: 7,
+        controller: ExternalControllerTransportContract {
+            schema: 2,
+            network_inputs,
+            https_origin: "https://controller.example:7443".into(),
+            route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
+            tls_root_bundle_digest: external_tls_root_bundle_digest(&roots)?,
+            connect_timeout_ms: 5_000,
+            request_timeout_ms: 10_000,
+            maximum_response_bytes: 1024 * 1024,
+        },
+        tls_root_certificates_der_base64: roots,
+        placement_thread_id: "T-native-test".into(),
+        occurrence_id: occurrence_id.into(),
+        allocation_request_digest: "2".repeat(64),
+        admitted_capsule_hash: "b".repeat(64),
+        base_snapshot_hash: inputs.base_snapshot.snapshot_hash.clone(),
+        execution_binding_hash: "d".repeat(64),
+        supervisor_runtime_hash: "e".repeat(64),
+        launcher_artifact_hash: launcher_hash.into(),
+        candidate_program: AdmittedExternalCandidateProgram {
+            requirement,
+            qualification_use,
+            runtime_manifest_kind: ryeos_state::objects::EXTERNAL_CONTENT_MANIFEST_KIND.into(),
+            runtime_manifest_hash: "e".repeat(64),
+            runtime_witness_hash: "1".repeat(64),
+            qualification_attestation_hash: "2".repeat(64),
+            selection_identity_digest: "3".repeat(64),
+            runtime_recipe_digest: recipe_digest,
+        }
+        .into(),
+        guest_input_identity: inputs.identity_digest()?,
+        guest_inputs: inputs.clone(),
+        owner_public_key: ryeos_state::external_execution::encode_channel_public_key(
+            &lillux::crypto::SigningKey::from_bytes(&[41; 32]).verifying_key(),
+        )?,
+        bootstrap_capability: STANDARD.encode([42_u8; 32]),
+        attachment_deadline_ms: 2_000_000,
+        execution_timeout_seconds: 60,
+        post_execution_timeout_seconds: 120,
+        candidate_export_max_bytes: 512 * 1024,
+        channel_max_bytes: 1024 * 1024,
+    }
+    .canonical_bytes()
+}
+
+fn run(fixture_path: &std::path::Path) -> Result<()> {
     // Keep durable fixture paths outside /tmp: Lillux replaces /tmp with the
     // process-private source mount after all uploaded bytes are pinned. The
     // invocation's writable working tree is also available on hosts where
     // /var/tmp is deliberately read-only.
-    let fixture = tempfile::Builder::new()
-        .prefix("ryeos-guest-occurrence-native-")
-        .tempdir_in(std::env::current_dir()?)?;
-    let state_path = fixture.path().join("state");
+    let state_path = fixture_path.join("state");
     std::fs::create_dir(&state_path)?;
     let db = ryeos_state::StateDb::open(&state_path, Arc::new(ryeos_state::TrustStore::new()))?;
     let authority = db.pinned_authority()?;
@@ -103,7 +204,6 @@ fn run() -> Result<()> {
     let mut entries = directory_entries;
     entries.extend(file_entries);
     let configuration = b"native-config";
-    let bootstrap = b"native-bootstrap";
     let launcher = b"native-launcher";
     let supervisor = b"native-supervisor";
     let inputs = ExternalGuestInputProjection {
@@ -133,6 +233,8 @@ fn run() -> Result<()> {
         executable_search: Vec::new(),
         environment: BTreeMap::new(),
     };
+    let bootstrap =
+        supervisor_bootstrap(&inputs, &lillux::sha256_hex(launcher), "occ-native-test")?;
     for (path, mode, bytes) in [
         ("bootstrap", 0o600, bootstrap.as_slice()),
         ("input-00", 0o644, configuration.as_slice()),
@@ -152,7 +254,7 @@ fn run() -> Result<()> {
         schema: GUEST_STAGING_PACKAGE_SCHEMA,
         activation_request_digest: "c".repeat(64),
         guest_input_identity: inputs.identity_digest()?,
-        bootstrap_sha256: lillux::sha256_hex(bootstrap),
+        bootstrap_sha256: lillux::sha256_hex(&bootstrap),
         supervisor_sha256: lillux::sha256_hex(supervisor),
         launcher_sha256: lillux::sha256_hex(launcher),
         total_regular_bytes: files.values().map(|bytes| bytes.len() as u64).sum(),
@@ -177,8 +279,8 @@ fn run() -> Result<()> {
         )?;
     }
     let bytes = writer.finish()?;
-    let upload_dir = fixture.path().join("upload");
-    let occurrence_dir = fixture.path().join("occurrence");
+    let upload_dir = fixture_path.join("upload");
+    let occurrence_dir = fixture_path.join("occurrence");
     std::fs::create_dir(&upload_dir)?;
     std::fs::create_dir(&occurrence_dir)?;
     let upload_parent = lillux::PinnedDirectory::open(&upload_dir)?.context("upload vanished")?;
@@ -216,6 +318,14 @@ fn run() -> Result<()> {
         occurrence_id: &ticket.occurrence_id,
         activation_request_digest: &ticket.activation_request_digest,
     };
+    std::fs::write(
+        fixture_path.join("ticket.json"),
+        serde_json::to_vec(&ticket)?,
+    )?;
+    std::fs::write(
+        fixture_path.join("inputs.json"),
+        serde_json::to_vec(&inputs)?,
+    )?;
     let owner = GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs)?;
     // No test-harness thread exists here. The old /tmp is replaced, while the
     // exact upload and durable occurrence remain pinned outside that mount.
@@ -264,17 +374,23 @@ fn run() -> Result<()> {
             .is_err(),
         "installed source remained writable"
     );
-    drop(installed);
+    let prepared = installed
+        .prepare_content_for_adoption(&context, &inputs)?
+        .create_private_scratch_once(&context, &inputs)?
+        .prepare_launch_artifacts_once(&context, &inputs)?
+        .prepare_supervisor_request(&context, &inputs, 10.0)?;
+    let committed = prepared.commit_outer_launch_intent(&context, &inputs)?;
+    let mounted = committed.prepare_mounted_sandbox_request(&context, &inputs)?;
+    let mut held = mounted.prepare_held_in_dedicated_owner()?;
+    let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs).is_err(),
-        "completed native import admitted a second owner"
+        receipt.mount_count > 0,
+        "held native target has no prepared mounts"
     );
-    ensure!(
-        recover_guest_occurrence(&occurrence, &ticket, &context, &inputs)?.phase()
-            == &GuestOccurrenceRecoveryPhase::InstallationUncertain,
-        "dropped native custody became adoptable"
-    );
-    println!("native guest occurrence source stage, seal, and custody-drop recovery passed");
+    drop(held);
+    // Native preparation changes this process's mount namespace. The parent
+    // test driver retains the host-side fixture and cleans it after exit.
+    println!("native guest sealed-source held preparation passed");
     Ok(())
 }
 
@@ -283,8 +399,77 @@ fn main() {
         println!("native guest occurrence probe skipped (set RYEOS_GUEST_OCCURRENCE_NATIVE=1)");
         return;
     }
-    if let Err(error) = run() {
-        eprintln!("native guest occurrence probe failed: {error:#}");
-        std::process::exit(1);
+    if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() == Ok("1") {
+        let root = std::env::var_os("RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT")
+            .expect("native child fixture root is absent");
+        if let Err(error) = run(std::path::Path::new(&root)) {
+            eprintln!("native guest occurrence probe failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
     }
+    let fixture = tempfile::Builder::new()
+        .prefix("ryeos-guest-occurrence-native-")
+        .tempdir_in(std::env::current_dir().expect("current test directory"))
+        .expect("create host-side native fixture");
+    let output = lillux::run(lillux::SubprocessRequest {
+        cmd: std::env::current_exe()
+            .expect("native test binary")
+            .to_string_lossy()
+            .into_owned(),
+        argv0: None,
+        args: Vec::new(),
+        cwd: None,
+        envs: vec![
+            ("RYEOS_GUEST_OCCURRENCE_NATIVE".into(), "1".into()),
+            ("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD".into(), "1".into()),
+            (
+                "RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT".into(),
+                fixture.path().to_string_lossy().into_owned(),
+            ),
+        ],
+        stdin_data: None,
+        timeout: 30.0,
+        limits: None,
+        inherited_fds: Vec::new(),
+        inherited_fd_mappings: Vec::new(),
+        supervised_status: None,
+    });
+    assert!(
+        output.success && !output.timed_out && !output.stdout_truncated && !output.stderr_truncated,
+        "native owner failed: exit={} timeout={} stdout={} stderr={}",
+        output.exit_code,
+        output.timed_out,
+        output.stdout,
+        output.stderr
+    );
+    let ticket: GuestImportTicket = serde_json::from_slice(
+        &std::fs::read(fixture.path().join("ticket.json")).expect("retained import ticket"),
+    )
+    .expect("decode retained import ticket");
+    let inputs: ExternalGuestInputProjection = serde_json::from_slice(
+        &std::fs::read(fixture.path().join("inputs.json")).expect("retained guest inputs"),
+    )
+    .expect("decode retained guest inputs");
+    let context = GuestImportContext {
+        binding_hash: &ticket.binding_hash,
+        allocation_request_digest: &ticket.allocation_request_digest,
+        occurrence_id: &ticket.occurrence_id,
+        activation_request_digest: &ticket.activation_request_digest,
+    };
+    let occurrence = lillux::PinnedDirectory::open(&fixture.path().join("occurrence"))
+        .expect("open retained occurrence")
+        .expect("retained occurrence exists");
+    assert_eq!(
+        recover_guest_occurrence(&occurrence, &ticket, &context, &inputs)
+            .expect("recover completed owner record")
+            .phase(),
+        &GuestOccurrenceRecoveryPhase::LaunchUncertain,
+        "held preparation cannot authorize a second launch after owner exit"
+    );
+    assert!(
+        GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs).is_err(),
+        "completed native occurrence admitted a second owner"
+    );
+    print!("{}", output.stdout);
 }

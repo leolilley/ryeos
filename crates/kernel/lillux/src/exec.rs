@@ -884,6 +884,37 @@ impl InheritedDescriptorAuthority {
         }
     }
 
+    /// Duplicate this registered authority above a caller's fixed child-FD
+    /// inventory. The duplicate remains a registered, CLOEXEC parent handle;
+    /// it does not grant a new content or filesystem authority. Sandbox
+    /// callers retain it through the exact held launch so a target coordinate
+    /// cannot alias a source descriptor in the inherited request.
+    pub fn duplicate_at_or_above(&self, minimum_fd: u32) -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsRawFd as _, FromRawFd as _};
+            let minimum = i32::try_from(minimum_fd.max(3))
+                .map_err(|_| "minimum inherited descriptor exceeds RawFd".to_owned())?;
+            let lease = retain_fork_sensitive_descriptors();
+            let duplicate =
+                unsafe { libc::fcntl(self.file().as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum) };
+            if duplicate < 0 {
+                return Err(format!(
+                    "duplicate inherited authority above {minimum}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: F_DUPFD_CLOEXEC returned one uniquely owned descriptor
+            // under the fork-sensitive lease acquired before duplication.
+            Self::from_owned_file(unsafe { std::fs::File::from_raw_fd(duplicate) }, &lease)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = minimum_fd;
+            Err("inherited descriptor duplication is unavailable on this platform".to_owned())
+        }
+    }
+
     pub fn retain_for_child(&self, inherited_fds: &mut Vec<Self>) {
         inherited_fds.push(self.clone());
     }
@@ -1458,6 +1489,27 @@ mod inherited_directory_traversal_tests {
         );
     }
 
+    #[test]
+    fn registered_authority_duplication_avoids_fixed_target_coordinates() {
+        let fixture = tempfile::tempdir().unwrap();
+        let authority = {
+            let lease = retain_fork_sensitive_descriptors();
+            let file = std::fs::File::open(fixture.path()).unwrap();
+            InheritedDescriptorAuthority::from_owned_file(file, &lease).unwrap()
+        };
+        let duplicate = authority.duplicate_at_or_above(59).unwrap();
+        assert!(duplicate.inherited_descriptor().unwrap() >= 59);
+        assert_ne!(
+            duplicate.inherited_descriptor().unwrap(),
+            authority.inherited_descriptor().unwrap()
+        );
+        assert!(authority.same_file_identity(&duplicate).unwrap());
+        assert_ne!(
+            unsafe { libc::fcntl(duplicate.file().as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn private_descendant_from_path_descriptor_survives_root_rename() {
@@ -1573,10 +1625,11 @@ mod inherited_directory_traversal_tests {
             .open_directory_descendant(Path::new("prepared/home"))
             .unwrap()
             .unwrap();
-        assert!(root
-            .open_directory_descendant(Path::new("prepared/absent"))
-            .unwrap()
-            .is_none());
+        assert!(
+            root.open_directory_descendant(Path::new("prepared/absent"))
+                .unwrap()
+                .is_none()
+        );
         assert!(!parent.path().join("prepared/absent").exists());
         for path in ["", "prepared/../home", "prepared//home", "/absolute"] {
             assert!(root.open_directory_descendant(Path::new(path)).is_err());
@@ -1595,9 +1648,10 @@ mod inherited_directory_traversal_tests {
         assert!(!expected.same_file_identity(&replacement).unwrap());
         std::os::unix::fs::symlink(parent.path().join("moved"), parent.path().join("link"))
             .unwrap();
-        assert!(root
-            .open_directory_descendant(Path::new("link/home"))
-            .is_err());
+        assert!(
+            root.open_directory_descendant(Path::new("link/home"))
+                .is_err()
+        );
     }
 }
 
@@ -6726,7 +6780,10 @@ mod applied_status_tests {
         .into_bytes();
         assert!(run(&[pid.clone(), wrong_schema]).1.is_err());
         let mut missing_echo = serde_json::to_value(receipt(42)).unwrap();
-        missing_echo.as_object_mut().unwrap().remove("post_release_mount_view");
+        missing_echo
+            .as_object_mut()
+            .unwrap()
+            .remove("post_release_mount_view");
         let missing_echo = format!(
             "{}\n",
             serde_json::json!({"schema":TEST_SCHEMA,"applied-launch":missing_echo})
@@ -7955,7 +8012,10 @@ mod exact_inheritance_tests {
             contents.len() as isize
         );
         assert_eq!(&contents, b"permitted");
-        let raw_fd: i32 = std::env::var("LILLUX_EXACT_RAW_FD").unwrap().parse().unwrap();
+        let raw_fd: i32 = std::env::var("LILLUX_EXACT_RAW_FD")
+            .unwrap()
+            .parse()
+            .unwrap();
         let mut raw_contents = [0_u8; 9];
         assert_eq!(
             unsafe {
@@ -8009,9 +8069,13 @@ mod exact_inheritance_tests {
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
-        permitted.bind_to_subprocess_request(&mut request, 50).unwrap();
+        permitted
+            .bind_to_subprocess_request(&mut request, 50)
+            .unwrap();
         raw.retain_for_child(&mut request.inherited_fds);
-        executable.bind_as_subprocess_executable(&mut request, 60).unwrap();
+        executable
+            .bind_as_subprocess_executable(&mut request, 60)
+            .unwrap();
         let result = lib_spawn_exact_inheritance_until(
             request,
             crate::time::MonotonicDeadline::after(Duration::from_secs(10)),
