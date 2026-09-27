@@ -29,12 +29,17 @@ use crate::runtime::{
 /// It does not launch a candidate or contact the controller.
 pub fn adopt_mounted_supervisor_content(
     staged_root: &lillux::PinnedDirectory,
+    expected_stage: &lillux::PinnedDirectoryIdentity,
     private_parent: &lillux::PinnedDirectory,
     retained: &ExternalGuestInputProjection,
     expected_launcher_sha256: &str,
 ) -> Result<(lillux::InheritedDescriptorAuthority, BoundGuestMountedContent)> {
     retained.validate()?;
     staged_root.require_owner_private_directory()?;
+    ensure!(
+        staged_root.identity()? == *expected_stage,
+        "mounted guest stage differs from retained generation"
+    );
     private_parent.require_owner_private_directory()?;
     staged_root.require_disjoint_directory_tree(private_parent)?;
     let launcher = staged_root
@@ -227,8 +232,15 @@ mod tests {
         };
         inputs.validate().unwrap();
         let launcher_hash = lillux::sha256_hex(launcher_bytes);
-        let (opened_launcher, bound) =
-            adopt_mounted_supervisor_content(&staged, &private, &inputs, &launcher_hash).unwrap();
+        let stage_identity = staged.identity().unwrap();
+        let (opened_launcher, bound) = adopt_mounted_supervisor_content(
+            &staged,
+            &stage_identity,
+            &private,
+            &inputs,
+            &launcher_hash,
+        )
+        .unwrap();
         assert_eq!(
             opened_launcher
                 .digest_regular_file_stable_exact(&opened_launcher.regular_file_observation().unwrap())
@@ -245,9 +257,23 @@ mod tests {
         }
         assert!(adopt_mounted_supervisor_content(
             &staged,
+            &stage_identity,
             &private,
             &inputs,
             &"0".repeat(64),
+        )
+        .is_err());
+        let other_stage_dir = tempfile::tempdir().unwrap();
+        let other_stage = lillux::PinnedDirectory::open(other_stage_dir.path())
+            .unwrap()
+            .unwrap();
+        other_stage.tighten_owner_private_directory().unwrap();
+        assert!(adopt_mounted_supervisor_content(
+            &staged,
+            &other_stage.identity().unwrap(),
+            &private,
+            &inputs,
+            &launcher_hash,
         )
         .is_err());
         let missing_private_dir = tempfile::tempdir().unwrap();
@@ -257,6 +283,7 @@ mod tests {
         missing_private.tighten_owner_private_directory().unwrap();
         assert!(adopt_mounted_supervisor_content(
             &staged,
+            &stage_identity,
             &missing_private,
             &inputs,
             &launcher_hash,
@@ -265,6 +292,7 @@ mod tests {
         let ambient = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
         assert!(adopt_mounted_supervisor_content(
             &staged,
+            &stage_identity,
             &private,
             &inputs,
             &launcher_hash,
