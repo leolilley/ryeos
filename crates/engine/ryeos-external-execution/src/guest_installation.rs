@@ -425,6 +425,25 @@ impl ReleasedGuestMountedSandbox {
         )?;
         Ok(Some(receipt))
     }
+
+    /// Refuse an already-dead supervisor before attachment. A pending exit
+    /// observation is only a point-in-time fact: it cannot establish that
+    /// exec succeeded, that the target stays live, or that Ready is authentic.
+    pub fn refuse_if_target_exited(&mut self) -> Result<()> {
+        if let Some(exit) = self
+            .held
+            .held()
+            .try_observe_target_exit()
+            .map_err(anyhow::Error::msg)?
+        {
+            anyhow::bail!(
+                "released supervisor exited before authenticated attachment: {:?}; launch_failure={}",
+                exit.exit(),
+                exit.launch_failure().is_some()
+            );
+        }
+        Ok(())
+    }
 }
 
 fn check_applied_supervisor_receipt(

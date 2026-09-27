@@ -408,6 +408,23 @@ fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
             released.try_observe_applied_launch()? == Some(applied),
             "repeated applied-launch point read changed the sole target receipt"
         );
+        let dead = loop {
+            match released.refuse_if_target_exited() {
+                Ok(()) => {}
+                Err(error) => break error,
+            }
+            ensure!(
+                !deadline.has_elapsed(),
+                "placeholder supervisor did not reach terminal refusal"
+            );
+            lillux::time::sleep(lillux::time::Duration::from_millis(10));
+        };
+        ensure!(
+            dead.to_string()
+                .contains("exited before authenticated attachment")
+                && dead.to_string().contains("launch_failure=true"),
+            "released supervisor had an unrelated terminal refusal: {dead:#}"
+        );
         drop(released);
     } else {
         drop(held);
