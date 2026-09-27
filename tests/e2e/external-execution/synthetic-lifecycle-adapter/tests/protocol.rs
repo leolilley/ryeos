@@ -5741,6 +5741,7 @@ fn exercise_activation_fault(fault: &str) {
         occurrence: occurrence.clone(),
         activation: activation.clone(),
         guest_input_identity: guest_inputs.identity_digest().unwrap(),
+        guest_input_projection: guest_inputs.clone(),
         import_ticket: ryeos_external_execution_contract::staging_package::GuestImportTicket {
             schema: ryeos_external_execution_contract::staging_package::GUEST_IMPORT_TICKET_SCHEMA,
             binding_hash: "b".repeat(64),

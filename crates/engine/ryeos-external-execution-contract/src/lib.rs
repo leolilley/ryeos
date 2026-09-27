@@ -969,6 +969,11 @@ pub enum LifecycleAdapterRequest {
         /// Projection descriptor numbers belong to the controller process and
         /// must never be interpreted as adapter-local file descriptors.
         guest_input_identity: String,
+        /// Semantic staging expectations sent separately from uploaded bytes.
+        /// Its descriptor coordinates are identifiers, not adapter or guest
+        /// process file descriptors. The importer must remap them only after
+        /// exact package verification and private staging.
+        guest_input_projection: ExternalGuestInputProjection,
         guest_package: LifecycleGuestPackageDelivery,
         /// Carried separately from package bytes. The guest must still join
         /// this against independently retained placement before import.
@@ -1203,6 +1208,7 @@ impl LifecycleAdapterRequest {
                 occurrence,
                 activation,
                 guest_input_identity,
+                guest_input_projection,
                 guest_package,
                 import_ticket,
                 ..
@@ -1210,6 +1216,7 @@ impl LifecycleAdapterRequest {
                 occurrence.validate()?;
                 activation.validate()?;
                 digest(guest_input_identity, "lifecycle guest input identity")?;
+                guest_input_projection.validate()?;
                 guest_package.validate()?;
                 import_ticket.validate_for_context(&staging_package::GuestImportContext {
                     binding_hash: &common.binding_hash,
@@ -1218,7 +1225,8 @@ impl LifecycleAdapterRequest {
                     activation_request_digest: &activation.activation_request_digest,
                 })?;
                 ensure!(
-                    import_ticket.guest_input_identity == *guest_input_identity
+                    guest_input_projection.identity_digest()? == *guest_input_identity
+                        && import_ticket.guest_input_identity == *guest_input_identity
                         && import_ticket.payload_sha256 == guest_package.payload_sha256
                         && import_ticket.manifest_sha256 == guest_package.manifest_sha256
                         && import_ticket.regular_bytes == guest_package.regular_bytes
@@ -2327,6 +2335,8 @@ mod tests {
     #[test]
     fn activation_import_ticket_is_separate_and_exactly_correlated() {
         let digest = |byte: char| byte.to_string().repeat(64);
+        let guest_input_projection = guest_projection();
+        let guest_input_identity = guest_input_projection.identity_digest().unwrap();
         let activation = SupervisorActivationIntent {
             activation_request_digest: digest('a'),
             supervisor_runtime_hash: digest('b'),
@@ -2353,7 +2363,7 @@ mod tests {
             allocation_request_digest: occurrence.request_digest.clone(),
             occurrence_id: occurrence.occurrence_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
-            guest_input_identity: digest('1'),
+            guest_input_identity: guest_input_identity.clone(),
             payload_sha256: package.payload_sha256.clone(),
             manifest_sha256: package.manifest_sha256.clone(),
             framed_bytes: package.framed_bytes,
@@ -2369,7 +2379,8 @@ mod tests {
             common: common(),
             occurrence,
             activation,
-            guest_input_identity: digest('1'),
+            guest_input_identity,
+            guest_input_projection,
             guest_package: package,
             import_ticket: ticket,
         };
@@ -2378,6 +2389,32 @@ mod tests {
         let decoded: LifecycleAdapterRequest =
             from_json_slice_strict(&encoded, encoded.len()).unwrap();
         assert_eq!(decoded, request);
+        let mut missing_projection = serde_json::to_value(&request).unwrap();
+        missing_projection
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_input_projection");
+        assert!(serde_json::from_value::<LifecycleAdapterRequest>(missing_projection).is_err());
+        let mut unknown_projection_field = serde_json::to_value(&request).unwrap();
+        unknown_projection_field["guest_input_projection"]["unknown"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<LifecycleAdapterRequest>(unknown_projection_field).is_err()
+        );
+        let mut relocated_projection = serde_json::to_value(&request).unwrap();
+        relocated_projection["guest_input_projection"]["base_snapshot"]["descriptor"] =
+            serde_json::json!(80);
+        relocated_projection["guest_input_projection"]["inputs"][0]["descriptor"] =
+            serde_json::json!(81);
+        relocated_projection["guest_input_projection"]["inputs"][0]["content_authority"]["manifest_descriptor"] =
+            serde_json::json!(82);
+        let relocated: LifecycleAdapterRequest =
+            serde_json::from_value(relocated_projection).unwrap();
+        relocated.validate().unwrap();
+        let mut changed_projection = serde_json::to_value(&request).unwrap();
+        changed_projection["guest_input_projection"]["inputs"][0]["destination"] =
+            serde_json::json!("/runtime/changed");
+        let changed: LifecycleAdapterRequest = serde_json::from_value(changed_projection).unwrap();
+        assert!(changed.validate().is_err());
         for field in [
             "binding_hash",
             "allocation_request_digest",

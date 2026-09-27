@@ -340,11 +340,13 @@ impl ExecutableExternalPlacementBackend {
             );
             if let LifecycleAdapterRequest::ActivateSupervisor {
                 guest_input_identity,
+                guest_input_projection,
                 ..
             } = request
             {
                 ensure!(
-                    guest_inputs.identity_digest()? == *guest_input_identity,
+                    guest_inputs.identity_digest()? == *guest_input_identity
+                        && guest_inputs.projection() == guest_input_projection,
                     "external guest input identity changed at package handoff"
                 );
             }
@@ -744,6 +746,11 @@ impl ExecutableExternalPlacementBackend {
                 occurrence: occurrence_wire,
                 activation,
                 guest_input_identity: intent.guest_input_identity.clone(),
+                guest_input_projection: activation_authority
+                    .context("first activation lost its guest input authority")?
+                    .guest_inputs()
+                    .projection()
+                    .clone(),
                 import_ticket: import_ticket.context("first activation lost its import ticket")?,
                 guest_package: LifecycleGuestPackageDelivery {
                     descriptor: package_authority
