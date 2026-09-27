@@ -12,6 +12,8 @@ use crate::staging_package::{GuestImportContext, GuestImportTicket};
 use crate::{ExternalGuestInputProjection, canonical_json};
 
 pub const GUEST_IMPORT_AUTHORIZATION_SCHEMA: u32 = 1;
+pub const GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA: u32 = 1;
+pub const MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize = 4 * 1024;
 pub const MAX_GUEST_IMPORT_AUTHORIZATION_BYTES: usize = 256 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-import-authorization.v1\0";
 
@@ -29,6 +31,126 @@ pub struct GuestOccurrenceAssignment<'a> {
     pub supervisor_runtime_hash: &'a str,
     pub guest_runtime_manifest_hash: &'a str,
     pub attachment_deadline_ms: i64,
+}
+
+/// Wire form for an occurrence assignment delivered independently by the
+/// trusted guest runtime. Parsing this value does not establish its origin:
+/// the importer must pin and verify the protected assignment source before
+/// comparing it with an uploaded package or signed authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestOccurrenceAssignmentDocument {
+    pub schema: u32,
+    pub placement_thread_id: String,
+    pub admitted_capsule_hash: String,
+    pub base_snapshot_hash: String,
+    pub execution_binding_hash: String,
+    pub allocation_request_digest: String,
+    pub occurrence_id: String,
+    pub activation_request_digest: String,
+    pub supervisor_runtime_hash: String,
+    pub guest_runtime_manifest_hash: String,
+    pub attachment_deadline_ms: i64,
+}
+
+impl GuestOccurrenceAssignmentDocument {
+    pub fn borrowed(&self) -> GuestOccurrenceAssignment<'_> {
+        GuestOccurrenceAssignment {
+            placement_thread_id: &self.placement_thread_id,
+            admitted_capsule_hash: &self.admitted_capsule_hash,
+            base_snapshot_hash: &self.base_snapshot_hash,
+            execution_binding_hash: &self.execution_binding_hash,
+            allocation_request_digest: &self.allocation_request_digest,
+            occurrence_id: &self.occurrence_id,
+            activation_request_digest: &self.activation_request_digest,
+            supervisor_runtime_hash: &self.supervisor_runtime_hash,
+            guest_runtime_manifest_hash: &self.guest_runtime_manifest_hash,
+            attachment_deadline_ms: self.attachment_deadline_ms,
+        }
+    }
+
+    /// Structural bound only; no claim of trusted provenance or admission.
+    pub fn validate_shape(&self) -> Result<()> {
+        ensure!(
+            self.schema == GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA
+                && !self.placement_thread_id.is_empty()
+                && self.placement_thread_id.len() <= 512
+                && !self.occurrence_id.is_empty()
+                && self.occurrence_id.len() <= 128
+                && self.attachment_deadline_ms > 0,
+            "guest occurrence assignment has invalid coordinates"
+        );
+        for digest in [
+            &self.admitted_capsule_hash,
+            &self.base_snapshot_hash,
+            &self.execution_binding_hash,
+            &self.allocation_request_digest,
+            &self.activation_request_digest,
+            &self.supervisor_runtime_hash,
+            &self.guest_runtime_manifest_hash,
+        ] {
+            ensure!(
+                canonical_digest(digest),
+                "guest occurrence assignment has invalid digest"
+            );
+        }
+        ensure!(
+            canonical_json(self)?.len() <= MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+            "guest occurrence assignment exceeds byte bound"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod assignment_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn document() -> GuestOccurrenceAssignmentDocument {
+        GuestOccurrenceAssignmentDocument {
+            schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+            placement_thread_id: "T-placement".into(),
+            admitted_capsule_hash: "a".repeat(64),
+            base_snapshot_hash: "b".repeat(64),
+            execution_binding_hash: "c".repeat(64),
+            allocation_request_digest: "d".repeat(64),
+            occurrence_id: "sbx-occurrence".into(),
+            activation_request_digest: "e".repeat(64),
+            supervisor_runtime_hash: "f".repeat(64),
+            guest_runtime_manifest_hash: "1".repeat(64),
+            attachment_deadline_ms: 1_800_000_000_000,
+        }
+    }
+
+    #[test]
+    fn assignment_wire_is_bounded_and_borrows_exact_coordinates() {
+        let source = document();
+        source.validate_shape().unwrap();
+        let decoded: GuestOccurrenceAssignmentDocument =
+            serde_json::from_slice(&canonical_json(&source).unwrap()).unwrap();
+        decoded.validate_shape().unwrap();
+        assert_eq!(decoded.borrowed().occurrence_id, source.occurrence_id);
+        assert_eq!(
+            decoded.borrowed().base_snapshot_hash,
+            source.base_snapshot_hash
+        );
+
+        let mut wrong_epoch = serde_json::to_value(&source).unwrap();
+        wrong_epoch["schema"] = json!(2);
+        assert!(
+            serde_json::from_value::<GuestOccurrenceAssignmentDocument>(wrong_epoch)
+                .unwrap()
+                .validate_shape()
+                .is_err()
+        );
+        let mut unknown = serde_json::to_value(&source).unwrap();
+        unknown["extra"] = json!(true);
+        assert!(serde_json::from_value::<GuestOccurrenceAssignmentDocument>(unknown).is_err());
+        let mut malformed = source;
+        malformed.guest_runtime_manifest_hash = "A".repeat(64);
+        assert!(malformed.validate_shape().is_err());
+    }
 }
 
 /// All semantic expectations needed before any package byte is imported.
