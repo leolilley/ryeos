@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-09-27T04:46:06Z:59cec2541315fd912e24f49c2824425a562f4af4ee5c3b4a010fa807f0556088:cnbF+x6XWsSEEY1og7+YF+Is8i20+CSHk7ChvRNggR3i4yn0764DquO+/C6nHoBu6QNhfovj5LDVr1lpuh2zDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Scoped Codex qualification boundary
 
 ## Decision and claim
@@ -20,6 +21,31 @@ It must not be promoted to the stronger qualification claim. Conversely, this
 decision does not add a second Codex worker workflow: local hardened, trusted
 disposable, and external placement remain endpoints of the existing bounded
 turn, candidate, evaluation, integration, and publication lifecycle.
+
+## Render external-placement boundary
+
+The hard scoped direct-Codex fixture is **not** a prerequisite for placing a
+Farm worker in a Render sandbox. The Render hosted-workflow controller has
+unconfigured process scopes and an explicit trusted process-group lane; it
+cannot issue a `scope_empty` claim. In external placement, the controller
+retains provider credentials and campaign authority while model-controlled
+commands and candidate files execute in the disposable guest. The guest's
+isolation, exact launch, containment, termination, export and authenticated
+return need their own installed evidence. A controller process-group absence
+is not evidence of guest containment, and the guest's isolation is not a
+scope-empty claim about the controller.
+
+The external-authoring worker's `guest-runtime` product relationship remains
+disabled until an independent qualification policy and complete guest-runtime
+evidence admit it. That policy may require the controller's trusted settlement
+authority only when its claims do not promise local hard containment; it must
+still prove the Render guest boundary and reject before provider contact if
+the selected product cannot provide it. The hard direct-Codex experiment
+remains a separate, fail-closed RyeOS qualification path. A scope-qualified
+same-node controller or cross-node testimony contract is needed only to
+activate that stronger product on a node without local scope authority, not
+to make Render-hosted Farm workers possible. Do not copy its node-bound
+testimony to a different controller or silently downgrade its claims.
 
 ## Why existing child paths do not establish this claim
 
