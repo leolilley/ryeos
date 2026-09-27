@@ -317,8 +317,8 @@ the restored tree and root *inside that snapshot*, upload modes, owner
 survival after losing the run stream, authenticated supervisor `Ready`, and
 whole-guest termination plus writer exclusion. The generic product
 qualification machinery can retain a signed verifier result and bounded
-probe evidence, but a Render-specific typed interpretation and join to the
-placement binding are still missing. A self-described `qualified` field, a
+probe evidence. A Render-specific typed interpretation now exists, but its
+authenticated join to the placement binding is still missing. A self-described `qualified` field, a
 matching create response, or a signed expectation alone must not grant
 startup capability.
 
@@ -333,6 +333,14 @@ refuses activation. The next implementation cut must load the current
 published qualification through RyeOS's existing product witness machinery,
 verify the independently admitted execution, and apply this comparison before
 any new allocation; retained cleanup must remain possible afterward.
+
+Binding schema 12 now carries a required-nullable
+`runtime_qualification_attestation_hash`. A non-null hash is only an exact
+coordinate: fresh placement refuses it until the published witness, current
+policy, independent execution evidence, and Render probe can all be joined.
+This is distinct from the Codex candidate-runtime product selection retained
+in the Worker capsule. Cleanup of an already contacted occurrence does not
+reapply this startup gate.
 
 The required implementation order is: publish and pin the exact owner input;
 sign the bounded producer Tool and capture its runtime product; run and retain the installed independent

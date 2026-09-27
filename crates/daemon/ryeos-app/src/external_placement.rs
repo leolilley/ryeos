@@ -947,6 +947,16 @@ impl ExternalPlacementBackendRegistry {
         mut required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
+        // A signed coordinate is not a qualification. Until fresh admission
+        // loads and verifies the published independent witness, it cannot be
+        // used as a startup permission. Retained cleanup does not reapply this
+        // startup gate to an already contacted occurrence.
+        if require_activation {
+            ensure!(
+                contract.runtime_qualification_attestation_hash.is_none(),
+                "external runtime qualification has no authenticated admission join"
+            );
+        }
         let backend = self
             .backends
             .get(&(
@@ -6375,6 +6385,24 @@ mod tests {
         registry
             .qualify(
                 &contract,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
+        let mut unverified = contract.clone();
+        unverified.runtime_qualification_attestation_hash = Some("6".repeat(64));
+        assert!(
+            registry
+                .qualify(
+                    &unverified,
+                    &credential,
+                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
+                )
+                .is_err()
+        );
+        registry
+            .qualify_for_cleanup(
+                &unverified,
                 &credential,
                 &AdmittedExternalExecutionProgram::StructuredSession(program()),
             )

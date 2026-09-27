@@ -121,6 +121,11 @@ struct BindingDocument {
     /// Expected independently qualified guest-owner runtime, not the
     /// candidate's structured-session runtime or a provider snapshot ID.
     guest_runtime_manifest_hash: String,
+    /// Exact current product qualification to verify before new allocation.
+    /// Null is explicit for backends without an installed runtime witness;
+    /// presence alone never grants activation or provider contact.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    runtime_qualification_attestation_hash: Option<String>,
     launcher_artifact_hash: String,
     launcher_artifact_bytes: u64,
     network_policy: String,
@@ -140,10 +145,18 @@ struct BindingDocument {
     max_guest_package_framed_bytes: u64,
 }
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 11,
+            self.kind == "node" && self.schema == 12,
             "unsupported external placement binding schema"
         );
         self.workload.validate()?;
@@ -171,6 +184,9 @@ impl BindingDocument {
             &self.launcher_artifact_hash,
         ] {
             validate_content_identity(value)?;
+        }
+        if let Some(hash) = &self.runtime_qualification_attestation_hash {
+            validate_content_identity(hash)?;
         }
         ensure!(
             self.settings.is_object()
@@ -249,6 +265,9 @@ impl BindingDocument {
             supervisor_artifact_hash: self.supervisor_artifact_hash.clone(),
             supervisor_artifact_bytes: self.supervisor_artifact_bytes,
             guest_runtime_manifest_hash: self.guest_runtime_manifest_hash.clone(),
+            runtime_qualification_attestation_hash: self
+                .runtime_qualification_attestation_hash
+                .clone(),
             launcher_artifact_hash: self.launcher_artifact_hash.clone(),
             launcher_artifact_bytes: self.launcher_artifact_bytes,
             network_policy: self.network_policy.clone(),
@@ -288,6 +307,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) supervisor_artifact_hash: String,
     pub(crate) supervisor_artifact_bytes: u64,
     pub(crate) guest_runtime_manifest_hash: String,
+    pub(crate) runtime_qualification_attestation_hash: Option<String>,
     pub(crate) launcher_artifact_hash: String,
     pub(crate) launcher_artifact_bytes: u64,
     pub(crate) network_policy: String,
@@ -504,7 +524,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 11,
+            schema: 12,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
                 provider_declaration_id: "codex-hosted".into(),
@@ -534,6 +554,7 @@ impl RetainedExternalExecutionBinding {
             supervisor_artifact_hash: "1".repeat(64),
             supervisor_artifact_bytes: 4096,
             guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification_attestation_hash: None,
             launcher_artifact_hash: "e".repeat(64),
             launcher_artifact_bytes: 4096,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -663,7 +684,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 11,
+            schema: 12,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -693,6 +714,7 @@ impl RetainedExternalExecutionBinding {
             supervisor_artifact_hash,
             supervisor_artifact_bytes,
             guest_runtime_manifest_hash: "4".repeat(64),
+            runtime_qualification_attestation_hash: None,
             launcher_artifact_hash,
             launcher_artifact_bytes,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -1073,6 +1095,7 @@ mod workload_binding_tests {
                 .unwrap()
                 .runtime_manifest_hash
         );
+        assert!(contract.runtime_qualification_attestation_hash.is_none());
 
         let mut missing = serde_json::to_value(&document).unwrap();
         missing
@@ -1081,8 +1104,27 @@ mod workload_binding_tests {
             .remove("guest_runtime_manifest_hash");
         assert!(serde_json::from_value::<BindingDocument>(missing).is_err());
 
+        let mut missing_qualification = serde_json::to_value(&document).unwrap();
+        missing_qualification
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_qualification_attestation_hash");
+        assert!(serde_json::from_value::<BindingDocument>(missing_qualification).is_err());
+
+        let mut qualified = document.clone();
+        qualified.runtime_qualification_attestation_hash = Some("6".repeat(64));
+        qualified.validate().unwrap();
+        assert_eq!(
+            qualified
+                .backend_contract()
+                .runtime_qualification_attestation_hash,
+            qualified.runtime_qualification_attestation_hash
+        );
+        qualified.runtime_qualification_attestation_hash = Some("not-a-hash".into());
+        assert!(qualified.validate().is_err());
+
         let mut old_schema = document.clone();
-        old_schema.schema = 10;
+        old_schema.schema = 11;
         assert!(old_schema.validate().is_err());
 
         let mut malformed = document;
@@ -1203,7 +1245,7 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 10);
+        assert_eq!(value["schema"], 12);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());
