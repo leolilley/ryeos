@@ -2310,6 +2310,94 @@ pub(super) fn load_current_qualification(
     Ok(witness)
 }
 
+/// Reuse ordinary product-selection admission for a node-signed external
+/// runtime binding. The binding names an owner and policy, but neither may
+/// manufacture a verified request context: the current node-signed operator
+/// grant supplies that authority. This is a fresh read-only check, not a
+/// contact permit or retained recovery proof.
+pub(crate) fn verify_current_external_runtime_qualification(
+    state: &AppState,
+    binding: &crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding,
+    expected_manifest_hash: &str,
+) -> anyhow::Result<VerifiedQualificationWitness> {
+    binding.validate()?;
+    require_canonical_hash("external runtime manifest", expected_manifest_hash)?;
+    let operator = crate::operator_authority::admitted_operator_authority_for_principal(
+        state,
+        &binding.owner_principal,
+    )?;
+    let context = operator.handler_context();
+    crate::operator_authority::require_admitted_operator(state, &context)?;
+    let limits = state
+        .node_policy
+        .require::<NodeObjectClosurePolicy>()?
+        .closure_limits()?;
+    let authority = state.state_store.pinned_state_authority()?;
+    let guard = authority.acquire_shared_guard()?;
+    let proof = load_current_qualification(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &binding.owner_principal,
+        &binding.attestation_hash,
+    )?;
+    let product = super::product_receipt::load_product_source(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &binding.owner_principal,
+        &proof.evidence.product_witness_hash,
+        &proof.evidence.witness_source,
+        super::product_receipt::ProductSourceVerification::Fresh,
+    )?;
+    if proof.evidence.product_witness_hash != product.attestation_hash
+        || proof.evidence.product_coordinate
+            != ProductCaptureCoordinate::from_evidence(&product.evidence)?
+        || proof.evidence.result.subject_manifest_hash != product.evidence.manifest_hash
+        || proof.evidence.result.subject_manifest_hash != expected_manifest_hash
+    {
+        bail!("external runtime qualification differs from its exact current product");
+    }
+    let policy_ref = binding
+        .qualification
+        .policy_ref
+        .as_deref()
+        .context("external runtime qualification has no signed policy")?;
+    let current_policy = resolve_current_bundle_qualification_policy(state, policy_ref)?;
+    if current_policy.policy.consumer_execution_context.is_some() {
+        bail!("external runtime snapshot qualification cannot borrow a Worker consumer context");
+    }
+    let current_verifier = resolve_current_bundle_verifier_identity_for_evidence(
+        state,
+        &authority,
+        &guard,
+        limits,
+        &context,
+        &current_policy.policy.verifier_ref,
+        &current_policy.policy.verifier_parameters,
+        &proof.evidence,
+    )?;
+    proof.evidence.validate_current_policy(
+        &current_policy,
+        &current_verifier.effective_definition_digest,
+        &binding.qualification.required_claims,
+    )?;
+    proof
+        .evidence
+        .validate_current_artifact(&current_verifier.artifact_identity)?;
+    execution_evidence::verify_current(
+        state,
+        &authority,
+        &guard,
+        &context,
+        &proof.evidence,
+        &current_verifier,
+    )?;
+    Ok(proof)
+}
+
 /// Recovery authenticates the exact retained proof under its caller's CAS
 /// guard. It deliberately does not reapply current-head, current-policy, or
 /// wall-clock eligibility.

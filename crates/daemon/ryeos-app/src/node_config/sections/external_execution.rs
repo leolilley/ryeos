@@ -100,6 +100,34 @@ fn validate_artifact_bytes(bytes: u64) -> Result<()> {
     Ok(())
 }
 
+/// Signed placement selection of one independently published product proof.
+/// It deliberately does not contain the proof itself or grant contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalRuntimeQualificationBinding {
+    pub(crate) attestation_hash: String,
+    pub(crate) owner_principal: String,
+    pub(crate) qualification:
+        ryeos_state::external_content::products::composition::ProductRelationshipQualification,
+}
+
+impl ExternalRuntimeQualificationBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_content_identity(&self.attestation_hash)?;
+        let owner = self
+            .owner_principal
+            .strip_prefix("fp:")
+            .context("external runtime qualification owner must be a fingerprint principal")?;
+        validate_content_identity(owner)?;
+        self.qualification.validate()?;
+        ensure!(
+            self.qualification.policy_ref.is_some(),
+            "external runtime qualification requires a signed policy"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDocument {
@@ -121,15 +149,10 @@ struct BindingDocument {
     /// Expected independently qualified guest-owner runtime, not the
     /// candidate's structured-session runtime or a provider snapshot ID.
     guest_runtime_manifest_hash: String,
-    /// Exact current product qualification to verify before new allocation.
     /// Null is explicit for backends without an installed runtime witness;
     /// presence alone never grants activation or provider contact.
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    runtime_qualification_attestation_hash: Option<String>,
-    /// Product testimony is owned by its producing principal, not by the
-    /// current-node signer of this placement Config.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    runtime_qualification_owner_principal: Option<String>,
+    runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
     launcher_artifact_hash: String,
     launcher_artifact_bytes: u64,
     network_policy: String,
@@ -160,7 +183,7 @@ where
 impl BindingDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.kind == "node" && self.schema == 13,
+            self.kind == "node" && self.schema == 14,
             "unsupported external placement binding schema"
         );
         self.workload.validate()?;
@@ -189,21 +212,8 @@ impl BindingDocument {
         ] {
             validate_content_identity(value)?;
         }
-        match (
-            &self.runtime_qualification_attestation_hash,
-            &self.runtime_qualification_owner_principal,
-        ) {
-            (Some(hash), Some(principal)) => {
-                validate_content_identity(hash)?;
-                let owner = principal.strip_prefix("fp:").context(
-                    "external runtime qualification owner must be a fingerprint principal",
-                )?;
-                validate_content_identity(owner)?;
-            }
-            (None, None) => {}
-            _ => anyhow::bail!(
-                "external runtime qualification hash and owner must be present together"
-            ),
+        if let Some(qualification) = &self.runtime_qualification {
+            qualification.validate()?;
         }
         ensure!(
             self.settings.is_object()
@@ -282,12 +292,7 @@ impl BindingDocument {
             supervisor_artifact_hash: self.supervisor_artifact_hash.clone(),
             supervisor_artifact_bytes: self.supervisor_artifact_bytes,
             guest_runtime_manifest_hash: self.guest_runtime_manifest_hash.clone(),
-            runtime_qualification_attestation_hash: self
-                .runtime_qualification_attestation_hash
-                .clone(),
-            runtime_qualification_owner_principal: self
-                .runtime_qualification_owner_principal
-                .clone(),
+            runtime_qualification: self.runtime_qualification.clone(),
             launcher_artifact_hash: self.launcher_artifact_hash.clone(),
             launcher_artifact_bytes: self.launcher_artifact_bytes,
             network_policy: self.network_policy.clone(),
@@ -327,8 +332,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) supervisor_artifact_hash: String,
     pub(crate) supervisor_artifact_bytes: u64,
     pub(crate) guest_runtime_manifest_hash: String,
-    pub(crate) runtime_qualification_attestation_hash: Option<String>,
-    pub(crate) runtime_qualification_owner_principal: Option<String>,
+    pub(crate) runtime_qualification: Option<ExternalRuntimeQualificationBinding>,
     pub(crate) launcher_artifact_hash: String,
     pub(crate) launcher_artifact_bytes: u64,
     pub(crate) network_policy: String,
@@ -545,7 +549,7 @@ impl RetainedExternalExecutionBinding {
             vec![STANDARD.encode(b"fixture controller TLS root")];
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 13,
+            schema: 14,
             protocol: ryeos_state::external_execution::admission::PROTOCOL.into(),
             workload: ExternalWorkloadBinding::StructuredSession(ExternalStructuredSessionBinding {
                 provider_declaration_id: "codex-hosted".into(),
@@ -575,8 +579,7 @@ impl RetainedExternalExecutionBinding {
             supervisor_artifact_hash: "1".repeat(64),
             supervisor_artifact_bytes: 4096,
             guest_runtime_manifest_hash: "4".repeat(64),
-            runtime_qualification_attestation_hash: None,
-            runtime_qualification_owner_principal: None,
+            runtime_qualification: None,
             launcher_artifact_hash: "e".repeat(64),
             launcher_artifact_bytes: 4096,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -706,7 +709,7 @@ impl RetainedExternalExecutionBinding {
         );
         let document = BindingDocument {
             kind: "node".into(),
-            schema: 13,
+            schema: 14,
             protocol: program.requirement.protocol.clone(),
             workload: ExternalWorkloadBinding::StructuredSession(
                 ExternalStructuredSessionBinding {
@@ -736,8 +739,7 @@ impl RetainedExternalExecutionBinding {
             supervisor_artifact_hash,
             supervisor_artifact_bytes,
             guest_runtime_manifest_hash: "4".repeat(64),
-            runtime_qualification_attestation_hash: None,
-            runtime_qualification_owner_principal: None,
+            runtime_qualification: None,
             launcher_artifact_hash,
             launcher_artifact_bytes,
             network_policy: "supervisor_pinned_owner_only_candidate_denied_v1".into(),
@@ -1118,7 +1120,7 @@ mod workload_binding_tests {
                 .unwrap()
                 .runtime_manifest_hash
         );
-        assert!(contract.runtime_qualification_attestation_hash.is_none());
+        assert!(contract.runtime_qualification.is_none());
 
         let mut missing = serde_json::to_value(&document).unwrap();
         missing
@@ -1131,31 +1133,43 @@ mod workload_binding_tests {
         missing_qualification
             .as_object_mut()
             .unwrap()
-            .remove("runtime_qualification_attestation_hash");
+            .remove("runtime_qualification");
         assert!(serde_json::from_value::<BindingDocument>(missing_qualification).is_err());
 
         let mut qualified = document.clone();
-        qualified.runtime_qualification_attestation_hash = Some("6".repeat(64));
-        assert!(qualified.validate().is_err());
-        qualified.runtime_qualification_owner_principal = Some(format!("fp:{}", "7".repeat(64)));
+        qualified.runtime_qualification = Some(ExternalRuntimeQualificationBinding {
+            attestation_hash: "6".repeat(64),
+            owner_principal: format!("fp:{}", "7".repeat(64)),
+            qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                policy_ref: Some("config:render/snapshot-qualification".into()),
+                required_claims: vec!["render_snapshot_v1".into()],
+            },
+        });
         qualified.validate().unwrap();
         assert_eq!(
-            qualified
-                .backend_contract()
-                .runtime_qualification_attestation_hash,
-            qualified.runtime_qualification_attestation_hash
+            qualified.backend_contract().runtime_qualification,
+            qualified.runtime_qualification
         );
-        qualified.runtime_qualification_attestation_hash = Some("not-a-hash".into());
+        qualified
+            .runtime_qualification
+            .as_mut()
+            .unwrap()
+            .attestation_hash = "not-a-hash".into();
         assert!(qualified.validate().is_err());
-        let mut missing_owner = serde_json::to_value(&document).unwrap();
-        missing_owner
+        let mut missing_owner = serde_json::to_value(&qualified).unwrap();
+        missing_owner["runtime_qualification"]
             .as_object_mut()
             .unwrap()
-            .remove("runtime_qualification_owner_principal");
+            .remove("owner_principal");
         assert!(serde_json::from_value::<BindingDocument>(missing_owner).is_err());
+        let mut wrong_policy = qualified.clone();
+        let qualification = wrong_policy.runtime_qualification.as_mut().unwrap();
+        qualification.attestation_hash = "6".repeat(64);
+        qualification.qualification.policy_ref = None;
+        assert!(wrong_policy.validate().is_err());
 
         let mut old_schema = document.clone();
-        old_schema.schema = 12;
+        old_schema.schema = 13;
         assert!(old_schema.validate().is_err());
 
         let mut malformed = document;
@@ -1276,7 +1290,7 @@ mod workload_binding_tests {
         let session = document();
         session.validate().unwrap();
         let value = serde_json::to_value(&session).unwrap();
-        assert_eq!(value["schema"], 13);
+        assert_eq!(value["schema"], 14);
         assert_eq!(value["workload"]["kind"], "structured_session");
         assert!(value.get("provider_declaration_id").is_none());
         assert!(value.get("runtime_selection_identity").is_none());

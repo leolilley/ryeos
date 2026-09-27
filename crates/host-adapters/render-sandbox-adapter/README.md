@@ -334,15 +334,24 @@ published qualification through RyeOS's existing product witness machinery,
 verify the independently admitted execution, and apply this comparison before
 any new allocation; retained cleanup must remain possible afterward.
 
-Binding schema 13 now carries paired required-nullable
-`runtime_qualification_attestation_hash` and
-`runtime_qualification_owner_principal` fields. The node Config signer is not
-assumed to be the product owner. A non-null pair is only an exact coordinate:
+Binding schema 14 now carries a required-nullable `runtime_qualification`
+object with the exact attestation hash, product-owner principal, policy ref,
+and required claims. The node Config signer is not assumed to be the product
+owner. A non-null object is only an exact coordinate:
 fresh placement refuses it until the published witness, current
 policy, independent execution evidence, and Render probe can all be joined.
 This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
+
+The fresh read-only check now resolves the named owner through its current
+node-signed operator grant, loads the exact published qualification and
+product witness under CAS guard, and rechecks current policy, verifier
+definition/artifact, required claims, and execution evidence. It runs before
+credential access on fresh placement paths. That authenticates the product
+proof but does not yet compare its provider-specific probe or retain it with
+the allocation; the backend registry still refuses a non-null qualification
+for new contact. No synthetic verified request context is constructed.
 
 The next join has two separate owners. RyeOS authenticates the binding's exact
 qualification attestation from current published CAS, its product witness,

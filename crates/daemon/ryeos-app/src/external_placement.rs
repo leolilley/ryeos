@@ -953,8 +953,7 @@ impl ExternalPlacementBackendRegistry {
         // startup gate to an already contacted occurrence.
         if require_activation {
             ensure!(
-                contract.runtime_qualification_attestation_hash.is_none()
-                    && contract.runtime_qualification_owner_principal.is_none(),
+                contract.runtime_qualification.is_none(),
                 "external runtime qualification has no authenticated admission join"
             );
         }
@@ -1032,7 +1031,28 @@ pub(crate) fn preflight_external_direct_endpoint(
                     .context("read protected external placement credential")?,
             )
         },
+        |binding| {
+            require_current_runtime_qualification_for_start(state, &binding.backend_contract())
+        },
     )
+}
+
+/// A current published witness must be checked under its actual product
+/// owner's grant. This is not yet a startup permit: the placement registry
+/// still refuses qualified bindings until provider-specific probe comparison
+/// and retained proof custody are complete.
+fn require_current_runtime_qualification_for_start(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+) -> Result<()> {
+    if let Some(binding) = &contract.runtime_qualification {
+        crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
+            state,
+            binding,
+            &contract.guest_runtime_manifest_hash,
+        )?;
+    }
+    Ok(())
 }
 
 fn preflight_external_direct_dependencies(
@@ -1042,6 +1062,7 @@ fn preflight_external_direct_dependencies(
     identity: &ryeos_engine::contracts::ExternalEndpointBindingIdentity,
     timeout_seconds: u64,
     load_credential: impl FnOnce(&InstalledExternalExecutionBinding) -> Result<PlacementCredential>,
+    qualify_runtime: impl FnOnce(&RetainedExternalExecutionBinding) -> Result<()>,
 ) -> Result<RetainedExternalExecutionBinding> {
     requirement.validate()?;
     identity.validate()?;
@@ -1074,6 +1095,7 @@ fn preflight_external_direct_dependencies(
         (1..=u64::from(contract.timeout_seconds)).contains(&timeout_seconds),
         "external direct preflight exceeds its signed execution budget"
     );
+    qualify_runtime(&retained)?;
     let credential = load_credential(binding)?;
     backends.qualify_dependencies(&contract, &credential, BTreeSet::new(), true)?;
     Ok(retained)
@@ -1085,6 +1107,8 @@ pub fn preflight_external_candidate_program(
     state: &AppState,
     program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
 ) -> Result<()> {
+    let binding = select_binding(&state.node_config.external_execution, program)?;
+    require_current_runtime_qualification_for_start(state, &binding.backend_contract())?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -1805,6 +1829,9 @@ impl<'a> ExternalPlacementOwner<'a> {
         record
             .reservation
             .validate_startup_budget(contract.direct_startup_budget_ms()?)?;
+        if !cleanup_only && record.phase == ExternalAllocationPhase::Reserved {
+            require_current_runtime_qualification_for_start(self.state, &contract)?;
+        }
         let program = AdmittedExternalExecutionProgram::DirectCommand(program.clone());
         let access = binding.credential_access()?;
         let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
@@ -1938,6 +1965,9 @@ impl<'a> ExternalPlacementOwner<'a> {
         };
         binding.check_direct_program(&program)?;
         let contract = binding.backend_contract();
+        if fresh {
+            require_current_runtime_qualification_for_start(self.state, &contract)?;
+        }
         let access = binding.credential_access()?;
         let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
         let backend = self.state.external_placement_backends.qualify(
@@ -2182,6 +2212,13 @@ impl<'a> ExternalPlacementOwner<'a> {
             let access = installed.credential_access()?;
             (binding, contract, access)
         };
+        if !cleanup_only
+            && existing
+                .as_ref()
+                .is_none_or(|record| record.phase == ExternalAllocationPhase::Reserved)
+        {
+            require_current_runtime_qualification_for_start(self.state, &contract)?;
+        }
         let credential = credential_access.decode(
             self.state
                 .vault
@@ -6391,8 +6428,16 @@ mod tests {
             )
             .unwrap();
         let mut unverified = contract.clone();
-        unverified.runtime_qualification_attestation_hash = Some("6".repeat(64));
-        unverified.runtime_qualification_owner_principal = Some(format!("fp:{}", "7".repeat(64)));
+        unverified.runtime_qualification = Some(
+            crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding {
+                attestation_hash: "6".repeat(64),
+                owner_principal: format!("fp:{}", "7".repeat(64)),
+                qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
+                    policy_ref: Some("config:render/snapshot-qualification".into()),
+                    required_claims: vec!["render_snapshot_v1".into()],
+                },
+            },
+        );
         assert!(
             registry
                 .qualify(
@@ -6894,7 +6939,8 @@ mod tests {
                     &requirement,
                     &identity,
                     30,
-                    |binding| Ok(credential(binding))
+                    |binding| Ok(credential(binding)),
+                    |_| Ok(()),
                 )
                 .is_ok(),
                 terminal
@@ -6907,6 +6953,45 @@ mod tests {
             assert_eq!(backend.terminate_calls.load(Ordering::SeqCst), 0);
             assert_eq!(backend.termination_observations.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[test]
+    fn direct_prebirth_runtime_proof_refusal_precedes_credential_and_backend() {
+        use ryeos_engine::contracts::{
+            ExecutionEndpointRequirement, ExternalEndpointBindingIdentity,
+        };
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let identity = ExternalEndpointBindingIdentity {
+            binding_id: binding.id().into(),
+            binding_digest: binding.digest().into(),
+        };
+        let requirement = ExecutionEndpointRequirement::External {
+            binding_id: binding.id().into(),
+            stdout_max_bytes: 1024,
+            stderr_max_bytes: 1024,
+        };
+        let backend = Arc::new(FaultBackend::new());
+        let registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![backend.clone()]).unwrap();
+        let credential_read = AtomicBool::new(false);
+        assert!(
+            preflight_external_direct_dependencies(
+                &[binding],
+                &registry,
+                &requirement,
+                &identity,
+                30,
+                |_| {
+                    credential_read.store(true, Ordering::SeqCst);
+                    bail!("credential must not be read")
+                },
+                |_| bail!("independent runtime proof is absent"),
+            )
+            .is_err()
+        );
+        assert!(!credential_read.load(Ordering::SeqCst));
+        assert_eq!(backend.qualification_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -6981,6 +7066,7 @@ mod tests {
                         credential_read.store(true, Ordering::SeqCst);
                         bail!("unexpected credential read")
                     },
+                    |_| Ok(()),
                 )
                 .is_err(),
                 "accepted {refusal}"
