@@ -48,6 +48,8 @@ const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+const GUEST_OWNER_EXECUTABLE: &str =
+    "/ryeos/guest-runtime/bin/ryeos-external-guest-occurrence-owner";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -346,6 +348,10 @@ fn operate() -> Result<()> {
             ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
         )?;
         verify_signed_assignment_handoff(&assignment_bytes, &signed_import)?;
+        // Render's run command is passed through `bash -c`. Preflight the
+        // exact, non-secret argv now; actual run contact remains disabled
+        // until the installed snapshot and lost-stream behavior qualify.
+        let _owner_command = guest_owner_run_command(&assignment_bytes)?;
     } else {
         ensure!(
             std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
@@ -544,6 +550,22 @@ fn verify_signed_assignment_handoff(
         )
         .context("signed guest import differs from the assigned occurrence owner")?;
     Ok(())
+}
+
+/// Construct only the fixed guest-owner invocation. The signed assignment is
+/// a public-key delegation, not a credential, and canonical base64url has no
+/// shell metacharacters. Never substitute a caller-provided executable/path.
+fn guest_owner_run_command(signed_assignment_bytes: &[u8]) -> Result<String> {
+    use ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES;
+    ensure!(
+        !signed_assignment_bytes.is_empty()
+            && signed_assignment_bytes.len() <= MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+        "signed guest assignment exceeds run-command bound"
+    );
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signed_assignment_bytes);
+    Ok(format!(
+        "exec {GUEST_OWNER_EXECUTABLE} --assignment-b64 {encoded}"
+    ))
 }
 
 fn parse_provider_spec_bytes(
@@ -1493,6 +1515,30 @@ mod offline_fixture_tests {
         };
         let assignment_bytes = canonical_json(&assignment).unwrap();
         verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
+        let command = guest_owner_run_command(&assignment_bytes).unwrap();
+        let encoded = command
+            .strip_prefix(&format!("exec {GUEST_OWNER_EXECUTABLE} --assignment-b64 "))
+            .unwrap();
+        assert!(
+            encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        );
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap(),
+            assignment_bytes
+        );
+        assert!(guest_owner_run_command(&[]).is_err());
+        assert!(
+            guest_owner_run_command(&vec![
+                b'a';
+                ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES
+                    + 1
+            ])
+            .is_err()
+        );
         let mut bad_signature = signed.clone();
         bad_signature.signature_hex = "0".repeat(128);
         assert!(verify_signed_assignment_handoff(&assignment_bytes, &bad_signature).is_err());
