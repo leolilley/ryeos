@@ -127,7 +127,12 @@ fn supervisor_bootstrap(
     .canonical_bytes()
 }
 
-fn run(fixture_path: &std::path::Path, release: bool, natural_probe: bool) -> Result<()> {
+fn run(
+    fixture_path: &std::path::Path,
+    release: bool,
+    natural_probe: bool,
+    cancel_probe: bool,
+) -> Result<()> {
     // Keep durable fixture paths outside /tmp: Lillux replaces /tmp with the
     // process-private source mount after all uploaded bytes are pinned. The
     // invocation's writable working tree is also available on hosts where
@@ -390,65 +395,88 @@ fn run(fixture_path: &std::path::Path, release: bool, natural_probe: bool) -> Re
     if release {
         let mut released = held.release_once()?;
         let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
-        if !natural_probe {
-            let applied = loop {
-                if let Some(receipt) = released.try_observe_applied_launch()? {
-                    break receipt;
+        if cancel_probe {
+            ensure!(
+                released
+                    .terminate_namespace_for_export_until(lillux::time::MonotonicDeadline::after(
+                        lillux::time::Duration::ZERO,
+                    ))
+                    .is_err(),
+                "expired cleanup deadline authorized namespace termination"
+            );
+            let _terminated = released.terminate_namespace_for_export_until(deadline)?;
+            let duplicate = released
+                .terminate_namespace_for_export_until(lillux::time::MonotonicDeadline::after(
+                    lillux::time::Duration::from_secs(5),
+                ))
+                .unwrap_err();
+            ensure!(
+                duplicate
+                    .to_string()
+                    .contains("not a live owned namespace-init authority"),
+                "settled native namespace refused for the wrong reason: {duplicate:#}"
+            );
+        } else {
+            if !natural_probe {
+                let applied = loop {
+                    if let Some(receipt) = released.try_observe_applied_launch()? {
+                        break receipt;
+                    }
+                    ensure!(
+                        !deadline.has_elapsed(),
+                        "released supervisor produced no child-origin applied-launch receipt"
+                    );
+                    lillux::time::sleep(lillux::time::Duration::from_millis(10));
+                };
+                ensure!(
+                    applied.owned_child_pid == receipt.owned_child_pid,
+                    "released supervisor changed its held process identity"
+                );
+                ensure!(
+                    released.try_observe_applied_launch()? == Some(applied),
+                    "repeated applied-launch point read changed the sole target receipt"
+                );
+            }
+            let dead = loop {
+                let observation = if natural_probe {
+                    released.try_observe_natural_settlement().map(|settled| {
+                        ensure!(
+                            settled.is_none(),
+                            "placeholder supervisor settled successfully"
+                        );
+                        Ok(())
+                    })
+                } else {
+                    released.refuse_if_target_exited().map(|()| Ok(()))
+                };
+                match observation.and_then(|result| result) {
+                    Ok(()) => {}
+                    Err(error) => break error,
                 }
                 ensure!(
                     !deadline.has_elapsed(),
-                    "released supervisor produced no child-origin applied-launch receipt"
+                    "placeholder supervisor did not reach terminal refusal"
                 );
                 lillux::time::sleep(lillux::time::Duration::from_millis(10));
             };
-            ensure!(
-                applied.owned_child_pid == receipt.owned_child_pid,
-                "released supervisor changed its held process identity"
-            );
-            ensure!(
-                released.try_observe_applied_launch()? == Some(applied),
-                "repeated applied-launch point read changed the sole target receipt"
-            );
-        }
-        let dead = loop {
-            let observation = if natural_probe {
-                released.try_observe_natural_settlement().map(|settled| {
-                    ensure!(
-                        settled.is_none(),
-                        "placeholder supervisor settled successfully"
-                    );
-                    Ok(())
-                })
+            if natural_probe {
+                ensure!(
+                    dead.to_string()
+                        .contains("did not settle successfully after applied launch"),
+                    "natural settlement accepted or misclassified placeholder launch: {dead:#}"
+                );
+                ensure!(
+                    released.try_observe_natural_settlement().is_err(),
+                    "consumed terminal target was observed a second time"
+                );
             } else {
-                released.refuse_if_target_exited().map(|()| Ok(()))
-            };
-            match observation.and_then(|result| result) {
-                Ok(()) => {}
-                Err(error) => break error,
+                ensure!(
+                    dead.to_string()
+                        .contains("exited before authenticated attachment")
+                        && dead.to_string().contains("launch_failure=true"),
+                    "released supervisor had an unrelated terminal refusal: {dead:#}"
+                );
             }
-            ensure!(
-                !deadline.has_elapsed(),
-                "placeholder supervisor did not reach terminal refusal"
-            );
-            lillux::time::sleep(lillux::time::Duration::from_millis(10));
-        };
-        if natural_probe {
-            ensure!(
-                dead.to_string()
-                    .contains("did not settle successfully after applied launch"),
-                "natural settlement accepted or misclassified placeholder launch: {dead:#}"
-            );
-            ensure!(
-                released.try_observe_natural_settlement().is_err(),
-                "consumed terminal target was observed a second time"
-            );
-        } else {
-            ensure!(
-                dead.to_string()
-                    .contains("exited before authenticated attachment")
-                    && dead.to_string().contains("launch_failure=true"),
-                "released supervisor had an unrelated terminal refusal: {dead:#}"
-            );
         }
         drop(released);
     } else {
@@ -457,7 +485,7 @@ fn run(fixture_path: &std::path::Path, release: bool, natural_probe: bool) -> Re
     // Native preparation changes this process's mount namespace. The parent
     // test driver retains the host-side fixture and cleans it after exit.
     println!(
-        "native guest sealed-source preparation passed; release={release}; natural_probe={natural_probe}"
+        "native guest sealed-source preparation passed; release={release}; natural_probe={natural_probe}; cancel_probe={cancel_probe}"
     );
     Ok(())
 }
@@ -473,13 +501,25 @@ fn main() {
         let release = std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE").as_deref() == Ok("1");
         let natural_probe =
             std::env::var("RYEOS_GUEST_OCCURRENCE_NATURAL_PROBE").as_deref() == Ok("1");
-        if let Err(error) = run(std::path::Path::new(&root), release, natural_probe) {
+        let cancel_probe =
+            std::env::var("RYEOS_GUEST_OCCURRENCE_CANCEL_PROBE").as_deref() == Ok("1");
+        if let Err(error) = run(
+            std::path::Path::new(&root),
+            release,
+            natural_probe,
+            cancel_probe,
+        ) {
             eprintln!("native guest occurrence probe failed: {error:#}");
             std::process::exit(1);
         }
         return;
     }
-    for (release, natural_probe) in [(false, false), (true, false), (true, true)] {
+    for (release, natural_probe, cancel_probe) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
         let fixture = tempfile::Builder::new()
             .prefix("ryeos-guest-occurrence-native-")
             .tempdir_in(std::env::current_dir().expect("current test directory"))
@@ -502,6 +542,10 @@ fn main() {
                 (
                     "RYEOS_GUEST_OCCURRENCE_NATURAL_PROBE".into(),
                     if natural_probe { "1" } else { "0" }.into(),
+                ),
+                (
+                    "RYEOS_GUEST_OCCURRENCE_CANCEL_PROBE".into(),
+                    if cancel_probe { "1" } else { "0" }.into(),
                 ),
                 (
                     "RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT".into(),

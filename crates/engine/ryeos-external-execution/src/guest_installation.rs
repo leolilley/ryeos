@@ -407,6 +407,22 @@ impl HeldGuestMountedSandbox {
 }
 
 impl ReleasedGuestMountedSandbox {
+    /// Cancel the sole released supervisor attempt under the caller's fixed
+    /// cleanup deadline. Lillux terminates the exact namespace-init lifetime
+    /// and proves descendant death; a timeout retains this owner for further
+    /// observation, never a replacement launch. The returned proof is writer
+    /// exclusion only, not successful execution, authenticated Ready, a
+    /// frozen candidate or cloud-occurrence termination.
+    pub fn terminate_namespace_for_export_until(
+        &mut self,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<lillux::LinuxSandboxTermination> {
+        self.held
+            .held()
+            .terminate_namespace_for_export_until(deadline)
+            .map_err(anyhow::Error::msg)
+    }
+
     /// Observe the exact child immediately before its exec attempt. This
     /// checks the committed target and final-root mounts, but does not infer
     /// exec success, supervisor attachment, Ready or whole-scope settlement.
