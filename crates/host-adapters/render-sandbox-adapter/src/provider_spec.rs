@@ -202,6 +202,7 @@ struct CreateBodyMapping {
 #[serde(rename_all = "snake_case")]
 enum PreconditionProfile {
     RenderConfiguredRuntimeSnapshotV1,
+    RenderQualifiedGuestRuntimeV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -226,6 +227,7 @@ enum TerminalProofProfile {
 #[serde(rename_all = "snake_case")]
 enum OperationKind {
     CreateOnce,
+    UploadThenRunOncePending,
     UnsupportedPending,
     TerminateOnceThenObserveExact,
     ObserveExactOccurrence,
@@ -395,7 +397,11 @@ impl ProviderSpec {
         );
         ensure!(
             self.operations.reconcile_allocation.is_empty_pending()
-                && self.operations.activate_supervisor.is_empty_pending()
+                && (self.operations.activate_supervisor.is_empty_pending()
+                    || self
+                        .operations
+                        .activate_supervisor
+                        .is_one_shot_pending_activation())
                 && self
                     .operations
                     .reconcile_supervisor_activation
@@ -450,7 +456,24 @@ impl ProviderSpec {
         {
             capabilities.insert(LifecycleCapability::ExactTerminalObservation);
         }
+        if self
+            .operations
+            .activate_supervisor
+            .is_one_shot_pending_activation()
+        {
+            capabilities.insert(LifecycleCapability::SupervisorActivation);
+            capabilities.insert(LifecycleCapability::IndependentGuestRuntimeAdmission);
+        }
         capabilities
+    }
+
+    /// This only describes the installed adapter's implementation. The
+    /// controller separately authenticates the exact qualified runtime
+    /// product before permitting allocation or first activation contact.
+    pub(crate) fn one_shot_activation_enabled(&self) -> bool {
+        self.operations
+            .activate_supervisor
+            .is_one_shot_pending_activation()
     }
 
     pub(crate) fn api_base(&self) -> &'static str {
@@ -618,6 +641,18 @@ impl ProviderSpec {
 }
 
 impl OperationSpec {
+    fn is_one_shot_pending_activation(&self) -> bool {
+        self.kind == OperationKind::UploadThenRunOncePending
+            && self.precondition_profile == Some(PreconditionProfile::RenderQualifiedGuestRuntimeV1)
+            && self.route.is_none()
+            && self.body.is_none()
+            && self.bind_proof_profile.is_none()
+            && self.no_occurrence_proof_profile.is_none()
+            && self.mutation_route.is_none()
+            && self.observation_route.is_none()
+            && self.terminal_proof_profile.is_none()
+    }
+
     fn is_empty_pending(&self) -> bool {
         self.kind == OperationKind::UnsupportedPending
             && self.route.is_none()
@@ -732,6 +767,42 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_activation_profile_is_closed_and_reconciliation_stays_pending() {
+        let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
+        value["operations"]["activate_supervisor"] = serde_json::json!({
+            "kind": "upload_then_run_once_pending",
+            "precondition_profile": "render_qualified_guest_runtime_v1"
+        });
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let spec = ProviderSpec::parse(&encoded, SETTINGS_SCHEMA_DIGEST).unwrap();
+        assert!(spec.one_shot_activation_enabled());
+        assert!(
+            spec.effective_capabilities()
+                .contains(&LifecycleCapability::SupervisorActivation)
+        );
+        assert!(
+            spec.effective_capabilities()
+                .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission)
+        );
+        value["operations"]["reconcile_supervisor_activation"] = serde_json::json!({
+            "kind": "upload_then_run_once_pending",
+            "precondition_profile": "render_qualified_guest_runtime_v1"
+        });
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+        value["operations"]["reconcile_supervisor_activation"] =
+            serde_json::json!({"kind": "unsupported_pending"});
+        value["operations"]["activate_supervisor"]["route"] =
+            serde_json::json!("sandbox_collection");
+        assert!(
+            ProviderSpec::parse(&serde_json::to_vec(&value).unwrap(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn render_spec_interprets_only_reviewed_routes_and_proof_profiles() {
         let spec = ProviderSpec::parse(&fixture(), SETTINGS_SCHEMA_DIGEST).unwrap();
         assert_eq!(
@@ -741,6 +812,7 @@ mod tests {
                 LifecycleCapability::ExactTerminalObservation,
             ])
         );
+        assert!(!spec.one_shot_activation_enabled());
         assert_eq!(
             spec.route_target(
                 RouteName::SandboxById,

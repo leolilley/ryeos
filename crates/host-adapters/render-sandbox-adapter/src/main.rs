@@ -71,6 +71,12 @@ struct ActivationDeliveryPlan {
     owner_command: String,
 }
 
+struct PreparedActivationInput {
+    signed_import: Vec<u8>,
+    package: lillux::InheritedDescriptorAuthority,
+    delivery: ActivationDeliveryPlan,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
@@ -405,7 +411,7 @@ fn operate() -> Result<()> {
         request.canonical_bytes()? == request_bytes,
         "operation request is noncanonical"
     );
-    let _guest_package_authority = if let LifecycleAdapterRequest::ActivateSupervisor {
+    let activation_input = if let LifecycleAdapterRequest::ActivateSupervisor {
         guest_package,
         ..
     } = &request
@@ -429,10 +435,14 @@ fn operate() -> Result<()> {
                 .map_err(anyhow::Error::msg)?;
         verify_guest_package_handoff(&package, guest_package)?;
         // Render's run command is passed through `bash -c`. Retain one fixed
-        // delivery mapping derived only from verified sealed inputs. Actual
-        // upload/run contact remains disabled until installed qualification.
-        let _delivery = activation_delivery_plan(&signed_bytes, &assignment_bytes, guest_package)?;
-        Some(package)
+        // delivery mapping derived only from verified sealed inputs. The
+        // signed provider spec still refuses contact until qualification.
+        let delivery = activation_delivery_plan(&signed_bytes, &assignment_bytes, guest_package)?;
+        Some(PreparedActivationInput {
+            signed_import: signed_bytes,
+            package,
+            delivery,
+        })
     } else {
         ensure!(
             std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
@@ -443,6 +453,9 @@ fn operate() -> Result<()> {
     };
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
         deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
+    }
+    if let LifecycleAdapterRequest::ActivateSupervisor { activation, .. } = &request {
+        deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
     }
     let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
     let provider_spec_bytes =
@@ -488,9 +501,38 @@ fn operate() -> Result<()> {
             request_digest: reservation.request_digest.clone(),
         },
         LifecycleAdapterRequest::ActivateSupervisor {
-            common, activation, ..
+            common,
+            occurrence,
+            activation,
+            ..
+        } => {
+            if provider_spec.one_shot_activation_enabled() {
+                let input = activation_input
+                    .as_ref()
+                    .context("first Render activation lost its verified sealed inputs")?;
+                // Once this call begins, any stage may have reached Render.
+                // Even a complete run response is not authenticated Ready;
+                // every transport outcome remains Pending for the original
+                // supervisor channel to settle. Reconciliation never calls
+                // this one-shot sequence again.
+                let _ = activation_contact::first_activation_contact(
+                    &network,
+                    &provider_spec,
+                    &settings,
+                    &occurrence.occurrence_id,
+                    &input.delivery,
+                    &input.signed_import,
+                    &input.package,
+                    deadline,
+                    &cancellation,
+                );
+            }
+            LifecycleAdapterResponse::SupervisorPending {
+                operation_id: common.operation_id.clone(),
+                activation_request_digest: activation.activation_request_digest.clone(),
+            }
         }
-        | LifecycleAdapterRequest::ReconcileSupervisorActivation {
+        LifecycleAdapterRequest::ReconcileSupervisorActivation {
             common, activation, ..
         } => LifecycleAdapterResponse::SupervisorPending {
             operation_id: common.operation_id.clone(),

@@ -720,6 +720,9 @@ pub enum LifecycleCapability {
     /// The exact installed adapter can start the admitted supervisor in an
     /// occurrence. Admission must require this before allocating one.
     SupervisorActivation,
+    /// The adapter requires an independently admitted exact guest-runtime
+    /// product and successful offline probe before startup authority.
+    IndependentGuestRuntimeAdmission,
     ExactAllocationReconciliation,
     /// Exact evidence that this allocation request created no occurrence.
     /// This may be provider testimony or a transport-owned proof that no

@@ -978,16 +978,6 @@ impl ExternalPlacementBackendRegistry {
         mut required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
-        // Current and retained product witnesses now join at session admission
-        // and contact, but a signed coordinate is still not a provider probe.
-        // Keep activation closed until exact guest snapshot comparison is
-        // implemented. Retained cleanup does not reapply this startup gate.
-        if require_activation {
-            ensure!(
-                contract.runtime_qualification.is_none(),
-                "external runtime qualification has no authenticated admission join"
-            );
-        }
         let backend = self
             .backends
             .get(&(
@@ -1015,6 +1005,13 @@ impl ExternalPlacementBackendRegistry {
         // reserved, but cannot be converted into an unsupported stronger fact.
         required.insert(LifecycleCapability::ExactTerminalObservation);
         let effective = backend.lifecycle_capabilities();
+        if require_activation {
+            ensure!(
+                contract.runtime_qualification.is_some()
+                    == effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                "external runtime qualification relationship differs from installed adapter admission"
+            );
+        }
         let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
         ensure!(
             missing.is_empty(),
@@ -1063,27 +1060,58 @@ pub(crate) fn preflight_external_direct_endpoint(
             )
         },
         |binding| {
-            require_current_runtime_qualification_for_start(state, &binding.backend_contract())
+            require_current_runtime_qualification_for_start(
+                state,
+                &binding.backend_contract(),
+                binding.digest(),
+            )
         },
     )
 }
 
-/// A current published witness must be checked under its actual product
-/// owner's grant. This is not yet a startup permit: the placement registry
-/// still refuses qualified bindings until provider-specific probe comparison
-/// and retained proof custody are complete.
+/// Recheck the current published witness under its actual product owner's
+/// grant and run the exact installed adapter's offline probe before fresh
+/// contact. The signed relationship alone is never a startup permit.
 fn require_current_runtime_qualification_for_start(
     state: &AppState,
     contract: &ExternalPlacementBackendContract,
+    binding_hash: &str,
 ) -> Result<()> {
-    if let Some(binding) = &contract.runtime_qualification {
-        crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
-            state,
-            binding,
-            &contract.guest_runtime_manifest_hash,
-        )?;
-    }
+    let _ = admit_current_runtime_qualification(state, contract, binding_hash)?;
     Ok(())
+}
+
+fn admit_current_runtime_qualification(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+    binding_hash: &str,
+) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    let Some(qualification) = &contract.runtime_qualification else {
+        return Ok(None);
+    };
+    let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
+        state,
+        qualification,
+        &contract.guest_runtime_manifest_hash,
+    )?;
+    let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
+        binding_hash: binding_hash.to_owned(),
+        guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+        owner_principal: qualification.owner_principal.clone(),
+        proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
+            attestation_hash: witness.attestation_hash,
+            evidence: witness.evidence,
+        },
+    };
+    retained.validate()?;
+    let source = verify_retained_runtime_proof(state, &retained)?;
+    state.external_placement_backends.verify_runtime_probe(
+        contract,
+        &retained.proof,
+        &source,
+        binding_hash,
+    )?;
+    Ok(Some(retained))
 }
 
 /// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
@@ -1260,37 +1288,7 @@ pub fn preflight_external_candidate_program(
 ) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
     let binding = select_binding(&state.node_config.external_execution, program)?;
     let contract = binding.backend_contract();
-    let runtime_proof = contract
-        .runtime_qualification
-        .as_ref()
-        .map(|qualification| {
-            let witness = crate::operator_external_content::product_qualification::verify_current_external_runtime_qualification(
-                state,
-                qualification,
-                &contract.guest_runtime_manifest_hash,
-            )?;
-            let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
-                binding_hash: binding.digest().to_owned(),
-                guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
-                owner_principal: qualification.owner_principal.clone(),
-                proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
-                    attestation_hash: witness.attestation_hash,
-                    evidence: witness.evidence,
-                },
-            };
-            retained.validate()?;
-            Ok::<_, anyhow::Error>(retained)
-        })
-        .transpose()?;
-    if let Some(proof) = runtime_proof.as_ref() {
-        let source = verify_retained_runtime_proof(state, proof)?;
-        state.external_placement_backends.verify_runtime_probe(
-            &contract,
-            &proof.proof,
-            &source,
-            binding.digest(),
-        )?;
-    }
+    let runtime_proof = admit_current_runtime_qualification(state, &contract, binding.digest())?;
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -2014,7 +2012,11 @@ impl<'a> ExternalPlacementOwner<'a> {
             .reservation
             .validate_startup_budget(contract.direct_startup_budget_ms()?)?;
         if !cleanup_only && record.phase == ExternalAllocationPhase::Reserved {
-            require_current_runtime_qualification_for_start(self.state, &contract)?;
+            require_current_runtime_qualification_for_start(
+                self.state,
+                &contract,
+                binding.digest(),
+            )?;
         }
         let program = AdmittedExternalExecutionProgram::DirectCommand(program.clone());
         let access = binding.credential_access()?;
@@ -2150,7 +2152,11 @@ impl<'a> ExternalPlacementOwner<'a> {
         binding.check_direct_program(&program)?;
         let contract = binding.backend_contract();
         if fresh {
-            require_current_runtime_qualification_for_start(self.state, &contract)?;
+            require_current_runtime_qualification_for_start(
+                self.state,
+                &contract,
+                binding.digest(),
+            )?;
         }
         let access = binding.credential_access()?;
         let credential = access.decode(self.state.vault.placement_credential(&access)?)?;
@@ -2404,7 +2410,11 @@ impl<'a> ExternalPlacementOwner<'a> {
                 .as_ref()
                 .is_none_or(|record| record.phase == ExternalAllocationPhase::Reserved)
         {
-            require_current_runtime_qualification_for_start(self.state, &contract)?;
+            require_current_runtime_qualification_for_start(
+                self.state,
+                &contract,
+                binding.digest(),
+            )?;
         }
         let credential = credential_access.decode(
             self.state
@@ -6767,6 +6777,35 @@ mod tests {
                 )
                 .is_err()
         );
+        let qualified_backend = Arc::new(FaultBackend {
+            capabilities: BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::IndependentGuestRuntimeAdmission,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
+            ..FaultBackend::new()
+        });
+        let qualified_registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![qualified_backend]).unwrap();
+        assert!(
+            qualified_registry
+                .qualify(
+                    &contract,
+                    &credential,
+                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
+                )
+                .is_err(),
+            "an active independent-runtime adapter cannot admit a missing relationship"
+        );
+        // The registry checks the shape. Session admission and first contact
+        // independently authenticate the exact witness and adapter probe.
+        qualified_registry
+            .qualify(
+                &unverified,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         registry
             .qualify_for_cleanup(
                 &unverified,

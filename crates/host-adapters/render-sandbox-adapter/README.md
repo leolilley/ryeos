@@ -61,8 +61,9 @@ support, signing, installation, or provider qualification.
 - Allocation reconciliation without a retained provider ID is always pending.
   The adapter does not treat list absence or a GET 404 as proof of no
   occurrence.
-- Activation and activation reconciliation always return `supervisor_pending`.
-  The installed provider spec therefore advertises no
+- Activation and activation reconciliation always return `supervisor_pending`;
+  even a successful proxy run is not authenticated supervisor `Ready`. The
+  currently signed provider spec advertises no
   `supervisor_activation` lifecycle capability. RyeOS requires that capability
   at offline placement admission, before Sandbox allocation or other provider
   contact; this incomplete adapter cannot strand a paid occurrence merely to
@@ -76,13 +77,12 @@ support, signing, installation, or provider qualification.
   and list operations; execution records contain command metadata,
   operation/type, token-mint `startedAt`, optional `stoppedAt`, and optional
   client-reported `exitCode`, but no supervisor readiness proof. The CLI's SSE
-  reader has no event-size ceiling; a RyeOS implementation would need bounded
-  per-operation SSE limits. If token minting's response is lost, the adapter
-  also lacks the returned execution ID needed for exact GET. A list result
-  cannot safely bind that uncertain activation to this RyeOS operation. The
-  dynamic proxy URI additionally needs a reviewed origin/path policy and
-  transport policy. W3 therefore does not mint a token, invoke a proxy URI, or
-  infer activation from an exit status.
+  reader has no event-size ceiling; RyeOS bounds the response before reading
+  it. If token minting's response is lost, the adapter lacks the returned
+  execution ID needed for exact GET. A list result cannot safely bind that
+  uncertain activation to this RyeOS operation. The adapter's narrow proxy
+  origin/path and transport checks do not turn a run response into `Ready`.
+  The currently signed profile still prevents token mint and proxy contact.
   These behaviors are visible in the pinned CLI's `pkg/sandbox/repo.go`,
   `pkg/sandbox/sse.go`, `pkg/client/client_gen.go`, and
   `pkg/client/sandboxes/sandboxes_gen.go`.
@@ -122,7 +122,7 @@ input byte against the retained projection and bind that verification to
 of the run-proxy stream. Provider terminal status alone is not guest-writer
 exclusion or hard-isolation qualification.
 
-`src/activation_contact.rs` now contains the disabled one-shot contact sequence:
+`src/activation_contact.rs` contains the one-shot contact sequence:
 mint a bounded token and upload the signed import, mint and stream the exact
 inherited package inode, then mint and send the fixed owner run command. It
 uses no retry, validates each returned bearer against the exact Sandbox proxy
@@ -130,12 +130,14 @@ route, and preserves only a `Pending` interpretation of the run response. A
 focused failure-order test proves it stops after the first uncertain stage.
 An additional request-construction test checks the exact Sandbox proxy URL,
 method, body budget, TLS roots and redacted bearer header before contact.
-Provider-spec schema 2 now declares the exact upload-token and run-token API
+Provider-spec schema 2 declares the exact upload-token and run-token API
 routes. The contact code requires its constructed URL to match that signed
-route as well as the fixed adapter operation; neither declaration authorizes
-contact while activation remains `unsupported_pending`.
-The signed provider spec still declares activation `unsupported_pending`, so
-none of this code is reachable as a live mutation. Enabling it requires the
+route as well as the fixed adapter operation. The parser also recognizes only
+an explicit `upload_then_run_once_pending` activation profile with a qualified
+guest-runtime precondition; reconciliation accepts only `unsupported_pending`
+and cannot repeat contact. The signed provider spec still declares activation
+`unsupported_pending`, so the one-shot branch is unreachable as a live
+mutation. Enabling it requires the
 installed snapshot, upload mode, process survival after stream loss, and
 authenticated supervisor `Ready` qualification described above.
 
@@ -268,7 +270,7 @@ is negative architecture evidence, not installed Render qualification.
 | --- | --- | --- | --- |
 | Create Sandbox | W2 supplies the retained operation ID, binding hash, allocation request digest, and reservation before invoking this adapter. The provider request has no create-correlation or idempotency token. | Only this request's complete, valid `201` response can bind its returned Sandbox ID after the configured fields match. | A lost/malformed response or any failure after request transmission stays pending. No retry or list search is allowed. `NoRequestSent` is locally authoritative. The three typed snapshot rejection shapes remain pending until provider-authoritative semantics are established. An uncertain create may exist and consume capacity/spend, so its original reservation remains quarantined. |
 | Allocation observation | The original allocation identity remains the coordinate; no Sandbox ID is invented. | Allocation reconciliation is unsupported without a retained provider ID. This adapter does not list or guess. | A list miss or `404` is not a negative proof. Unresolved occurrence and spend remain unknown under the original reservation. |
-| Bootstrap and readiness | W2's activation request identity remains authoritative; this adapter does not create a Render execution token. | No bootstrap/readiness proof is emitted. Activation and its reconciliation remain pending. | The pinned CLI's token-mint response would carry the execution ID and operation-scoped proxy URI; a lost response leaves no exact ID to query. This adapter does not mint, retry, invoke, or guess from a list. |
+| Bootstrap and readiness | W2's activation request identity remains authoritative; the current signed profile refuses the one-shot activation branch. | An explicitly signed, qualified-runtime one-shot profile may mint/upload/run once, but still emits only pending; authenticated supervisor `Ready` comes from the existing channel, never the proxy response. Reconciliation never repeats contact. | A lost token-mint or run-stream response leaves the original activation pending. The adapter does not retry, infer success from an execution list, or mint during reconciliation. |
 | Terminate | W2 supplies the retained operation ID, bound occurrence ID, and termination request digest before invocation. | One termination `POST` is followed by a `GET` for that exact ID. Only a matching ID, protected plan/region, `deny-all` policy, `status: terminated`, and a valid `terminatedAt` are terminal observation; allocation lifetime parity is not rechecked. Recovery is GET-only. | A lost POST response is reconciled by exact-ID GET; the POST is not repeated. A timeout, `404`, malformed response, or missing terminal fields remains pending. Until exact terminal observation, remaining capacity/spend is unknown. |
 | Provider Sandbox death and writer exclusion | Bound to the exact Sandbox occurrence, but distinct from the termination request coordinate. | The current adapter does not establish guest descendant settlement, writer exclusion, or a frozen export. | Provider `terminated` status is not installed qualification or proof of RyeOS guest-writer death. No candidate execution or export is enabled by this adapter. |
 
@@ -451,15 +453,16 @@ before settings or network work. The settings-schema digest in the spec must
 match the exact settings schema carried by this adapter.
 
 `src/provider_spec.rs` is the first narrow interpreter profile. It accepts
-fixed operation kinds, route segments, typed field sources, one reviewed
-snapshot precondition, and code-defined proof-profile identifiers. It rejects
+fixed operation kinds, route segments, typed field sources, exact configured
+and independently qualified runtime preconditions, and code-defined
+proof-profile identifiers. It rejects
 unknown fields, methods, origins, arbitrary expressions, capability claims,
 and proof values. The interpreter builds the create body and exact route from
 the signed data; Rust validates create binding and terminal observations before
 deriving effective capabilities. Create remains
 one POST with no retry or listing-based reconciliation. Termination remains
-one POST followed by exact-ID GET. Activation and its reconciliation remain
-pending.
+one POST followed by exact-ID GET. Activation always reports pending, and the
+currently signed provider spec does not permit its one-shot contact branch.
 
 This is the Render reference profile for the data-driven lifecycle direction,
 not evidence that a multi-provider shared runtime is complete. The interpreter

@@ -73,7 +73,6 @@ fn contact_once(
 /// reconciliation. Even a successful run response remains merely Pending:
 /// only the independently authenticated supervisor channel can establish
 /// Ready. The installed Render profile currently does not enable this call.
-#[allow(dead_code)]
 pub(crate) fn first_activation_contact(
     network: &NetworkContext,
     provider_spec: &ProviderSpec,
