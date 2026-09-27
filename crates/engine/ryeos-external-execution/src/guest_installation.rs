@@ -7,6 +7,7 @@
 //! launch, enforce input writer exclusion and settle the enclosing scope.
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
@@ -301,6 +302,15 @@ pub struct CommittedGuestSupervisorLaunchIntent {
     record_sha256: String,
 }
 
+/// One exact held-sandbox proposal with all control FDs and the sealed source
+/// owner still alive. No public raw-request or spawn accessor exists: the
+/// next transition must join the Lillux held/applied receipts and release.
+pub struct PreparedGuestMountedSandbox {
+    _committed: CommittedGuestSupervisorLaunchIntent,
+    _controls: [lillux::InheritedDescriptorAuthority; 5],
+    request: lillux::LinuxSandboxRequest,
+}
+
 impl CommittedGuestSupervisorLaunchIntent {
     pub fn record_file(&self) -> &lillux::PinnedRegularFileIdentity {
         &self.record_file
@@ -356,6 +366,87 @@ impl CommittedGuestSupervisorLaunchIntent {
         );
         lillux::sealed_memfd(c"ryeos-guest-supervisor-launch-intent", &bytes)
             .map_err(anyhow::Error::msg)
+    }
+
+    /// Form the sole mounted-source supervisor request from committed owner
+    /// handles. The controller transport belongs to this trusted supervisor;
+    /// untrusted candidate commands receive a separate nested isolated view.
+    /// This retains every FD, but deliberately cannot spawn or claim Ready.
+    pub fn prepare_mounted_sandbox_request(
+        self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<PreparedGuestMountedSandbox> {
+        let artifacts = &self._prepared._artifacts;
+        let installed = &artifacts.private.content._installed;
+        installed.owner.recheck(context, inputs)?;
+        installed.recheck_for_adoption(context, inputs)?;
+        ensure!(
+            self._source_mount.stage() == &installed.imported.stage_identity()?,
+            "mounted supervisor source differs from committed stage"
+        );
+        let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
+        let state = artifacts.state_root.inherited_descriptor_authority()?;
+        let runtime = installed.runtime.inherited_descriptor_authority()?;
+        let private = artifacts.private.private_parent.inherited_descriptor_authority()?;
+        let launch_record = self.seal_record_for_supervisor()?;
+        let controls = [bootstrap, state, runtime, private, launch_record];
+        let channels = controls
+            .iter()
+            .zip(SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS)
+            .map(|(authority, target)| {
+                Ok::<_, anyhow::Error>((
+                    authority.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                    target,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let source_fd = self
+            ._source_mount
+            .mount_authority()
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            channels.iter().all(|(fd, _)| *fd != source_fd),
+            "sealed source descriptor entered supervisor control channels"
+        );
+        let request = lillux::LinuxSandboxRequest {
+            executable: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION).join("supervisor"),
+            argv0: "ryeos-external-candidate-supervisor".into(),
+            arguments: Vec::new(),
+            cwd: PathBuf::from("/"),
+            environment: std::collections::BTreeMap::new(),
+            mounts: vec![lillux::LinuxSandboxMount {
+                source_fd,
+                destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+                access: lillux::LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            }],
+            fixed_parent_views: Vec::new(),
+            overlay: None,
+            network: lillux::LinuxSandboxNetwork::Host,
+            private_tmp: true,
+            proc_filesystem: lillux::LinuxSandboxProcFilesystem::PidNamespaceNested,
+            minimal_devices: true,
+            character_devices: Vec::new(),
+            target_channels: channels,
+            lifecycle: lillux::LinuxSandboxLifecycle::Run,
+            contain_process_group: false,
+            nested_sandbox: true,
+            aggregate_limits: None,
+        };
+        Ok(PreparedGuestMountedSandbox {
+            _committed: self,
+            _controls: controls,
+            request,
+        })
+    }
+}
+
+#[cfg(test)]
+impl PreparedGuestMountedSandbox {
+    pub(crate) fn inspect_for_test(&self) -> &lillux::LinuxSandboxRequest {
+        &self.request
     }
 }
 

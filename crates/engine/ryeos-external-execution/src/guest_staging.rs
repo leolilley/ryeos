@@ -2450,7 +2450,35 @@ mod tests {
             &committed_bytes,
         )
         .is_err(), "committed launch intent cannot be replaced");
-        drop(committed);
+        let mounted = committed
+            .prepare_mounted_sandbox_request(&context, &inputs)
+            .unwrap();
+        let mounted_request = mounted.inspect_for_test();
+        assert_eq!(
+            mounted_request.executable,
+            std::path::PathBuf::from(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_STAGE_MOUNT_DESTINATION
+            )
+            .join("supervisor")
+        );
+        assert_eq!(mounted_request.mounts.len(), 1);
+        assert_eq!(
+            mounted_request.mounts[0].access,
+            lillux::LinuxSandboxMountAccess::ReadOnly
+        );
+        assert_eq!(
+            mounted_request
+                .target_channels
+                .iter()
+                .map(|(_, target)| *target)
+                .collect::<Vec<_>>(),
+            ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
+        );
+        assert!(mounted_request
+            .target_channels
+            .iter()
+            .all(|(source, _)| *source != mounted_request.mounts[0].source_fd));
+        drop(mounted);
         assert_eq!(
             crate::guest_installation::recover_guest_occurrence(
                 &committed_occurrence,
