@@ -703,7 +703,8 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
     )?;
     let mut statement = db.prepare(
         "SELECT attempt_id, recipe_digest, recipe_generation, scenario_digest, \
-         natural_empty_receipt_digest, observation_object_hash, phase, mount_preparation_evidence \
+         natural_empty_receipt_digest, observation_object_hash, phase, mount_preparation_evidence, \
+         recovery_death_evidence_digest, retirement_evidence_digest \
          FROM scoped_child_attempt WHERE owner_thread_id=?1",
     )?;
     let rows = statement
@@ -717,6 +718,8 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -724,10 +727,23 @@ fn exact_scoped_producer_observation(state: &Path, root: &str) -> anyhow::Result
         rows.len() == 1,
         "expected exactly one scoped attempt for root {root}"
     );
-    let (attempt, recipe, generation, scenario, receipt, object, phase, mount_evidence) = &rows[0];
+    let (
+        attempt,
+        recipe,
+        generation,
+        scenario,
+        receipt,
+        object,
+        phase,
+        mount_evidence,
+        death_evidence,
+        retirement_evidence,
+    ) = &rows[0];
     ensure!(
-        matches!(phase.as_str(), "natural_scope_empty" | "retired"),
-        "scoped producer has not settled naturally"
+        phase == "retired"
+            && death_evidence.as_deref().is_some_and(lillux::valid_hash)
+            && retirement_evidence.as_deref().is_some_and(lillux::valid_hash),
+        "scoped producer has not proved exact scope death and retirement"
     );
     let receipt = receipt
         .as_deref()
