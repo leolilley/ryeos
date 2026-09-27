@@ -12,6 +12,7 @@ use anyhow::{Context as _, Result, ensure};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     GuestSupervisorDescriptorPlan, SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD,
     SUPERVISOR_EXECUTABLE_FD, SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS, SUPERVISOR_STAGE_MOUNT_DESTINATION,
     SUPERVISOR_STATE_ROOT_FD, fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_external_execution_contract::staging_package::{
@@ -55,10 +56,10 @@ struct GuestSupervisorLaunchIntent {
     supervisor_sha256: String,
     launcher_sha256: String,
     guest_input_identity: String,
-    /// Exact IEEE-754 bits of the sole variable non-descriptor launch field.
-    /// All other request semantics are checked against the fixed profile.
-    request_timeout_bits: u64,
-    inherited_descriptors: Vec<u32>,
+    /// Exact IEEE-754 bits of the outer launch deadline budget.
+    launch_timeout_bits: u64,
+    stage_mount_destination: String,
+    control_descriptors: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +277,9 @@ impl CommittedGuestSupervisorLaunchIntent {
         let parsed: GuestSupervisorLaunchIntent = serde_json::from_slice(&bytes)?;
         ensure!(
             canonical_launch_record(&parsed)? == bytes
+                && parsed.schema == 2
+                && parsed.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
+                && parsed.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
                 && parsed.stage == *self._source_mount.stage()
                 && parsed.install_record_file
                     == self
@@ -364,10 +368,10 @@ impl PreparedGuestSupervisorRequest {
         let owner = &installed.owner;
         ensure!(
             self.plan == fixed_guest_supervisor_descriptor_plan(inputs)?,
-            "guest supervisor descriptor plan changed before outer intent"
+            "guest supervisor content plan changed before outer intent"
         );
         canonical_launch_record(&GuestSupervisorLaunchIntent {
-            schema: 1,
+            schema: 2,
             ticket_sha256: digest_ticket(ticket)?,
             occurrence_id: owner.record.occurrence_id.clone(),
             occurrence_directory: owner.occurrence.identity()?,
@@ -383,8 +387,9 @@ impl PreparedGuestSupervisorRequest {
             supervisor_sha256: ticket.supervisor_sha256.clone(),
             launcher_sha256: ticket.launcher_sha256.clone(),
             guest_input_identity: inputs.identity_digest()?,
-            request_timeout_bits: self.exact_request_timeout_bits()?,
-            inherited_descriptors: self.plan.inherited_descriptors.clone(),
+            launch_timeout_bits: self.exact_request_timeout_bits()?,
+            stage_mount_destination: SUPERVISOR_STAGE_MOUNT_DESTINATION.into(),
+            control_descriptors: SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS.to_vec(),
         })
     }
 
@@ -1203,10 +1208,9 @@ pub fn recover_guest_occurrence(
         let launch_bytes =
             launch_file.read_stable_bounded(&launch_observation, MAX_RECORD_BYTES)?;
         let launch: GuestSupervisorLaunchIntent = serde_json::from_slice(&launch_bytes)?;
-        let expected_descriptors = fixed_guest_supervisor_descriptor_plan(inputs)?;
         ensure!(
             canonical_launch_record(&launch)? == launch_bytes
-                && launch.schema == 1
+                && launch.schema == 2
                 && launch.ticket_sha256 == owner.ticket_sha256
                 && launch.occurrence_id == owner.occurrence_id
                 && launch.occurrence_directory == owner.occurrence_directory
@@ -1223,9 +1227,10 @@ pub fn recover_guest_occurrence(
                 && launch.supervisor_sha256 == ticket.supervisor_sha256
                 && launch.launcher_sha256 == ticket.launcher_sha256
                 && launch.guest_input_identity == inputs.identity_digest()?
-                && f64::from_bits(launch.request_timeout_bits).is_finite()
-                && f64::from_bits(launch.request_timeout_bits) > 0.0
-                && launch.inherited_descriptors == expected_descriptors.inherited_descriptors,
+                && f64::from_bits(launch.launch_timeout_bits).is_finite()
+                && f64::from_bits(launch.launch_timeout_bits) > 0.0
+                && launch.stage_mount_destination == SUPERVISOR_STAGE_MOUNT_DESTINATION
+                && launch.control_descriptors == SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS,
             "guest supervisor launch intent differs from retained authority"
         );
         ensure_child_binding(occurrence, CANDIDATE_PRIVATE_DIRECTORY, &private_parent)?;

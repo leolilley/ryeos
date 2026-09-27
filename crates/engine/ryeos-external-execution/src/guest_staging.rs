@@ -2025,9 +2025,21 @@ mod tests {
         let launch_value: serde_json::Value =
             serde_json::from_slice(&synthetic_launch_intent).unwrap();
         assert_eq!(
-            launch_value["request_timeout_bits"].as_u64(),
+            launch_value["launch_timeout_bits"].as_u64(),
             Some(10.0_f64.to_bits())
         );
+        assert_eq!(launch_value["schema"], 2);
+        assert_eq!(
+            launch_value["stage_mount_destination"],
+            ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_STAGE_MOUNT_DESTINATION
+        );
+        assert_eq!(
+            launch_value["control_descriptors"],
+            serde_json::json!(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_MOUNTED_CONTROL_DESCRIPTORS
+            )
+        );
+        assert!(launch_value.get("inherited_descriptors").is_none());
         drop(prepared);
         let recovered_occurrence = crate::guest_installation::recover_guest_occurrence(
             &occurrence,
@@ -2425,6 +2437,31 @@ mod tests {
         assert!(
             replaced.seal_record_for_supervisor().is_err(),
             "same-byte replacement launch inode cannot be sealed for the supervisor"
+        );
+        let (predecessor_dir, _predecessor_source, predecessor_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let predecessor = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
+        let predecessor_path = predecessor_dir
+            .path()
+            .join("guest-import-owner/guest-supervisor-launch-intent.json");
+        let mut predecessor_value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&predecessor_path).unwrap()).unwrap();
+        predecessor_value["schema"] = serde_json::json!(1);
+        std::fs::write(
+            &predecessor_path,
+            lillux::canonical_json(&predecessor_value).unwrap(),
+        )
+        .unwrap();
+        drop(predecessor);
+        assert!(
+            crate::guest_installation::recover_guest_occurrence(
+                &predecessor_occurrence,
+                &ticket,
+                &context,
+                &inputs,
+            )
+            .is_err(),
+            "predecessor fixed-descriptor launch record cannot recover as mounted launch"
         );
         for child in ["candidate-private", "supervisor-state"] {
             let (occurrence_dir, _source_dir, occurrence, prepared) =
