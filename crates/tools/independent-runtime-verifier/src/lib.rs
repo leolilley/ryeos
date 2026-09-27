@@ -421,6 +421,17 @@ impl SelectedInput {
         &self.subject_manifest_hash
     }
 
+    /// The sealed subject's signed relative project mount, not a host path
+    /// reconstructed from an ambient realization or callback.
+    pub fn subject_mount_relative(&self) -> Result<&str> {
+        let mount = self
+            .trees
+            .get("subject")
+            .context("selected subject mount is absent")?;
+        ensure!(mount == "qualification/subject", "selected subject mount changed");
+        Ok(mount)
+    }
+
     pub fn open_roots(
         &self,
         project: &lillux::PinnedDirectory,

@@ -17,7 +17,8 @@ use ryeos_runtime::callback::CallbackError;
 use ryeos_runtime::callback_uds::UdsRuntimeClient;
 use ryeos_runtime::scoped_relay_handoff::ScopedRelayHandoff;
 use ryeos_state::external_content::products::producer_recipe::{
-    ProductProducerRecipe, ProducerCwdSource, ProducerEnvironmentBinding, ProducerEnvironmentSource,
+    ProductProducerRecipe, ProducerCwdSource, ProducerEnvironmentBinding,
+    ProducerEnvironmentSource, ProducerExecutableSource,
     prepared_directory_mount_destination,
 };
 use ryeos_state::external_content::products::qualification::ProductProducerRecipeSourceIdentity;
@@ -233,6 +234,16 @@ async fn main() -> Result<()> {
             direct_stage.environment_configuration_sha256(),
         )?;
         if running_relay.is_some() {
+            let signed_target = signed_direct_target_commitments(
+                &parameters.configuration.expected_producer_recipe,
+                &realizations,
+                &project,
+                selected.subject_mount_relative()?,
+            )?;
+            ensure!(
+                locator.expected_applied_launch == signed_target,
+                "direct Codex held target differs from independently selected signed member"
+            );
             // Refuse a different daemon launch expectation before this
             // verifier sends its first Codex protocol frame. START may have
             // already released the target; this is not proof of zero startup
@@ -243,6 +254,10 @@ async fn main() -> Result<()> {
                 &locator.expected_applied_launch,
             )?;
             check_scoped_applied_target(&locator, &locator.applied_launch)?;
+            ensure!(
+                locator.applied_launch.matches_commitments(&signed_target),
+                "direct Codex applied target differs from independently selected signed member"
+            );
             check_scoped_direct_environment_and_cwd(
                 &parameters.configuration.expected_producer_recipe,
                 &realizations,
@@ -935,6 +950,63 @@ fn check_scoped_direct_environment_and_cwd(
     Ok(())
 }
 
+/// Independently derive all four applied target commitments from the signed
+/// recipe, the sealed realization selection, and this verifier's pinned
+/// admitted project root. The daemon's compiled target is not used as an
+/// input. Descriptor-backed member content is checked by `SelectedInput`'s
+/// rooted preflight before this comparison; this binds its namespace path.
+fn signed_direct_target_commitments(
+    recipe: &ProductProducerRecipe,
+    admitted_realizations: &str,
+    project: &lillux::PinnedDirectory,
+    subject_mount: &str,
+) -> Result<lillux::LinuxSandboxAppliedLaunchCommitments> {
+    recipe.validate()?;
+    project.ensure_path_binding()?;
+    let project_path = lillux::canonicalize_existing_path(project.path())?;
+    let rebound = lillux::PinnedDirectory::open(&project_path)?
+        .context("canonical admitted verifier root disappeared")?;
+    ensure!(
+        project.is_same_directory(&rebound)?,
+        "canonical verifier root differs from pinned admitted project"
+    );
+    let ProducerExecutableSource::AdmittedRealizationMember {
+        realization_id,
+        relative_path,
+        ..
+    } = &recipe.executable_source else {
+        bail!("direct Codex target is not an admitted realization member");
+    };
+    ensure!(
+        realization_id == "subject"
+            && subject_mount == "qualification/subject"
+            && relative_path == "bin/codex",
+        "direct Codex target differs from selected subject member"
+    );
+    let executable = ryeos_state::objects::ExternalContentMountRoot::Project
+        .destination(Some(&project_path), subject_mount)?
+        .join(relative_path);
+    let argv0 = executable.as_os_str().to_os_string();
+    let arguments = recipe.argv.iter().map(OsString::from).collect::<Vec<_>>();
+    let cwd = match &recipe.cwd_source {
+        ProducerCwdSource::PreparedDirectory { id } => prepared_directory_mount_destination(id)?,
+        ProducerCwdSource::VerifierPrivateWorkspace => {
+            bail!("direct Codex cwd cannot be verifier-private")
+        }
+    };
+    let environment = signed_direct_environment(recipe, admitted_realizations)?;
+    lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+        lillux::LinuxSandboxAppliedLaunchTarget {
+            executable: &executable,
+            argv0: &argv0,
+            arguments: &arguments,
+            cwd: &cwd,
+            environment: &environment,
+        },
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 fn check_scoped_direct_expected_environment_and_cwd(
     recipe: &ProductProducerRecipe,
     admitted_realizations: &str,
@@ -1339,6 +1411,140 @@ mod tests {
         })).unwrap();
         let admitted = "[{\"id\":\"signed\"}]";
         let environment = signed_direct_environment(&recipe, admitted).unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let project = lillux::PinnedDirectory::open(project_dir.path())
+            .unwrap()
+            .unwrap();
+        let signed_target = signed_direct_target_commitments(
+            &recipe,
+            admitted,
+            &project,
+            "qualification/subject",
+        )
+        .unwrap();
+        let signed_executable = project_dir.path().join("qualification/subject/bin/codex");
+        let signed_argv0 = signed_executable.as_os_str().to_os_string();
+        let signed_arguments = vec![OsString::from("app-server")];
+        let signed_cwd = Path::new("/ryeos/producer-prepared/codex-occurrence");
+        let expected_signed_target = lillux::LinuxSandboxAppliedLaunchCommitments::from_target(
+            lillux::LinuxSandboxAppliedLaunchTarget {
+                executable: &signed_executable,
+                argv0: &signed_argv0,
+                arguments: &signed_arguments,
+                cwd: signed_cwd,
+                environment: &environment,
+            },
+        )
+        .unwrap();
+        assert_eq!(signed_target, expected_signed_target);
+        assert!(signed_direct_target_commitments(&recipe, admitted, &project, "other").is_err());
+        let mut wrong_subject = recipe.clone();
+        if let ProducerExecutableSource::AdmittedRealizationMember {
+            realization_id,
+            ..
+        } = &mut wrong_subject.executable_source
+        {
+            *realization_id = "other".into();
+        }
+        assert!(signed_direct_target_commitments(
+            &wrong_subject,
+            admitted,
+            &project,
+            "qualification/subject"
+        )
+        .is_err());
+        let mut wrong_member = recipe.clone();
+        if let ProducerExecutableSource::AdmittedRealizationMember { relative_path, .. } =
+            &mut wrong_member.executable_source
+        {
+            *relative_path = "bin/other".into();
+        }
+        assert!(signed_direct_target_commitments(
+            &wrong_member,
+            admitted,
+            &project,
+            "qualification/subject"
+        )
+        .is_err());
+        let mut wrong_executable_source = recipe.clone();
+        wrong_executable_source.executable_source =
+            ProducerExecutableSource::AdmittedVerifierExecutable;
+        assert!(signed_direct_target_commitments(
+            &wrong_executable_source,
+            admitted,
+            &project,
+            "qualification/subject"
+        )
+        .is_err());
+        let mut changed_arguments = recipe.clone();
+        changed_arguments.argv.push("--different".into());
+        assert_ne!(
+            signed_direct_target_commitments(
+                &changed_arguments,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .unwrap(),
+            signed_target
+        );
+        let mut changed_target_cwd = recipe.clone();
+        changed_target_cwd.cwd_source = ProducerCwdSource::PreparedDirectory {
+            id: "other-occurrence".into(),
+        };
+        assert_ne!(
+            signed_direct_target_commitments(
+                &changed_target_cwd,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .unwrap(),
+            signed_target
+        );
+        changed_target_cwd.cwd_source = ProducerCwdSource::VerifierPrivateWorkspace;
+        assert!(signed_direct_target_commitments(
+            &changed_target_cwd,
+            admitted,
+            &project,
+            "qualification/subject"
+        )
+        .is_err());
+        let mut changed_target_environment = recipe.clone();
+        changed_target_environment.environment_bindings.insert(
+            "LANG".into(),
+            ProducerEnvironmentBinding::Literal {
+                value: "POSIX".into(),
+            },
+        );
+        assert_ne!(
+            signed_direct_target_commitments(
+                &changed_target_environment,
+                admitted,
+                &project,
+                "qualification/subject"
+            )
+            .unwrap(),
+            signed_target
+        );
+        let rebound_root = tempfile::tempdir().unwrap();
+        let selected_path = rebound_root.path().join("selected");
+        let displaced_path = rebound_root.path().join("displaced");
+        std::fs::create_dir(&selected_path).unwrap();
+        let pinned_selected = lillux::PinnedDirectory::open(&selected_path)
+            .unwrap()
+            .unwrap();
+        std::fs::rename(&selected_path, &displaced_path).unwrap();
+        std::fs::create_dir(&selected_path).unwrap();
+        assert!(signed_direct_target_commitments(
+            &recipe,
+            admitted,
+            &pinned_selected,
+            "qualification/subject"
+        )
+        .is_err());
+        std::fs::remove_dir(&selected_path).unwrap();
+        std::fs::rename(&displaced_path, &selected_path).unwrap();
         assert_eq!(environment.len(), 8);
         assert_eq!(environment.get(OsStr::new("RYEOS_EXTERNAL_REALIZATIONS")),
             Some(&OsString::from(admitted)));
