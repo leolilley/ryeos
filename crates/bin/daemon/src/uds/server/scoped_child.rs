@@ -526,7 +526,8 @@ fn scoped_attempt_locator(
         .ok_or_else(|| anyhow::anyhow!("scoped locator has no retained held mount preparation"))?;
     anyhow::ensure!(
         held_mounts.plan_digest == isolation_plan_digest
-            && held_mounts.observed.matches_commitments(&held_mounts.expected),
+            && held_mounts.observed.matches_commitments(&held_mounts.expected)
+            && applied.matches_post_release_mounts(&held_mounts.expected),
         "scoped locator held mount preparation differs from compiled plan"
     );
     Ok(serde_json::json!({

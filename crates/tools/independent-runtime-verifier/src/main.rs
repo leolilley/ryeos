@@ -1689,6 +1689,16 @@ mod tests {
         let mut missing_applied = valid.clone();
         missing_applied.as_object_mut().unwrap().remove("applied_launch");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_applied).is_err());
+        let mut changed_mounts = valid.clone();
+        changed_mounts["expected_mount_preparation"]["destination_access_sha256"][0] = json!(255);
+        changed_mounts["held_mount_preparation"]["destination_access_sha256"][0] = json!(255);
+        assert!(
+            serde_json::from_value::<ScopedAttemptLocator>(changed_mounts)
+                .unwrap()
+                .validate()
+                .is_err(),
+            "a consistently rewritten held mount view reached provider permit"
+        );
         let home = ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(
             staging::DIRECT_HOME_ID,
         )
