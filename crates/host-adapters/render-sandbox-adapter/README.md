@@ -88,6 +88,10 @@ returned origins, methods, queries, fragments, credentials, ports and alternate
 encodings before a future bearer token could be forwarded. This is local
 policy/test evidence, **not** evidence that Render always returns that shape or
 that a proxy operation has been safely implemented.
+It also constructs only the pinned CLI's exact API token-mint routes for the
+same Sandbox and owner: file upload/download with a validated path, or run
+stream. The constructor does not mint a token. A lost mint response must not
+cause a second mint or upload/run attempt under the same activation claim.
 The same dormant boundary now parses a bounded connect response directly into
 a zeroizing bearer, rejects duplicates, unknown fields and trailing data,
 checks expiry and execution identity, and binds the returned method and URI to

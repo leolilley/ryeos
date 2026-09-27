@@ -54,6 +54,55 @@ pub(crate) enum ProxyOperation<'a> {
     RunStream,
 }
 
+/// The exact Render API token-mint routes exposed by the pinned CLI. A token
+/// mint can itself be contact-ambiguous, so this only constructs one request;
+/// callers must retain their original durable activation claim and never
+/// mint again during reconciliation.
+#[allow(dead_code)]
+pub(crate) fn connect_token_url(
+    occurrence_id: &str,
+    owner_id: &str,
+    operation: ProxyOperation<'_>,
+) -> Result<Url> {
+    ensure!(
+        valid_dns_label(occurrence_id, 128) && occurrence_id.starts_with("sbx-"),
+        "Render token-mint occurrence is invalid"
+    );
+    ensure!(
+        !owner_id.is_empty()
+            && owner_id.len() <= 256
+            && owner_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "Render token-mint owner is invalid"
+    );
+    let (suffix, remote_path) = match operation {
+        ProxyOperation::UploadFile { remote_path } => {
+            ensure!(
+                valid_remote_path(remote_path),
+                "Render upload path is invalid"
+            );
+            ("files/upload/token", Some(remote_path))
+        }
+        ProxyOperation::DownloadFile { remote_path } => {
+            ensure!(
+                valid_remote_path(remote_path),
+                "Render download path is invalid"
+            );
+            ("files/download/token", Some(remote_path))
+        }
+        ProxyOperation::RunStream => ("runs/stream/token", None),
+    };
+    let mut url = Url::parse(&format!(
+        "https://api.render.com/v1/sandboxes/{occurrence_id}/{suffix}"
+    ))?;
+    url.query_pairs_mut().append_pair("ownerId", owner_id);
+    if let Some(remote_path) = remote_path {
+        url.query_pairs_mut().append_pair("path", remote_path);
+    }
+    Ok(url)
+}
+
 #[allow(dead_code)]
 pub(crate) fn bind_connect_response(
     response_bytes: &Zeroizing<Vec<u8>>,
@@ -230,6 +279,53 @@ mod tests {
         assert_eq!(bound.method, "POST");
         assert_eq!(bound.route.as_str(), "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream");
         assert_eq!(bound.bearer.as_str(), "short-lived-token");
+    }
+
+    #[test]
+    fn token_mint_routes_bind_exact_owner_occurrence_and_operation() {
+        let upload = connect_token_url(
+            OCCURRENCE,
+            "tea-owner_1",
+            ProxyOperation::UploadFile {
+                remote_path: "/ryeos/activation/guest-package",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            upload.as_str(),
+            "https://api.render.com/v1/sandboxes/sbx-abc123/files/upload/token?ownerId=tea-owner_1&path=%2Fryeos%2Factivation%2Fguest-package"
+        );
+        let run = connect_token_url(OCCURRENCE, "tea-owner_1", ProxyOperation::RunStream).unwrap();
+        assert_eq!(
+            run.as_str(),
+            "https://api.render.com/v1/sandboxes/sbx-abc123/runs/stream/token?ownerId=tea-owner_1"
+        );
+        for (occurrence, owner, path) in [
+            (
+                "sbx-other/../sbx-abc123",
+                "tea-owner_1",
+                "/ryeos/activation/guest-package",
+            ),
+            (
+                OCCURRENCE,
+                "tea-owner_1&other=1",
+                "/ryeos/activation/guest-package",
+            ),
+            (
+                OCCURRENCE,
+                "tea-owner_1",
+                "/ryeos/activation/../guest-package",
+            ),
+        ] {
+            assert!(
+                connect_token_url(
+                    occurrence,
+                    owner,
+                    ProxyOperation::UploadFile { remote_path: path },
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
