@@ -2,8 +2,8 @@
 //!
 //! This is an observation over a private staged generation, not a Ready or
 //! writer-exclusion claim. The caller must pass the independently retained
-//! projection, own the stage exclusively, and repeat the checks at the fixed-FD
-//! supervisor adoption boundary before authorizing execution.
+//! projection, own the stage exclusively, and repeat the checks at supervisor
+//! adoption before authorizing execution.
 
 use std::ffi::OsStr;
 
@@ -12,31 +12,42 @@ use ryeos_external_execution_contract::{
     ExternalGuestInputProjection, GuestMountContentAuthority, GuestMountKind,
     GuestProductManifestKind,
 };
+use ryeos_external_execution_contract::guest_supervisor_descriptors::rebind_opened_guest_descriptors;
 
 use crate::guest_staging::StagedGuestPackage;
 
-/// Point-verified, still-open staged authorities for the future fixed-FD
-/// handoff. Private scratch has no staged source and is represented by `None`;
+/// Point-verified, still-open staged authorities. Private scratch has no
+/// staged source and is represented by `None`;
 /// the occurrence owner must create and verify that slot separately. These
 /// handles do not exclude concurrent writers or authorize supervisor launch.
 pub struct VerifiedGuestContentHandles {
+    guest_input_identity: String,
     pub(crate) workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
     pub(crate) runtime_mounts: Vec<Option<lillux::InheritedDescriptorAuthority>>,
     pub(crate) content_records: Vec<lillux::InheritedDescriptorAuthority>,
 }
 
-impl VerifiedGuestContentHandles {
-    /// Consume the checked handles for a trusted supervisor's subsequent
-    /// descriptor binding. These handles are content custody only: no caller
-    /// may infer stage identity, read-only mount or writer exclusion from them.
+/// Opened source content plus exact occurrence-owned scratch, rebound to the
+/// descriptors the trusted supervisor actually holds. This is still content
+/// custody, not source-mount or writer-exclusion evidence.
+pub struct BoundGuestMountedContent {
+    execution_inputs: ExternalGuestInputProjection,
+    workspace_outputs: Option<lillux::InheritedDescriptorAuthority>,
+    runtime_mounts: Vec<lillux::InheritedDescriptorAuthority>,
+    content_records: Vec<lillux::InheritedDescriptorAuthority>,
+}
+
+impl BoundGuestMountedContent {
     pub fn into_parts(
         self,
     ) -> (
+        ExternalGuestInputProjection,
         Option<lillux::InheritedDescriptorAuthority>,
-        Vec<Option<lillux::InheritedDescriptorAuthority>>,
+        Vec<lillux::InheritedDescriptorAuthority>,
         Vec<lillux::InheritedDescriptorAuthority>,
     ) {
         (
+            self.execution_inputs,
             self.workspace_outputs,
             self.runtime_mounts,
             self.content_records,
@@ -44,9 +55,92 @@ impl VerifiedGuestContentHandles {
     }
 }
 
+impl VerifiedGuestContentHandles {
+    /// Join opened staged content with the exact private-scratch slots and
+    /// rebind only process-local descriptor coordinates. The outer owner must
+    /// independently attest the read-only staged mount and writable scratch
+    /// inodes, then exclude writers through launch and settlement.
+    pub fn bind_execution_inputs(
+        mut self,
+        retained: &ExternalGuestInputProjection,
+        private_scratch: Vec<(usize, lillux::InheritedDescriptorAuthority)>,
+    ) -> Result<BoundGuestMountedContent> {
+        ensure!(
+            retained.identity_digest()? == self.guest_input_identity
+                && self.runtime_mounts.len() == retained.inputs.len()
+                && self.content_records.len() == retained.record_descriptors().count(),
+            "mounted guest content differs from retained projection"
+        );
+        let mut scratch = std::collections::BTreeMap::new();
+        for (index, authority) in private_scratch {
+            ensure!(
+                scratch.insert(index, authority).is_none(),
+                "private guest scratch slot was supplied twice"
+            );
+        }
+        for (index, (slot, input)) in self
+            .runtime_mounts
+            .iter_mut()
+            .zip(&retained.inputs)
+            .enumerate()
+        {
+            if matches!(input.content_authority, GuestMountContentAuthority::PrivateScratch { .. }) {
+                ensure!(slot.is_none(), "private guest scratch has a staged source");
+                let authority = scratch
+                    .remove(&index)
+                    .context("private guest scratch slot is absent")?;
+                let directory = authority.try_clone_pinned_directory(
+                    std::path::PathBuf::from("<mounted-guest-scratch>"),
+                )?;
+                directory.require_owner_private_directory()?;
+                ensure!(
+                    directory.entries_no_follow_bounded(0)?.is_empty(),
+                    "private guest scratch was populated before binding"
+                );
+                *slot = Some(authority);
+            } else {
+                ensure!(slot.is_some(), "immutable guest input has no mounted source");
+            }
+        }
+        ensure!(scratch.is_empty(), "unexpected private guest scratch slot");
+        let runtime_mounts = self
+            .runtime_mounts
+            .into_iter()
+            .map(|slot| slot.context("guest runtime slot remained unbound"))
+            .collect::<Result<Vec<_>>>()?;
+        let runtime_descriptors = runtime_mounts
+            .iter()
+            .map(|handle| handle.inherited_descriptor().map_err(anyhow::Error::msg))
+            .collect::<Result<Vec<_>>>()?;
+        let record_descriptors = self
+            .content_records
+            .iter()
+            .map(|handle| handle.inherited_descriptor().map_err(anyhow::Error::msg))
+            .collect::<Result<Vec<_>>>()?;
+        let workspace_descriptor = self
+            .workspace_outputs
+            .as_ref()
+            .map(|handle| handle.inherited_descriptor().map_err(anyhow::Error::msg))
+            .transpose()?;
+        let mut execution_inputs = retained.clone();
+        rebind_opened_guest_descriptors(
+            &mut execution_inputs,
+            workspace_descriptor,
+            &runtime_descriptors,
+            &record_descriptors,
+        )?;
+        Ok(BoundGuestMountedContent {
+            execution_inputs,
+            workspace_outputs: self.workspace_outputs,
+            runtime_mounts,
+            content_records: self.content_records,
+        })
+    }
+}
+
 /// Verify the exact opened authorities, not merely their stage pathnames.
 /// This follows the full staged-content check and retains the descriptors
-/// needed for the supervisor's fixed mapping.
+/// needed for the supervisor's source-mount preparation.
 pub(crate) fn open_verified_staged_guest_content(
     staged: &StagedGuestPackage,
     retained: &ExternalGuestInputProjection,
@@ -186,6 +280,7 @@ pub fn open_verified_mounted_guest_content(
         "opened guest content record order changed"
     );
     Ok(VerifiedGuestContentHandles {
+        guest_input_identity: retained.identity_digest()?,
         workspace_outputs,
         runtime_mounts,
         content_records,

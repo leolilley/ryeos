@@ -1735,6 +1735,140 @@ mod tests {
             .unwrap();
         assert_eq!(scratch.identity().unwrap(), private.observation.scratch[0].directory);
         assert!(scratch.entries_no_follow_bounded(0).unwrap().is_empty());
+        let mounted_root = private
+            .content
+            .observation
+            .stage
+            .resolve_under(&source_root)
+            .unwrap();
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        assert!(opened.bind_execution_inputs(&inputs, vec![]).is_err());
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            opened
+                .bind_execution_inputs(
+                    &inputs,
+                    vec![
+                        (3, scratch.inherited_descriptor_authority().unwrap()),
+                        (3, scratch.inherited_descriptor_authority().unwrap()),
+                    ],
+                )
+                .is_err()
+        );
+        for index in [0, 4] {
+            let opened = crate::guest_content::open_verified_mounted_guest_content(
+                &mounted_root,
+                &inputs,
+            )
+            .unwrap();
+            assert!(
+                opened
+                    .bind_execution_inputs(
+                        &inputs,
+                        vec![(index, scratch.inherited_descriptor_authority().unwrap())],
+                    )
+                    .is_err()
+            );
+        }
+        let regular_root = tempfile::tempdir().unwrap();
+        let regular_parent = lillux::PinnedDirectory::open(regular_root.path())
+            .unwrap()
+            .unwrap();
+        let regular = regular_parent
+            .open_pinned_regular_create(OsStr::new("not-scratch"), false, true, 0o600)
+            .unwrap();
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            opened
+                .bind_execution_inputs(
+                    &inputs,
+                    vec![(3, regular.inherited_descriptor_authority().unwrap())],
+                )
+                .is_err()
+        );
+        scratch.set_mode(0o755).unwrap();
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            opened
+                .bind_execution_inputs(
+                    &inputs,
+                    vec![(3, scratch.inherited_descriptor_authority().unwrap())],
+                )
+                .is_err()
+        );
+        scratch.set_mode(0o700).unwrap();
+        let ambient_scratch = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        assert!(
+            opened
+                .bind_execution_inputs(
+                    &inputs,
+                    vec![(3, scratch.inherited_descriptor_authority().unwrap())],
+                )
+                .is_err()
+        );
+        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient_scratch).unwrap());
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        let mut wrong_inputs = inputs.clone();
+        wrong_inputs.inputs[0].authority_id = "different-authority".into();
+        assert!(
+            opened
+                .bind_execution_inputs(
+                    &wrong_inputs,
+                    vec![(3, scratch.inherited_descriptor_authority().unwrap())],
+                )
+                .is_err()
+        );
+        let opened = crate::guest_content::open_verified_mounted_guest_content(
+            &mounted_root,
+            &inputs,
+        )
+        .unwrap();
+        let bound = opened
+            .bind_execution_inputs(
+                &inputs,
+                vec![(3, scratch.inherited_descriptor_authority().unwrap())],
+            )
+            .unwrap();
+        let (rebound, outputs, mounts, records) = bound.into_parts();
+        assert_eq!(rebound.identity_digest().unwrap(), inputs.identity_digest().unwrap());
+        assert!(outputs.is_none());
+        assert_eq!(mounts.len(), inputs.inputs.len());
+        assert_eq!(records.len(), inputs.record_descriptors().count());
+        assert_eq!(
+            mounts[3].directory_identity().unwrap(),
+            private.observation.scratch[0].directory
+        );
+        for (handle, input) in mounts.iter().zip(&rebound.inputs) {
+            assert_eq!(handle.inherited_descriptor().unwrap(), input.descriptor);
+        }
+        for (handle, (descriptor, _, _)) in records.iter().zip(rebound.record_descriptors()) {
+            assert_eq!(handle.inherited_descriptor().unwrap(), descriptor);
+        }
         assert!(
             private
                 .private_parent
