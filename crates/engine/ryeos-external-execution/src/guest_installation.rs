@@ -325,6 +325,19 @@ pub struct HeldGuestMountedSandbox {
     request: lillux::LinuxSandboxRequest,
 }
 
+/// The sole released native supervisor attempt. Applied launch is still only
+/// pre-exec evidence; this owner cannot claim guest Ready or writer exclusion.
+pub struct ReleasedGuestMountedSandbox {
+    // Keep the namespace owner ahead of all source and control custody so
+    // dropping an unadopted attempt settles the child first.
+    held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
+    _committed: CommittedGuestSupervisorLaunchIntent,
+    _source_copy: lillux::InheritedDescriptorAuthority,
+    _controls: [lillux::InheritedDescriptorAuthority; 5],
+    request: lillux::LinuxSandboxRequest,
+    expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
+}
+
 impl HeldGuestMountedSandbox {
     /// Child-origin final-root observation before target release. It is not
     /// applied-exec, writer-exclusion, or guest Ready evidence.
@@ -343,6 +356,66 @@ impl HeldGuestMountedSandbox {
             "held supervisor mount preparation differs from committed request"
         );
         Ok(receipt)
+    }
+
+    /// Consume the exact held launch once. The committed outer intent already
+    /// forbids recovery from preparing a replacement. An ambiguous release
+    /// error drops and settles this owner; it is never retried.
+    pub fn release_once(mut self) -> Result<ReleasedGuestMountedSandbox> {
+        // The exact launch record was sealed into a retained control FD
+        // before Lillux entered the source-owner mount namespace. Reopening
+        // its former host pathname here is neither possible nor authority.
+        let expected_mounts =
+            lillux::LinuxSandboxMountPreparationCommitments::from_admitted_mounts(
+                &self.request.mounts,
+                &[],
+            )
+            .map_err(anyhow::Error::msg)?;
+        let held_mounts = self.mount_preparation_receipt()?;
+        ensure!(
+            held_mounts.matches_commitments(&expected_mounts)
+                && held_mounts.owned_child_pid == self.held.held().child_pid(),
+            "held supervisor mount preparation changed before release"
+        );
+        self.held
+            .held()
+            .release_once()
+            .map_err(anyhow::Error::msg)?;
+        Ok(ReleasedGuestMountedSandbox {
+            held: self.held,
+            _committed: self._committed,
+            _source_copy: self._source_copy,
+            _controls: self._controls,
+            request: self.request,
+            expected_mounts,
+        })
+    }
+}
+
+impl ReleasedGuestMountedSandbox {
+    /// Observe the exact child immediately before its exec attempt. This
+    /// checks the committed target and final-root mounts, but does not infer
+    /// exec success, supervisor attachment, Ready or whole-scope settlement.
+    pub fn try_observe_applied_launch(
+        &mut self,
+    ) -> Result<Option<lillux::LinuxSandboxAppliedLaunchReceipt>> {
+        let Some(receipt) = self
+            .held
+            .held()
+            .try_observe_applied_launch()
+            .map_err(anyhow::Error::msg)?
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            receipt
+                .matches_request(&self.request)
+                .map_err(anyhow::Error::msg)?
+                && receipt.matches_post_release_mounts(&self.expected_mounts)
+                && receipt.owned_child_pid == self.held.held().child_pid(),
+            "released supervisor applied target or mounts differ from committed request"
+        );
+        Ok(Some(receipt))
     }
 }
 

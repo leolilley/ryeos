@@ -127,7 +127,7 @@ fn supervisor_bootstrap(
     .canonical_bytes()
 }
 
-fn run(fixture_path: &std::path::Path) -> Result<()> {
+fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
     // Keep durable fixture paths outside /tmp: Lillux replaces /tmp with the
     // process-private source mount after all uploaded bytes are pinned. The
     // invocation's writable working tree is also available on hosts where
@@ -387,10 +387,34 @@ fn run(fixture_path: &std::path::Path) -> Result<()> {
         receipt.mount_count > 0,
         "held native target has no prepared mounts"
     );
-    drop(held);
+    if release {
+        let mut released = held.release_once()?;
+        let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+        let applied = loop {
+            if let Some(receipt) = released.try_observe_applied_launch()? {
+                break receipt;
+            }
+            ensure!(
+                !deadline.has_elapsed(),
+                "released supervisor produced no child-origin applied-launch receipt"
+            );
+            lillux::time::sleep(lillux::time::Duration::from_millis(10));
+        };
+        ensure!(
+            applied.owned_child_pid == receipt.owned_child_pid,
+            "released supervisor changed its held process identity"
+        );
+        ensure!(
+            released.try_observe_applied_launch()? == Some(applied),
+            "repeated applied-launch point read changed the sole target receipt"
+        );
+        drop(released);
+    } else {
+        drop(held);
+    }
     // Native preparation changes this process's mount namespace. The parent
     // test driver retains the host-side fixture and cleans it after exit.
-    println!("native guest sealed-source held preparation passed");
+    println!("native guest sealed-source preparation passed; release={release}");
     Ok(())
 }
 
@@ -402,74 +426,84 @@ fn main() {
     if std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD").as_deref() == Ok("1") {
         let root = std::env::var_os("RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT")
             .expect("native child fixture root is absent");
-        if let Err(error) = run(std::path::Path::new(&root)) {
+        let release = std::env::var("RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE").as_deref() == Ok("1");
+        if let Err(error) = run(std::path::Path::new(&root), release) {
             eprintln!("native guest occurrence probe failed: {error:#}");
             std::process::exit(1);
         }
         return;
     }
-    let fixture = tempfile::Builder::new()
-        .prefix("ryeos-guest-occurrence-native-")
-        .tempdir_in(std::env::current_dir().expect("current test directory"))
-        .expect("create host-side native fixture");
-    let output = lillux::run(lillux::SubprocessRequest {
-        cmd: std::env::current_exe()
-            .expect("native test binary")
-            .to_string_lossy()
-            .into_owned(),
-        argv0: None,
-        args: Vec::new(),
-        cwd: None,
-        envs: vec![
-            ("RYEOS_GUEST_OCCURRENCE_NATIVE".into(), "1".into()),
-            ("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD".into(), "1".into()),
-            (
-                "RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT".into(),
-                fixture.path().to_string_lossy().into_owned(),
-            ),
-        ],
-        stdin_data: None,
-        timeout: 30.0,
-        limits: None,
-        inherited_fds: Vec::new(),
-        inherited_fd_mappings: Vec::new(),
-        supervised_status: None,
-    });
-    assert!(
-        output.success && !output.timed_out && !output.stdout_truncated && !output.stderr_truncated,
-        "native owner failed: exit={} timeout={} stdout={} stderr={}",
-        output.exit_code,
-        output.timed_out,
-        output.stdout,
-        output.stderr
-    );
-    let ticket: GuestImportTicket = serde_json::from_slice(
-        &std::fs::read(fixture.path().join("ticket.json")).expect("retained import ticket"),
-    )
-    .expect("decode retained import ticket");
-    let inputs: ExternalGuestInputProjection = serde_json::from_slice(
-        &std::fs::read(fixture.path().join("inputs.json")).expect("retained guest inputs"),
-    )
-    .expect("decode retained guest inputs");
-    let context = GuestImportContext {
-        binding_hash: &ticket.binding_hash,
-        allocation_request_digest: &ticket.allocation_request_digest,
-        occurrence_id: &ticket.occurrence_id,
-        activation_request_digest: &ticket.activation_request_digest,
-    };
-    let occurrence = lillux::PinnedDirectory::open(&fixture.path().join("occurrence"))
-        .expect("open retained occurrence")
-        .expect("retained occurrence exists");
-    assert_eq!(
-        recover_guest_occurrence(&occurrence, &ticket, &context, &inputs)
-            .expect("recover completed owner record")
-            .phase(),
-        &GuestOccurrenceRecoveryPhase::LaunchUncertain,
-        "held preparation cannot authorize a second launch after owner exit"
-    );
-    assert!(
-        GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs).is_err(),
-        "completed native occurrence admitted a second owner"
-    );
-    print!("{}", output.stdout);
+    for release in [false, true] {
+        let fixture = tempfile::Builder::new()
+            .prefix("ryeos-guest-occurrence-native-")
+            .tempdir_in(std::env::current_dir().expect("current test directory"))
+            .expect("create host-side native fixture");
+        let output = lillux::run(lillux::SubprocessRequest {
+            cmd: std::env::current_exe()
+                .expect("native test binary")
+                .to_string_lossy()
+                .into_owned(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: None,
+            envs: vec![
+                ("RYEOS_GUEST_OCCURRENCE_NATIVE".into(), "1".into()),
+                ("RYEOS_GUEST_OCCURRENCE_NATIVE_CHILD".into(), "1".into()),
+                (
+                    "RYEOS_GUEST_OCCURRENCE_NATIVE_RELEASE".into(),
+                    if release { "1" } else { "0" }.into(),
+                ),
+                (
+                    "RYEOS_GUEST_OCCURRENCE_FIXTURE_ROOT".into(),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+            ],
+            stdin_data: None,
+            timeout: 30.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            inherited_fd_mappings: Vec::new(),
+            supervised_status: None,
+        });
+        assert!(
+            output.success
+                && !output.timed_out
+                && !output.stdout_truncated
+                && !output.stderr_truncated,
+            "native owner failed: exit={} timeout={} stdout={} stderr={}",
+            output.exit_code,
+            output.timed_out,
+            output.stdout,
+            output.stderr
+        );
+        let ticket: GuestImportTicket = serde_json::from_slice(
+            &std::fs::read(fixture.path().join("ticket.json")).expect("retained import ticket"),
+        )
+        .expect("decode retained import ticket");
+        let inputs: ExternalGuestInputProjection = serde_json::from_slice(
+            &std::fs::read(fixture.path().join("inputs.json")).expect("retained guest inputs"),
+        )
+        .expect("decode retained guest inputs");
+        let context = GuestImportContext {
+            binding_hash: &ticket.binding_hash,
+            allocation_request_digest: &ticket.allocation_request_digest,
+            occurrence_id: &ticket.occurrence_id,
+            activation_request_digest: &ticket.activation_request_digest,
+        };
+        let occurrence = lillux::PinnedDirectory::open(&fixture.path().join("occurrence"))
+            .expect("open retained occurrence")
+            .expect("retained occurrence exists");
+        assert_eq!(
+            recover_guest_occurrence(&occurrence, &ticket, &context, &inputs)
+                .expect("recover completed owner record")
+                .phase(),
+            &GuestOccurrenceRecoveryPhase::LaunchUncertain,
+            "held preparation cannot authorize a second launch after owner exit"
+        );
+        assert!(
+            GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs).is_err(),
+            "completed native occurrence admitted a second owner"
+        );
+        print!("{}", output.stdout);
+    }
 }
