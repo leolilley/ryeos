@@ -209,11 +209,31 @@ pub struct PreparedGuestSupervisorRequest {
     bootstrap_sha256: String,
 }
 
+/// One exact staged generation selected from the still-owned sealed source.
+/// This is a mount input, not a target channel or a supervisor launch token.
+/// The held Lillux transition must recheck it as the only read-only private
+/// source mount and attest the applied destination before target adoption.
+pub(crate) struct GuestSourceMountSelection {
+    stage: GuestStageIdentity,
+    authority: lillux::InheritedDescriptorAuthority,
+}
+
+impl GuestSourceMountSelection {
+    pub(crate) fn stage(&self) -> &GuestStageIdentity {
+        &self.stage
+    }
+
+    pub(crate) fn mount_authority(&self) -> &lillux::InheritedDescriptorAuthority {
+        &self.authority
+    }
+}
+
 /// One-way outer launch intent retained with the exact prepared descriptors.
 /// This deliberately has no spawn accessor: writer exclusion, process-scope
 /// ownership and installed Ready still require a separate joined transition.
 pub struct CommittedGuestSupervisorLaunchIntent {
     _prepared: PreparedGuestSupervisorRequest,
+    _source_mount: GuestSourceMountSelection,
     record_file: lillux::PinnedRegularFileIdentity,
     record_sha256: String,
 }
@@ -229,6 +249,36 @@ impl CommittedGuestSupervisorLaunchIntent {
 }
 
 impl PreparedGuestSupervisorRequest {
+    /// Resolve the retained stage under its original private source owner.
+    /// The source remains owned by `self`; extracting this exact mount input
+    /// does not permit a raw spawn or forwarding its FD to `target_channels`.
+    pub(crate) fn prepare_source_mount_selection(
+        &self,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+    ) -> Result<GuestSourceMountSelection> {
+        let installed = &self._artifacts.private.content._installed;
+        installed.recheck_for_adoption(context, inputs)?;
+        let source_root = match &installed._source {
+            GuestSourceCustody::Sealed(source) => source.root(),
+            GuestSourceCustody::Live(_) => {
+                anyhow::bail!("guest source was not sealed before mount selection")
+            }
+            #[cfg(test)]
+            GuestSourceCustody::StructuralFixture(root) => root,
+        };
+        let stage = installed.imported.stage_identity()?;
+        let selected = stage.resolve_under(source_root)?;
+        ensure!(
+            selected.identity()? == stage.directory_identity(),
+            "guest source mount selection changed stage identity"
+        );
+        Ok(GuestSourceMountSelection {
+            stage,
+            authority: selected.inherited_descriptor_authority()?,
+        })
+    }
+
     fn exact_request_timeout_bits(&self) -> Result<u64> {
         let request = &self.request;
         ensure!(
@@ -304,6 +354,12 @@ impl PreparedGuestSupervisorRequest {
         let installed = &self._artifacts.private.content._installed;
         installed.owner.recheck(context, inputs)?;
         installed.recheck_for_adoption(context, inputs)?;
+        let source_mount = self.prepare_source_mount_selection(context, inputs)?;
+        ensure!(
+            source_mount.mount_authority().directory_identity()?
+                == source_mount.stage().directory_identity(),
+            "guest launch source mount differs from retained stage"
+        );
         ensure!(
             self._artifacts.private.private_parent.identity()?
                 == self._artifacts.private.observation.private_parent
@@ -344,6 +400,7 @@ impl PreparedGuestSupervisorRequest {
             record_file,
             record_sha256,
             _prepared: self,
+            _source_mount: source_mount,
         })
     }
 }

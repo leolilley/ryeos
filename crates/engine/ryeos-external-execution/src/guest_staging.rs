@@ -1850,6 +1850,22 @@ mod tests {
         assert!(!actual_targets.contains(&ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
         assert_eq!(request.cmd, "/proc/self/fd/57");
         assert_eq!(bootstrap_sha256, lillux::sha256_hex(&bootstrap));
+        let source_mount = prepared
+            .prepare_source_mount_selection(&context, &inputs)
+            .unwrap();
+        assert_eq!(
+            source_mount.stage().directory_identity(),
+            source_root
+                .open_child_directory(OsStr::new(source_mount.stage().name()))
+                .unwrap()
+                .unwrap()
+                .identity()
+                .unwrap()
+        );
+        assert_eq!(
+            source_mount.mount_authority().mount_entry_kind().unwrap(),
+            lillux::OpenMountEntryKind::Directory
+        );
         let sealed_mapping = request.inherited_fd_mappings.iter().find(|mapping| {
             mapping.target_descriptor()
                 == ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_BOOTSTRAP_FD
@@ -2194,6 +2210,22 @@ mod tests {
             .unwrap();
             (occurrence_dir, source_dir, occurrence, prepared)
         };
+        let (_detached_occurrence_dir, detached_source_dir, _detached_occurrence, prepared) =
+            prepare_launch_occurrence();
+        let selected = prepared
+            .prepare_source_mount_selection(&context, &inputs)
+            .unwrap();
+        std::fs::rename(
+            detached_source_dir.path().join(selected.stage().name()),
+            detached_source_dir.path().join("detached-stage"),
+        )
+        .unwrap();
+        assert!(
+            prepared
+                .prepare_source_mount_selection(&context, &inputs)
+                .is_err(),
+            "a detached staged generation cannot become a held source mount"
+        );
         let (_committed_occurrence_dir, _committed_source_dir, committed_occurrence, prepared) =
             prepare_launch_occurrence();
         let committed = prepared.commit_outer_launch_intent(&context, &inputs).unwrap();
