@@ -1,5 +1,27 @@
 # Render Sandbox early-access lifecycle adapter
 
+## Bounded provider feasibility observation (2026-09-27)
+
+With explicit operator approval, two `starter` Sandboxes in the default Oregon
+group ran for a total of about 124 seconds. Both used `deny-all` network policy
+and were terminated and subsequently observed `terminated`. In
+`sbx-18p4gdaseelbbc2fs73etqm50`, `unshare --user --map-root-user --mount
+--pid --fork` mounted a private tmpfs and wrote a marker that was absent from
+the enclosing mount namespace. A filesystem snapshot
+`snp-dasef2ljk5ds739n9hg0` restored that marker into
+`sbx-18p4gdasef8rbc2fs73etssh0` with the same SHA-256
+`0a7860b394d39d9b2f8b65a0fa4ec9213f5188a385ea382d8ace469f252cfc82`,
+`0700` parent, and `0444` file modes. The marker-only snapshot was deleted;
+the snapshot list was then empty. An earlier bounded guest
+`sbx-18p4gdasecdvlk1mc73bjsasg` showed that a `sleep` process survived
+abrupt loss of its CLI run stream and that a private `0700` activation
+directory contained an uploaded owner-owned `0600` file. That guest was also
+terminated. These observations establish only feasibility of those specific
+Render behaviors. They do not qualify an owner executable, signed runtime
+product, authenticated supervisor `Ready`, whole-guest writer exclusion, or
+RyeOS recovery. No model or Kaggle contact occurred. Exact charges were not
+observed.
+
 This crate is an authored, unqualified adapter for the early-access Sandbox
 surface described by the pinned Render CLI source at
 `/tmp/render-oss-cli` (`de62fd1e2762ac25ad4ae11d086377c49fd4b299`). Render's
