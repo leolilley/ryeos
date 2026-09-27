@@ -111,7 +111,11 @@ input byte against the retained projection and bind that verification to
 of the run-proxy stream. Provider terminal status alone is not guest-writer
 exclusion or hard-isolation qualification.
 
-There is currently no guest-side importer executable joining these stages.
+The source tree now contains a dedicated guest occurrence-owner executable
+that composes the one-shot import through held native supervisor launch. It
+is not yet packaged into a qualified Render runtime snapshot, and this adapter
+does not launch it. The remaining installed ingress and lifecycle gates below
+still apply before activation can change from `SupervisorPending`.
 The controller now authors a node-root-signed occurrence assignment from the
 original bound allocation and seals it into the first activation contact with
 the separately signed import authorization and exact package. This adapter

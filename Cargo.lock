@@ -3063,6 +3063,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-external-guest-occurrence-owner"
+version = "0.5.99"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "lillux",
+ "ryeos-external-execution",
+ "ryeos-external-execution-contract",
+ "signal-hook",
+]
+
+[[package]]
 name = "ryeos-graph-definition"
 version = "0.1.0"
 dependencies = [

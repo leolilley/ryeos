@@ -11,9 +11,49 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
     SignedGuestImportAuthorization, SignedGuestOccurrenceAssignment,
 };
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 
 const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
+const OWNER_PROFILE_FILE: &str = "guest-owner-profile.json";
+const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestOwnerRuntimeProfile {
+    pub schema: u32,
+    pub private_source_max_bytes: u64,
+    pub private_source_max_inodes: u64,
+    pub owner_timeout_seconds: u32,
+}
+
+impl GuestOwnerRuntimeProfile {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1,
+            "unsupported installed guest-owner profile"
+        );
+        self.private_source_limits()
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            (1..=5_400).contains(&self.owner_timeout_seconds),
+            "installed guest-owner timeout exceeds runtime ceiling"
+        );
+        Ok(())
+    }
+
+    pub fn private_source_limits(&self) -> lillux::sandbox::LinuxPrivateSourceLimits {
+        lillux::sandbox::LinuxPrivateSourceLimits {
+            max_bytes: self.private_source_max_bytes,
+            max_inodes: self.private_source_max_inodes,
+        }
+    }
+
+    pub fn owner_timeout_seconds(&self) -> f64 {
+        f64::from(self.owner_timeout_seconds)
+    }
+}
 
 /// Exact point observation of an installed guest runtime. The provider
 /// snapshot-to-runtime qualification and writer exclusion remain separate;
@@ -23,6 +63,7 @@ pub struct ObservedGuestRuntime {
     root_identity: lillux::PinnedDirectoryIdentity,
     manifest_hash: String,
     controller_root: VerifyingKey,
+    profile: GuestOwnerRuntimeProfile,
 }
 
 impl ObservedGuestRuntime {
@@ -51,16 +92,52 @@ impl ObservedGuestRuntime {
             !controller_root.is_weak(),
             "installed controller root is weak"
         );
+        let profile_file = root
+            .open_pinned_regular(OsStr::new(OWNER_PROFILE_FILE), false)?
+            .context("installed guest runtime has no owner profile")?;
+        ensure!(
+            matches!(profile_file.permission_mode()?, 0o444 | 0o644),
+            "installed guest-owner profile has unexpected file mode"
+        );
+        let profile_observation = profile_file.observation()?;
+        ensure!(
+            profile_observation.size() <= MAX_OWNER_PROFILE_BYTES,
+            "installed guest-owner profile exceeds byte bound"
+        );
+        let profile_bytes =
+            profile_file.read_stable_bounded(&profile_observation, MAX_OWNER_PROFILE_BYTES)?;
+        let profile: GuestOwnerRuntimeProfile =
+            ryeos_external_execution_contract::from_json_slice_strict(
+                &profile_bytes,
+                MAX_OWNER_PROFILE_BYTES as usize,
+            )?;
+        profile.validate()?;
+        ensure!(
+            ryeos_external_execution_contract::canonical_json(&profile)? == profile_bytes,
+            "installed guest-owner profile is noncanonical"
+        );
         Ok(Self {
             root: root.try_clone()?,
             root_identity,
             manifest_hash,
             controller_root,
+            profile,
         })
     }
 
     pub fn manifest_hash(&self) -> &str {
         &self.manifest_hash
+    }
+
+    pub fn profile(&self) -> &GuestOwnerRuntimeProfile {
+        &self.profile
+    }
+
+    /// A mutable occurrence journal or source may not become an ambient
+    /// entry beneath the exact runtime tree used as the controller-root anchor.
+    pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {
+        self.root.require_disjoint_directory_tree(other)?;
+        Ok(())
     }
 
     /// Refuse drift immediately before admitting the exact one-shot import.
@@ -78,7 +155,8 @@ impl ObservedGuestRuntime {
         let current = Self::observe(&self.root)?;
         ensure!(
             current.manifest_hash == self.manifest_hash
-                && current.controller_root == self.controller_root,
+                && current.controller_root == self.controller_root
+                && current.profile == self.profile,
             "installed guest runtime drifted before import admission"
         );
         verify_guest_import_documents(
@@ -369,10 +447,33 @@ mod tests {
         let root_key = SigningKey::from_bytes(&[43; 32]);
         let root_file = directory.path().join(CONTROLLER_ROOT_FILE);
         std::fs::write(&root_file, hex::encode(root_key.verifying_key().to_bytes())).unwrap();
+        let profile_file = directory.path().join(OWNER_PROFILE_FILE);
+        std::fs::write(
+            &profile_file,
+            ryeos_external_execution_contract::canonical_json(&GuestOwnerRuntimeProfile {
+                schema: 1,
+                private_source_max_bytes: 32 * 1024 * 1024,
+                private_source_max_inodes: 1024,
+                owner_timeout_seconds: 10,
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let runtime = lillux::PinnedDirectory::open(directory.path())
             .unwrap()
             .unwrap();
         let observed = ObservedGuestRuntime::observe(&runtime).unwrap();
+        let separate = tempfile::tempdir().unwrap();
+        let separate = lillux::PinnedDirectory::open(separate.path())
+            .unwrap()
+            .unwrap();
+        observed.require_disjoint_directory_tree(&separate).unwrap();
+        let nested = runtime
+            .create_child(OsStr::new("nested-mutable"), 0o700)
+            .unwrap();
+        assert!(observed.require_disjoint_directory_tree(&nested).is_err());
+        drop(nested);
+        std::fs::remove_dir(directory.path().join("nested-mutable")).unwrap();
         let (mut authorization, original_assignment) = fixture();
         let manifest_hash = observed.manifest_hash().to_owned();
         authorization.guest_runtime_manifest_hash = manifest_hash.clone();
@@ -434,6 +535,9 @@ mod tests {
                 .is_err()
         );
         std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ObservedGuestRuntime::observe(&runtime).is_err());
+        std::fs::set_permissions(&root_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&profile_file, br#"{"schema":1,"owner_timeout_seconds":6000,"private_source_max_bytes":33554432,"private_source_max_inodes":1024}"#).unwrap();
         assert!(ObservedGuestRuntime::observe(&runtime).is_err());
     }
 

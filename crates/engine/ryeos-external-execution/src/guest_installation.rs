@@ -346,15 +346,26 @@ pub fn prepare_authorized_held_guest_supervisor_once(
     signed_assignment_bytes: &[u8],
     source: lillux::sandbox::LinuxPrivateSourceFilesystem,
     import_deadline: lillux::time::MonotonicDeadline,
-    owner_timeout_seconds: f64,
 ) -> Result<HeldGuestMountedSandbox> {
     ensure!(
-        owner_timeout_seconds.is_finite() && (1.0..=5_400.0).contains(&owner_timeout_seconds),
-        "guest owner timeout exceeds the fixed runtime ceiling"
+        source.limits() == installed_runtime.profile().private_source_limits(),
+        "private source limits differ from exact installed guest-owner profile"
     );
+    installed_runtime.require_disjoint_directory_tree(occurrence)?;
+    installed_runtime.require_disjoint_directory_tree(source.root())?;
     let verified =
         installed_runtime.verify_import_documents(signed_import_bytes, signed_assignment_bytes)?;
     verified.require_fresh_admission()?;
+    let stage_bytes = verified
+        .authorization()
+        .ticket
+        .framed_bytes
+        .checked_sub(20)
+        .context("guest package has no bounded staged-content floor")?;
+    ensure!(
+        stage_bytes <= source.limits().max_bytes,
+        "guest package cannot fit the installed private-source ceiling"
+    );
     let authority = verified.authorization().clone();
     let context = authority.context();
     let inputs = &authority.guest_inputs;
@@ -365,7 +376,11 @@ pub fn prepare_authorized_held_guest_supervisor_once(
         .prepare_content_for_adoption(&context, inputs)?
         .create_private_scratch_once(&context, inputs)?
         .prepare_launch_artifacts_once(&context, inputs)?
-        .prepare_supervisor_request(&context, inputs, owner_timeout_seconds)?;
+        .prepare_supervisor_request(
+            &context,
+            inputs,
+            installed_runtime.profile().owner_timeout_seconds(),
+        )?;
     let committed = prepared.commit_outer_launch_intent(&context, inputs)?;
     committed
         .prepare_mounted_sandbox_request(&context, inputs)?
@@ -384,6 +399,35 @@ pub struct ReleasedGuestMountedSandbox {
     _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
     expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
+}
+
+/// Terminal proof for the sole native supervisor target. A code-zero target
+/// with an applied-launch receipt is still not an authenticated RyeOS Ready,
+/// completed channel transcript, frozen candidate, or provider termination.
+#[derive(Debug)]
+pub struct GuestSupervisorNaturalExit {
+    termination: lillux::LinuxSandboxTermination,
+    applied_launch: Option<lillux::LinuxSandboxAppliedLaunchReceipt>,
+}
+
+impl GuestSupervisorNaturalExit {
+    pub fn termination(&self) -> &lillux::LinuxSandboxTermination {
+        &self.termination
+    }
+
+    pub fn applied_launch(&self) -> Option<&lillux::LinuxSandboxAppliedLaunchReceipt> {
+        self.applied_launch.as_ref()
+    }
+
+    pub fn target_reported_success(&self) -> bool {
+        self.applied_launch.is_some()
+            && self.termination.launch_failure().is_none()
+            && self.termination.exit() == lillux::LinuxSandboxExit::Code(0)
+    }
+
+    pub fn into_termination(self) -> lillux::LinuxSandboxTermination {
+        self.termination
+    }
 }
 
 impl HeldGuestMountedSandbox {
@@ -520,9 +564,21 @@ impl ReleasedGuestMountedSandbox {
     pub fn try_observe_natural_settlement(
         &mut self,
     ) -> Result<Option<lillux::LinuxSandboxTermination>> {
-        let Some(_applied) = self.try_observe_applied_launch()? else {
+        let Some(exit) = self.try_observe_natural_exit()? else {
             return Ok(None);
         };
+        ensure!(
+            exit.target_reported_success(),
+            "released supervisor did not settle successfully after applied launch"
+        );
+        Ok(Some(exit.into_termination()))
+    }
+
+    /// Point-read the exact native target until it exits, retaining its
+    /// namespace writer-exclusion proof even when exec or workload fails.
+    /// Applied launch remains pre-exec evidence, not protocol success.
+    pub fn try_observe_natural_exit(&mut self) -> Result<Option<GuestSupervisorNaturalExit>> {
+        let applied_launch = self.try_observe_applied_launch()?;
         let Some(exit) = self
             .held
             .held()
@@ -531,11 +587,10 @@ impl ReleasedGuestMountedSandbox {
         else {
             return Ok(None);
         };
-        ensure!(
-            exit.launch_failure().is_none() && exit.exit() == lillux::LinuxSandboxExit::Code(0),
-            "released supervisor did not settle successfully after applied launch"
-        );
-        Ok(Some(exit.into_termination()))
+        Ok(Some(GuestSupervisorNaturalExit {
+            termination: exit.into_termination(),
+            applied_launch,
+        }))
     }
 }
 

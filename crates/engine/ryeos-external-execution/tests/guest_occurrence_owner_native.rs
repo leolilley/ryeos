@@ -410,6 +410,17 @@ fn run(
                 .to_bytes(),
         ),
     )?;
+    std::fs::write(
+        guest_runtime_path.join("guest-owner-profile.json"),
+        ryeos_external_execution_contract::canonical_json(
+            &ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile {
+                schema: 1,
+                private_source_max_bytes: 32 * 1024 * 1024,
+                private_source_max_inodes: 1024,
+                owner_timeout_seconds: 10,
+            },
+        )?,
+    )?;
     let guest_runtime = lillux::PinnedDirectory::open(&guest_runtime_path)?
         .context("installed native fixture runtime vanished")?;
     let observed_runtime = ObservedGuestRuntime::observe(&guest_runtime)?;
@@ -522,7 +533,6 @@ fn run(
             &signed_assignment,
             source,
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(30)),
-            10.0,
         )?
     };
     let receipt = held.mount_preparation_receipt()?;
@@ -575,39 +585,38 @@ fn run(
                     "repeated applied-launch point read changed the sole target receipt"
                 );
             }
-            let dead = loop {
-                let observation = if natural_probe {
-                    released.try_observe_natural_settlement().map(|settled| {
-                        ensure!(
-                            settled.is_none(),
-                            "placeholder supervisor settled successfully"
-                        );
-                        Ok(())
-                    })
-                } else {
-                    released.refuse_if_target_exited().map(|()| Ok(()))
-                };
-                match observation.and_then(|result| result) {
-                    Ok(()) => {}
-                    Err(error) => break error,
-                }
-                ensure!(
-                    !deadline.has_elapsed(),
-                    "placeholder supervisor did not reach terminal refusal"
-                );
-                lillux::time::sleep(lillux::time::Duration::from_millis(10));
-            };
             if natural_probe {
+                let terminal = loop {
+                    if let Some(exit) = released.try_observe_natural_exit()? {
+                        break exit;
+                    }
+                    ensure!(
+                        !deadline.has_elapsed(),
+                        "placeholder supervisor did not reach native terminal proof"
+                    );
+                    lillux::time::sleep(lillux::time::Duration::from_millis(10));
+                };
                 ensure!(
-                    dead.to_string()
-                        .contains("did not settle successfully after applied launch"),
-                    "natural settlement accepted or misclassified placeholder launch: {dead:#}"
+                    !terminal.target_reported_success()
+                        && terminal.termination().launch_failure().is_some(),
+                    "failed placeholder lost its exact native terminal proof: {terminal:?}"
                 );
                 ensure!(
-                    released.try_observe_natural_settlement().is_err(),
+                    released.try_observe_natural_exit().is_err(),
                     "consumed terminal target was observed a second time"
                 );
             } else {
+                let dead = loop {
+                    match released.refuse_if_target_exited() {
+                        Ok(()) => {}
+                        Err(error) => break error,
+                    }
+                    ensure!(
+                        !deadline.has_elapsed(),
+                        "placeholder supervisor did not reach terminal refusal"
+                    );
+                    lillux::time::sleep(lillux::time::Duration::from_millis(10));
+                };
                 ensure!(
                     dead.to_string()
                         .contains("exited before authenticated attachment")

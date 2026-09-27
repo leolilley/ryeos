@@ -224,6 +224,7 @@ impl LinuxPrivateSourceLimits {
 /// must retain the owner through exact guest-scope settlement.
 pub struct LinuxPrivateSourceFilesystem {
     root: crate::secure_fs::PinnedDirectory,
+    limits: LinuxPrivateSourceLimits,
     // Mount namespaces are process/thread state. Do not move this owner to a
     // different Rust thread after the irreversible namespace transition.
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
@@ -232,6 +233,10 @@ pub struct LinuxPrivateSourceFilesystem {
 impl LinuxPrivateSourceFilesystem {
     pub fn root(&self) -> &crate::secure_fs::PinnedDirectory {
         &self.root
+    }
+
+    pub fn limits(&self) -> LinuxPrivateSourceLimits {
+        self.limits
     }
 
     /// Recursively make this private source mount read-only before any
@@ -274,6 +279,7 @@ pub fn enter_linux_private_source_filesystem(
     let root = imp::enter_private_source_filesystem(limits)?;
     Ok(LinuxPrivateSourceFilesystem {
         root,
+        limits,
         _thread_bound: std::marker::PhantomData,
     })
 }

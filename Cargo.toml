@@ -40,6 +40,7 @@ members = [
     "crates/tools/external-candidate-launcher",
     "crates/tools/external-candidate-connector",
     "crates/tools/external-candidate-supervisor",
+    "crates/tools/external-guest-occurrence-owner",
     "crates/tools/codex-external-configuration",
     "crates/tools/codex-guest-runtime-producer",
     "crates/tools/independent-runtime-verifier",
