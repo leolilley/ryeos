@@ -351,6 +351,9 @@ mod tests {
         large["schema"] = serde_json::json!(ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA);
         let large_identity = derive_guest_owner_runtime_manifest_identity(&large, &key).unwrap();
         assert_eq!(large_identity.owner_executable_sha256, digest);
+        // A large-content product can describe the same files, but its
+        // manifest coordinate is not the guest's ordinary tree observation.
+        assert_ne!(large_identity.manifest_hash, product.manifest_hash());
         let large_owner = large["entries"]
             .as_array_mut()
             .unwrap()

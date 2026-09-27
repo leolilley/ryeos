@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-27T10:47:04Z:49935cab93632327900e63e0429c29596e5c89cff5347fe96cfb280d7ba6ea4e:7kQuO/dr47r/l8hTzIdHbyM8t0Ld++pzuDYDY740u28j68DXqZy4vTAm9vVvt0m1emzLdmyfOM6kXHoDzzI0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-09-27T11:54:23Z:9ab87b00484fca92e32a42b2a147d6022397c6bc43c77951523547ea92e90bee:ys2aVvD9584Nx3xfySNR0qmIKoNaXbixFVKIkmg0Yil0HcVlBwzO75gN2qlAsRk53im4LCice7cgZY8h1Xd/DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained credential-free node-rooted guest occurrence owner runtime
@@ -7,7 +7,7 @@ build_products:
   output_roots:
     - name: runtime
       path: products/external-guest-owner-runtime
-      storage: large_content
+      storage: content
       bounds:
         maximum_entries: 4
         maximum_depth: 3
@@ -18,7 +18,7 @@ build_products:
       source: {kind: workspace_output, root: runtime}
       path: products/external-guest-owner-runtime
       shape: tree
-      storage: large_content
+      storage: content
       required: true
       bounds:
         maximum_entries: 4

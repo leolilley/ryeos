@@ -329,7 +329,11 @@ producer. No credential or submission authority enters that workspace.
 Independent qualification must still join the resulting owner digest and
 public root to the executable and root actually installed in the Render
 snapshot. Similar names or a successful production graph do not establish
-that join. The hosted-workflow source bundles have been refreshed; this
+that join. The owner runtime product uses ordinary `content` storage: its
+captured manifest coordinate must equal the tree manifest the guest observes.
+The large-content manifest format is a distinct hash even for equivalent
+files and cannot be substituted in this qualification. The hosted-workflow
+source bundles have been refreshed; this
 newly authored Tool/graph has not been installed or runtime-qualified.
 
 The provider-installed qualification must then bind, at minimum, the exact
