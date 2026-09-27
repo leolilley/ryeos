@@ -282,6 +282,50 @@ qualified, exact importer/build identity. Allocation fixtures do not establish
 that trust anchor; supervisor activation stays pending until that binding and
 the guest import path are qualified.
 
+## Guest-owner source and snapshot authority cut
+
+The signed placement binding's `guest_runtime_manifest_hash` is an expected
+content identity; Render settings' `snapshot_id` is an opaque provider locator.
+Neither is evidence that the provider restored those bytes. These two
+coordinates and the controller public root must meet in one independently
+verified qualification before a new Sandbox can be allocated for RyeOS work.
+
+The source product should be authored through an ordinary retained-output
+recipe. Its producer needs the exact owner executable as a **data input** from
+the signed Bundle generation, captured by the existing verified binary
+resolver into a sealed descriptor. The producer also needs the node's public
+assignment-verification root and a signed owner profile. It writes a fresh
+credential-free tree; RyeOS captures that tree as a product and checks its
+manifest against the guest's `ObservedGuestRuntime` algorithm. A pathname
+under an installed `.ai/bin`, a caller-selected executable, and a second
+external-content pin over the same Bundle source are not equivalent input
+authority. The current product recipe/tool input contract cannot yet pass a
+Bundle executable as data, so this authoring graph is not installed.
+
+The provider-installed qualification must then bind, at minimum, the exact
+product witness and manifest, Bundle/source generation, node public root,
+Render owner/account, snapshot ID, effective plan and region, and the exact
+signed binding generation. Its independently admitted verifier must observe
+the restored tree and root *inside that snapshot*, upload modes, owner
+survival after losing the run stream, authenticated supervisor `Ready`, and
+whole-guest termination plus writer exclusion. The generic product
+qualification machinery can retain a signed verifier result and bounded
+probe evidence, but a Render-specific typed interpretation and join to the
+placement binding are still missing. A self-described `qualified` field, a
+matching create response, or a signed expectation alone must not grant
+startup capability.
+
+The required implementation order is: admit the Bundle-artifact data input;
+capture the owner runtime product; run and retain the installed independent
+snapshot qualification; join its exact evidence to the current placement
+binding before allocation; then enable the signed activation operation and
+prove one-shot contact, ambiguous-response quarantine, authenticated `Ready`,
+and exact cleanup. Pre-contact tests must reject missing, stale, different-
+snapshot, different-root, and different-manifest evidence without invoking
+the adapter. Retained cleanup must remain available even if a later startup
+qualification is absent. A read-only Render inventory on 2026-09-27 returned
+no snapshots (`[]`), so none of the installed claims above has been made.
+
 The declared capabilities are exactly `authoritative_no_occurrence` and
 `exact_terminal_observation`. The first capability is limited to W1's
 `NoRequestSent` result; provider response errors do not currently establish it.
@@ -358,11 +402,10 @@ workspace. A source build command is:
 cargo build --release --manifest-path crates/host-adapters/render-sandbox-adapter/Cargo.toml
 ```
 
-The feature branch's focused offline serial package test passed all six
-remaining tests on 2026-09-26. The removed seventh test only recognized a
-snapshot-error shape; it never proved that a transmitted create had not made a
-Sandbox. No release build, signing, Render API call, provisioning, or installed
-qualification followed this correction. Before use, the integration must
+The feature branch's focused offline serial package test passed all 21 tests
+on 2026-09-27. A read-only Render snapshot inventory returned `[]`; no release
+build, signing, provisioning, paid Sandbox contact, or installed qualification
+followed this correction. Before use, the integration must
 establish provider-authoritative lifecycle evidence, proxy validation, RyeOS
 bootstrap and network-route semantics, and joined cancellation behavior. Any
 authenticated Render call requires separate approval.
