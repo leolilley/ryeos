@@ -342,6 +342,19 @@ This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not
 reapply this startup gate.
 
+The next join has two separate owners. RyeOS authenticates the binding's exact
+qualification attestation from current published CAS, its product witness,
+current signed policy, admitted verifier definition, and execution evidence;
+it retains that result with the placement generation before first contact.
+The Render adapter interprets the bounded `probe_evidence` against the same
+binding's owner/account/snapshot/plan/region, controller public root, owner
+executable and runtime manifest. Neither a caller-provided JSON probe nor a
+synthetic `HandlerContext` may stand in for RyeOS's authenticated witness.
+The proof must be rechecked at the fresh reservation/contact cut, while
+recovery of an already contacted occurrence uses its retained exact proof and
+does not select a newer witness. The existing `guest-runtime` Worker slot
+remains the distinct Codex executable product, not this guest-owner snapshot.
+
 The required implementation order is: publish and pin the exact owner input;
 sign the bounded producer Tool and capture its runtime product; run and retain the installed independent
 snapshot qualification; join its exact evidence to the current placement
