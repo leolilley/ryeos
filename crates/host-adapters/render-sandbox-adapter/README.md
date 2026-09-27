@@ -334,9 +334,11 @@ published qualification through RyeOS's existing product witness machinery,
 verify the independently admitted execution, and apply this comparison before
 any new allocation; retained cleanup must remain possible afterward.
 
-Binding schema 12 now carries a required-nullable
-`runtime_qualification_attestation_hash`. A non-null hash is only an exact
-coordinate: fresh placement refuses it until the published witness, current
+Binding schema 13 now carries paired required-nullable
+`runtime_qualification_attestation_hash` and
+`runtime_qualification_owner_principal` fields. The node Config signer is not
+assumed to be the product owner. A non-null pair is only an exact coordinate:
+fresh placement refuses it until the published witness, current
 policy, independent execution evidence, and Render probe can all be joined.
 This is distinct from the Codex candidate-runtime product selection retained
 in the Worker capsule. Cleanup of an already contacted occurrence does not

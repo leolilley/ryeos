@@ -953,7 +953,8 @@ impl ExternalPlacementBackendRegistry {
         // startup gate to an already contacted occurrence.
         if require_activation {
             ensure!(
-                contract.runtime_qualification_attestation_hash.is_none(),
+                contract.runtime_qualification_attestation_hash.is_none()
+                    && contract.runtime_qualification_owner_principal.is_none(),
                 "external runtime qualification has no authenticated admission join"
             );
         }
@@ -6391,6 +6392,7 @@ mod tests {
             .unwrap();
         let mut unverified = contract.clone();
         unverified.runtime_qualification_attestation_hash = Some("6".repeat(64));
+        unverified.runtime_qualification_owner_principal = Some(format!("fp:{}", "7".repeat(64)));
         assert!(
             registry
                 .qualify(
