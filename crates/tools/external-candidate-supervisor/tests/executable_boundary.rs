@@ -236,7 +236,7 @@ fn noncanonical_bootstrap_descriptor_fails_closed() {
 }
 
 #[test]
-fn canonical_bootstrap_advances_to_fixed_state_descriptor() {
+fn canonical_bootstrap_without_sealed_launch_record_fails_closed() {
     let document = lillux::sealed_memfd(
         c"external-supervisor-canonical",
         &bootstrap().canonical_bytes().unwrap(),
@@ -247,15 +247,15 @@ fn canonical_bootstrap_advances_to_fixed_state_descriptor() {
     assert!(!result.success);
     assert_eq!(result.exit_code, 126, "{}", result.stderr);
     assert!(
-        result.stderr.contains("Bad file descriptor"),
-        "expected missing fixed state fd {SUPERVISOR_STATE_ROOT_FD}: {}",
+        result.stderr.contains("sealed input descriptor is not a live inherited descriptor"),
+        "expected missing sealed mounted launch record: {}",
         result.stderr
     );
     assert!(!result.stderr.contains("bootstrap is not canonical"));
 }
 
 #[test]
-fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
+fn fixed_source_descriptors_cannot_start_mounted_supervisor() {
     let root = tempfile::tempdir().unwrap();
     let state_path = root.path().join("state");
     let candidate_path = root.path().join("candidate");
@@ -393,7 +393,7 @@ fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
             &admitted.launcher_artifact_hash,
         )
         .unwrap();
-    let expected_binding_digest = launch.binding().digest().unwrap();
+    let _expected_binding_digest = launch.binding().digest().unwrap();
     drop(launch);
     drop(reservation);
 
@@ -429,12 +429,14 @@ fn retained_launch_intent_is_recovery_only_across_the_executable_boundary() {
 
     let result = lillux::run(child);
     assert!(!result.success);
-    assert_eq!(result.exit_code, 76, "{}", result.stderr);
-    let outcome: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap();
-    assert_eq!(outcome["status"], "recovery_only");
-    assert_eq!(outcome["binding_digest"], expected_binding_digest);
-    assert!(lillux::valid_hash(
-        outcome["launch_intent_digest"].as_str().unwrap()
-    ));
-    assert!(!marker.exists(), "recovery spawned the candidate launcher");
+    assert_eq!(result.exit_code, 126, "{}", result.stderr);
+    assert!(
+        result
+            .stderr
+            .contains("sealed input descriptor is not a live inherited descriptor"),
+        "fixed source FDs were not refused at mounted launch admission: {}",
+        result.stderr
+    );
+    assert!(result.stdout.trim().is_empty());
+    assert!(!marker.exists(), "refused launch contacted the candidate launcher");
 }
