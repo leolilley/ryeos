@@ -72,8 +72,8 @@ fn invocation(with_credential: bool) -> anyhow::Result<(LifecycleRuntimeProbeReq
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(root)
             ),
-            "signed_import_mode": 0o400,
-            "guest_package_mode": 0o400,
+            "signed_import_mode": 0o600,
+            "guest_package_mode": 0o600,
             "lost_stream_survival_evidence_hash": "6".repeat(64),
             "authenticated_ready_evidence_hash": "7".repeat(64),
             "whole_guest_termination_evidence_hash": "8".repeat(64),

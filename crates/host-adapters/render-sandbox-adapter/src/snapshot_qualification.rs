@@ -159,8 +159,11 @@ impl RenderSnapshotProbe {
                 && self.installed_owner_hash == expected.installed_owner_hash
                 && self.installed_controller_public_root == expected.controller_public_root
                 && self.restored_tree_manifest_hash == expected.guest_runtime_manifest_hash
-                && self.signed_import_mode == 0o400
-                && self.guest_package_mode == 0o400,
+                // Render's observed upload is owner-writable 0600. The
+                // one-shot owner accepts that exact mode beneath its private
+                // activation root; 0400 would refuse a real upload.
+                && self.signed_import_mode == 0o600
+                && self.guest_package_mode == 0o600,
             "Render snapshot probe differs from the exact admitted placement or restored runtime"
         );
         Ok(())
@@ -194,8 +197,8 @@ mod tests {
             restored_tree_manifest_hash: "2".repeat(64),
             installed_owner_hash: "5".repeat(64),
             installed_controller_public_root: public_root(),
-            signed_import_mode: 0o400,
-            guest_package_mode: 0o400,
+            signed_import_mode: 0o600,
+            guest_package_mode: 0o600,
             lost_stream_survival_evidence_hash: "6".repeat(64),
             authenticated_ready_evidence_hash: "7".repeat(64),
             whole_guest_termination_evidence_hash: "8".repeat(64),
@@ -229,7 +232,13 @@ mod tests {
         observed.installed_controller_public_root = "ed25519:other".into();
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
+        observed.signed_import_mode = 0o400;
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
         observed.signed_import_mode = 0o644;
+        assert!(observed.validate_for(&settings, &expected).is_err());
+        observed = probe();
+        observed.guest_package_mode = 0o644;
         assert!(observed.validate_for(&settings, &expected).is_err());
         observed = probe();
         observed.whole_guest_termination_evidence_hash.clear();
