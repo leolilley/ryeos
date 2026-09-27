@@ -20,11 +20,11 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, canonical_json,
-    from_json_slice_strict,
+    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
+    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    canonical_json, from_json_slice_strict,
 };
 use ryeos_http_transport::{
     ContactState, Deadlines, Header, HttpClient, HttpError, HttpRequest, HttpResponse, Limits,
@@ -333,6 +333,19 @@ fn operate() -> Result<()> {
         request.canonical_bytes()? == request_bytes,
         "operation request is noncanonical"
     );
+    if matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }) {
+        let signed_bytes = read_sealed_env(
+            LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            ryeos_external_execution_contract::guest_import_authorization::MAX_GUEST_IMPORT_AUTHORIZATION_BYTES
+                + 256,
+        )?;
+        verify_signed_import_handoff(&signed_bytes, &request)?;
+    } else {
+        ensure!(
+            std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none(),
+            "signed guest import was supplied outside first activation"
+        );
+    }
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
         deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
     }
@@ -419,6 +432,54 @@ fn operate() -> Result<()> {
     };
     response.validate_for(&request)?;
     write_response(&response)
+}
+
+/// Transport check only. The disposable guest must validate this signature
+/// against its independently installed controller key and occurrence assignment.
+fn verify_signed_import_handoff(bytes: &[u8], request: &LifecycleAdapterRequest) -> Result<()> {
+    use ryeos_external_execution_contract::guest_import_authorization::{
+        MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, SignedGuestImportAuthorization,
+    };
+    let LifecycleAdapterRequest::ActivateSupervisor {
+        common,
+        occurrence,
+        activation,
+        guest_input_identity,
+        guest_input_projection,
+        guest_package,
+        import_ticket,
+    } = request
+    else {
+        anyhow::bail!("signed guest import requires first activation");
+    };
+    let signed: SignedGuestImportAuthorization =
+        from_json_slice_strict(bytes, MAX_GUEST_IMPORT_AUTHORIZATION_BYTES + 256)?;
+    signed.validate_shape()?;
+    ensure!(
+        canonical_json(&signed)? == bytes,
+        "signed guest import handoff is noncanonical"
+    );
+    let authorization = &signed.authorization;
+    ensure!(
+        authorization.execution_binding_hash == common.binding_hash
+            && authorization.allocation_request_digest == occurrence.request_digest
+            && authorization.occurrence_id == occurrence.occurrence_id
+            && authorization.activation_request_digest == activation.activation_request_digest
+            && authorization.supervisor_runtime_hash == activation.supervisor_runtime_hash
+            && authorization.attachment_deadline_ms == activation.attachment_deadline_ms
+            && authorization.base_snapshot_hash
+                == guest_input_projection.base_snapshot.snapshot_hash
+            && authorization.guest_inputs == *guest_input_projection
+            && authorization.ticket == *import_ticket
+            && authorization.ticket.guest_input_identity == *guest_input_identity
+            && authorization.ticket.payload_sha256 == guest_package.payload_sha256
+            && authorization.ticket.manifest_sha256 == guest_package.manifest_sha256
+            && authorization.ticket.regular_bytes == guest_package.regular_bytes
+            && authorization.ticket.framed_bytes == guest_package.framed_bytes,
+        "sealed signed import changed the exact activation or package"
+    );
+    authorization.require_fresh_admission_at(lillux::time::timestamp_millis())?;
+    Ok(())
 }
 
 fn parse_provider_spec_bytes(
@@ -1213,6 +1274,140 @@ fn write_response<T: Serialize>(response: &T) -> Result<()> {
 #[cfg(test)]
 mod offline_fixture_tests {
     use super::*;
+
+    #[test]
+    fn signed_import_descriptor_is_correlated_but_not_guest_trust() {
+        use ryeos_external_execution_contract::guest_import_authorization::{
+            GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization,
+            SignedGuestImportAuthorization,
+        };
+        use ryeos_external_execution_contract::staging_package::{
+            GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
+        };
+        use ryeos_external_execution_contract::{
+            BoundOccurrence, EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA, ExternalGuestInputProjection,
+            GuestBaseSnapshotInput, GuestMountAccess, GuestMountContentAuthority, GuestMountInput,
+            GuestMountKind, GuestMountRole, LifecycleGuestPackageDelivery,
+            LifecycleOperationCommon, SupervisorActivationIntent,
+        };
+
+        let digest = |character: char| character.to_string().repeat(64);
+        let inputs = ExternalGuestInputProjection {
+            schema: EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            base_snapshot: GuestBaseSnapshotInput {
+                descriptor: 56,
+                snapshot_hash: digest('a'),
+                closure_digest: digest('b'),
+                object_count: 3,
+                blob_count: 1,
+                total_bytes: 1,
+            },
+            workspace_outputs: None,
+            inputs: vec![GuestMountInput {
+                role: GuestMountRole::Configuration,
+                authority_id: "config".into(),
+                descriptor: 64,
+                destination: "/runtime/configuration".into(),
+                kind: GuestMountKind::RegularFile,
+                access: GuestMountAccess::ReadOnly,
+                normalized_mode: Some(0o644),
+                content_authority: GuestMountContentAuthority::RawFile {
+                    sha256: digest('c'),
+                },
+                bytes: 1,
+            }],
+            executable_search: Vec::new(),
+            environment: BTreeMap::new(),
+        };
+        let input_identity = inputs.identity_digest().unwrap();
+        let attachment_deadline_ms = lillux::time::timestamp_millis() + 60_000;
+        let common = LifecycleOperationCommon {
+            schema: 1,
+            protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
+            operation_id: "activate-fixture".into(),
+            binding_hash: digest('d'),
+            settings_digest: digest('e'),
+        };
+        let occurrence = BoundOccurrence {
+            request_digest: digest('f'),
+            occurrence_id: "occ-fixture".into(),
+        };
+        let activation = SupervisorActivationIntent {
+            activation_request_digest: digest('1'),
+            supervisor_runtime_hash: digest('2'),
+            launcher_artifact_hash: digest('3'),
+            attachment_deadline_ms,
+            execution_timeout_seconds: 60,
+            post_execution_timeout_seconds: 120,
+            channel_max_bytes: 1024 * 1024,
+        };
+        let package = LifecycleGuestPackageDelivery {
+            descriptor: 60,
+            payload_sha256: digest('4'),
+            manifest_sha256: digest('5'),
+            regular_bytes: 100,
+            framed_bytes: 200,
+        };
+        let ticket = GuestImportTicket {
+            schema: GUEST_IMPORT_TICKET_SCHEMA,
+            binding_hash: common.binding_hash.clone(),
+            allocation_request_digest: occurrence.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: activation.activation_request_digest.clone(),
+            guest_input_identity: input_identity.clone(),
+            payload_sha256: package.payload_sha256.clone(),
+            manifest_sha256: package.manifest_sha256.clone(),
+            framed_bytes: package.framed_bytes,
+            regular_bytes: package.regular_bytes,
+            bootstrap_sha256: digest('6'),
+            supervisor_sha256: digest('7'),
+            launcher_sha256: activation.launcher_artifact_hash.clone(),
+            maximum_regular_bytes: 1000,
+            maximum_framed_bytes: 2000,
+        };
+        let request = LifecycleAdapterRequest::ActivateSupervisor {
+            common: common.clone(),
+            occurrence: occurrence.clone(),
+            activation: activation.clone(),
+            guest_input_identity: input_identity,
+            guest_input_projection: inputs.clone(),
+            guest_package: package,
+            import_ticket: ticket.clone(),
+        };
+        request.validate().unwrap();
+        let signed = SignedGuestImportAuthorization {
+            authorization: GuestImportAuthorization {
+                schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
+                placement_thread_id: "T-fixture".into(),
+                admitted_capsule_hash: digest('8'),
+                base_snapshot_hash: inputs.base_snapshot.snapshot_hash.clone(),
+                execution_binding_hash: common.binding_hash,
+                allocation_request_digest: occurrence.request_digest,
+                occurrence_id: occurrence.occurrence_id,
+                activation_request_digest: activation.activation_request_digest,
+                supervisor_runtime_hash: activation.supervisor_runtime_hash,
+                guest_runtime_manifest_hash: digest('9'),
+                attachment_deadline_ms,
+                admission_deadline_ms: attachment_deadline_ms,
+                nonce_sha256: digest('0'),
+                ticket,
+                guest_inputs: inputs,
+            },
+            // The adapter checks transport correlation, not the cryptographic
+            // trust decision made by the independently provisioned guest.
+            signature_hex: "0".repeat(128),
+        };
+        let canonical = canonical_json(&signed).unwrap();
+        verify_signed_import_handoff(&canonical, &request).unwrap();
+        let mut changed = signed;
+        changed.authorization.ticket.payload_sha256 = digest('a');
+        assert!(
+            verify_signed_import_handoff(&canonical_json(&changed).unwrap(), &request).is_err()
+        );
+        let mut noncanonical = canonical;
+        noncanonical.push(b' ');
+        assert!(verify_signed_import_handoff(&noncanonical, &request).is_err());
+    }
 
     #[test]
     fn reusable_render_runtime_snapshot_is_distinct_from_each_guest_base() {

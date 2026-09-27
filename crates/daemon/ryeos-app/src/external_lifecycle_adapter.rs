@@ -13,11 +13,12 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
-    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
-    LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
-    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
+    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
+    LifecycleGuestPackageDelivery, LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
+    from_json_slice_strict,
 };
 
 use crate::external_artifacts::{
@@ -208,6 +209,7 @@ impl ExecutableExternalPlacementBackend {
         bootstrap: Option<&ryeos_state::external_execution::transport::ExternalSupervisorBootstrap>,
         guest_inputs: Option<&ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
         guest_package: Option<&lillux::InheritedDescriptorAuthority>,
+        signed_import: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -360,6 +362,26 @@ impl ExecutableExternalPlacementBackend {
                     .to_string(),
             ));
             inherited.push(package.clone());
+        }
+        ensure!(
+            signed_import.is_some() == guest_package.is_some()
+                && signed_import.is_some()
+                    == matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+            "signed guest import and exact package must cross one activation contact together"
+        );
+        if let Some(signed) = signed_import {
+            signed.validate_shape()?;
+            let bytes = ryeos_external_execution_contract::canonical_json(signed)?;
+            let handle = lillux::sealed_memfd(c"ryeos-signed-guest-import", &bytes)
+                .map_err(anyhow::Error::msg)?;
+            envs.push((
+                LIFECYCLE_SIGNED_IMPORT_FD_ENV.into(),
+                handle
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ));
+            inherited.push(handle);
         }
         drop(descriptors);
         let remaining_timeout_ms = deadline.remaining().as_millis();
@@ -631,7 +653,9 @@ impl ExecutableExternalPlacementBackend {
                 reservation: reservation_wire,
             }
         };
-        let response = self.invoke(contract, credential, &request, None, None, None, deadline)?;
+        let response = self.invoke(
+            contract, credential, &request, None, None, None, None, deadline,
+        )?;
         let value = match response.value {
             LifecycleAdapterResponse::AllocationBound {
                 occurrence_id,
@@ -701,26 +725,34 @@ impl ExecutableExternalPlacementBackend {
                     && package.manifest().total_regular_bytes == intent.delivery.regular_bytes,
                 "prepared guest package changed after durable activation claim"
             );
-            let ticket = ryeos_external_execution_contract::staging_package::GuestImportTicket {
-                schema:
-                    ryeos_external_execution_contract::staging_package::GUEST_IMPORT_TICKET_SCHEMA,
-                binding_hash: reservation.binding_hash.clone(),
-                allocation_request_digest: reservation.request_digest.clone(),
-                occurrence_id: occurrence.occurrence_id.clone(),
-                activation_request_digest: intent.activation_request_digest.clone(),
-                guest_input_identity: intent.guest_input_identity.clone(),
-                payload_sha256: intent.delivery.payload_sha256.clone(),
-                manifest_sha256: intent.delivery.manifest_sha256.clone(),
-                framed_bytes: intent.delivery.framed_bytes,
-                regular_bytes: intent.delivery.regular_bytes,
-                bootstrap_sha256: lillux::sha256_hex(
-                    &activation_authority.bootstrap().canonical_bytes()?,
-                ),
-                supervisor_sha256: contract.supervisor_artifact_hash.clone(),
-                launcher_sha256: contract.launcher_artifact_hash.clone(),
-                maximum_regular_bytes: contract.max_guest_package_regular_bytes,
-                maximum_framed_bytes: contract.max_guest_package_framed_bytes,
-            };
+            let signed = activation_authority.signed_import_authorization()?;
+            let authorization = &signed.authorization;
+            ensure!(
+                authorization.placement_thread_id == reservation.placement_thread_id
+                    && authorization.admitted_capsule_hash == reservation.admitted_capsule_hash
+                    && authorization.base_snapshot_hash == reservation.base_snapshot_hash
+                    && authorization.execution_binding_hash == reservation.binding_hash
+                    && authorization.activation_request_digest == intent.activation_request_digest
+                    && authorization.supervisor_runtime_hash == intent.supervisor_runtime_hash
+                    && authorization.guest_runtime_manifest_hash
+                        == contract.guest_runtime_manifest_hash
+                    && authorization.guest_inputs
+                        == *activation_authority.guest_inputs().projection(),
+                "signed guest import changed the admitted activation"
+            );
+            let ticket = authorization.ticket.clone();
+            ensure!(
+                ticket.guest_input_identity == intent.guest_input_identity
+                    && ticket.payload_sha256 == intent.delivery.payload_sha256
+                    && ticket.manifest_sha256 == intent.delivery.manifest_sha256
+                    && ticket.regular_bytes == intent.delivery.regular_bytes
+                    && ticket.framed_bytes == intent.delivery.framed_bytes
+                    && ticket.bootstrap_sha256
+                        == lillux::sha256_hex(&activation_authority.bootstrap().canonical_bytes()?)
+                    && ticket.supervisor_sha256 == contract.supervisor_artifact_hash
+                    && ticket.launcher_sha256 == contract.launcher_artifact_hash,
+                "signed guest import ticket changed durable delivery or executable roots"
+            );
             ticket.validate_verified_manifest(
                 &ryeos_external_execution_contract::staging_package::GuestImportContext {
                     binding_hash: &reservation.binding_hash,
@@ -774,6 +806,9 @@ impl ExecutableExternalPlacementBackend {
             bootstrap,
             guest_inputs,
             package_authority.as_ref(),
+            activation_authority
+                .map(ExternalSupervisorActivation::signed_import_authorization)
+                .transpose()?,
             deadline,
         )?;
         let value = match response.value {
@@ -839,7 +874,7 @@ impl ExecutableExternalPlacementBackend {
         ));
         // Late terminal evidence may settle cleanup, never start execution.
         match self
-            .invoke(contract, credential, &request, None, None, None, deadline)?
+            .invoke(contract, credential, &request, None, None, None, None, deadline)?
             .value
         {
             LifecycleAdapterResponse::OccurrenceTerminal {

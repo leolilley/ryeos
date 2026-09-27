@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, Weak};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution_contract::LifecycleCapability;
+use ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization;
 use ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram;
 use subtle::ConstantTimeEq as _;
 
@@ -190,6 +191,7 @@ pub(crate) struct ExternalSupervisorActivation {
     bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
     guest_package: Option<SupervisorGuestPackage>,
+    import_authorization: Option<SignedGuestImportAuthorization>,
 }
 
 pub(crate) enum SupervisorGuestPackage {
@@ -781,6 +783,12 @@ impl ExternalSupervisorActivation {
             }
             None => bail!("external guest package already discarded"),
         }
+    }
+
+    pub(crate) fn signed_import_authorization(&self) -> Result<&SignedGuestImportAuthorization> {
+        self.import_authorization
+            .as_ref()
+            .context("first activation has no signed guest import authorization")
     }
 
     fn discard_guest_package(&mut self) -> Result<()> {
@@ -3822,14 +3830,146 @@ fn supervisor_activation(
         }
         return Err(error);
     }
+    let import_authorization = match &guest_package {
+        SupervisorGuestPackage::Prepared { package, .. } => {
+            let signed = sign_prepared_guest_import(
+                contract,
+                reservation,
+                occurrence,
+                &intent,
+                &bootstrap,
+                guest_inputs.projection(),
+                package,
+                authority,
+            );
+            match signed {
+                Ok(signed) => Some(signed),
+                Err(error) => {
+                    if let Err(cleanup) = guest_package.discard() {
+                        return Err(error.context(format!(
+                            "guest import refusal also failed package cleanup: {cleanup:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        #[cfg(test)]
+        SupervisorGuestPackage::Fixture(_) => None,
+    };
     Ok((
         intent,
         ExternalSupervisorActivation {
             bootstrap,
             guest_inputs,
             guest_package: Some(guest_package),
+            import_authorization,
         },
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_prepared_guest_import(
+    contract: &ExternalPlacementBackendContract,
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    intent: &ExternalSupervisorActivationIntent,
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    inputs: &ryeos_external_execution_contract::ExternalGuestInputProjection,
+    package: &ryeos_external_execution::guest_package_producer::PreparedGuestPackage,
+    authority: &ExternalChannelAuthority,
+) -> Result<SignedGuestImportAuthorization> {
+    use ryeos_external_execution_contract::staging_package::{
+        GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
+    };
+
+    let ticket = GuestImportTicket {
+        schema: GUEST_IMPORT_TICKET_SCHEMA,
+        binding_hash: reservation.binding_hash.clone(),
+        allocation_request_digest: reservation.request_digest.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        activation_request_digest: intent.activation_request_digest.clone(),
+        guest_input_identity: intent.guest_input_identity.clone(),
+        payload_sha256: package.sha256().to_owned(),
+        manifest_sha256: package.manifest_sha256().to_owned(),
+        framed_bytes: package.bytes(),
+        regular_bytes: package.manifest().total_regular_bytes,
+        bootstrap_sha256: lillux::sha256_hex(&bootstrap.canonical_bytes()?),
+        supervisor_sha256: contract.supervisor_artifact_hash.clone(),
+        launcher_sha256: contract.launcher_artifact_hash.clone(),
+        maximum_regular_bytes: contract.max_guest_package_regular_bytes,
+        maximum_framed_bytes: contract.max_guest_package_framed_bytes,
+    };
+    ticket.validate_verified_manifest(
+        &ryeos_external_execution_contract::staging_package::GuestImportContext {
+            binding_hash: &reservation.binding_hash,
+            allocation_request_digest: &reservation.request_digest,
+            occurrence_id: &occurrence.occurrence_id,
+            activation_request_digest: &intent.activation_request_digest,
+        },
+        package.manifest(),
+        package.sha256(),
+        package.bytes(),
+    )?;
+    sign_guest_import_ticket(
+        contract,
+        reservation,
+        occurrence,
+        intent,
+        inputs,
+        ticket,
+        authority,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_guest_import_ticket(
+    contract: &ExternalPlacementBackendContract,
+    reservation: &ExternalAllocationReservation,
+    occurrence: &ExternalAllocationOccurrence,
+    intent: &ExternalSupervisorActivationIntent,
+    inputs: &ryeos_external_execution_contract::ExternalGuestInputProjection,
+    ticket: ryeos_external_execution_contract::staging_package::GuestImportTicket,
+    authority: &ExternalChannelAuthority,
+) -> Result<SignedGuestImportAuthorization> {
+    use ryeos_external_execution_contract::guest_import_authorization::{
+        GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization, GuestOccurrenceAssignment,
+    };
+
+    let assignment = GuestOccurrenceAssignment {
+        placement_thread_id: &reservation.placement_thread_id,
+        admitted_capsule_hash: &reservation.admitted_capsule_hash,
+        base_snapshot_hash: &reservation.base_snapshot_hash,
+        execution_binding_hash: &reservation.binding_hash,
+        allocation_request_digest: &reservation.request_digest,
+        occurrence_id: &occurrence.occurrence_id,
+        activation_request_digest: &intent.activation_request_digest,
+        supervisor_runtime_hash: &intent.supervisor_runtime_hash,
+        guest_runtime_manifest_hash: &contract.guest_runtime_manifest_hash,
+        attachment_deadline_ms: intent.attachment_deadline_ms,
+    };
+    let authorization = GuestImportAuthorization {
+        schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
+        placement_thread_id: reservation.placement_thread_id.clone(),
+        admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+        base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+        execution_binding_hash: reservation.binding_hash.clone(),
+        allocation_request_digest: reservation.request_digest.clone(),
+        occurrence_id: occurrence.occurrence_id.clone(),
+        activation_request_digest: intent.activation_request_digest.clone(),
+        supervisor_runtime_hash: intent.supervisor_runtime_hash.clone(),
+        guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+        attachment_deadline_ms: intent.attachment_deadline_ms,
+        admission_deadline_ms: intent.attachment_deadline_ms,
+        nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
+        ticket,
+        guest_inputs: inputs.clone(),
+    };
+    ryeos_external_execution::guest_import_authorization::sign_guest_import_authorization(
+        authorization,
+        authority.owner_signing_key(),
+        &assignment,
+    )
 }
 
 /// Validate the meaning of an adapter observation before durable settlement.
@@ -7083,6 +7223,109 @@ mod tests {
                 "generic placement accepted changed session {field}"
             );
         }
+    }
+
+    #[test]
+    fn controller_signed_import_joins_exact_activation_and_guest_runtime() {
+        use ryeos_external_execution_contract::guest_import_authorization::GuestOccurrenceAssignment;
+        use ryeos_external_execution_contract::staging_package::{
+            GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let (db, reservation, binding) = lifecycle_fixture(&dir.path().join("runtime.sqlite3"));
+        let contract = binding.backend_contract();
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "occ-signed-import".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        let authority =
+            ExternalChannelAuthority::test_fixture(&reservation.channel_authority_generation);
+        let guest_inputs = guest_input_authority(
+            &dir.path().join("signed-import-inputs"),
+            &reservation.base_snapshot_hash,
+        );
+        let package_parent = lillux::PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let (intent, activation) = supervisor_activation(
+            &contract,
+            &reservation,
+            &occurrence,
+            &authority,
+            &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            guest_inputs,
+            &FaultBackend::new(),
+            &package_parent,
+            reservation.startup_deadline().unwrap(),
+        )
+        .unwrap();
+        let ticket = GuestImportTicket {
+            schema: GUEST_IMPORT_TICKET_SCHEMA,
+            binding_hash: reservation.binding_hash.clone(),
+            allocation_request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            guest_input_identity: intent.guest_input_identity.clone(),
+            payload_sha256: intent.delivery.payload_sha256.clone(),
+            manifest_sha256: intent.delivery.manifest_sha256.clone(),
+            framed_bytes: intent.delivery.framed_bytes,
+            regular_bytes: intent.delivery.regular_bytes,
+            bootstrap_sha256: lillux::sha256_hex(
+                &activation.bootstrap().canonical_bytes().unwrap(),
+            ),
+            supervisor_sha256: contract.supervisor_artifact_hash.clone(),
+            launcher_sha256: contract.launcher_artifact_hash.clone(),
+            maximum_regular_bytes: contract.max_guest_package_regular_bytes,
+            maximum_framed_bytes: contract.max_guest_package_framed_bytes,
+        };
+        let signed = sign_guest_import_ticket(
+            &contract,
+            &reservation,
+            &occurrence,
+            &intent,
+            activation.guest_inputs().projection(),
+            ticket,
+            &authority,
+        )
+        .unwrap();
+        let assignment = GuestOccurrenceAssignment {
+            placement_thread_id: &reservation.placement_thread_id,
+            admitted_capsule_hash: &reservation.admitted_capsule_hash,
+            base_snapshot_hash: &reservation.base_snapshot_hash,
+            execution_binding_hash: &reservation.binding_hash,
+            allocation_request_digest: &reservation.request_digest,
+            occurrence_id: &occurrence.occurrence_id,
+            activation_request_digest: &intent.activation_request_digest,
+            supervisor_runtime_hash: &intent.supervisor_runtime_hash,
+            guest_runtime_manifest_hash: &contract.guest_runtime_manifest_hash,
+            attachment_deadline_ms: intent.attachment_deadline_ms,
+        };
+        ryeos_external_execution::guest_import_authorization::verify_guest_import_authorization(
+            signed.clone(),
+            &authority.owner_signing_key().verifying_key(),
+            &assignment,
+        )
+        .unwrap();
+        assert_ne!(
+            signed.authorization.guest_runtime_manifest_hash,
+            signed.authorization.supervisor_runtime_hash
+        );
+        let changed_runtime = "7".repeat(64);
+        let wrong_assignment = GuestOccurrenceAssignment {
+            guest_runtime_manifest_hash: &changed_runtime,
+            ..assignment
+        };
+        assert!(
+            ryeos_external_execution::guest_import_authorization::verify_guest_import_authorization(
+                signed,
+                &authority.owner_signing_key().verifying_key(),
+                &wrong_assignment,
+            )
+            .is_err()
+        );
+        drop(db);
     }
 
     #[test]

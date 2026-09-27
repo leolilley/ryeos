@@ -37,6 +37,9 @@ pub const LIFECYCLE_REQUEST_FD_ENV: &str = "RYEOS_LIFECYCLE_REQUEST_FD";
 pub const LIFECYCLE_SETTINGS_FD_ENV: &str = "RYEOS_LIFECYCLE_SETTINGS_FD";
 pub const LIFECYCLE_CREDENTIAL_FD_ENV: &str = "RYEOS_LIFECYCLE_CREDENTIAL_FD";
 pub const LIFECYCLE_BOOTSTRAP_FD_ENV: &str = "RYEOS_LIFECYCLE_BOOTSTRAP_FD";
+/// Sealed controller signature over the exact one-shot guest import. The
+/// adapter may transport it, but cannot confer guest trust in its own bytes.
+pub const LIFECYCLE_SIGNED_IMPORT_FD_ENV: &str = "RYEOS_LIFECYCLE_SIGNED_IMPORT_FD";
 pub const LIFECYCLE_GUEST_PACKAGE_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_PACKAGE_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
