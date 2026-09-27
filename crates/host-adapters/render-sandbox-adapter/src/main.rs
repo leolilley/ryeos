@@ -50,6 +50,24 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const GUEST_OWNER_EXECUTABLE: &str =
     "/ryeos/guest-runtime/bin/ryeos-external-guest-occurrence-owner";
+const SIGNED_IMPORT_REMOTE_PATH: &str = "/ryeos/activation/signed-import.json";
+const GUEST_PACKAGE_REMOTE_PATH: &str = "/ryeos/activation/guest-package";
+
+/// Exact, pre-contact inputs for the eventual one-shot upload and launch.
+/// This is not provider authority: the current signed Render spec still
+/// refuses activation until the installed snapshot and lost-stream behavior
+/// are qualified. It prevents that later transport from choosing paths or a
+/// command independently of the verified handoff.
+#[allow(dead_code)]
+struct ActivationDeliveryPlan {
+    signed_import_remote_path: &'static str,
+    signed_import_sha256: String,
+    signed_import_bytes: u64,
+    guest_package_remote_path: &'static str,
+    guest_package_sha256: String,
+    guest_package_bytes: u64,
+    owner_command: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -352,10 +370,6 @@ fn operate() -> Result<()> {
             ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
         )?;
         verify_signed_assignment_handoff(&assignment_bytes, &signed_import)?;
-        // Render's run command is passed through `bash -c`. Preflight the
-        // exact, non-secret argv now; actual run contact remains disabled
-        // until the installed snapshot and lost-stream behavior qualify.
-        let _owner_command = guest_owner_run_command(&assignment_bytes)?;
         // SAFETY: the trusted runner transferred this exact package descriptor
         // once into the adapter before any provider contact. It is distinct
         // from the controller's original descriptor coordinate.
@@ -363,6 +377,10 @@ fn operate() -> Result<()> {
             unsafe { lillux::take_inherited_descriptor_authority(guest_package.descriptor) }
                 .map_err(anyhow::Error::msg)?;
         verify_guest_package_handoff(&package, guest_package)?;
+        // Render's run command is passed through `bash -c`. Retain one fixed
+        // delivery mapping derived only from verified sealed inputs. Actual
+        // upload/run contact remains disabled until installed qualification.
+        let _delivery = activation_delivery_plan(&signed_bytes, &assignment_bytes, guest_package)?;
         Some(package)
     } else {
         ensure!(
@@ -579,6 +597,29 @@ fn guest_owner_run_command(signed_assignment_bytes: &[u8]) -> Result<String> {
     Ok(format!(
         "exec {GUEST_OWNER_EXECUTABLE} --assignment-b64 {encoded}"
     ))
+}
+
+fn activation_delivery_plan(
+    signed_import_bytes: &[u8],
+    signed_assignment_bytes: &[u8],
+    guest_package: &ryeos_external_execution_contract::LifecycleGuestPackageDelivery,
+) -> Result<ActivationDeliveryPlan> {
+    use ryeos_external_execution_contract::guest_import_authorization::MAX_GUEST_IMPORT_AUTHORIZATION_BYTES;
+    ensure!(
+        !signed_import_bytes.is_empty()
+            && signed_import_bytes.len() <= MAX_GUEST_IMPORT_AUTHORIZATION_BYTES + 256,
+        "signed guest import exceeds upload bound"
+    );
+    guest_package.validate()?;
+    Ok(ActivationDeliveryPlan {
+        signed_import_remote_path: SIGNED_IMPORT_REMOTE_PATH,
+        signed_import_sha256: lillux::sha256_hex(signed_import_bytes),
+        signed_import_bytes: u64::try_from(signed_import_bytes.len())?,
+        guest_package_remote_path: GUEST_PACKAGE_REMOTE_PATH,
+        guest_package_sha256: guest_package.payload_sha256.clone(),
+        guest_package_bytes: guest_package.framed_bytes,
+        owner_command: guest_owner_run_command(signed_assignment_bytes)?,
+    })
 }
 
 fn verify_guest_package_handoff(
@@ -1586,6 +1627,27 @@ mod offline_fixture_tests {
         let assignment_bytes = canonical_json(&assignment).unwrap();
         verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
         let command = guest_owner_run_command(&assignment_bytes).unwrap();
+        let LifecycleAdapterRequest::ActivateSupervisor { guest_package, .. } = &request else {
+            unreachable!()
+        };
+        let delivery =
+            activation_delivery_plan(&canonical, &assignment_bytes, guest_package).unwrap();
+        assert_eq!(
+            delivery.signed_import_remote_path,
+            SIGNED_IMPORT_REMOTE_PATH
+        );
+        assert_eq!(
+            delivery.signed_import_sha256,
+            lillux::sha256_hex(&canonical)
+        );
+        assert_eq!(delivery.signed_import_bytes, canonical.len() as u64);
+        assert_eq!(
+            delivery.guest_package_remote_path,
+            GUEST_PACKAGE_REMOTE_PATH
+        );
+        assert_eq!(delivery.guest_package_sha256, guest_package.payload_sha256);
+        assert_eq!(delivery.guest_package_bytes, guest_package.framed_bytes);
+        assert_eq!(delivery.owner_command, command);
         let encoded = command
             .strip_prefix(&format!("exec {GUEST_OWNER_EXECUTABLE} --assignment-b64 "))
             .unwrap();
