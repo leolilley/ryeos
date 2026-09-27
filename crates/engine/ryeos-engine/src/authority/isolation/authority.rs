@@ -486,6 +486,12 @@ impl IsolationProducerPreparedDirectoryAuthority {
         &self.destination
     }
 
+    /// Identity of the exact descriptor later consumed by the prepared mount.
+    /// Callers may retain and compare it, but must not interpret OS fields.
+    pub fn source_directory_identity(&self) -> anyhow::Result<lillux::PinnedDirectoryIdentity> {
+        self.source.directory_identity().map_err(anyhow::Error::msg)
+    }
+
     pub(crate) fn source(&self) -> &lillux::InheritedDescriptorAuthority {
         &self.source
     }

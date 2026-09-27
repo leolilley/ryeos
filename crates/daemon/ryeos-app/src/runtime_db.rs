@@ -2615,7 +2615,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // separately signed guest-package byte authorities that schema 9 lacked.
 // Epoch 70 binds the exact prepared guest-package delivery to the same
 // immutable supervisor activation row and one-shot contact claim.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 70;
+// Scoped mount evidence now retains exact prepared-directory source identities.
+// An epoch-70 row cannot be decoded under the new no-backcompat contract.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 71;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

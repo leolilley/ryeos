@@ -1010,6 +1010,17 @@ pub fn reopen_direct_target_probe(
 }
 
 impl StagedDirectTargetProbe {
+    pub fn prepared_directory_sources(
+        &self,
+    ) -> Result<BTreeMap<String, lillux::PinnedDirectoryIdentity>> {
+        self.occurrence.ensure_path_binding()?;
+        self.home.ensure_path_binding()?;
+        Ok(BTreeMap::from([
+            (DIRECT_OCCURRENCE_ID.to_owned(), self.occurrence.identity()?),
+            (DIRECT_HOME_ID.to_owned(), self.home.identity()?),
+        ]))
+    }
+
     pub fn recheck_preflight(&self, parameters: &Parameters) -> Result<()> {
         self.recheck_sealed_inputs(parameters)?;
         ensure!(

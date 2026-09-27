@@ -531,7 +531,7 @@ fn scoped_attempt_locator(
         "scoped locator held mount preparation differs from compiled plan"
     );
     Ok(serde_json::json!({
-        "schema": "ryeos.scoped_producer_locator.v6",
+        "schema": "ryeos.scoped_producer_locator.v7",
         "attempt_id": record.initial.attempt_id,
         "recipe_digest": record.initial.recipe_digest,
         "recipe_generation": record.initial.recipe_generation,
@@ -541,6 +541,7 @@ fn scoped_attempt_locator(
         "applied_launch": applied,
         "expected_mount_preparation": held_mounts.expected,
         "held_mount_preparation": held_mounts.observed,
+        "prepared_directory_sources": held_mounts.prepared_directory_sources,
         "prepared_immutable_sha256": held_mounts.prepared_immutable_sha256,
     }))
 }

@@ -159,6 +159,9 @@ pub struct ScopedChildMountPreparationEvidence {
     pub plan_digest: String,
     pub expected: lillux::LinuxSandboxMountPreparationCommitments,
     pub observed: lillux::LinuxSandboxMountPreparationReceipt,
+    /// Exact admitted source descriptors used for prepared writable mounts.
+    pub prepared_directory_sources:
+        std::collections::BTreeMap<String, lillux::PinnedDirectoryIdentity>,
     /// Daemon-sealed content at exact prepared namespace destinations. This
     /// cannot be reconstructed from the writable workspace after release.
     pub prepared_immutable_sha256: std::collections::BTreeMap<String, String>,
@@ -167,8 +170,17 @@ pub struct ScopedChildMountPreparationEvidence {
 impl ScopedChildMountPreparationEvidence {
     fn validate_for(&self, identity: &ExecutionProcessIdentity) -> Result<()> {
         anyhow::ensure!(
-            self.schema == 2,
+            self.schema == 3,
             "scoped child mount evidence schema is unsupported"
+        );
+        anyhow::ensure!(
+            self.prepared_directory_sources.len()
+                <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES
+                && self.prepared_directory_sources.keys().all(|id| {
+                    ryeos_state::external_content::products::producer_recipe::prepared_directory_mount_destination(id)
+                        .is_ok()
+                }),
+            "scoped child prepared directory sources are not canonical or bounded"
         );
         anyhow::ensure!(
             self.prepared_immutable_sha256.len()
@@ -1491,7 +1503,7 @@ mod tests {
 
     fn mount_evidence(identity: &ExecutionProcessIdentity) -> ScopedChildMountPreparationEvidence {
         ScopedChildMountPreparationEvidence {
-            schema: 2,
+            schema: 3,
             plan_digest: format!("sha256:{}", "c".repeat(64)),
             expected: lillux::LinuxSandboxMountPreparationCommitments {
                 schema: 1,
@@ -1504,6 +1516,7 @@ mod tests {
                 mount_count: 1,
                 destination_access_sha256: [7; 32],
             },
+            prepared_directory_sources: std::collections::BTreeMap::new(),
             prepared_immutable_sha256: std::collections::BTreeMap::new(),
         }
     }
@@ -1518,6 +1531,16 @@ mod tests {
             &identity,
         ).is_err());
         let mut wrong = evidence.clone();
+        let source_root = tempfile::tempdir().unwrap();
+        let source = lillux::PinnedDirectory::open(source_root.path()).unwrap().unwrap();
+        // A canonical signed ID may retain an opaque source identity; a
+        // traversal-shaped ID may not enter the durable mount evidence.
+        let source = source.identity().unwrap();
+        wrong.prepared_directory_sources.insert("codex-home".into(), source);
+        wrong.validate_for(&identity).unwrap();
+        wrong.prepared_directory_sources.insert("../foreign".into(), source);
+        assert!(wrong.validate_for(&identity).is_err());
+        wrong.prepared_directory_sources.clear();
         wrong.prepared_immutable_sha256.insert(
             "/ryeos/producer-prepared/codex-home/../config.toml".into(),
             "a".repeat(64),
@@ -2391,6 +2414,46 @@ mod tests {
             params![initial.attempt_id, encoded],
         ).unwrap();
         assert!(RuntimeDb::open_existing_current(&path).is_err());
+    }
+
+    #[test]
+    fn predecessor_mount_evidence_requires_epoch_reset_before_nested_decode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.sqlite3");
+        let (initial, recovery, identity) = fixture();
+        let former_bytes;
+        {
+            let db = RuntimeDb::open(&path).unwrap();
+            seed_owner(&db, &initial.owner);
+            db.reserve_scoped_child_attempt(&initial).unwrap();
+            db.bind_scoped_child_scope(&initial.attempt_id, &recovery).unwrap();
+            db.attach_scoped_child_process(&initial.attempt_id, &identity, &mount_evidence(&identity))
+                .unwrap();
+            let mut former = serde_json::to_value(mount_evidence(&identity)).unwrap();
+            former["schema"] = serde_json::json!(2);
+            former.as_object_mut().unwrap().remove("prepared_directory_sources");
+            former_bytes = lillux::canonical_json(&former).unwrap();
+            db.conn.execute(
+                "UPDATE scoped_child_attempt SET mount_preparation_evidence=?2 WHERE attempt_id=?1",
+                params![initial.attempt_id, former_bytes],
+            ).unwrap();
+            db.conn.pragma_update(
+                None,
+                "application_id",
+                RUNTIME_OPERATOR_APP_ID_PREFIX | (RUNTIME_OPERATOR_SCHEMA_EPOCH - 1),
+            ).unwrap();
+        }
+        let error = RuntimeDb::open_existing_current(&path).err().unwrap();
+        let message = format!("{error:#}");
+        assert!(message.contains("explicit no-backcompat reset"), "{message}");
+        assert!(message.contains("stored schema_epoch=70"), "{message}");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let retained: String = conn.query_row(
+            "SELECT mount_preparation_evidence FROM scoped_child_attempt WHERE attempt_id=?1",
+            [&initial.attempt_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retained, former_bytes);
     }
 
     #[test]

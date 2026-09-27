@@ -234,6 +234,12 @@ async fn main() -> Result<()> {
             direct_stage.environment_configuration_sha256(),
         )?;
         if running_relay.is_some() {
+            require_direct_prepared_source_join(
+                &locator.prepared_directory_sources,
+                &direct_stage.prepared_directory_sources()?,
+            )?;
+        }
+        if running_relay.is_some() {
             let signed_target = signed_direct_target_commitments(
                 &parameters.configuration.expected_producer_recipe,
                 &realizations,
@@ -491,8 +497,15 @@ async fn main() -> Result<()> {
         &realizations,
         &observation.applied_launch,
     )?;
+    if direct_evidence.is_some() {
+        require_direct_prepared_observation_join(
+            &locator.prepared_directory_sources,
+            &observation.prepared_directory_sources,
+            &direct_stage.prepared_directory_sources()?,
+        )?;
+    }
     ensure!(
-        observation.schema == "ryeos.scoped_producer_observation.v6"
+        observation.schema == "ryeos.scoped_producer_observation.v7"
             && observation.attempt_id == locator.attempt_id
             && observation.launch_owner["thread_id"] == thread_id
             && observation.launch_owner["monotonic_launch_epoch"]
@@ -507,6 +520,7 @@ async fn main() -> Result<()> {
             && observation.recipe_digest == locator.recipe_digest
             && observation.recipe_generation == locator.recipe_generation
             && observation.prepared_immutable_sha256 == locator.prepared_immutable_sha256
+            && observation.prepared_directory_sources == locator.prepared_directory_sources
             && observation.recipe_generation == expected_source.bundle_generation_identity
             && observation.scenario_digest == locator.scenario_digest
             && observation.process_identity["schema_version"] == 5
@@ -915,6 +929,33 @@ fn check_scoped_prepared_immutable(
     Ok(())
 }
 
+fn require_direct_prepared_source_join(
+    retained: &BTreeMap<String, lillux::PinnedDirectoryIdentity>,
+    pinned: &BTreeMap<String, lillux::PinnedDirectoryIdentity>,
+) -> Result<()> {
+    ensure!(
+        retained.len() == 2
+            && retained.contains_key(staging::DIRECT_OCCURRENCE_ID)
+            && retained.contains_key(staging::DIRECT_HOME_ID)
+            && retained == pinned,
+        "direct prepared mount sources differ from verifier-pinned occurrence and home"
+    );
+    Ok(())
+}
+
+fn require_direct_prepared_observation_join(
+    retained: &BTreeMap<String, lillux::PinnedDirectoryIdentity>,
+    observed: &BTreeMap<String, lillux::PinnedDirectoryIdentity>,
+    pinned: &BTreeMap<String, lillux::PinnedDirectoryIdentity>,
+) -> Result<()> {
+    require_direct_prepared_source_join(retained, pinned)?;
+    ensure!(
+        observed == retained,
+        "settled direct mount sources differ from retained pre-contact sources"
+    );
+    Ok(())
+}
+
 fn check_scoped_applied_target(
     locator: &ScopedAttemptLocator,
     receipt: &lillux::LinuxSandboxAppliedLaunchReceipt,
@@ -1183,13 +1224,14 @@ struct ScopedAttemptLocator {
     applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     held_mount_preparation: lillux::LinuxSandboxMountPreparationReceipt,
+    prepared_directory_sources: BTreeMap<String, lillux::PinnedDirectoryIdentity>,
     prepared_immutable_sha256: BTreeMap<String, String>,
 }
 
 impl ScopedAttemptLocator {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == "ryeos.scoped_producer_locator.v6"
+            self.schema == "ryeos.scoped_producer_locator.v7"
                 && self.attempt_id.starts_with("scoped-")
                 && self.attempt_id.len() == 71
                 && self.attempt_id[7..]
@@ -1208,6 +1250,11 @@ impl ScopedAttemptLocator {
                 && self.applied_launch.matches_commitments(&self.expected_applied_launch)
                 && self.applied_launch.matches_post_release_mounts(&self.expected_mount_preparation)
                 && self.applied_launch.owned_child_pid == self.held_mount_preparation.owned_child_pid
+                && self.prepared_directory_sources.len()
+                    <= ryeos_state::external_content::products::producer_recipe::MAX_PRODUCER_PREPARED_DIRECTORIES
+                && self.prepared_directory_sources.keys().all(|id| {
+                    prepared_directory_mount_destination(id).is_ok()
+                })
                 && self.applied_launch.namespace_pid == 1
                 && self.applied_launch.effective_uid == 1
                 && self.applied_launch.effective_gid == 1
@@ -1237,6 +1284,7 @@ struct ScopedObservationCut {
     scope_recovery: lillux::ProcessScopeRecovery,
     isolation_provenance: serde_json::Value,
     applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
+    prepared_directory_sources: BTreeMap<String, lillux::PinnedDirectoryIdentity>,
     prepared_immutable_sha256: BTreeMap<String, String>,
     producer_exit_clean: bool,
     natural_empty_receipt_digest: String,
@@ -1717,7 +1765,7 @@ mod tests {
             recipe_digest: digest.clone(),
         };
         let locator = ScopedAttemptLocator {
-            schema: "ryeos.scoped_producer_locator.v6".into(),
+            schema: "ryeos.scoped_producer_locator.v7".into(),
             attempt_id: format!("scoped-{}", "d".repeat(64)),
             recipe_digest: digest.clone(),
             recipe_generation: source.bundle_generation_identity.clone(),
@@ -1757,6 +1805,7 @@ mod tests {
                 mount_count: 1,
                 destination_access_sha256: [0; 32],
             },
+            prepared_directory_sources: BTreeMap::new(),
             prepared_immutable_sha256: BTreeMap::new(),
         };
         assert!(
@@ -1820,7 +1869,7 @@ mod tests {
     #[test]
     fn scoped_locator_binds_attempt_to_retained_recipe_coordinate() {
         let valid = json!({
-            "schema": "ryeos.scoped_producer_locator.v6",
+            "schema": "ryeos.scoped_producer_locator.v7",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
@@ -1860,10 +1909,26 @@ mod tests {
                 "mount_count": 1,
                 "destination_access_sha256": vec![0; 32],
             },
+            "prepared_directory_sources": {},
             "prepared_immutable_sha256": {},
         });
         let locator: ScopedAttemptLocator = serde_json::from_value(valid.clone()).unwrap();
         locator.validate().unwrap();
+        let mut missing_prepared_sources = valid.clone();
+        missing_prepared_sources
+            .as_object_mut()
+            .unwrap()
+            .remove("prepared_directory_sources");
+        assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_prepared_sources).is_err());
+        let mut invalid_prepared_source = valid.clone();
+        invalid_prepared_source["prepared_directory_sources"]["../foreign"] =
+            json!({"containing_device": 1, "inode": 2});
+        assert!(
+            serde_json::from_value::<ScopedAttemptLocator>(invalid_prepared_source)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
         for field in ["executable_sha256", "argv_sha256", "environment_sha256", "cwd_sha256"] {
             let mut changed = valid.clone();
             changed["applied_launch"][field][0] = json!(255);
@@ -2059,7 +2124,7 @@ mod tests {
         missing_recipe.as_object_mut().unwrap().remove("recipe_digest");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(missing_recipe).is_err());
         let mut no_prelaunch_target = json!({
-            "schema": "ryeos.scoped_producer_locator.v6",
+            "schema": "ryeos.scoped_producer_locator.v7",
             "attempt_id": format!("scoped-{}", "a".repeat(64)),
             "recipe_digest": "b".repeat(64),
             "recipe_generation": "signed-generation-one",
@@ -2071,6 +2136,49 @@ mod tests {
         );
         no_prelaunch_target["schema"] = json!("ryeos.scoped_producer_locator.v1");
         assert!(serde_json::from_value::<ScopedAttemptLocator>(no_prelaunch_target).is_err());
+    }
+
+    #[test]
+    fn direct_prepared_source_join_rejects_wrong_swapped_and_missing_real_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let occurrence = root
+            .create_child(std::ffi::OsStr::new("codex-occurrence"), 0o700)
+            .unwrap();
+        let home = root.create_child(std::ffi::OsStr::new("codex-home"), 0o700).unwrap();
+        let foreign = root.create_child(std::ffi::OsStr::new("foreign"), 0o700).unwrap();
+        let pinned = BTreeMap::from([
+            (staging::DIRECT_OCCURRENCE_ID.to_owned(), occurrence.identity().unwrap()),
+            (staging::DIRECT_HOME_ID.to_owned(), home.identity().unwrap()),
+        ]);
+        require_direct_prepared_source_join(&pinned, &pinned).unwrap();
+
+        let mut wrong = pinned.clone();
+        wrong.insert(staging::DIRECT_HOME_ID.to_owned(), foreign.identity().unwrap());
+        assert!(require_direct_prepared_source_join(&wrong, &pinned).is_err());
+        let mut swapped = pinned.clone();
+        swapped.insert(staging::DIRECT_HOME_ID.to_owned(), occurrence.identity().unwrap());
+        swapped.insert(staging::DIRECT_OCCURRENCE_ID.to_owned(), home.identity().unwrap());
+        assert!(require_direct_prepared_source_join(&swapped, &pinned).is_err());
+        let mut missing = pinned.clone();
+        missing.remove(staging::DIRECT_HOME_ID);
+        assert!(require_direct_prepared_source_join(&missing, &pinned).is_err());
+        let mut extra = pinned.clone();
+        extra.insert("foreign".into(), foreign.identity().unwrap());
+        assert!(require_direct_prepared_source_join(&extra, &pinned).is_err());
+        let mut substituted_observation = pinned.clone();
+        substituted_observation.insert(
+            staging::DIRECT_HOME_ID.to_owned(),
+            foreign.identity().unwrap(),
+        );
+        assert!(
+            require_direct_prepared_observation_join(
+                &pinned,
+                &substituted_observation,
+                &pinned,
+            )
+            .is_err()
+        );
     }
 
     #[test]

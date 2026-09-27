@@ -153,6 +153,10 @@ pub fn start_scoped_producer(
         live.request_for_recipe(&selected.recipe, admitted_stdin, &admitted_command)?;
     let request = prepared_launch.request;
     let prepared_mounts = prepared_launch.prepared_mounts;
+    let prepared_directory_sources = prepared_mounts
+        .iter()
+        .map(|mount| Ok((mount.id().to_owned(), mount.source_directory_identity()?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let prepared_immutable_sha256 = prepared_mounts
         .iter()
         .flat_map(|mount| mount.immutable_files())
@@ -369,13 +373,14 @@ pub fn start_scoped_producer(
                 &attempt_id,
                 &identity,
                 &crate::runtime_db::scoped_child_attempt::ScopedChildMountPreparationEvidence {
-                    schema: 2,
+                    schema: 3,
                     plan_digest: provenance
                         .plan_digest
                         .clone()
                         .context("compiled scoped producer has no exact plan digest")?,
                     expected: expected_mount_preparation.clone(),
                     observed: mount_preparation.clone(),
+                    prepared_directory_sources: prepared_directory_sources.clone(),
                     prepared_immutable_sha256: prepared_immutable_sha256.clone(),
                 },
             )?;

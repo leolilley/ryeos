@@ -25,7 +25,7 @@ use ryeos_state::external_content::products::qualification::{
     ProductQualificationLaunchPurpose, ProductQualificationScopedAttemptProof,
 };
 
-const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v6";
+const OBSERVATION_SCHEMA: &str = "ryeos.scoped_producer_observation.v7";
 const MAX_OBSERVATION_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
 
 fn deserialize_required_nullable<'de, D, T>(
@@ -59,6 +59,7 @@ struct ScopedProducerObservation {
     scope_recovery: lillux::ProcessScopeRecovery,
     isolation_provenance: ryeos_engine::isolation::IsolationLaunchProvenance,
     applied_launch: lillux::LinuxSandboxAppliedLaunchReceipt,
+    prepared_directory_sources: BTreeMap<String, lillux::PinnedDirectoryIdentity>,
     prepared_immutable_sha256: BTreeMap<String, String>,
     natural_empty_receipt_digest: String,
     subprocess_success: bool,
@@ -150,6 +151,10 @@ impl ScopedProducerObservation {
             self.isolation_provenance.plan_digest.as_deref().unwrap(),
             &self.process_identity,
         )?;
+        ensure!(
+            self.prepared_directory_sources == mount_evidence.prepared_directory_sources,
+            "observation prepared directory sources differ from retained mount evidence"
+        );
         validate_prepared_immutable_join(
             &self.prepared_immutable_sha256,
             &mount_evidence.prepared_immutable_sha256,
@@ -445,6 +450,12 @@ fn observe_owned_scoped_producer(
                 .context("released scoped child has no scope recovery")?,
             isolation_provenance: provenance,
             applied_launch,
+            prepared_directory_sources: record
+                .mount_preparation_evidence
+                .as_ref()
+                .context("released scoped child has no retained mount evidence")?
+                .prepared_directory_sources
+                .clone(),
             prepared_immutable_sha256: record
                 .mount_preparation_evidence
                 .as_ref()
