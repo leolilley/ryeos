@@ -50,6 +50,7 @@ pub(crate) struct BoundConnectToken {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProxyOperation<'a> {
     UploadFile { remote_path: &'a str },
+    DownloadFile { remote_path: &'a str },
     RunStream,
 }
 
@@ -145,6 +146,15 @@ pub(crate) fn validate_proxy_route(
             expected.set_path("/files/upload");
             expected.query_pairs_mut().append_pair("path", remote_path);
         }
+        ProxyOperation::DownloadFile { remote_path } => {
+            ensure!(method == "GET", "Render download proxy method changed");
+            ensure!(
+                valid_remote_path(remote_path),
+                "Render download path is invalid"
+            );
+            expected.set_path("/files/download");
+            expected.query_pairs_mut().append_pair("path", remote_path);
+        }
         ProxyOperation::RunStream => {
             ensure!(method == "POST", "Render run proxy method changed");
             expected.set_path("/runs/stream");
@@ -220,6 +230,48 @@ mod tests {
         assert_eq!(bound.method, "POST");
         assert_eq!(bound.route.as_str(), "https://sbx-abc123.oregon.sandbox.onrender.com/runs/stream");
         assert_eq!(bound.bearer.as_str(), "short-lived-token");
+    }
+
+    #[test]
+    fn download_token_binds_only_the_exact_occurrence_and_file() {
+        let path = "/ryeos/activation/ready.json";
+        let uri = "https://sbx-abc123.oregon.sandbox.onrender.com/files/download?path=%2Fryeos%2Factivation%2Fready.json";
+        let bytes = connect_response(uri, "GET", "short-lived-token");
+        let bound = bind_connect_response(
+            &bytes,
+            OCCURRENCE,
+            REGION,
+            ProxyOperation::DownloadFile { remote_path: path },
+            1_790_380_800_000,
+        )
+        .unwrap();
+        assert_eq!(bound.route.as_str(), uri);
+        assert!(bind_connect_response(
+            &bytes,
+            OCCURRENCE,
+            REGION,
+            ProxyOperation::DownloadFile {
+                remote_path: "/ryeos/activation/other.json"
+            },
+            1_790_380_800_000,
+        )
+        .is_err());
+        assert!(bind_connect_response(
+            &bytes,
+            "sbx-other",
+            REGION,
+            ProxyOperation::DownloadFile { remote_path: path },
+            1_790_380_800_000,
+        )
+        .is_err());
+        assert!(bind_connect_response(
+            &bytes,
+            OCCURRENCE,
+            REGION,
+            ProxyOperation::UploadFile { remote_path: path },
+            1_790_380_800_000,
+        )
+        .is_err());
     }
 
     #[test]
