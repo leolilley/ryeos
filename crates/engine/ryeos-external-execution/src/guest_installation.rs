@@ -22,6 +22,7 @@ use ryeos_external_execution_contract::staging_package::{
 use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use serde::{Deserialize, Serialize};
 
+use crate::guest_import_authorization::VerifiedGuestImportAuthorization;
 use crate::guest_staging::{
     GuestStageIdentity, TicketedGuestImport, stage_ticketed_uploaded_guest_package,
 };
@@ -147,6 +148,7 @@ struct GuestBaseInstallMarker {
 #[serde(deny_unknown_fields)]
 struct GuestOccurrenceOwnerRecord {
     schema: u32,
+    authorization_sha256: String,
     ticket_sha256: String,
     occurrence_id: String,
     occurrence_directory: lillux::PinnedDirectoryIdentity,
@@ -1587,14 +1589,49 @@ impl RecoveredGuestOccurrence {
 /// phase exposes import, installation, supervisor launch, or Ready authority.
 /// In particular, a crash before the owner record or stage intent is complete
 /// remains quarantined rather than guessed from directory contents.
-pub fn recover_guest_occurrence(
+pub fn recover_guest_occurrence_authorized(
+    occurrence: &lillux::PinnedDirectory,
+    authorization: &VerifiedGuestImportAuthorization,
+) -> Result<RecoveredGuestOccurrence> {
+    let admitted = authorization.authorization();
+    recover_guest_occurrence_inner(
+        occurrence,
+        &admitted.ticket,
+        &admitted.context(),
+        &admitted.guest_inputs,
+        authorization.identity_digest(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn recover_guest_occurrence(
     occurrence: &lillux::PinnedDirectory,
     ticket: &GuestImportTicket,
     context: &GuestImportContext<'_>,
     inputs: &ExternalGuestInputProjection,
 ) -> Result<RecoveredGuestOccurrence> {
+    recover_guest_occurrence_inner(
+        occurrence,
+        ticket,
+        context,
+        inputs,
+        &structural_fixture_authorization_digest(ticket)?,
+    )
+}
+
+fn recover_guest_occurrence_inner(
+    occurrence: &lillux::PinnedDirectory,
+    ticket: &GuestImportTicket,
+    context: &GuestImportContext<'_>,
+    inputs: &ExternalGuestInputProjection,
+    authorization_sha256: &str,
+) -> Result<RecoveredGuestOccurrence> {
     occurrence.require_owner_private_directory()?;
     ticket.staging_expected(context, inputs)?;
+    ensure!(
+        lillux::valid_hash(authorization_sha256),
+        "guest import authorization digest is invalid"
+    );
     let root = occurrence
         .open_child_directory(OsStr::new(OWNER_DIRECTORY))?
         .context("guest occurrence owner is absent")?;
@@ -1619,7 +1656,8 @@ pub fn recover_guest_occurrence(
     let owner: GuestOccurrenceOwnerRecord = serde_json::from_slice(&owner_bytes)?;
     ensure!(
         canonical_owner_record(&owner)? == owner_bytes
-            && owner.schema == 1
+            && owner.schema == 2
+            && owner.authorization_sha256 == authorization_sha256
             && owner.ticket_sha256 == digest_ticket(ticket)?
             && owner.occurrence_id == context.occurrence_id
             && owner.occurrence_directory == occurrence.identity()?
@@ -1807,21 +1845,77 @@ fn recheck_scratch_bindings(
 impl GuestOccurrenceOwner {
     /// Reserve the exact occurrence before importing an uploaded package.
     /// An incumbent child, even an incomplete one, is never adopted here.
-    pub fn begin(
+    pub fn begin_authorized(
+        occurrence: &lillux::PinnedDirectory,
+        authorization: VerifiedGuestImportAuthorization,
+    ) -> Result<Self> {
+        authorization.require_fresh_admission()?;
+        Self::begin_with_verified(occurrence, authorization)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_authorized_at(
+        occurrence: &lillux::PinnedDirectory,
+        authorization: VerifiedGuestImportAuthorization,
+        now_ms: i64,
+    ) -> Result<Self> {
+        authorization.require_fresh_admission_at(now_ms)?;
+        Self::begin_with_verified(occurrence, authorization)
+    }
+
+    fn begin_with_verified(
+        occurrence: &lillux::PinnedDirectory,
+        authorization: VerifiedGuestImportAuthorization,
+    ) -> Result<Self> {
+        let admitted = authorization.authorization();
+        Self::begin_inner(
+            occurrence,
+            &admitted.ticket,
+            &admitted.context(),
+            &admitted.guest_inputs,
+            authorization.identity_digest(),
+        )
+    }
+
+    /// Structural tests exercise owner and recovery mechanics without
+    /// producing a controller signature. No production importer can call it.
+    #[cfg(test)]
+    pub(crate) fn begin(
         occurrence: &lillux::PinnedDirectory,
         ticket: &GuestImportTicket,
         context: &GuestImportContext<'_>,
         inputs: &ExternalGuestInputProjection,
     ) -> Result<Self> {
+        Self::begin_inner(
+            occurrence,
+            ticket,
+            context,
+            inputs,
+            &structural_fixture_authorization_digest(ticket)?,
+        )
+    }
+
+    fn begin_inner(
+        occurrence: &lillux::PinnedDirectory,
+        ticket: &GuestImportTicket,
+        context: &GuestImportContext<'_>,
+        inputs: &ExternalGuestInputProjection,
+        authorization_sha256: &str,
+    ) -> Result<Self> {
         occurrence.require_owner_private_directory()?;
         ticket.staging_expected(context, inputs)?;
+        ensure!(
+            lillux::valid_hash(authorization_sha256),
+            "guest import authorization digest is invalid"
+        );
         let root = occurrence.create_child(OsStr::new(OWNER_DIRECTORY), 0o700)?;
         let lock = root
             .try_lock_exclusive()?
             .context("new guest occurrence owner is already locked")?;
         lock.ensure_protects(&root)?;
         let record = GuestOccurrenceOwnerRecord {
-            schema: 1,
+            schema: 2,
+            authorization_sha256: authorization_sha256.to_owned(),
             ticket_sha256: digest_ticket(ticket)?,
             occurrence_id: context.occurrence_id.to_owned(),
             occurrence_directory: occurrence.identity()?,
@@ -1847,7 +1941,8 @@ impl GuestOccurrenceOwner {
         self._lock.ensure_protects(&self.root)?;
         self.ticket.staging_expected(context, inputs)?;
         ensure!(
-            self.record.schema == 1
+            self.record.schema == 2
+                && lillux::valid_hash(&self.record.authorization_sha256)
                 && self.record.ticket_sha256 == digest_ticket(&self.ticket)?
                 && self.record.occurrence_id == context.occurrence_id
                 && self.record.occurrence_directory == self.occurrence.identity()?
@@ -2170,6 +2265,13 @@ fn ticket_digest(imported: &TicketedGuestImport) -> Result<String> {
 fn digest_ticket(ticket: &GuestImportTicket) -> Result<String> {
     Ok(lillux::sha256_hex(
         lillux::canonical_json(&serde_json::to_value(ticket)?)?.as_bytes(),
+    ))
+}
+
+#[cfg(test)]
+fn structural_fixture_authorization_digest(ticket: &GuestImportTicket) -> Result<String> {
+    Ok(lillux::sha256_hex(
+        format!("unqualified-guest-owner-fixture:{}", digest_ticket(ticket)?).as_bytes(),
     ))
 }
 

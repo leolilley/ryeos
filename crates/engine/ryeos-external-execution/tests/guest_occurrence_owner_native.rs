@@ -10,8 +10,15 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ryeos_external_execution::guest_import_authorization::{
+    sign_guest_import_authorization, verify_guest_import_authorization,
+};
 use ryeos_external_execution::guest_installation::{
-    GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase, recover_guest_occurrence,
+    GuestOccurrenceOwner, GuestOccurrenceRecoveryPhase, recover_guest_occurrence_authorized,
+};
+use ryeos_external_execution_contract::guest_import_authorization::{
+    GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization, GuestOccurrenceAssignment,
+    SignedGuestImportAuthorization,
 };
 use ryeos_external_execution_contract::staging_package::{
     GUEST_IMPORT_TICKET_SCHEMA, GUEST_STAGING_PACKAGE_SCHEMA, GuestImportContext,
@@ -118,13 +125,31 @@ fn supervisor_bootstrap(
             &lillux::crypto::SigningKey::from_bytes(&[41; 32]).verifying_key(),
         )?,
         bootstrap_capability: STANDARD.encode([42_u8; 32]),
-        attachment_deadline_ms: 2_000_000,
+        attachment_deadline_ms: lillux::time::timestamp_millis() + 60_000,
         execution_timeout_seconds: 60,
         post_execution_timeout_seconds: 120,
         candidate_export_max_bytes: 512 * 1024,
         channel_max_bytes: 1024 * 1024,
     }
     .canonical_bytes()
+}
+
+fn occurrence_assignment(
+    base_snapshot_hash: &str,
+    attachment_deadline_ms: i64,
+) -> GuestOccurrenceAssignment<'_> {
+    GuestOccurrenceAssignment {
+        placement_thread_id: "T-native-test",
+        admitted_capsule_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        base_snapshot_hash,
+        execution_binding_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        allocation_request_digest: "2222222222222222222222222222222222222222222222222222222222222222",
+        occurrence_id: "occ-native-test",
+        activation_request_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        supervisor_runtime_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        guest_runtime_manifest_hash: "9999999999999999999999999999999999999999999999999999999999999999",
+        attachment_deadline_ms,
+    }
 }
 
 fn run(
@@ -302,7 +327,7 @@ fn run(
         .context("uploaded payload vanished")?;
     let ticket = GuestImportTicket {
         schema: GUEST_IMPORT_TICKET_SCHEMA,
-        binding_hash: "1".repeat(64),
+        binding_hash: "d".repeat(64),
         allocation_request_digest: "2".repeat(64),
         occurrence_id: "occ-native-test".into(),
         activation_request_digest: manifest.activation_request_digest.clone(),
@@ -331,7 +356,42 @@ fn run(
         fixture_path.join("inputs.json"),
         serde_json::to_vec(&inputs)?,
     )?;
-    let owner = GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs)?;
+    let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+        serde_json::from_slice(&bootstrap)?;
+    let assignment = occurrence_assignment(
+        &measurement.snapshot_hash,
+        parsed_bootstrap.attachment_deadline_ms,
+    );
+    let authorization = GuestImportAuthorization {
+        schema: GUEST_IMPORT_AUTHORIZATION_SCHEMA,
+        placement_thread_id: assignment.placement_thread_id.into(),
+        admitted_capsule_hash: assignment.admitted_capsule_hash.into(),
+        base_snapshot_hash: assignment.base_snapshot_hash.into(),
+        execution_binding_hash: assignment.execution_binding_hash.into(),
+        allocation_request_digest: assignment.allocation_request_digest.into(),
+        occurrence_id: assignment.occurrence_id.into(),
+        activation_request_digest: assignment.activation_request_digest.into(),
+        supervisor_runtime_hash: assignment.supervisor_runtime_hash.into(),
+        guest_runtime_manifest_hash: assignment.guest_runtime_manifest_hash.into(),
+        attachment_deadline_ms: assignment.attachment_deadline_ms,
+        admission_deadline_ms: assignment.attachment_deadline_ms - 1_000,
+        nonce_sha256: "8".repeat(64),
+        ticket: ticket.clone(),
+        guest_inputs: inputs.clone(),
+    };
+    let controller = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+    let signed = sign_guest_import_authorization(authorization, &controller, &assignment)?;
+    std::fs::write(
+        fixture_path.join("signed-authorization.json"),
+        serde_json::to_vec(&signed)?,
+    )?;
+    std::fs::write(
+        fixture_path.join("assignment-deadline.txt"),
+        assignment.attachment_deadline_ms.to_string(),
+    )?;
+    let verified =
+        verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)?;
+    let owner = GuestOccurrenceOwner::begin_authorized(&occurrence, verified)?;
     // No test-harness thread exists here. The old /tmp is replaced, while the
     // exact upload and durable occurrence remain pinned outside that mount.
     let source = lillux::sandbox::enter_linux_private_source_filesystem(
@@ -578,24 +638,57 @@ fn main() {
             &std::fs::read(fixture.path().join("inputs.json")).expect("retained guest inputs"),
         )
         .expect("decode retained guest inputs");
-        let context = GuestImportContext {
-            binding_hash: &ticket.binding_hash,
-            allocation_request_digest: &ticket.allocation_request_digest,
-            occurrence_id: &ticket.occurrence_id,
-            activation_request_digest: &ticket.activation_request_digest,
-        };
+        let signed: SignedGuestImportAuthorization = serde_json::from_slice(
+            &std::fs::read(fixture.path().join("signed-authorization.json"))
+                .expect("retained signed guest authorization"),
+        )
+        .expect("decode signed guest authorization");
+        assert_eq!(signed.authorization.ticket, ticket);
+        assert_eq!(signed.authorization.guest_inputs, inputs);
+        let attachment_deadline_ms: i64 =
+            std::fs::read_to_string(fixture.path().join("assignment-deadline.txt"))
+                .expect("retained fixture assignment deadline")
+                .parse()
+                .expect("decode fixture assignment deadline");
+        let assignment =
+            occurrence_assignment(&inputs.base_snapshot.snapshot_hash, attachment_deadline_ms);
+        let controller = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+        let mut competing_authorization = signed.authorization.clone();
+        competing_authorization.nonce_sha256 = "9".repeat(64);
+        let competing_signed =
+            sign_guest_import_authorization(competing_authorization, &controller, &assignment)
+                .expect("sign competing native occurrence authorization");
+        let competing_verified = verify_guest_import_authorization(
+            competing_signed,
+            &controller.verifying_key(),
+            &assignment,
+        )
+        .expect("verify competing native occurrence authorization");
+        let verified =
+            verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)
+                .expect("verify retained guest authorization");
         let occurrence = lillux::PinnedDirectory::open(&fixture.path().join("occurrence"))
             .expect("open retained occurrence")
             .expect("retained occurrence exists");
         assert_eq!(
-            recover_guest_occurrence(&occurrence, &ticket, &context, &inputs)
+            recover_guest_occurrence_authorized(&occurrence, &verified)
                 .expect("recover completed owner record")
                 .phase(),
             &GuestOccurrenceRecoveryPhase::LaunchUncertain,
             "held preparation cannot authorize a second launch after owner exit"
         );
+        let competing_refusal =
+            recover_guest_occurrence_authorized(&occurrence, &competing_verified)
+                .err()
+                .expect("a fresh signed nonce adopted the first import owner's durable record");
         assert!(
-            GuestOccurrenceOwner::begin(&occurrence, &ticket, &context, &inputs).is_err(),
+            competing_refusal
+                .to_string()
+                .contains("guest occurrence owner differs from retained placement"),
+            "competing authorization refused at the wrong boundary: {competing_refusal:#}"
+        );
+        assert!(
+            GuestOccurrenceOwner::begin_authorized(&occurrence, verified).is_err(),
             "completed native occurrence admitted a second owner"
         );
         print!("{}", output.stdout);

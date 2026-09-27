@@ -8,6 +8,7 @@ description = "Protected guest runtime for RyeOS external candidate execution"
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
 lillux = { workspace = true }
 ryeos-project-capture = { workspace = true }
 ryeos-external-execution-contract = { workspace = true }

@@ -6,6 +6,7 @@
 pub mod backends;
 pub mod guest_inputs;
 pub mod guest_installation;
+pub mod guest_import_authorization;
 pub mod guest_package_producer;
 pub mod guest_content;
 pub mod guest_staging;
