@@ -2565,11 +2565,22 @@ mod tests {
             )
             .join("supervisor")
         );
-        assert_eq!(mounted_request.mounts.len(), 1);
+        assert_eq!(mounted_request.mounts.len(), 3);
         assert_eq!(
             mounted_request.mounts[0].access,
             lillux::LinuxSandboxMountAccess::ReadOnly
         );
+        assert_eq!(
+            mounted_request.mounts[1].destination,
+            std::path::PathBuf::from("/etc/resolv.conf")
+        );
+        assert_eq!(
+            mounted_request.mounts[2].destination,
+            std::path::PathBuf::from("/etc/hosts")
+        );
+        assert!(mounted_request.mounts.iter().all(|mount| {
+            mount.access == lillux::LinuxSandboxMountAccess::ReadOnly
+        }));
         assert_eq!(
             mounted_request
                 .target_channels

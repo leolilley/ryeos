@@ -309,6 +309,7 @@ pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
+    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
     request: lillux::LinuxSandboxRequest,
 }
 
@@ -322,6 +323,7 @@ pub struct HeldGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
+    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
     request: lillux::LinuxSandboxRequest,
 }
 
@@ -334,6 +336,7 @@ pub struct ReleasedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _source_copy: lillux::InheritedDescriptorAuthority,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
+    _network_inputs: [lillux::InheritedDescriptorAuthority; 2],
     expected_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mounts: lillux::LinuxSandboxMountPreparationCommitments,
 }
@@ -396,6 +399,7 @@ impl HeldGuestMountedSandbox {
             _committed: self._committed,
             _source_copy: self._source_copy,
             _controls: self._controls,
+            _network_inputs: self._network_inputs,
             expected_launch,
             expected_mounts,
         })
@@ -459,6 +463,50 @@ fn check_applied_supervisor_receipt(
         "released supervisor applied target or mounts differ from committed request"
     );
     Ok(())
+}
+
+/// Capture only the two guest-local files selected by the sealed bootstrap.
+/// Lillux resolves symlinks once, pins exact regular files and seals bounded
+/// bytes; the mounted supervisor sees those bytes at the original policy
+/// paths, not ambient files from a controller or a later namespace.
+fn capture_supervisor_network_mounts(
+    policy: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+) -> Result<([lillux::InheritedDescriptorAuthority; 2], [PathBuf; 2])> {
+    policy.validate()?;
+    let destinations = [
+        std::path::Path::new(&policy.resolver.source),
+        std::path::Path::new(&policy.hosts.source),
+        std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+    ];
+    ensure!(
+        destinations.iter().enumerate().all(|(index, path)| {
+            destinations[index + 1..]
+                .iter()
+                .all(|other| !path.starts_with(other) && !other.starts_with(path))
+        }),
+        "supervisor network input destinations overlap each other or the stage"
+    );
+    let capture =
+        |selection: &ryeos_state::external_execution::transport::ExternalNetworkInputSelection,
+         name: &std::ffi::CStr|
+         -> Result<(lillux::InheritedDescriptorAuthority, PathBuf, Vec<u8>)> {
+            let source =
+                lillux::canonicalize_existing_path(std::path::Path::new(&selection.source))?;
+            let file = lillux::open_pinned_regular_file_no_follow(&source)?;
+            let captured =
+                file.capture_sealed_bounded(&file.observation()?, selection.max_bytes)?;
+            let bytes = captured.bytes().to_vec();
+            let sealed = lillux::sealed_memfd(name, &bytes)
+                .map_err(anyhow::Error::msg)?
+                .duplicate_at_or_above(59)
+                .map_err(anyhow::Error::msg)?;
+            Ok((sealed, PathBuf::from(&selection.source), bytes))
+        };
+    let (resolver, resolver_path, resolver_bytes) =
+        capture(&policy.resolver, c"ryeos-guest-resolver")?;
+    let (hosts, hosts_path, hosts_bytes) = capture(&policy.hosts, c"ryeos-guest-hosts")?;
+    lillux::network::NetworkContext::from_config_bytes(&resolver_bytes, &hosts_bytes)?;
+    Ok(([resolver, hosts], [resolver_path, hosts_path]))
 }
 
 impl CommittedGuestSupervisorLaunchIntent {
@@ -536,6 +584,21 @@ impl CommittedGuestSupervisorLaunchIntent {
             "mounted supervisor source differs from committed stage"
         );
         let bootstrap = artifacts.seal_supervisor_bootstrap(context, inputs)?;
+        let bootstrap_bytes = lillux::read_sealed_inherited_descriptor(
+            bootstrap
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?,
+            ryeos_state::external_execution::transport::MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let parsed_bootstrap: ryeos_state::external_execution::transport::ExternalSupervisorBootstrap =
+            serde_json::from_slice(&bootstrap_bytes)?;
+        ensure!(
+            parsed_bootstrap.canonical_bytes()? == bootstrap_bytes,
+            "sealed supervisor bootstrap changed before network-input capture"
+        );
+        let (network_inputs, network_destinations) =
+            capture_supervisor_network_mounts(&parsed_bootstrap.controller.network_inputs)?;
         let state = artifacts.state_root.inherited_descriptor_authority()?;
         let runtime = installed.runtime.inherited_descriptor_authority()?;
         let private = artifacts
@@ -578,18 +641,27 @@ impl CommittedGuestSupervisorLaunchIntent {
             channels.iter().all(|(fd, _)| *fd != source_fd),
             "sealed source descriptor entered supervisor control channels"
         );
+        let mut mounts = vec![lillux::LinuxSandboxMount {
+            source_fd,
+            destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+            access: lillux::LinuxSandboxMountAccess::ReadOnly,
+            layer: 0,
+        }];
+        for (source, destination) in network_inputs.iter().zip(network_destinations) {
+            mounts.push(lillux::LinuxSandboxMount {
+                source_fd: source.inherited_descriptor().map_err(anyhow::Error::msg)?,
+                destination,
+                access: lillux::LinuxSandboxMountAccess::ReadOnly,
+                layer: 0,
+            });
+        }
         let request = lillux::LinuxSandboxRequest {
             executable: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION).join("supervisor"),
             argv0: "ryeos-external-candidate-supervisor".into(),
             arguments: Vec::new(),
             cwd: PathBuf::from("/"),
             environment: std::collections::BTreeMap::new(),
-            mounts: vec![lillux::LinuxSandboxMount {
-                source_fd,
-                destination: PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
-                access: lillux::LinuxSandboxMountAccess::ReadOnly,
-                layer: 0,
-            }],
+            mounts,
             fixed_parent_views: Vec::new(),
             overlay: None,
             network: lillux::LinuxSandboxNetwork::Host,
@@ -607,6 +679,7 @@ impl CommittedGuestSupervisorLaunchIntent {
             _committed: self,
             _source_copy: source_copy,
             _controls: controls,
+            _network_inputs: network_inputs,
             request,
         })
     }
@@ -651,6 +724,7 @@ impl PreparedGuestMountedSandbox {
             _committed: self._committed,
             _source_copy: self._source_copy,
             _controls: self._controls,
+            _network_inputs: self._network_inputs,
             request: self.request,
         })
     }
@@ -2103,6 +2177,89 @@ pub(crate) fn create_launch_intent_record_for_test(
 #[cfg(test)]
 mod recovery_binding_tests {
     use super::*;
+    use ryeos_state::external_execution::transport::{
+        ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
+    };
+
+    fn network_policy(
+        resolver: &std::path::Path,
+        hosts: &std::path::Path,
+    ) -> ExternalNetworkInputPolicy {
+        ExternalNetworkInputPolicy {
+            resolver: ExternalNetworkInputSelection {
+                source: resolver.to_str().unwrap().into(),
+                max_bytes: 64 * 1024,
+            },
+            hosts: ExternalNetworkInputSelection {
+                source: hosts.to_str().unwrap().into(),
+                max_bytes: 64 * 1024,
+            },
+        }
+    }
+
+    #[test]
+    fn supervisor_network_mounts_keep_exact_bytes_after_source_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let resolver = temporary.path().join("resolver");
+        let resolver_link = temporary.path().join("resolver-link");
+        let hosts = temporary.path().join("hosts");
+        let resolver_bytes = b"nameserver 127.0.0.1\n";
+        let hosts_bytes = b"127.0.0.1 localhost\n";
+        std::fs::write(&resolver, resolver_bytes).unwrap();
+        std::os::unix::fs::symlink(&resolver, &resolver_link).unwrap();
+        std::fs::write(&hosts, hosts_bytes).unwrap();
+        let (mounted, destinations) =
+            capture_supervisor_network_mounts(&network_policy(&resolver_link, &hosts)).unwrap();
+        assert_eq!(destinations, [resolver_link, hosts.clone()]);
+        std::fs::write(&resolver, b"nameserver 192.0.2.1\n").unwrap();
+        std::fs::write(&hosts, b"192.0.2.1 changed\n").unwrap();
+        assert_eq!(
+            lillux::read_sealed_inherited_descriptor(
+                mounted[0].inherited_descriptor().unwrap(),
+                64 * 1024
+            )
+            .unwrap(),
+            resolver_bytes
+        );
+        assert_eq!(
+            lillux::read_sealed_inherited_descriptor(
+                mounted[1].inherited_descriptor().unwrap(),
+                64 * 1024
+            )
+            .unwrap(),
+            hosts_bytes
+        );
+    }
+
+    #[test]
+    fn supervisor_network_mounts_refuse_overlap_and_invalid_sources() {
+        let temporary = tempfile::tempdir().unwrap();
+        let resolver = temporary.path().join("resolver");
+        let hosts = temporary.path().join("hosts");
+        std::fs::write(&resolver, b"nameserver 127.0.0.1\n").unwrap();
+        std::fs::write(&hosts, b"127.0.0.1 localhost\n").unwrap();
+        let mut policy = network_policy(&resolver, &hosts);
+        for bad_path in [
+            resolver.clone(),
+            PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+            PathBuf::from(SUPERVISOR_STAGE_MOUNT_DESTINATION).join("network"),
+        ] {
+            policy.hosts.source = bad_path.to_str().unwrap().into();
+            assert!(capture_supervisor_network_mounts(&policy).is_err());
+        }
+        policy = network_policy(&resolver, &hosts);
+        policy.resolver.max_bytes = 1;
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+        policy = network_policy(temporary.path(), &hosts);
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+        let dangling = temporary.path().join("dangling");
+        std::os::unix::fs::symlink("missing", &dangling).unwrap();
+        policy = network_policy(&dangling, &hosts);
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+        std::fs::write(&resolver, b"not a resolver\n").unwrap();
+        policy = network_policy(&resolver, &hosts);
+        assert!(capture_supervisor_network_mounts(&policy).is_err());
+    }
 
     #[test]
     fn released_supervisor_receipt_rejects_wrong_process_target_or_mounts() {

@@ -384,8 +384,8 @@ fn run(fixture_path: &std::path::Path, release: bool) -> Result<()> {
     let mut held = mounted.prepare_held_in_dedicated_owner()?;
     let receipt = held.mount_preparation_receipt()?;
     ensure!(
-        receipt.mount_count > 0,
-        "held native target has no prepared mounts"
+        receipt.mount_count == 3,
+        "held native target lacks the stage and two sealed network inputs"
     );
     if release {
         let mut released = held.release_once()?;
