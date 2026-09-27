@@ -295,6 +295,10 @@ pub struct NativeExternalCandidate {
     binding: ExecutionChannelBinding,
     guest_inputs: ExternalGuestInputProjection,
     process: lillux::HeldLinuxSandboxProcess,
+    /// Pinned from the child-origin held-mount receipt before release. Lillux
+    /// clears the live process handle PID after reap, but a cached applied
+    /// receipt must still compare to this exact original child.
+    held_child_pid: u32,
     expected_applied_launch: lillux::LinuxSandboxAppliedLaunchCommitments,
     expected_mount_preparation: lillux::LinuxSandboxMountPreparationCommitments,
     root: lillux::PinnedDirectory,
@@ -332,11 +336,21 @@ fn require_applied_candidate_runtime(
     expected_mounts: &lillux::LinuxSandboxMountPreparationCommitments,
     held_pid: u32,
 ) -> Result<()> {
+    let target_matches = receipt.matches_commitments(expected_target);
+    let mounts_match = receipt.matches_post_release_mounts(expected_mounts);
+    let child_matches = receipt.owned_child_pid == held_pid;
     ensure!(
-        receipt.matches_commitments(expected_target)
-            && receipt.matches_post_release_mounts(expected_mounts)
-            && receipt.owned_child_pid == held_pid,
-        "external candidate applied runtime differs from admitted held target"
+        target_matches && mounts_match && child_matches,
+        "external candidate applied runtime differs from admitted held target: target_matches={target_matches}, mounts_match={mounts_match}, child_matches={child_matches}, namespace_pid_one={}, uid_one={}, gid_one={}, no_new_privs={}, seccomp_filter={}, executable_matches={}, argv_matches={}, environment_matches={}, cwd_matches={}",
+        receipt.namespace_pid == 1,
+        receipt.effective_uid == 1,
+        receipt.effective_gid == 1,
+        receipt.no_new_privs,
+        receipt.seccomp_mode == 2,
+        receipt.executable_sha256 == expected_target.executable_sha256,
+        receipt.argv_sha256 == expected_target.argv_sha256,
+        receipt.environment_sha256 == expected_target.environment_sha256,
+        receipt.cwd_sha256 == expected_target.cwd_sha256,
     );
     Ok(())
 }
@@ -846,6 +860,7 @@ impl NativeExternalCandidate {
                 binding,
                 guest_inputs: guest_inputs.clone(),
                 process,
+                held_child_pid: held_mount_preparation.owned_child_pid,
                 expected_applied_launch,
                 expected_mount_preparation,
                 root,
@@ -916,7 +931,7 @@ impl NativeExternalCandidate {
             &receipt,
             &self.expected_applied_launch,
             &self.expected_mount_preparation,
-            self.process.child_pid(),
+            self.held_child_pid,
         )?;
         Ok(Some(receipt))
     }
@@ -1072,6 +1087,14 @@ impl NativeExternalCandidate {
             self.native_termination.is_none(),
             "actual target status is unavailable after native cleanup or launch failure"
         );
+        // A fast direct command may exit before the supervisor polls the
+        // applied-launch channel. Reaping it first destroys the exact owned
+        // child identity required by Lillux to authenticate that receipt.
+        // Keep the target unreaped until its pre-exec evidence is retained;
+        // pending evidence is not an exit observation.
+        if self.try_observe_applied_launch()?.is_none() {
+            return Ok(None);
+        }
         let observation = self.process.try_observe_target_exit();
         let Some(observed) = (match observation {
             Ok(observed) => observed,

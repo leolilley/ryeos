@@ -70,7 +70,7 @@ fn recorded_graph_definition() -> Value {
 fn ordinary_execution_policy() -> Value {
     json!({
         "category":"execution", "version":"2.1.0", "schema_version":"2.1.0",
-        "items":{"tool":{"fixtures/ordinary-direct/run":{"timeout":30}}}
+        "items":{"tool":{"fixtures/ordinary-direct/run":{"timeout":120}}}
     })
 }
 
@@ -137,8 +137,18 @@ pub fn install_before_start(
     let (adapter_hash, adapter_bytes) = identity(artifacts.adapter)?;
     let (supervisor_hash, supervisor_bytes) = identity(artifacts.supervisor)?;
     let (launcher_hash, launcher_bytes) = identity(artifacts.launcher)?;
-    let (bundle, _, _) =
+    let (bundle, trust, _) =
         signed_bundle::install_signed_test_bundle(state_path, true, &fixture.publisher, artifacts);
+    // The synthetic local backend has no independently qualified Render-style
+    // snapshot, but its exact signed executable closure is still an identity
+    // in the current placement binding. Do not fill this coordinate with a
+    // placeholder or mistake the consumer's separate runtime product for it.
+    let guest_runtime_manifest_hash =
+        ryeos_engine::registry::binary_resolver::verify_bundle_executor_manifest_ref_identity(
+            &bundle, &trust,
+        )?
+        .context("signed synthetic executor manifest is absent")?
+        .manifest_hash;
     fast_fixture::register_presigned_fixture_bundle(
         state_path,
         "synthetic-external",
@@ -155,7 +165,7 @@ pub fn install_before_start(
     write_signed_new(
         &state_path.join(format!(".ai/node/external_execution/{BINDING_ID}.yaml")),
         &json!({
-            "kind":"node", "schema":10,
+            "kind":"node", "schema":14,
             "protocol":ryeos_state::external_execution::admission::PROTOCOL,
             "workload":{"kind":"direct_command"}, "backend":"synthetic-local",
             "account":"ordinary-fixture", "capacity_group":"ordinary-fixture",
@@ -165,18 +175,22 @@ pub fn install_before_start(
             "settings":settings, "settings_digest":settings_digest,
             "backend_artifact_hash":adapter_hash, "backend_artifact_bytes":adapter_bytes,
             "supervisor_artifact_hash":supervisor_hash, "supervisor_artifact_bytes":supervisor_bytes,
+            "guest_runtime_manifest_hash":guest_runtime_manifest_hash,
+            "runtime_qualification":null,
             "launcher_artifact_hash":launcher_hash, "launcher_artifact_bytes":launcher_bytes,
             "network_policy":"supervisor_pinned_owner_only_candidate_denied_v1",
             "storage_policy":"ephemeral_private_candidate_v1",
             "cleanup_proof":"provider_terminal_occurrence_v1",
             "controller_transport":endpoint.transport,
             "controller_tls_root_certificates_der_base64":endpoint.tls_roots_der_base64,
-            "max_active":1, "timeout_seconds":30, "contact_timeout_seconds":30,
-            "observation_timeout_seconds":60, "cleanup_timeout_seconds":120,
+            "max_active":1, "timeout_seconds":120, "contact_timeout_seconds":60,
+            "observation_timeout_seconds":180, "cleanup_timeout_seconds":120,
             "max_workspace_bytes":67_108_864, "max_export_bytes":0,
-            "max_transfer_bytes":134_217_728,
-            "max_guest_package_regular_bytes":134_217_728,
-            "max_guest_package_framed_bytes":268_435_456,
+            // This test signs debug-built guest executables. Keep the budget
+            // explicit and bounded while covering their measured closure.
+            "max_transfer_bytes":1_073_741_824,
+            "max_guest_package_regular_bytes":1_073_741_824,
+            "max_guest_package_framed_bytes":2_147_483_648_u64,
         }),
         &fixture.node,
     )?;
@@ -276,7 +290,7 @@ fn write_consumer_with_effects(
             "env_config":{"interpreter":{"type":"realization_member",
                 "realization_id":"runtime","relative_path":"bin/codex"}},
             "config":{"command":"${interpreter}","args":["${source.entry}"],
-                "input_data":"{\"id\":1,\"method\":\"fixture/session/run\"}\n","timeout_secs":30}
+                "input_data":"{\"id\":1,\"method\":\"fixture/session/run\"}\n","timeout_secs":120}
         }),
         &fixture.publisher,
     )?;
@@ -399,7 +413,7 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(resolve(&policy, TOOL_REF).timeout.unwrap().value, 30);
+        assert_eq!(resolve(&policy, TOOL_REF).timeout.unwrap().value, 120);
         assert!(resolve(&policy, RUNTIME_REF).timeout.is_none());
         assert!(
             resolve(&policy, retained_runtime_producer::PRODUCER_REF)
@@ -409,7 +423,7 @@ mod tests {
         // Exercise actual resolver precedence against the inherited Core value.
         let mut inherited = policy;
         inherited["defaults"] = json!({"timeout":86400});
-        assert_eq!(resolve(&inherited, TOOL_REF).timeout.unwrap().value, 30);
+        assert_eq!(resolve(&inherited, TOOL_REF).timeout.unwrap().value, 120);
         assert_eq!(
             resolve(&inherited, RUNTIME_REF).timeout.unwrap().value,
             86400

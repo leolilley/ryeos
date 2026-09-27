@@ -134,7 +134,7 @@ pub fn verify(
             row.get::<_, String>(2)?,
         ))
     })?;
-    let (mut ready, mut release, mut terminal) = (0, 0, None);
+    let (mut ready, mut release, mut runtime_applied, mut terminal) = (0, 0, 0, None);
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     for row in rows {
         let (wire, retained_digest, application) = row?;
@@ -171,6 +171,27 @@ pub fn verify(
                 );
                 release += 1;
             }
+            ExecutionChannelPayload::RuntimeApplied {
+                launcher_occurrence_digest,
+                candidate_program_digest,
+                receipt,
+            } => {
+                ensure!(
+                    direction == ChannelDirection::SupervisorToOwner
+                        && application == "applied"
+                        && runtime_applied == 0
+                        && lillux::valid_hash(launcher_occurrence_digest)
+                        && candidate_program_digest == &program.digest()?
+                        && receipt.owned_child_pid > 0
+                        && receipt.namespace_pid == 1
+                        && receipt.effective_uid == 1
+                        && receipt.effective_gid == 1
+                        && receipt.no_new_privs
+                        && receipt.seccomp_mode == 2,
+                    "runtime-applied frame does not join the exact admitted direct program"
+                );
+                runtime_applied += 1;
+            }
             ExecutionChannelPayload::CommandOutput {
                 stream,
                 offset,
@@ -203,8 +224,8 @@ pub fn verify(
         }
     }
     ensure!(
-        ready == 1 && release == 1,
-        "ordinary readiness/release is not unique"
+        ready == 1 && release == 1 && runtime_applied == 1,
+        "ordinary readiness/release/applied-runtime is not unique"
     );
     let terminal = terminal.context("authenticated target terminal")?;
     ensure!(
