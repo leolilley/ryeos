@@ -6657,26 +6657,39 @@ impl StateStore {
         reservation: &runtime_db::ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
         let g = self.lock()?;
-        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
             bail!("thread scope reservation is closed for daemon shutdown");
         }
         g.runtime_db.reserve_thread_process_scope(reservation)
     }
 
     pub fn bind_thread_process_scope(
-        &self, thread_id: &str, launch_owner: &str, recovery: &lillux::ProcessScopeRecovery,
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        recovery: &lillux::ProcessScopeRecovery,
     ) -> Result<()> {
         let g = self.lock()?;
-        if !self.process_attachment_admission_open.load(Ordering::Acquire) {
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
             bail!("thread scope binding is closed for daemon shutdown");
         }
-        g.runtime_db.bind_thread_process_scope(thread_id, launch_owner, recovery)
+        g.runtime_db
+            .bind_thread_process_scope(thread_id, launch_owner, recovery)
     }
 
     pub fn thread_process_scope_reservation(
-        &self, thread_id: &str,
+        &self,
+        thread_id: &str,
     ) -> Result<Option<runtime_db::ThreadProcessScopeReservationRecord>> {
-        self.lock()?.runtime_db.thread_process_scope_reservation(thread_id)
+        self.lock()?
+            .runtime_db
+            .thread_process_scope_reservation(thread_id)
     }
 
     pub fn thread_process_scope_reservations(
@@ -6690,13 +6703,17 @@ impl StateStore {
         reservation: &runtime_db::ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db.fence_thread_process_scope_recovery(reservation)
+        g.runtime_db
+            .fence_thread_process_scope_recovery(reservation)
     }
 
     pub fn clear_thread_process_scope_reservation(
-        &self, reservation: &runtime_db::ThreadProcessScopeReservationRecord,
+        &self,
+        reservation: &runtime_db::ThreadProcessScopeReservationRecord,
     ) -> Result<()> {
-        self.lock()?.runtime_db.clear_thread_process_scope_reservation(reservation)
+        self.lock()?
+            .runtime_db
+            .clear_thread_process_scope_reservation(reservation)
     }
 
     pub fn bind_process_resource_scope(
@@ -9756,7 +9773,9 @@ impl StateStore {
         allow_closed_admission: bool,
         owned_launch_owner: Option<&runtime_db::LaunchOwner>,
     ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
-        if g.runtime_db.has_unsettled_scoped_child_for_thread(thread_id)? {
+        if g.runtime_db
+            .has_unsettled_scoped_child_for_thread(thread_id)?
+        {
             bail!("thread finalization requires exact scoped child retirement");
         }
         let validated_final_cost = update
@@ -14758,6 +14777,77 @@ impl StateStore {
             .begin_external_supervisor_activation(placement, intent)
     }
 
+    /// Author only the original bound occurrence's guest assignment with the
+    /// node identity. The qualified guest must already pin this public root;
+    /// signing here does not make a provider snapshot qualified or start it.
+    pub(crate) fn author_external_guest_assignment(
+        &self,
+        reservation: &runtime_db::external_execution::ExternalAllocationReservation,
+        occurrence: &runtime_db::external_execution::ExternalAllocationOccurrence,
+        intent: &runtime_db::external_execution::ExternalSupervisorActivationIntent,
+        contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract,
+    ) -> Result<ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment>{
+        use ryeos_external_execution_contract::guest_import_authorization::{
+            GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA, GuestOccurrenceAssignmentDocument,
+            SignedGuestOccurrenceAssignment,
+        };
+        let g = self.lock()?;
+        let retained = g
+            .runtime_db
+            .external_allocation(&reservation.placement_thread_id)?
+            .context("guest assignment lost its retained allocation")?;
+        anyhow::ensure!(
+            retained.phase == runtime_db::external_execution::ExternalAllocationPhase::Bound
+                && retained.reservation == *reservation
+                && retained.occurrence.as_ref() == Some(occurrence)
+                && g.runtime_db
+                    .external_supervisor_activation(&reservation.placement_thread_id)?
+                    .is_none(),
+            "guest assignment requires the exact original bound occurrence before activation claim"
+        );
+        let binding = g
+            .runtime_db
+            .retained_external_binding(&reservation.binding_hash)?
+            .context("guest assignment lost its signed placement binding")?;
+        anyhow::ensure!(
+            binding.backend_contract() == *contract,
+            "guest assignment changed the retained signed placement contract"
+        );
+        intent.validate_contract(reservation, occurrence, contract)?;
+        ryeos_state::external_execution::validate_channel_public_key(
+            &reservation.channel_owner_public_key,
+        )?;
+        let owner_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(&reservation.channel_owner_public_key)?
+            .try_into()
+            .map_err(|_| anyhow!("guest assignment owner key changed length"))?;
+        let assignment = GuestOccurrenceAssignmentDocument {
+            schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+            placement_thread_id: reservation.placement_thread_id.clone(),
+            admitted_capsule_hash: reservation.admitted_capsule_hash.clone(),
+            base_snapshot_hash: reservation.base_snapshot_hash.clone(),
+            execution_binding_hash: reservation.binding_hash.clone(),
+            allocation_request_digest: reservation.request_digest.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            activation_request_digest: intent.activation_request_digest.clone(),
+            supervisor_runtime_hash: intent.supervisor_runtime_hash.clone(),
+            guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
+            owner_public_key_hex: hex::encode(owner_bytes),
+            attachment_deadline_ms: intent.attachment_deadline_ms,
+        };
+        let signature = g.signer.sign(&assignment.signing_bytes()?);
+        anyhow::ensure!(
+            signature.len() == 64,
+            "node signer returned non-Ed25519 assignment signature"
+        );
+        let signed = SignedGuestOccurrenceAssignment {
+            assignment,
+            signature_hex: hex::encode(signature),
+        };
+        signed.validate_shape()?;
+        Ok(signed)
+    }
+
     pub(crate) fn external_supervisor_activation(
         &self,
         placement: &str,
@@ -19407,7 +19497,9 @@ mod tests {
             .create_child(std::ffi::OsStr::new("external-guest-packages"), 0o700)
             .unwrap();
         for _ in 0..1025 {
-            packages.create_unique_child("guest-package", 0o700).unwrap();
+            packages
+                .create_unique_child("guest-package", 0o700)
+                .unwrap();
         }
         discard_abandoned_external_guest_packages(&state).unwrap();
         assert!(packages.entry_names_bounded(1).unwrap().is_empty());
@@ -19441,7 +19533,9 @@ mod tests {
 
         let store = open();
         let packages = store.external_guest_package_parent().unwrap();
-        let (name, package) = packages.create_unique_child("guest-package", 0o700).unwrap();
+        let (name, package) = packages
+            .create_unique_child("guest-package", 0o700)
+            .unwrap();
         let mut payload = package
             .open_regular_create(std::ffi::OsStr::new("payload"), true, true, 0o600)
             .unwrap();

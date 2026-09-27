@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ryeos_external_execution_contract::LifecycleCapability;
 use ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization;
+use ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment;
 use ryeos_state::external_execution::admission::AdmittedExternalExecutionProgram;
 use subtle::ConstantTimeEq as _;
 
@@ -192,6 +193,7 @@ pub(crate) struct ExternalSupervisorActivation {
     guest_inputs: ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority,
     guest_package: Option<SupervisorGuestPackage>,
     import_authorization: Option<SignedGuestImportAuthorization>,
+    signed_assignment: Option<SignedGuestOccurrenceAssignment>,
 }
 
 pub(crate) enum SupervisorGuestPackage {
@@ -789,6 +791,36 @@ impl ExternalSupervisorActivation {
         self.import_authorization
             .as_ref()
             .context("first activation has no signed guest import authorization")
+    }
+
+    pub(crate) fn signed_assignment(&self) -> Result<&SignedGuestOccurrenceAssignment> {
+        self.signed_assignment
+            .as_ref()
+            .context("first activation has no node-signed guest occurrence assignment")
+    }
+
+    fn retain_signed_assignment(&mut self, signed: SignedGuestOccurrenceAssignment) -> Result<()> {
+        signed.validate_shape()?;
+        let import = &self.signed_import_authorization()?.authorization;
+        let assignment = &signed.assignment;
+        ensure!(
+            self.signed_assignment.is_none()
+                && assignment.placement_thread_id == import.placement_thread_id
+                && assignment.admitted_capsule_hash == import.admitted_capsule_hash
+                && assignment.base_snapshot_hash == import.base_snapshot_hash
+                && assignment.execution_binding_hash == import.execution_binding_hash
+                && assignment.allocation_request_digest == import.allocation_request_digest
+                && assignment.occurrence_id == import.occurrence_id
+                && assignment.activation_request_digest == import.activation_request_digest
+                && assignment.supervisor_runtime_hash == import.supervisor_runtime_hash
+                && assignment.guest_runtime_manifest_hash == import.guest_runtime_manifest_hash
+                && assignment.attachment_deadline_ms == import.attachment_deadline_ms
+                && assignment.owner_public_key_hex
+                    == hex::encode(STANDARD.decode(&self.bootstrap.owner_public_key)?),
+            "node-signed guest assignment changed its import or channel-owner authority"
+        );
+        self.signed_assignment = Some(signed);
+        Ok(())
     }
 
     fn discard_guest_package(&mut self) -> Result<()> {
@@ -3479,6 +3511,24 @@ impl ExternalPlacementReconciliation {
                 &package_parent,
                 deadline,
             )?;
+            if activation.import_authorization.is_some() {
+                let assignment = self.state_store.author_external_guest_assignment(
+                    &current.reservation,
+                    occurrence,
+                    &intent,
+                    &self.contract,
+                );
+                let retained =
+                    assignment.and_then(|signed| activation.retain_signed_assignment(signed));
+                if let Err(error) = retained {
+                    if let Err(cleanup) = activation.discard_guest_package() {
+                        return Err(error.context(format!(
+                            "guest assignment refusal also failed package cleanup: {cleanup:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
             let claim = self
                 .state_store
                 .begin_external_supervisor_activation(placement, &intent);
@@ -3864,6 +3914,7 @@ fn supervisor_activation(
             guest_inputs,
             guest_package: Some(guest_package),
             import_authorization,
+            signed_assignment: None,
         },
     ))
 }
@@ -5909,7 +5960,10 @@ mod tests {
         // The exact two executable roots are 4096 bytes each. An older
         // retained reservation must not bypass the new pre-contact check.
         prepared.contract.max_guest_package_regular_bytes = 8191;
-        let error = prepared.claim().err().expect("undersized package was admitted");
+        let error = prepared
+            .claim()
+            .err()
+            .expect("undersized package was admitted");
         assert!(error.to_string().contains("before allocation"), "{error:#}");
         assert_eq!(backend.allocate_calls.load(Ordering::SeqCst), 0);
         assert!(!gate.load(Ordering::SeqCst));

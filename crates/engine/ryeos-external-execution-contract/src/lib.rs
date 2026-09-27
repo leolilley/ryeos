@@ -40,6 +40,7 @@ pub const LIFECYCLE_BOOTSTRAP_FD_ENV: &str = "RYEOS_LIFECYCLE_BOOTSTRAP_FD";
 /// Sealed controller signature over the exact one-shot guest import. The
 /// adapter may transport it, but cannot confer guest trust in its own bytes.
 pub const LIFECYCLE_SIGNED_IMPORT_FD_ENV: &str = "RYEOS_LIFECYCLE_SIGNED_IMPORT_FD";
+pub const LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV: &str = "RYEOS_LIFECYCLE_SIGNED_ASSIGNMENT_FD";
 pub const LIFECYCLE_GUEST_PACKAGE_FD_ENV: &str = "RYEOS_LIFECYCLE_GUEST_PACKAGE_FD";
 pub const LIFECYCLE_SUPERVISOR_FD_ENV: &str = "RYEOS_LIFECYCLE_SUPERVISOR_FD";
 pub const LIFECYCLE_LAUNCHER_FD_ENV: &str = "RYEOS_LIFECYCLE_LAUNCHER_FD";
@@ -1918,19 +1919,30 @@ mod tests {
         let projection = source_projection();
         let semantic_identity = projection.identity_digest().unwrap();
         let plan = fixed_guest_supervisor_descriptor_plan(&projection).unwrap();
-        assert_eq!(plan.execution_inputs.identity_digest().unwrap(), semantic_identity);
+        assert_eq!(
+            plan.execution_inputs.identity_digest().unwrap(),
+            semantic_identity
+        );
         assert_eq!(projection.base_snapshot.descriptor, 10);
         assert_eq!(
             plan.execution_inputs.base_snapshot.descriptor,
             SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD
         );
-        assert!(!plan
-            .inherited_descriptors
-            .contains(&SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD));
-        assert!(plan.inherited_descriptors.contains(&SUPERVISOR_EXECUTABLE_FD));
+        assert!(
+            !plan
+                .inherited_descriptors
+                .contains(&SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD)
+        );
+        assert!(
+            plan.inherited_descriptors
+                .contains(&SUPERVISOR_EXECUTABLE_FD)
+        );
         assert_eq!(
             plan.runtime_mount_descriptors,
-            vec![SUPERVISOR_RUNTIME_MOUNT_FD_BASE, SUPERVISOR_RUNTIME_MOUNT_FD_BASE + 1]
+            vec![
+                SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
+                SUPERVISOR_RUNTIME_MOUNT_FD_BASE + 1
+            ]
         );
         assert_eq!(
             plan.content_record_descriptors,
@@ -1952,8 +1964,21 @@ mod tests {
         rebind_opened_guest_descriptors(&mut mounted, None, &[80, 81], &[90, 91, 92]).unwrap();
         assert_eq!(mounted.identity_digest().unwrap(), identity);
         assert_eq!(mounted.base_snapshot.descriptor, 93);
-        assert_eq!(mounted.inputs.iter().map(|input| input.descriptor).collect::<Vec<_>>(), vec![80, 81]);
-        assert_eq!(mounted.record_descriptors().map(|(fd, _, _)| fd).collect::<Vec<_>>(), vec![90, 91, 92]);
+        assert_eq!(
+            mounted
+                .inputs
+                .iter()
+                .map(|input| input.descriptor)
+                .collect::<Vec<_>>(),
+            vec![80, 81]
+        );
+        assert_eq!(
+            mounted
+                .record_descriptors()
+                .map(|(fd, _, _)| fd)
+                .collect::<Vec<_>>(),
+            vec![90, 91, 92]
+        );
 
         for (output, mounts, records) in [
             (Some(77), vec![80, 81], vec![90, 91, 92]),
@@ -1977,13 +2002,10 @@ mod tests {
         let mut invalid_original = original.clone();
         invalid_original.inputs[0].descriptor = 1;
         let unchanged = invalid_original.clone();
-        assert!(rebind_opened_guest_descriptors(
-            &mut invalid_original,
-            None,
-            &[80, 81],
-            &[90, 91, 92],
-        )
-        .is_err());
+        assert!(
+            rebind_opened_guest_descriptors(&mut invalid_original, None, &[80, 81], &[90, 91, 92],)
+                .is_err()
+        );
         assert_eq!(invalid_original, unchanged);
     }
 

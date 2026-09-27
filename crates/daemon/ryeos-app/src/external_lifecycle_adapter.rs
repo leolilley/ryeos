@@ -13,12 +13,12 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV,
-    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV, LIFECYCLE_SUPERVISOR_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    LifecycleGuestPackageDelivery, LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES,
-    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
-    from_json_slice_strict,
+    LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+    LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
+    LifecycleOperationCommon, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    SupervisorActivationIntent, TerminationIntent, from_json_slice_strict,
 };
 
 use crate::external_artifacts::{
@@ -210,6 +210,7 @@ impl ExecutableExternalPlacementBackend {
         guest_inputs: Option<&ryeos_external_execution::guest_inputs::ExternalGuestInputAuthority>,
         guest_package: Option<&lillux::InheritedDescriptorAuthority>,
         signed_import: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization>,
+        signed_assignment: Option<&ryeos_external_execution_contract::guest_import_authorization::SignedGuestOccurrenceAssignment>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
@@ -365,6 +366,7 @@ impl ExecutableExternalPlacementBackend {
         }
         ensure!(
             signed_import.is_some() == guest_package.is_some()
+                && signed_assignment.is_some() == signed_import.is_some()
                 && signed_import.is_some()
                     == matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
             "signed guest import and exact package must cross one activation contact together"
@@ -376,6 +378,20 @@ impl ExecutableExternalPlacementBackend {
                 .map_err(anyhow::Error::msg)?;
             envs.push((
                 LIFECYCLE_SIGNED_IMPORT_FD_ENV.into(),
+                handle
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?
+                    .to_string(),
+            ));
+            inherited.push(handle);
+        }
+        if let Some(signed) = signed_assignment {
+            signed.validate_shape()?;
+            let bytes = ryeos_external_execution_contract::canonical_json(signed)?;
+            let handle = lillux::sealed_memfd(c"ryeos-signed-guest-assignment", &bytes)
+                .map_err(anyhow::Error::msg)?;
+            envs.push((
+                LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV.into(),
                 handle
                     .inherited_descriptor()
                     .map_err(anyhow::Error::msg)?
@@ -654,7 +670,7 @@ impl ExecutableExternalPlacementBackend {
             }
         };
         let response = self.invoke(
-            contract, credential, &request, None, None, None, None, deadline,
+            contract, credential, &request, None, None, None, None, None, deadline,
         )?;
         let value = match response.value {
             LifecycleAdapterResponse::AllocationBound {
@@ -809,6 +825,9 @@ impl ExecutableExternalPlacementBackend {
             activation_authority
                 .map(ExternalSupervisorActivation::signed_import_authorization)
                 .transpose()?,
+            activation_authority
+                .map(ExternalSupervisorActivation::signed_assignment)
+                .transpose()?,
             deadline,
         )?;
         let value = match response.value {
@@ -874,7 +893,9 @@ impl ExecutableExternalPlacementBackend {
         ));
         // Late terminal evidence may settle cleanup, never start execution.
         match self
-            .invoke(contract, credential, &request, None, None, None, None, deadline)?
+            .invoke(
+                contract, credential, &request, None, None, None, None, None, deadline,
+            )?
             .value
         {
             LifecycleAdapterResponse::OccurrenceTerminal {

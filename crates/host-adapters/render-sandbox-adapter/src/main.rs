@@ -20,11 +20,12 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
     LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV,
     LIFECYCLE_REMAINING_TIMEOUT_MS_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
-    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
-    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
-    MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
-    canonical_json, from_json_slice_strict,
+    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
+    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
+    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_PROVIDER_SPEC_BYTES,
+    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, canonical_json,
+    from_json_slice_strict,
 };
 use ryeos_http_transport::{
     ContactState, Deadlines, Header, HttpClient, HttpError, HttpRequest, HttpResponse, Limits,
@@ -339,11 +340,17 @@ fn operate() -> Result<()> {
             ryeos_external_execution_contract::guest_import_authorization::MAX_GUEST_IMPORT_AUTHORIZATION_BYTES
                 + 256,
         )?;
-        verify_signed_import_handoff(&signed_bytes, &request)?;
+        let signed_import = verify_signed_import_handoff(&signed_bytes, &request)?;
+        let assignment_bytes = read_sealed_env(
+            LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+            ryeos_external_execution_contract::guest_import_authorization::MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
+        )?;
+        verify_signed_assignment_handoff(&assignment_bytes, &signed_import)?;
     } else {
         ensure!(
-            std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none(),
-            "signed guest import was supplied outside first activation"
+            std::env::var_os(LIFECYCLE_SIGNED_IMPORT_FD_ENV).is_none()
+                && std::env::var_os(LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV).is_none(),
+            "signed guest import or assignment was supplied outside first activation"
         );
     }
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
@@ -436,7 +443,12 @@ fn operate() -> Result<()> {
 
 /// Transport check only. The disposable guest must validate this signature
 /// against its independently installed controller key and occurrence assignment.
-fn verify_signed_import_handoff(bytes: &[u8], request: &LifecycleAdapterRequest) -> Result<()> {
+fn verify_signed_import_handoff(
+    bytes: &[u8],
+    request: &LifecycleAdapterRequest,
+) -> Result<
+    ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
+> {
     use ryeos_external_execution_contract::guest_import_authorization::{
         MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, SignedGuestImportAuthorization,
     };
@@ -479,6 +491,40 @@ fn verify_signed_import_handoff(bytes: &[u8], request: &LifecycleAdapterRequest)
         "sealed signed import changed the exact activation or package"
     );
     authorization.require_fresh_admission_at(lillux::time::timestamp_millis())?;
+    Ok(signed)
+}
+
+/// Correlation only; the qualified guest verifies the node-root signature
+/// and its own installed runtime identity before trusting the delegated key.
+fn verify_signed_assignment_handoff(
+    bytes: &[u8],
+    import: &ryeos_external_execution_contract::guest_import_authorization::SignedGuestImportAuthorization,
+) -> Result<()> {
+    use ryeos_external_execution_contract::guest_import_authorization::{
+        MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES, SignedGuestOccurrenceAssignment,
+    };
+    let signed: SignedGuestOccurrenceAssignment =
+        from_json_slice_strict(bytes, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES)?;
+    signed.validate_shape()?;
+    ensure!(
+        canonical_json(&signed)? == bytes,
+        "signed guest assignment handoff is noncanonical"
+    );
+    let assignment = &signed.assignment;
+    let authorization = &import.authorization;
+    ensure!(
+        assignment.placement_thread_id == authorization.placement_thread_id
+            && assignment.admitted_capsule_hash == authorization.admitted_capsule_hash
+            && assignment.base_snapshot_hash == authorization.base_snapshot_hash
+            && assignment.execution_binding_hash == authorization.execution_binding_hash
+            && assignment.allocation_request_digest == authorization.allocation_request_digest
+            && assignment.occurrence_id == authorization.occurrence_id
+            && assignment.activation_request_digest == authorization.activation_request_digest
+            && assignment.supervisor_runtime_hash == authorization.supervisor_runtime_hash
+            && assignment.guest_runtime_manifest_hash == authorization.guest_runtime_manifest_hash
+            && assignment.attachment_deadline_ms == authorization.attachment_deadline_ms,
+        "signed guest assignment changed the exact import coordinates"
+    );
     Ok(())
 }
 
@@ -929,7 +975,9 @@ fn observe_termination_with_network(
         Ok(value) => value,
         Err(_) => return pending(),
     };
-    let Some(terminated_at) = exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id, settings) else {
+    let Some(terminated_at) =
+        exact_terminal_timestamp(&sandbox, &occurrence.occurrence_id, settings)
+    else {
         return pending();
     };
     let response_sha256 = lillux::sha256_hex(&bytes);
@@ -1278,8 +1326,9 @@ mod offline_fixture_tests {
     #[test]
     fn signed_import_descriptor_is_correlated_but_not_guest_trust() {
         use ryeos_external_execution_contract::guest_import_authorization::{
-            GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization,
-            SignedGuestImportAuthorization,
+            GUEST_IMPORT_AUTHORIZATION_SCHEMA, GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+            GuestImportAuthorization, GuestOccurrenceAssignmentDocument,
+            SignedGuestImportAuthorization, SignedGuestOccurrenceAssignment,
         };
         use ryeos_external_execution_contract::staging_package::{
             GUEST_IMPORT_TICKET_SCHEMA, GuestImportTicket,
@@ -1399,6 +1448,38 @@ mod offline_fixture_tests {
         };
         let canonical = canonical_json(&signed).unwrap();
         verify_signed_import_handoff(&canonical, &request).unwrap();
+        let authorization = &signed.authorization;
+        let assignment = SignedGuestOccurrenceAssignment {
+            assignment: GuestOccurrenceAssignmentDocument {
+                schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
+                placement_thread_id: authorization.placement_thread_id.clone(),
+                admitted_capsule_hash: authorization.admitted_capsule_hash.clone(),
+                base_snapshot_hash: authorization.base_snapshot_hash.clone(),
+                execution_binding_hash: authorization.execution_binding_hash.clone(),
+                allocation_request_digest: authorization.allocation_request_digest.clone(),
+                occurrence_id: authorization.occurrence_id.clone(),
+                activation_request_digest: authorization.activation_request_digest.clone(),
+                supervisor_runtime_hash: authorization.supervisor_runtime_hash.clone(),
+                guest_runtime_manifest_hash: authorization.guest_runtime_manifest_hash.clone(),
+                owner_public_key_hex: "1".repeat(64),
+                attachment_deadline_ms: authorization.attachment_deadline_ms,
+            },
+            signature_hex: "0".repeat(128),
+        };
+        let assignment_bytes = canonical_json(&assignment).unwrap();
+        verify_signed_assignment_handoff(&assignment_bytes, &signed).unwrap();
+        let mut changed_assignment = assignment.clone();
+        changed_assignment.assignment.occurrence_id = "occ-other".into();
+        assert!(
+            verify_signed_assignment_handoff(
+                &canonical_json(&changed_assignment).unwrap(),
+                &signed
+            )
+            .is_err()
+        );
+        let mut noncanonical_assignment = assignment_bytes;
+        noncanonical_assignment.push(b' ');
+        assert!(verify_signed_assignment_handoff(&noncanonical_assignment, &signed).is_err());
         let mut changed = signed;
         changed.authorization.ticket.payload_sha256 = digest('a');
         assert!(
@@ -1545,13 +1626,22 @@ mod offline_fixture_tests {
             exact_terminal_timestamp(&response, "sbx-fixture-001", &settings),
             Some("2026-09-24T00:01:00Z")
         );
-        assert_eq!(exact_terminal_timestamp(&response, "sbx-other", &settings), None);
+        assert_eq!(
+            exact_terminal_timestamp(&response, "sbx-other", &settings),
+            None
+        );
         let mut altered = settings.clone();
         altered.region = "different-region".into();
-        assert_eq!(exact_terminal_timestamp(&response, "sbx-fixture-001", &altered), None);
+        assert_eq!(
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered),
+            None
+        );
         altered = settings.clone();
         altered.plan = RenderPlan::Pro;
-        assert_eq!(exact_terminal_timestamp(&response, "sbx-fixture-001", &altered), None);
+        assert_eq!(
+            exact_terminal_timestamp(&response, "sbx-fixture-001", &altered),
+            None
+        );
         let mut altered_response: serde_json::Value =
             serde_json::from_slice(include_bytes!("../fixtures/terminated-response.json")).unwrap();
         altered_response["networkPolicy"]["default"] = serde_json::json!("allow-all");

@@ -17,6 +17,7 @@ crash-qualification-test-support = []
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
+hex = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 lillux = { workspace = true }
@@ -57,7 +58,6 @@ zeroize = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-hex = { workspace = true }
 tempfile = { workspace = true }
 ryeos-state = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
