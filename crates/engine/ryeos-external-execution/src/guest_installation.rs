@@ -210,7 +210,7 @@ pub struct InstalledGuestBase {
     runtime: lillux::PinnedDirectory,
     intent_identity: GuestBaseInstallIntentIdentity,
     children: InstalledRuntimeChildren,
-    _source: GuestSourceCustody,
+    _source: Option<GuestSourceCustody>,
 }
 
 /// One-shot, still-owned staged authorities prepared after the exact installed
@@ -309,6 +309,31 @@ pub struct PreparedGuestMountedSandbox {
     _committed: CommittedGuestSupervisorLaunchIntent,
     _controls: [lillux::InheritedDescriptorAuthority; 5],
     request: lillux::LinuxSandboxRequest,
+}
+
+/// A held native supervisor in its dedicated private-source owner. The target
+/// has not been released or adopted as a Ready guest. Dropping this value
+/// terminates the held target through Lillux.
+pub struct HeldGuestMountedSandbox {
+    _committed: CommittedGuestSupervisorLaunchIntent,
+    _controls: [lillux::InheritedDescriptorAuthority; 5],
+    request: lillux::LinuxSandboxRequest,
+    held: lillux::sandbox::HeldPrivateSourceSandboxProcess,
+}
+
+impl HeldGuestMountedSandbox {
+    /// Child-origin final-root observation before target release. It is not
+    /// applied-exec, writer-exclusion, or guest Ready evidence.
+    pub fn mount_preparation_receipt(
+        &mut self,
+    ) -> Result<lillux::LinuxSandboxMountPreparationReceipt> {
+        let receipt = self.held.held().mount_preparation_receipt().map_err(anyhow::Error::msg)?;
+        ensure!(
+            receipt.matches_request(&self.request).map_err(anyhow::Error::msg)?,
+            "held supervisor mount preparation differs from committed request"
+        );
+        Ok(receipt)
+    }
 }
 
 impl CommittedGuestSupervisorLaunchIntent {
@@ -443,6 +468,38 @@ impl CommittedGuestSupervisorLaunchIntent {
     }
 }
 
+impl PreparedGuestMountedSandbox {
+    /// Enter the one-way native preparation cut in a dedicated, unprivileged
+    /// owner process. Lillux exits that process on a source mismatch or failed
+    /// namespace transition; this must never run on a shared daemon worker.
+    pub fn prepare_held_in_dedicated_owner(mut self) -> Result<HeldGuestMountedSandbox> {
+        let installed = &mut self._committed._prepared._artifacts.private.content._installed;
+        let stage_name = self._committed._source_mount.stage().name().to_owned();
+        let source = match installed._source.take() {
+            Some(GuestSourceCustody::Sealed(source)) => source,
+            Some(_) => anyhow::bail!("guest source was not sealed for native preparation"),
+            None => anyhow::bail!("guest source custody was already consumed"),
+        };
+        let mut held = lillux::sandbox::prepare_linux_sandbox_from_sealed_source(
+            source,
+            OsStr::new(&stage_name),
+            std::path::Path::new(SUPERVISOR_STAGE_MOUNT_DESTINATION),
+            self.request.clone(),
+        );
+        let receipt = held.held().mount_preparation_receipt().map_err(anyhow::Error::msg)?;
+        ensure!(
+            receipt.matches_request(&self.request).map_err(anyhow::Error::msg)?,
+            "held supervisor mount preparation differs from committed request"
+        );
+        Ok(HeldGuestMountedSandbox {
+            _committed: self._committed,
+            _controls: self._controls,
+            request: self.request,
+            held,
+        })
+    }
+}
+
 #[cfg(test)]
 impl PreparedGuestMountedSandbox {
     pub(crate) fn inspect_for_test(&self) -> &lillux::LinuxSandboxRequest {
@@ -461,13 +518,14 @@ impl PreparedGuestSupervisorRequest {
     ) -> Result<GuestSourceMountSelection> {
         let installed = &self._artifacts.private.content._installed;
         installed.recheck_for_adoption(context, inputs)?;
-        let source_root = match &installed._source {
-            GuestSourceCustody::Sealed(source) => source.root(),
-            GuestSourceCustody::Live(_) => {
+        let source_root = match installed._source.as_ref() {
+            Some(GuestSourceCustody::Sealed(source)) => source.root(),
+            Some(GuestSourceCustody::Live(_)) => {
                 anyhow::bail!("guest source was not sealed before mount selection")
             }
             #[cfg(test)]
-            GuestSourceCustody::StructuralFixture(root) => root,
+            Some(GuestSourceCustody::StructuralFixture(root)) => root,
+            None => anyhow::bail!("guest source custody was already consumed"),
         };
         let stage = installed.imported.stage_identity()?;
         let selected = stage.resolve_under(source_root)?;
@@ -1663,7 +1721,7 @@ impl StagedGuestOccurrence {
             runtime,
             intent_identity,
             children,
-            _source: source,
+            _source: Some(source),
         })
     }
 }

@@ -2478,7 +2478,10 @@ mod tests {
             .target_channels
             .iter()
             .all(|(source, _)| *source != mounted_request.mounts[0].source_fd));
-        drop(mounted);
+        assert!(
+            mounted.prepare_held_in_dedicated_owner().is_err(),
+            "a structural source fixture must not reach native held launch"
+        );
         assert_eq!(
             crate::guest_installation::recover_guest_occurrence(
                 &committed_occurrence,
