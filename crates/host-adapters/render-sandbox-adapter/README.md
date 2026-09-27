@@ -329,8 +329,8 @@ producer. No credential or submission authority enters that workspace.
 Independent qualification must still join the resulting owner digest and
 public root to the executable and root actually installed in the Render
 snapshot. Similar names or a successful production graph do not establish
-that join. Source bundle manifests must be refreshed before this newly
-authored Tool/graph is installable.
+that join. The hosted-workflow source bundles have been refreshed; this
+newly authored Tool/graph has not been installed or runtime-qualified.
 
 The provider-installed qualification must then bind, at minimum, the exact
 product witness and manifest, Bundle/source generation, node public root,
