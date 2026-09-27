@@ -17,8 +17,7 @@ fn zero_participant_qualification_requires_exact_scoped_witness_shape() {
             for channel in [CallbackChannel::None, CallbackChannel::Http] {
                 if matches!(
                     (scoped, purpose, channel),
-                    (false, false, CallbackChannel::None)
-                        | (true, true, CallbackChannel::Http)
+                    (false, false, CallbackChannel::None) | (true, true, CallbackChannel::Http)
                 ) {
                     continue;
                 }

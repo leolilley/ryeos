@@ -117,8 +117,10 @@ pub struct ProducerPreparedImmutableFile {
 impl ProducerPreparedImmutableFile {
     pub fn destination(&self) -> anyhow::Result<std::path::PathBuf> {
         self.validate()?;
-        Ok(prepared_directory_mount_destination(&self.prepared_directory_id)?
-            .join(&self.leaf_name))
+        Ok(
+            prepared_directory_mount_destination(&self.prepared_directory_id)?
+                .join(&self.leaf_name),
+        )
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -127,9 +129,10 @@ impl ProducerPreparedImmutableFile {
             || self.leaf_name.len() > 128
             || self.leaf_name == "."
             || self.leaf_name == ".."
-            || !self.leaf_name.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-            })
+            || !self
+                .leaf_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
             bail!("producer immutable file leaf is not canonical");
         }
@@ -137,9 +140,10 @@ impl ProducerPreparedImmutableFile {
             bail!("producer immutable file byte bound is invalid");
         }
         if self.expected_sha256.len() != 64
-            || !self.expected_sha256.bytes().all(|byte| {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            })
+            || !self
+                .expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             bail!("producer immutable file expected content hash is not canonical");
         }
@@ -331,10 +335,9 @@ impl ProductProducerRecipe {
             if !prepared_ids.contains(file.prepared_directory_id.as_str()) {
                 bail!("producer immutable file requires a used prepared directory");
             }
-            if !immutable_destinations.insert((
-                file.prepared_directory_id.as_str(),
-                file.leaf_name.as_str(),
-            )) {
+            if !immutable_destinations
+                .insert((file.prepared_directory_id.as_str(), file.leaf_name.as_str()))
+            {
                 bail!("producer immutable file destination is duplicated");
             }
         }
@@ -488,7 +491,10 @@ mod tests {
         ]);
         let recipe = ProductProducerRecipe::from_value(value.clone()).unwrap();
         assert_eq!(
-            recipe.prepared_immutable_files[0].destination().unwrap().to_str(),
+            recipe.prepared_immutable_files[0]
+                .destination()
+                .unwrap()
+                .to_str(),
             Some("/ryeos/producer-prepared/codex-home/config.toml")
         );
         for (field, bad) in [
@@ -497,23 +503,30 @@ mod tests {
             ("leaf_name", json!(".config/config.toml")),
             ("leaf_name", json!("..")),
             ("maximum_bytes", json!(0)),
-            ("maximum_bytes", json!(MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES + 1)),
+            (
+                "maximum_bytes",
+                json!(MAX_PRODUCER_PREPARED_IMMUTABLE_FILE_BYTES + 1),
+            ),
             ("expected_sha256", json!("A".repeat(64))),
         ] {
             let mut invalid = value.clone();
             invalid["prepared_immutable_files"][0][field] = bad;
-            assert!(ProductProducerRecipe::from_value(invalid).is_err(), "{field}");
+            assert!(
+                ProductProducerRecipe::from_value(invalid).is_err(),
+                "{field}"
+            );
         }
         let mut duplicate = value.clone();
-        duplicate["prepared_immutable_files"][1] =
-            duplicate["prepared_immutable_files"][0].clone();
+        duplicate["prepared_immutable_files"][1] = duplicate["prepared_immutable_files"][0].clone();
         assert!(ProductProducerRecipe::from_value(duplicate).is_err());
         let mut too_many = value;
-        too_many["prepared_immutable_files"] = json!((0..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILES)
-            .map(|index| json!({"prepared_directory_id":"codex-home",
+        too_many["prepared_immutable_files"] = json!(
+            (0..=MAX_PRODUCER_PREPARED_IMMUTABLE_FILES)
+                .map(|index| json!({"prepared_directory_id":"codex-home",
                 "leaf_name":format!("file-{index}"),"maximum_bytes":1,
                 "expected_sha256":"a".repeat(64)}))
-            .collect::<Vec<_>>());
+                .collect::<Vec<_>>()
+        );
         assert!(ProductProducerRecipe::from_value(too_many).is_err());
     }
 

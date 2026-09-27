@@ -98,16 +98,31 @@ fn fixture_qualification_use(
         .unwrap()
         .expect("captured Worker profile has no external-candidate requirement");
     assert_eq!(requirement, expected_requirement);
-    let realized = ExternalContentRealizationSet::new(vec![ExternalContentRealization {
-        id: "provider-runtime".into(),
-        kind: ExternalContentKind::Tree,
-        mode: ExternalContentMode::Pinned,
-        manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
-        entry_count: runtime.entry_count,
-        total_bytes: runtime.total_bytes,
-        mount_root: ExternalContentMountRoot::ExecutionRuntime,
-        mount: "provider-runtime".into(),
-    }])
+    // The selected auxiliary product and the Worker's provider-runtime pin
+    // realize at distinct guest destinations, even when their manifest bytes
+    // coincide. Qualification must exercise the full admitted mount set.
+    let realized = ExternalContentRealizationSet::new(vec![
+        ExternalContentRealization {
+            id: "auxiliary".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            entry_count: runtime.entry_count,
+            total_bytes: runtime.total_bytes,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "auxiliary".into(),
+        },
+        ExternalContentRealization {
+            id: "provider-runtime".into(),
+            kind: ExternalContentKind::Tree,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash: bundle.provider_runtime_manifest_hash.clone(),
+            entry_count: runtime.entry_count,
+            total_bytes: runtime.total_bytes,
+            mount_root: ExternalContentMountRoot::ExecutionRuntime,
+            mount: "provider-runtime".into(),
+        },
+    ])
     .unwrap();
     ryeos_state::external_execution::admission::ExternalCandidateQualificationUse::from_admitted_inputs(
         &requirement,
@@ -1489,155 +1504,6 @@ async fn try_execute_recorded_service(
     Ok(result)
 }
 
-fn dispatch_projectless_public_item(
-    state: &ryeos_app::state::AppState,
-    item_ref: &str,
-    expected_kind: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    let state = state.clone();
-    let item_ref = item_ref.to_owned();
-    let expected_kind = expected_kind.to_owned();
-    std::thread::Builder::new()
-        .name("projectless-public-dispatch".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(dispatch_projectless_public_item_inner(
-                    &state,
-                    &item_ref,
-                    &expected_kind,
-                    params,
-                ))
-        })
-        .unwrap()
-        .join()
-        .unwrap()
-}
-
-async fn dispatch_projectless_public_item_inner(
-    state: &ryeos_app::state::AppState,
-    item_ref: &str,
-    expected_kind: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    use ryeos_engine::contracts::{
-        EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
-        SubjectResolutionAuthority,
-    };
-
-    let operator =
-        ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
-    let principal = operator.principal_id();
-    let scopes = vec!["*".to_owned()];
-    let site = state.threads.site_id().to_owned();
-    let (workspace, lifeline) = ryeos_app::temp_dir_guard::create_projectless_workspace(
-        &state.config.runtime_root().cache(),
-        &format!(
-            "public-dispatch-{}",
-            lillux::sha256_hex(item_ref.as_bytes())
-        ),
-    )
-    .unwrap();
-    let authority = ryeos_state::objects::ExecutionProjectAuthority::projectless(
-        ryeos_state::objects::EnvironmentAuthority::None,
-    )
-    .unwrap();
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_projectless(
-        workspace.clone(),
-        state.engine.clone(),
-        lifeline,
-        authority,
-    )
-    .unwrap();
-    let plan_ctx = PlanContext {
-        requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: principal.clone(),
-            scopes: scopes.clone(),
-        }),
-        project_context: ProjectContext::None,
-        subject_resolution_authority: SubjectResolutionAuthority::Projectless,
-        current_site_id: site.clone(),
-        origin_site_id: site,
-        execution_hints: ExecutionHints::default(),
-        scheduled_fire: None,
-        validate_only: false,
-    };
-    let context = ryeos_executor::executor::ExecutionContext {
-        principal_fingerprint: principal,
-        caller_scopes: scopes,
-        engine: state.engine.clone(),
-        plan_ctx,
-        requested_call: None,
-    };
-    let binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
-        &context.engine,
-        &context.plan_ctx,
-        &provenance,
-    )
-    .unwrap();
-    let ref_bindings = BTreeMap::new();
-    let product_selections = Vec::new();
-    let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
-        item_ref,
-        expected_kind,
-        &params,
-        &ref_bindings,
-        &product_selections,
-        None,
-        None,
-        &binding,
-        &context,
-        state,
-        None,
-    )
-    .unwrap();
-    let root_admission = preflight.root_admission.unwrap();
-    ryeos_executor::dispatch::admit_launch_contract(
-        preflight.root_dispatch_evidence.applicability(),
-        &root_admission,
-        &ref_bindings,
-        &ryeos_state::objects::ExecutionLifecycleAuthority::REQUEST_SCOPED,
-        &provenance,
-        &context,
-        state,
-    )
-    .await
-    .unwrap();
-    ryeos_executor::dispatch::dispatch(
-        item_ref,
-        &ryeos_executor::dispatch::DispatchRequest {
-            launch_mode: "wait",
-            target_site_id: None,
-            validate_only: false,
-            params,
-            ref_bindings,
-            product_selections,
-            acting_principal: &context.principal_fingerprint,
-            project_path: &workspace,
-            provenance,
-            lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::REQUEST_SCOPED,
-            launch_timings: None,
-            original_root_kind: expected_kind,
-            pre_minted_thread_id: None,
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            previous_thread_id: None,
-            root_admission: Some(root_admission),
-            root_dispatch_evidence: Some(preflight.root_dispatch_evidence),
-            parent_execution_context: None,
-            effect_authority: None,
-        },
-        &context,
-        state,
-    )
-    .await
-    .unwrap()
-}
-
 fn dispatch_pinned_public_worker(
     state: Arc<ryeos_app::state::AppState>,
     original_project: PathBuf,
@@ -1841,7 +1707,9 @@ async fn wait_for_terminal_thread(
             .get_thread(thread_id)
             .unwrap()
             .unwrap_or_else(|| panic!("thread {thread_id} disappeared"));
-        if matches!(thread.status.as_str(), "completed" | "failed" | "cancelled") {
+        if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+            .is_some_and(|status| status.is_terminal())
+        {
             let snapshot = state
                 .state_store
                 .get_authoritative_root_thread_snapshot(thread_id)
@@ -1858,6 +1726,19 @@ async fn wait_for_terminal_thread(
         }
         assert!(Instant::now() < deadline, "thread {thread_id} timed out");
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A nested test runtime must not be synchronously dropped from an async
+/// Tokio worker. Its accepted dispatch task remains owned until this guard
+/// leaves the surrounding fixture, including on a test panic.
+struct RetainedTestRuntime(Option<tokio::runtime::Runtime>);
+
+impl Drop for RetainedTestRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -3422,16 +3303,6 @@ async fn run_production_tls_candidate(
         &state,
         &[&runtime_manifest_hash, &qualification_runtime_manifest_hash],
     );
-    let verifier = dispatch_projectless_public_item(
-        &state,
-        "tool:fixtures/verify-external-runtime",
-        "tool",
-        qualification_use.parameters().unwrap(),
-    );
-    let verifier_thread_id = verifier["thread"]["thread_id"]
-        .as_str()
-        .expect("public qualification verifier returned no exact thread")
-        .to_owned();
     let operator =
         ryeos_app::identity::NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
     let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
@@ -3442,6 +3313,74 @@ async fn run_production_tls_candidate(
         None,
     );
     let qualification_state = Arc::new(state);
+    // Accepted launch hands background dispatch to the current runtime. Keep
+    // that test runtime alive through terminal collection; a short-lived
+    // current-thread runtime would cancel the accepted root after handoff.
+    // Its debug workers need the same explicit stack allowance as the public
+    // Worker dispatch below. This does not change runtime admission.
+    let launch_state = qualification_state.clone();
+    let launch_context = handler_context.clone();
+    let launch_witness = runtime_witness_hash.clone();
+    let (launch, qualification_launch_runtime) = std::thread::Builder::new()
+        .name("external-product-qualification-launch".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            let launch = runtime
+                .block_on(ryeos_api::handlers::product_qualification_launch::handle(
+                    ryeos_api::handlers::product_qualification_launch::Request {
+                        launch_id: format!("L-{}", "a".repeat(32)),
+                        witness_hash: launch_witness,
+                        witness_source: ryeos_state::external_content::products::transfer::ProductWitnessSource::LocalCapture {},
+                        relationship_name: "auxiliary_to_verifier".into(),
+                    },
+                    launch_context,
+                    launch_state,
+                ))
+                .unwrap();
+            (launch, runtime)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    let _qualification_launch_runtime = RetainedTestRuntime(Some(qualification_launch_runtime));
+    let verifier_thread_id = launch["thread_id"]
+        .as_str()
+        .expect("qualification launch returned no exact verifier thread")
+        .to_owned();
+    let qualification_deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let thread = qualification_state
+            .state_store
+            .get_thread(&verifier_thread_id)
+            .unwrap()
+            .expect("accepted qualification thread disappeared");
+        if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+            .is_some_and(|status| status.is_terminal())
+        {
+            if thread.status != "completed" {
+                let retained_node = root.keep();
+                panic!(
+                    "qualification verifier failed; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
+                    retained_node.display()
+                );
+            }
+            break;
+        }
+        if Instant::now() >= qualification_deadline {
+            let retained_node = root.keep();
+            panic!(
+                "qualification verifier did not settle; root={verifier_thread_id}; retained_node={}; detail={thread:#?}",
+                retained_node.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let qualification = ryeos_app::operator_external_content::product_qualification::qualify(
         qualification_state.clone(),
         handler_context,
