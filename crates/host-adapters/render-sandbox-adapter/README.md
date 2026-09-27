@@ -121,6 +121,8 @@ inherited package inode, then mint and send the fixed owner run command. It
 uses no retry, validates each returned bearer against the exact Sandbox proxy
 route, and preserves only a `Pending` interpretation of the run response. A
 focused failure-order test proves it stops after the first uncertain stage.
+An additional request-construction test checks the exact Sandbox proxy URL,
+method, body budget, TLS roots and redacted bearer header before contact.
 The signed provider spec still declares activation `unsupported_pending`, so
 none of this code is reachable as a live mutation. Enabling it requires the
 installed snapshot, upload mode, process survival after stream loss, and

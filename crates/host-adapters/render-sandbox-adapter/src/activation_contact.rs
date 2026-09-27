@@ -156,41 +156,68 @@ impl RenderContact<'_> {
         accept: &'static str,
         response_limit: u64,
     ) -> Result<HttpResponse> {
-        ensure!(
-            token.expires_at_ms > lillux::time::timestamp_millis(),
-            "Render proxy token expired before use"
-        );
-        validate_proxy_route(
-            token.route.as_str(),
-            &token.method,
+        let request = proxy_request(
+            self.settings,
             self.occurrence_id,
-            &self.settings.region,
+            token,
             operation,
-        )?;
-        let mut authorization = Zeroizing::new(b"Bearer ".to_vec());
-        authorization.extend_from_slice(token.bearer.as_bytes());
-        let mut limits = Limits::control_plane();
-        limits.request_body_bytes = body.exact_len();
-        limits.response_body_bytes = response_limit;
-        limits.response_body_wire_bytes = response_limit.saturating_mul(2);
-        let request = HttpRequest {
-            method: token.method,
-            url: token.route,
-            headers: vec![
-                Header::new_sensitive("Authorization", authorization),
-                Header::new("Content-Type", content_type),
-                Header::new("Accept", accept),
-            ],
             body,
-            tls_roots_der: tls_roots(self.settings)?,
-            limits,
-            deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, self.deadline),
-            cancellation: self.cancellation.clone(),
-        };
+            content_type,
+            accept,
+            response_limit,
+            self.deadline,
+            self.cancellation,
+        )?;
         HttpClient::new(self.network.clone())
             .execute(request)
             .map_err(anyhow::Error::from)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proxy_request(
+    settings: &Settings,
+    occurrence_id: &str,
+    token: BoundConnectToken,
+    operation: ProxyOperation<'_>,
+    body: RequestBodySource,
+    content_type: &'static str,
+    accept: &'static str,
+    response_limit: u64,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+) -> Result<HttpRequest> {
+    ensure!(
+        token.expires_at_ms > lillux::time::timestamp_millis(),
+        "Render proxy token expired before use"
+    );
+    validate_proxy_route(
+        token.route.as_str(),
+        &token.method,
+        occurrence_id,
+        &settings.region,
+        operation,
+    )?;
+    let mut authorization = Zeroizing::new(b"Bearer ".to_vec());
+    authorization.extend_from_slice(token.bearer.as_bytes());
+    let mut limits = Limits::control_plane();
+    limits.request_body_bytes = body.exact_len();
+    limits.response_body_bytes = response_limit;
+    limits.response_body_wire_bytes = response_limit.saturating_mul(2);
+    Ok(HttpRequest {
+        method: token.method,
+        url: token.route,
+        headers: vec![
+            Header::new_sensitive("Authorization", authorization),
+            Header::new("Content-Type", content_type),
+            Header::new("Accept", accept),
+        ],
+        body,
+        tls_roots_der: tls_roots(settings)?,
+        limits,
+        deadlines: Deadlines::new(SETUP_TIMEOUT, IDLE_TIMEOUT, deadline),
+        cancellation: cancellation.clone(),
+    })
 }
 
 impl OneShotContact for RenderContact<'_> {
@@ -269,6 +296,86 @@ impl OneShotContact for RenderContact<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    fn proxy_settings() -> Settings {
+        Settings {
+            schema: 2,
+            owner_id: "tea-owner".into(),
+            plan: crate::RenderPlan::Starter,
+            region: "oregon".into(),
+            snapshot_id: "snp-fixture".into(),
+            tls_roots_der_base64: vec![
+                base64::engine::general_purpose::STANDARD.encode(b"exact-test-root"),
+            ],
+        }
+    }
+
+    fn upload_token(uri: &str) -> BoundConnectToken {
+        BoundConnectToken {
+            execution_id: "exe-fixture".into(),
+            expires_at_ms: lillux::time::timestamp_millis() + 60_000,
+            method: "PUT".into(),
+            route: url::Url::parse(uri).unwrap(),
+            bearer: Zeroizing::new("private-token-sentinel".into()),
+        }
+    }
+
+    #[test]
+    fn proxy_request_binds_bearer_to_exact_sandbox_and_body() {
+        let settings = proxy_settings();
+        let cancellation = NetworkCancellation::default();
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        let path = "/ryeos/activation/guest-package";
+        let uri = "https://sbx-fixture.oregon.sandbox.onrender.com/files/upload?path=%2Fryeos%2Factivation%2Fguest-package";
+        let request = proxy_request(
+            &settings,
+            "sbx-fixture",
+            upload_token(uri),
+            ProxyOperation::UploadFile { remote_path: path },
+            RequestBodySource::from_bytes(b"exact-package".to_vec()),
+            "application/octet-stream",
+            "application/json",
+            MAX_UPLOAD_RESPONSE_BYTES,
+            deadline,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.url.as_str(), uri);
+        assert_eq!(request.body.exact_len(), 13);
+        assert_eq!(request.limits.request_body_bytes, 13);
+        assert_eq!(
+            request.limits.response_body_bytes,
+            MAX_UPLOAD_RESPONSE_BYTES
+        );
+        assert_eq!(request.headers[0].value(), b"Bearer private-token-sentinel");
+        assert!(!format!("{:?}", request.headers[0]).contains("private-token-sentinel"));
+        assert_eq!(request.tls_roots_der, vec![b"exact-test-root".to_vec()]);
+        for (occurrence, route) in [
+            ("sbx-other", uri),
+            (
+                "sbx-fixture",
+                "https://sbx-other.oregon.sandbox.onrender.com/files/upload?path=%2Fryeos%2Factivation%2Fguest-package",
+            ),
+        ] {
+            assert!(
+                proxy_request(
+                    &settings,
+                    occurrence,
+                    upload_token(route),
+                    ProxyOperation::UploadFile { remote_path: path },
+                    RequestBodySource::from_bytes(b"exact-package".to_vec()),
+                    "application/octet-stream",
+                    "application/json",
+                    MAX_UPLOAD_RESPONSE_BYTES,
+                    deadline,
+                    &cancellation,
+                )
+                .is_err()
+            );
+        }
+    }
 
     struct CountingContact {
         calls: Vec<&'static str>,
