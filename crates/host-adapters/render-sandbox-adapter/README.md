@@ -349,14 +349,18 @@ node-signed operator grant, loads the exact published qualification and
 product witness under CAS guard, and rechecks current policy, verifier
 definition/artifact, required claims, and execution evidence. It runs before
 credential access on fresh placement paths. That authenticates the product
-proof but does not yet compare its provider-specific probe or retain it with
-the allocation; the backend registry still refuses a non-null qualification
-for new contact. No synthetic verified request context is constructed.
+proof but does not yet compare its provider-specific probe; the backend registry
+still refuses a non-null qualification for new contact. The exact proof and
+product owner are now CAS-owned by the schema-18 persistent-session capsule,
+separately from the Codex executable selection. No synthetic verified request
+context is constructed.
 
-The next join has two separate owners. RyeOS authenticates the binding's exact
+The remaining provider-probe join has two separate owners. RyeOS authenticates the binding's exact
 qualification attestation from current published CAS, its product witness,
 current signed policy, admitted verifier definition, and execution evidence;
-it retains that result with the placement generation before first contact.
+the session capsule retains that result with the exact signed binding generation
+before first contact, and start/channel recovery authenticates it without
+selecting a new product head.
 The Render adapter interprets the bounded `probe_evidence` against the same
 binding's owner/account/snapshot/plan/region, controller public root, owner
 executable and runtime manifest. Neither a caller-provided JSON probe nor a
