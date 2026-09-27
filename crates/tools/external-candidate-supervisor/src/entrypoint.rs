@@ -1,13 +1,17 @@
 //! Fixed-descriptor executable boundary for the protected supervisor.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, ensure};
+use ryeos_external_execution::guest_content::{
+    BoundGuestMountedContent, open_verified_mounted_guest_content,
+};
+use ryeos_external_execution_contract::{ExternalGuestInputProjection, GuestMountContentAuthority};
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
-    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
-    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RUNTIME_MOUNT_FD_BASE,
-    SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
-    fixed_guest_supervisor_descriptor_plan, rebind_fixed_guest_descriptors,
+    SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCHER_FD,
+    SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
+    fixed_guest_supervisor_descriptor_plan,
 };
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
@@ -17,6 +21,44 @@ use crate::runtime::{
     ExternalCandidateSupervisorInputs, ExternalCandidateSupervisorOutcome,
     run_external_candidate_supervisor,
 };
+
+/// Adopt source-resident content after the trusted outer owner has proved the
+/// exact staged child is the sole read-only mount in this supervisor view.
+/// This helper checks content and indexed scratch, but it cannot attest the
+/// applied mount, occurrence writer fence, or whole-scope settlement itself.
+/// It does not launch a candidate or contact the controller.
+pub fn adopt_mounted_supervisor_content(
+    staged_root: &lillux::PinnedDirectory,
+    private_parent: &lillux::PinnedDirectory,
+    retained: &ExternalGuestInputProjection,
+    expected_launcher_sha256: &str,
+) -> Result<(lillux::InheritedDescriptorAuthority, BoundGuestMountedContent)> {
+    retained.validate()?;
+    staged_root.require_owner_private_directory()?;
+    private_parent.require_owner_private_directory()?;
+    staged_root.require_disjoint_directory_tree(private_parent)?;
+    let launcher = staged_root
+        .open_inherited_regular(OsStr::new("launcher"), false)?
+        .context("mounted guest launcher is absent")?;
+    launcher.require_owned_executable()?;
+    let observation = launcher.regular_file_observation()?;
+    ensure!(
+        launcher.digest_regular_file_stable_exact(&observation)? == expected_launcher_sha256,
+        "mounted guest launcher changed admitted bytes"
+    );
+    let opened = open_verified_mounted_guest_content(staged_root, retained)?;
+    let mut scratch = Vec::new();
+    for (index, input) in retained.inputs.iter().enumerate() {
+        if matches!(input.content_authority, GuestMountContentAuthority::PrivateScratch { .. }) {
+            let name = format!("guest-scratch-{index:02}");
+            let directory = private_parent
+                .open_child_directory(OsStr::new(&name))?
+                .context("mounted supervisor private scratch is absent")?;
+            scratch.push((index, directory.inherited_descriptor_authority()?));
+        }
+    }
+    Ok((launcher, opened.bind_execution_inputs(retained, scratch)?))
+}
 
 /// Adopt the exact fixed descriptor contract and run one supervisor.
 ///
@@ -102,8 +144,12 @@ pub fn run_from_inherited() -> Result<ExternalCandidateSupervisorOutcome> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::Write as _;
 
-    use ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD;
+    use ryeos_external_execution_contract::guest_supervisor_descriptors::{
+        SUPERVISOR_CONSUMED_BASE_SNAPSHOT_FD, SUPERVISOR_CONTENT_RECORD_FD_BASE,
+        SUPERVISOR_RUNTIME_MOUNT_FD_BASE, rebind_fixed_guest_descriptors,
+    };
     use ryeos_external_execution_contract::{
         ExternalGuestInputProjection, GuestBaseSnapshotInput, GuestMountAccess,
         GuestMountContentAuthority, GuestMountInput, GuestMountKind, GuestMountRole,
@@ -111,6 +157,121 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn mounted_content_adoption_binds_launcher_config_and_indexed_scratch() {
+        let staged_dir = tempfile::tempdir().unwrap();
+        let staged = lillux::PinnedDirectory::open(staged_dir.path()).unwrap().unwrap();
+        staged.tighten_owner_private_directory().unwrap();
+        let launcher_bytes = b"exact launcher fixture";
+        let mut launcher = staged
+            .open_regular_create(OsStr::new("launcher"), true, true, 0o755)
+            .unwrap();
+        launcher.write_all(launcher_bytes).unwrap();
+        launcher.sync_all().unwrap();
+        drop(launcher);
+        let config_bytes = b"exact configuration";
+        let mut config = staged
+            .open_regular_create(OsStr::new("input-00"), true, true, 0o644)
+            .unwrap();
+        config.write_all(config_bytes).unwrap();
+        config.sync_all().unwrap();
+        drop(config);
+        let private_dir = tempfile::tempdir().unwrap();
+        let private = lillux::PinnedDirectory::open(private_dir.path()).unwrap().unwrap();
+        private.tighten_owner_private_directory().unwrap();
+        let scratch = private
+            .create_child(OsStr::new("guest-scratch-01"), 0o700)
+            .unwrap();
+        let inputs = ExternalGuestInputProjection {
+            schema: ryeos_external_execution_contract::EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
+            base_snapshot: GuestBaseSnapshotInput {
+                descriptor: 10,
+                snapshot_hash: "a".repeat(64),
+                closure_digest: "b".repeat(64),
+                object_count: 3,
+                blob_count: 1,
+                total_bytes: 1,
+            },
+            workspace_outputs: None,
+            inputs: vec![
+                GuestMountInput {
+                    role: GuestMountRole::Configuration,
+                    authority_id: "config".into(),
+                    descriptor: 11,
+                    destination: "/config/farm".into(),
+                    kind: GuestMountKind::RegularFile,
+                    access: GuestMountAccess::ReadOnly,
+                    normalized_mode: Some(0o644),
+                    content_authority: GuestMountContentAuthority::RawFile {
+                        sha256: lillux::sha256_hex(config_bytes),
+                    },
+                    bytes: config_bytes.len() as u64,
+                },
+                GuestMountInput {
+                    role: GuestMountRole::PrivateScratch,
+                    authority_id: "scratch".into(),
+                    descriptor: 12,
+                    destination: "/scratch".into(),
+                    kind: GuestMountKind::Directory,
+                    access: GuestMountAccess::PrivateWritable,
+                    normalized_mode: None,
+                    content_authority: GuestMountContentAuthority::PrivateScratch {
+                        binding_hash: "c".repeat(64),
+                    },
+                    bytes: 0,
+                },
+            ],
+            executable_search: vec![],
+            environment: BTreeMap::new(),
+        };
+        inputs.validate().unwrap();
+        let launcher_hash = lillux::sha256_hex(launcher_bytes);
+        let (opened_launcher, bound) =
+            adopt_mounted_supervisor_content(&staged, &private, &inputs, &launcher_hash).unwrap();
+        assert_eq!(
+            opened_launcher
+                .digest_regular_file_stable_exact(&opened_launcher.regular_file_observation().unwrap())
+                .unwrap(),
+            launcher_hash
+        );
+        let (rebound, outputs, mounts, records) = bound.into_parts();
+        assert_eq!(rebound.identity_digest().unwrap(), inputs.identity_digest().unwrap());
+        assert!(outputs.is_none() && records.is_empty());
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1].directory_identity().unwrap(), scratch.identity().unwrap());
+        for (mount, input) in mounts.iter().zip(&rebound.inputs) {
+            assert_eq!(mount.inherited_descriptor().unwrap(), input.descriptor);
+        }
+        assert!(adopt_mounted_supervisor_content(
+            &staged,
+            &private,
+            &inputs,
+            &"0".repeat(64),
+        )
+        .is_err());
+        let missing_private_dir = tempfile::tempdir().unwrap();
+        let missing_private = lillux::PinnedDirectory::open(missing_private_dir.path())
+            .unwrap()
+            .unwrap();
+        missing_private.tighten_owner_private_directory().unwrap();
+        assert!(adopt_mounted_supervisor_content(
+            &staged,
+            &missing_private,
+            &inputs,
+            &launcher_hash,
+        )
+        .is_err());
+        let ambient = scratch.create_child(OsStr::new("ambient"), 0o700).unwrap();
+        assert!(adopt_mounted_supervisor_content(
+            &staged,
+            &private,
+            &inputs,
+            &launcher_hash,
+        )
+        .is_err());
+        assert!(scratch.remove_empty_child_if_same(OsStr::new("ambient"), &ambient).unwrap());
+    }
 
     #[test]
     fn two_product_inputs_rebind_without_manifest_descriptor_collision() {

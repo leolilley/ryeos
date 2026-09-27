@@ -24,4 +24,5 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+ryeos-state = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
