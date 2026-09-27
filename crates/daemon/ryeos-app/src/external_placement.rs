@@ -64,6 +64,18 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         credential: &PlacementCredential,
     ) -> Result<()>;
 
+    /// Interpret an already-authenticated, CAS-owned runtime product probe
+    /// against this exact signed placement contract. This operation must be
+    /// credential-free and provider-contact-free. It cannot authenticate the
+    /// product attestation, grant lifecycle capability, or permit allocation.
+    fn verify_runtime_probe(
+        &self,
+        _contract: &ExternalPlacementBackendContract,
+        _proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    ) -> Result<()> {
+        bail!("external lifecycle adapter does not verify runtime qualification probes")
+    }
+
     /// Prepare and locally re-import the exact secret-bearing guest package
     /// before the durable activation/contact claim. No provider contact is
     /// permitted here. The returned commitment is inserted with that claim.
@@ -845,6 +857,21 @@ pub struct ExternalPlacementBackendRegistry {
 }
 
 impl ExternalPlacementBackendRegistry {
+    fn verify_runtime_probe(
+        &self,
+        contract: &ExternalPlacementBackendContract,
+        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
+    ) -> Result<()> {
+        let backend = self
+            .backends
+            .get(&(
+                contract.backend.clone(),
+                contract.backend_artifact_hash.clone(),
+            ))
+            .context("exact signed external placement backend generation is not installed")?;
+        backend.verify_runtime_probe(contract, proof)
+    }
+
     pub(crate) fn from_backends(backends: Vec<Arc<dyn ExternalPlacementBackend>>) -> Result<Self> {
         let mut by_id = BTreeMap::new();
         for backend in backends {
@@ -1072,7 +1099,10 @@ fn require_retained_session_runtime_qualification(
     else {
         return Ok(());
     };
-    verify_retained_runtime_proof(state, retained)
+    verify_retained_runtime_proof(state, retained)?;
+    state
+        .external_placement_backends
+        .verify_runtime_probe(&contract, &retained.proof)
 }
 
 /// Recovery validates only the capsule's historical CAS-owned witness. First
@@ -1211,6 +1241,11 @@ pub fn preflight_external_candidate_program(
             Ok::<_, anyhow::Error>(retained)
         })
         .transpose()?;
+    if let Some(proof) = runtime_proof.as_ref() {
+        state
+            .external_placement_backends
+            .verify_runtime_probe(&contract, &proof.proof)?;
+    }
     preflight_external_candidate_dependencies(
         &state.node_config.external_execution,
         &state.external_candidate_connectors,
@@ -6603,6 +6638,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_probe_interpretation_requires_an_exact_installed_backend() {
+        let binding = RetainedExternalExecutionBinding::test_fixture();
+        let contract = binding.backend_contract();
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
+            &contract.guest_runtime_manifest_hash,
+        )
+        .unwrap();
+        let proof = selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .as_ref()
+            .unwrap();
+        assert!(
+            ExternalPlacementBackendRegistry::default()
+                .verify_runtime_probe(&contract, proof)
+                .is_err()
+        );
+        let registry =
+            ExternalPlacementBackendRegistry::from_backends(vec![Arc::new(FixtureBackend {
+                artifact: contract.backend_artifact_hash.clone(),
+            })])
+            .unwrap();
+        assert!(registry.verify_runtime_probe(&contract, proof).is_err());
     }
 
     #[test]

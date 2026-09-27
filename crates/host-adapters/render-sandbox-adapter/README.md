@@ -355,6 +355,13 @@ product owner are now CAS-owned by the schema-18 persistent-session capsule,
 separately from the Codex executable selection. No synthetic verified request
 context is constructed.
 
+The lifecycle backend now has a credential-free, provider-neutral runtime-probe
+interpretation hook. Fresh admission and retained placement call it only after
+RyeOS authenticates the corresponding proof. The hook defaults to refusal; the
+installed Render adapter has not implemented its sealed offline invocation,
+and the separate allocation gate still refuses qualified bindings. Neither
+the hook nor a successful probe parse is an activation claim.
+
 The remaining provider-probe join has two separate owners. RyeOS authenticates the binding's exact
 qualification attestation from current published CAS, its product witness,
 current signed policy, admitted verifier definition, and execution evidence;
