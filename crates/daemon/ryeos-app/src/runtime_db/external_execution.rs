@@ -876,6 +876,7 @@ pub(crate) fn external_supervisor_activation_request_digest(
         "base_snapshot_hash":&reservation.base_snapshot_hash,
         "execution_binding_hash":&reservation.binding_hash,
         "supervisor_runtime_hash":runtime_manifest,
+        "guest_runtime_manifest_hash":&contract.guest_runtime_manifest_hash,
         "launcher_artifact_hash":&contract.launcher_artifact_hash,
         "owner_public_key":&reservation.channel_owner_public_key,
         "bootstrap_capability_hash":&reservation.channel_bootstrap_capability_hash,
@@ -2749,6 +2750,39 @@ pub(crate) mod tests {
             channel_max_bytes,
             delivery,
         }
+    }
+
+    #[test]
+    fn activation_identity_binds_the_distinct_guest_owner_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let db = RuntimeDb::open(&root.path().join("runtime.sqlite3")).unwrap();
+        let reservation = reservation(&db, "guest-runtime-binding");
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "occ-guest-runtime-binding".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        let contract = crate::node_config::sections::external_execution::RetainedExternalExecutionBinding::test_fixture().backend_contract();
+        let deadline = reservation.contact_deadline_ms
+            + i64::from(contract.observation_timeout_seconds) * 1_000;
+        let digest = |contract: &crate::node_config::sections::external_execution::ExternalPlacementBackendContract| {
+            external_supervisor_activation_request_digest(
+                &reservation,
+                &occurrence,
+                contract,
+                deadline,
+                contract.observation_timeout_seconds + contract.cleanup_timeout_seconds,
+                contract.max_transfer_bytes.min(64 * 1024 * 1024),
+                &"9".repeat(64),
+            )
+            .unwrap()
+        };
+        let original = digest(&contract);
+        let mut changed = contract;
+        changed.guest_runtime_manifest_hash = "7".repeat(64);
+        assert_ne!(digest(&changed), original);
     }
 
     #[test]
