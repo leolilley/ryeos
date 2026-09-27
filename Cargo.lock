@@ -3269,6 +3269,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "hex",
  "lillux",
  "ryeos-external-execution-contract",
  "ryeos-http-transport",
