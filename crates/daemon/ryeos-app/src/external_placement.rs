@@ -5802,6 +5802,97 @@ mod tests {
     }
 
     #[test]
+    fn guest_assignment_is_signed_by_retained_node_for_only_the_bound_occurrence() {
+        let (store, reservation, binding, _lifetime, lock_path) = placement_store_fixture();
+        assert!(matches!(
+            store
+                .claim_external_allocation_contact("T-one", &reservation.request_digest)
+                .unwrap(),
+            ExternalAllocationContactClaim::Contact(_)
+        ));
+        let occurrence = ExternalAllocationOccurrence {
+            schema: 1,
+            binding_hash: reservation.binding_hash.clone(),
+            request_digest: reservation.request_digest.clone(),
+            occurrence_id: "assigned-occurrence".into(),
+            provider_observation_digest: "f".repeat(64),
+        };
+        store
+            .bind_external_allocation("T-one", &occurrence, test_observation_timing())
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let inputs = guest_input_authority(
+            &temporary.path().join("guest-inputs"),
+            &reservation.base_snapshot_hash,
+        );
+        let package_parent = lillux::PinnedDirectory::open(temporary.path())
+            .unwrap()
+            .unwrap();
+        let channel =
+            ExternalChannelAuthority::test_fixture(&reservation.channel_authority_generation);
+        let contract = binding.backend_contract();
+        let (intent, _activation) = supervisor_activation(
+            &contract,
+            &reservation,
+            &occurrence,
+            &channel,
+            &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            inputs,
+            &FaultBackend::new(),
+            &package_parent,
+            reservation.startup_deadline().unwrap(),
+        )
+        .unwrap();
+        let signed = store
+            .author_external_guest_assignment(&reservation, &occurrence, &intent, &contract)
+            .unwrap();
+        let root = lock_path.ancestors().nth(3).unwrap();
+        let identity = crate::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
+        let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
+            signed.clone(),
+            identity.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(
+            verified.assignment().occurrence_id,
+            occurrence.occurrence_id
+        );
+        assert_eq!(
+            verified.assignment().guest_runtime_manifest_hash,
+            contract.guest_runtime_manifest_hash
+        );
+        let mut changed = occurrence.clone();
+        changed.occurrence_id = "substituted-occurrence".into();
+        assert!(
+            store
+                .author_external_guest_assignment(&reservation, &changed, &intent, &contract)
+                .is_err()
+        );
+        let mut changed_contract = contract.clone();
+        changed_contract.guest_runtime_manifest_hash = "7".repeat(64);
+        assert!(
+            store
+                .author_external_guest_assignment(
+                    &reservation,
+                    &occurrence,
+                    &intent,
+                    &changed_contract
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .begin_external_supervisor_activation("T-one", &intent)
+                .unwrap()
+        );
+        assert!(
+            store
+                .author_external_guest_assignment(&reservation, &occurrence, &intent, &contract)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn normal_direct_settlement_does_not_admit_absent_or_session_allocations() {
         // Storage-only negative admission test, not a real born direct launch.
         let (store, reservation, _, _lifetime, _) = placement_store_fixture();
