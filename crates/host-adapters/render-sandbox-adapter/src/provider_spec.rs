@@ -41,6 +41,8 @@ pub(crate) enum RouteName {
     SandboxCollection,
     SandboxById,
     SandboxTerminateById,
+    SandboxFileUploadTokenById,
+    SandboxRunStreamTokenById,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -51,6 +53,16 @@ enum RouteLiteral {
     Sandboxes,
     #[serde(rename = "terminate")]
     Terminate,
+    #[serde(rename = "files")]
+    Files,
+    #[serde(rename = "upload")]
+    Upload,
+    #[serde(rename = "runs")]
+    Runs,
+    #[serde(rename = "stream")]
+    Stream,
+    #[serde(rename = "token")]
+    Token,
 }
 
 impl RouteLiteral {
@@ -59,6 +71,11 @@ impl RouteLiteral {
             Self::V1 => "v1",
             Self::Sandboxes => "sandboxes",
             Self::Terminate => "terminate",
+            Self::Files => "files",
+            Self::Upload => "upload",
+            Self::Runs => "runs",
+            Self::Stream => "stream",
+            Self::Token => "token",
         }
     }
 }
@@ -91,6 +108,20 @@ struct RouteSpec {
 struct RouteQuery {
     #[serde(rename = "ownerId")]
     owner_id: StringSource,
+    #[serde(default, deserialize_with = "deserialize_non_null_option")]
+    path: Option<UploadPathSource>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum UploadPathFieldSource {
+    #[serde(rename = "activation.upload_path")]
+    ActivationUploadPath,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UploadPathSource {
+    source: UploadPathFieldSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -241,12 +272,15 @@ struct Routes {
     sandbox_collection: RouteSpec,
     sandbox_by_id: RouteSpec,
     sandbox_terminate_by_id: RouteSpec,
+    sandbox_file_upload_token_by_id: RouteSpec,
+    sandbox_run_stream_token_by_id: RouteSpec,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RouteTarget {
     pub(crate) path_segments: Vec<String>,
     pub(crate) owner_id_query: Option<String>,
+    pub(crate) upload_path_query: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,7 +318,7 @@ impl ProviderSpec {
 
     fn validate(&self, settings_schema_digest: &str) -> Result<()> {
         ensure!(
-            self.schema == 1
+            self.schema == 2
                 && self.provider_profile == ProviderProfile::RenderSandboxV1
                 && self.origin_profile == OriginProfile::RenderApiV1
                 && self.settings_schema_digest == settings_schema_digest,
@@ -297,7 +331,7 @@ impl ProviderSpec {
                     RouteSegmentExpectation::Literal(RouteLiteral::V1),
                     RouteSegmentExpectation::Literal(RouteLiteral::Sandboxes)
                 ],
-                false,
+                ExpectedRouteQuery::None,
             ) && route_matches(
                 &self.routes.sandbox_by_id,
                 &[
@@ -305,7 +339,7 @@ impl ProviderSpec {
                     RouteSegmentExpectation::Literal(RouteLiteral::Sandboxes),
                     RouteSegmentExpectation::Bound(RouteBinding::OccurrenceId)
                 ],
-                true,
+                ExpectedRouteQuery::Owner,
             ) && route_matches(
                 &self.routes.sandbox_terminate_by_id,
                 &[
@@ -314,7 +348,29 @@ impl ProviderSpec {
                     RouteSegmentExpectation::Bound(RouteBinding::OccurrenceId),
                     RouteSegmentExpectation::Literal(RouteLiteral::Terminate)
                 ],
-                true,
+                ExpectedRouteQuery::Owner,
+            ) && route_matches(
+                &self.routes.sandbox_file_upload_token_by_id,
+                &[
+                    RouteSegmentExpectation::Literal(RouteLiteral::V1),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Sandboxes),
+                    RouteSegmentExpectation::Bound(RouteBinding::OccurrenceId),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Files),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Upload),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Token),
+                ],
+                ExpectedRouteQuery::OwnerAndUploadPath,
+            ) && route_matches(
+                &self.routes.sandbox_run_stream_token_by_id,
+                &[
+                    RouteSegmentExpectation::Literal(RouteLiteral::V1),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Sandboxes),
+                    RouteSegmentExpectation::Bound(RouteBinding::OccurrenceId),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Runs),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Stream),
+                    RouteSegmentExpectation::Literal(RouteLiteral::Token),
+                ],
+                ExpectedRouteQuery::Owner,
             ),
             "provider spec route profile is unsupported"
         );
@@ -451,11 +507,14 @@ impl ProviderSpec {
         name: RouteName,
         occurrence_id: Option<&str>,
         settings_owner_id: &str,
+        upload_path: Option<&str>,
     ) -> Result<RouteTarget> {
         let route = match name {
             RouteName::SandboxCollection => &self.routes.sandbox_collection,
             RouteName::SandboxById => &self.routes.sandbox_by_id,
             RouteName::SandboxTerminateById => &self.routes.sandbox_terminate_by_id,
+            RouteName::SandboxFileUploadTokenById => &self.routes.sandbox_file_upload_token_by_id,
+            RouteName::SandboxRunStreamTokenById => &self.routes.sandbox_run_stream_token_by_id,
         };
         let mut path_segments = Vec::with_capacity(route.segments.len());
         let mut has_occurrence_binding = false;
@@ -482,9 +541,36 @@ impl ProviderSpec {
             Some(_) => anyhow::bail!("provider spec query projection is unsupported"),
             None => None,
         };
+        let upload_path_query = match (&route.query, upload_path) {
+            (Some(query), Some(path))
+                if query.path.as_ref().is_some_and(|source| {
+                    source.source == UploadPathFieldSource::ActivationUploadPath
+                }) =>
+            {
+                ensure!(
+                    path.starts_with('/')
+                        && path.len() <= 2048
+                        && path.split('/').skip(1).all(|segment| {
+                            !segment.is_empty()
+                                && segment != "."
+                                && segment != ".."
+                                && segment.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric()
+                                        || matches!(byte, b'-' | b'_' | b'.')
+                                })
+                        }),
+                    "activation upload path is invalid"
+                );
+                Some(path.to_owned())
+            }
+            (Some(query), None) if query.path.is_none() => None,
+            (None, None) => None,
+            _ => anyhow::bail!("activation upload path does not match the signed route"),
+        };
         Ok(RouteTarget {
             path_segments,
             owner_id_query,
+            upload_path_query,
         })
     }
 
@@ -550,10 +636,17 @@ enum RouteSegmentExpectation {
     Bound(RouteBinding),
 }
 
+#[derive(Clone, Copy)]
+enum ExpectedRouteQuery {
+    None,
+    Owner,
+    OwnerAndUploadPath,
+}
+
 fn route_matches(
     route: &RouteSpec,
     expected_segments: &[RouteSegmentExpectation],
-    owner_id_query: bool,
+    expected_query: ExpectedRouteQuery,
 ) -> bool {
     route.segments.len() == expected_segments.len()
         && route
@@ -568,9 +661,17 @@ fn route_matches(
                     actual.literal.is_none() && actual.bound == Some(*value)
                 }
             })
-        && match (&route.query, owner_id_query) {
-            (Some(query), true) => query.owner_id.source == StringFieldSource::SettingsOwnerId,
-            (None, false) => true,
+        && match (&route.query, expected_query) {
+            (None, ExpectedRouteQuery::None) => true,
+            (Some(query), ExpectedRouteQuery::Owner) => {
+                query.owner_id.source == StringFieldSource::SettingsOwnerId && query.path.is_none()
+            }
+            (Some(query), ExpectedRouteQuery::OwnerAndUploadPath) => {
+                query.owner_id.source == StringFieldSource::SettingsOwnerId
+                    && query.path.as_ref().is_some_and(|source| {
+                        source.source == UploadPathFieldSource::ActivationUploadPath
+                    })
+            }
             _ => false,
         }
 }
@@ -641,12 +742,48 @@ mod tests {
             ])
         );
         assert_eq!(
-            spec.route_target(RouteName::SandboxById, Some("sbx-fixture-1"), "owner-1")
-                .unwrap(),
+            spec.route_target(
+                RouteName::SandboxById,
+                Some("sbx-fixture-1"),
+                "owner-1",
+                None
+            )
+            .unwrap(),
             RouteTarget {
                 path_segments: vec!["v1".into(), "sandboxes".into(), "sbx-fixture-1".into()],
                 owner_id_query: Some("owner-1".into()),
+                upload_path_query: None,
             }
+        );
+        assert_eq!(
+            spec.route_target(
+                RouteName::SandboxFileUploadTokenById,
+                Some("sbx-fixture-1"),
+                "owner-1",
+                Some("/ryeos/activation/guest-package"),
+            )
+            .unwrap(),
+            RouteTarget {
+                path_segments: vec![
+                    "v1".into(),
+                    "sandboxes".into(),
+                    "sbx-fixture-1".into(),
+                    "files".into(),
+                    "upload".into(),
+                    "token".into(),
+                ],
+                owner_id_query: Some("owner-1".into()),
+                upload_path_query: Some("/ryeos/activation/guest-package".into()),
+            }
+        );
+        assert!(
+            spec.route_target(
+                RouteName::SandboxRunStreamTokenById,
+                Some("sbx-fixture-1"),
+                "owner-1",
+                Some("/ryeos/activation/guest-package"),
+            )
+            .is_err()
         );
         assert_eq!(spec.api_base(), "https://api.render.com/");
     }
@@ -655,8 +792,8 @@ mod tests {
     fn spec_rejects_unknown_configuration_and_unreviewed_routes() {
         let fixture = String::from_utf8(fixture()).unwrap();
         let with_capability_claim = fixture.replacen(
-            "\"schema\": 1,",
-            "\"schema\": 1,\n  \"capabilities\": [\"exact_terminal_observation\"],",
+            "\"schema\": 2,",
+            "\"schema\": 2,\n  \"capabilities\": [\"exact_terminal_observation\"],",
             1,
         );
         assert!(
@@ -684,6 +821,17 @@ mod tests {
             "provider_claims_terminal_success_v1",
         );
         assert!(ProviderSpec::parse(arbitrary_proof.as_bytes(), SETTINGS_SCHEMA_DIGEST).is_err());
+        let arbitrary_token_route =
+            fixture.replacen("\"literal\": \"upload\"", "\"literal\": \"download\"", 1);
+        assert!(
+            ProviderSpec::parse(arbitrary_token_route.as_bytes(), SETTINGS_SCHEMA_DIGEST).is_err()
+        );
+        let arbitrary_upload_source =
+            fixture.replace("activation.upload_path", "settings.snapshot_id");
+        assert!(
+            ProviderSpec::parse(arbitrary_upload_source.as_bytes(), SETTINGS_SCHEMA_DIGEST)
+                .is_err()
+        );
     }
 
     #[test]

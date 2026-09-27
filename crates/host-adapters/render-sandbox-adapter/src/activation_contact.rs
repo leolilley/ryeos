@@ -16,13 +16,14 @@ use ryeos_http_transport::{
 };
 use zeroize::Zeroizing;
 
+use crate::provider_spec::{ProviderSpec, RouteName};
 use crate::proxy_route::{
     BoundConnectToken, MAX_CONNECT_RESPONSE_BYTES, ProxyOperation, bind_connect_response,
     connect_token_url, validate_proxy_route,
 };
 use crate::{
-    ActivationDeliveryPlan, IDLE_TIMEOUT, SETUP_TIMEOUT, Settings, has_json_content_type,
-    read_credential, send_api_request, tls_roots,
+    ActivationDeliveryPlan, IDLE_TIMEOUT, SETUP_TIMEOUT, Settings, api_url, has_json_content_type,
+    read_credential, send_api_request, tls_roots, validate_api_url,
 };
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
@@ -75,6 +76,7 @@ fn contact_once(
 #[allow(dead_code)]
 pub(crate) fn first_activation_contact(
     network: &NetworkContext,
+    provider_spec: &ProviderSpec,
     settings: &Settings,
     occurrence_id: &str,
     delivery: &ActivationDeliveryPlan,
@@ -86,6 +88,7 @@ pub(crate) fn first_activation_contact(
     let credential = read_credential()?;
     let mut contact = RenderContact {
         network,
+        provider_spec,
         settings,
         occurrence_id,
         credential,
@@ -97,6 +100,7 @@ pub(crate) fn first_activation_contact(
 
 struct RenderContact<'a> {
     network: &'a NetworkContext,
+    provider_spec: &'a ProviderSpec,
     settings: &'a Settings,
     occurrence_id: &'a str,
     credential: Zeroizing<String>,
@@ -110,7 +114,32 @@ impl RenderContact<'_> {
         operation: ProxyOperation<'_>,
         command: Option<&str>,
     ) -> Result<BoundConnectToken> {
-        let url = connect_token_url(self.occurrence_id, &self.settings.owner_id, operation)?;
+        let (route, upload_path) = match operation {
+            ProxyOperation::UploadFile { remote_path } => {
+                (RouteName::SandboxFileUploadTokenById, Some(remote_path))
+            }
+            ProxyOperation::RunStream => (RouteName::SandboxRunStreamTokenById, None),
+            ProxyOperation::DownloadFile { .. } => {
+                anyhow::bail!("guest activation cannot mint a download token")
+            }
+        };
+        let (url, target) = api_url(
+            self.provider_spec,
+            route,
+            Some(self.occurrence_id),
+            self.settings,
+            upload_path,
+        )?;
+        validate_api_url(
+            &url,
+            &target.path_segments,
+            target.owner_id_query.as_deref(),
+            target.upload_path_query.as_deref(),
+        )?;
+        ensure!(
+            url == connect_token_url(self.occurrence_id, &self.settings.owner_id, operation)?,
+            "signed Render token route differs from the fixed adapter operation"
+        );
         let body = command
             .map(|command| canonical_json(&serde_json::json!({ "command": command })))
             .transpose()?;
@@ -318,6 +347,45 @@ mod tests {
             method: "PUT".into(),
             route: url::Url::parse(uri).unwrap(),
             bearer: Zeroizing::new("private-token-sentinel".into()),
+        }
+    }
+
+    #[test]
+    fn signed_token_routes_match_fixed_render_operations() {
+        let settings = proxy_settings();
+        let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
+        let spec = ProviderSpec::parse(
+            include_bytes!("../fixtures/provider-spec.json"),
+            &schema_digest,
+        )
+        .unwrap();
+        for (route, operation, upload_path) in [
+            (
+                RouteName::SandboxFileUploadTokenById,
+                ProxyOperation::UploadFile {
+                    remote_path: "/ryeos/activation/guest-package",
+                },
+                Some("/ryeos/activation/guest-package"),
+            ),
+            (
+                RouteName::SandboxRunStreamTokenById,
+                ProxyOperation::RunStream,
+                None,
+            ),
+        ] {
+            let (url, target) =
+                api_url(&spec, route, Some("sbx-fixture"), &settings, upload_path).unwrap();
+            validate_api_url(
+                &url,
+                &target.path_segments,
+                target.owner_id_query.as_deref(),
+                target.upload_path_query.as_deref(),
+            )
+            .unwrap();
+            assert_eq!(
+                url,
+                connect_token_url("sbx-fixture", &settings.owner_id, operation).unwrap()
+            );
         }
     }
 

@@ -123,6 +123,10 @@ route, and preserves only a `Pending` interpretation of the run response. A
 focused failure-order test proves it stops after the first uncertain stage.
 An additional request-construction test checks the exact Sandbox proxy URL,
 method, body budget, TLS roots and redacted bearer header before contact.
+Provider-spec schema 2 now declares the exact upload-token and run-token API
+routes. The contact code requires its constructed URL to match that signed
+route as well as the fixed adapter operation; neither declaration authorizes
+contact while activation remains `unsupported_pending`.
 The signed provider spec still declares activation `unsupported_pending`, so
 none of this code is reachable as a live mutation. Enabling it requires the
 installed snapshot, upload mode, process survival after stream loss, and

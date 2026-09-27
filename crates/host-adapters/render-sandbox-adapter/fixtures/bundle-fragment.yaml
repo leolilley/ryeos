@@ -9,7 +9,7 @@ external_lifecycle_adapters:
     launcher: ryeos-external-candidate-launcher
     provider_spec:
       path: fixtures/provider-spec.json
-      sha256: "425403bbce535bba8e738f891858eeb88b51d44e070ad2ed55b47c201caf1341"
+      sha256: "867227b37e7090a0497cefb41980964d5e9651e7be8f711db8f7fc3abaf644ae"
     settings_schema_digest: "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172"
     capabilities:
       - authoritative_no_occurrence

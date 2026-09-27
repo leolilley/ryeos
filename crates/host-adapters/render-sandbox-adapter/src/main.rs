@@ -681,13 +681,14 @@ fn allocate(
     let Some(route) = provider_spec.allocation_route() else {
         return pending();
     };
-    let Ok((url, route_target)) = api_url(provider_spec, route, None, settings) else {
+    let Ok((url, route_target)) = api_url(provider_spec, route, None, settings, None) else {
         return pending();
     };
     if validate_api_url(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
+        route_target.upload_path_query.as_deref(),
     )
     .is_err()
     {
@@ -952,6 +953,7 @@ fn terminate(
         route,
         Some(&occurrence.occurrence_id),
         settings,
+        None,
     ) else {
         return pending();
     };
@@ -959,6 +961,7 @@ fn terminate(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
+        route_target.upload_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1051,6 +1054,7 @@ fn observe_termination_with_network(
         route,
         Some(&occurrence.occurrence_id),
         settings,
+        None,
     ) else {
         return pending();
     };
@@ -1058,6 +1062,7 @@ fn observe_termination_with_network(
         &url,
         &route_target.path_segments,
         route_target.owner_id_query.as_deref(),
+        route_target.upload_path_query.as_deref(),
     )
     .is_err()
     {
@@ -1294,8 +1299,10 @@ fn api_url(
     route: RouteName,
     occurrence_id: Option<&str>,
     settings: &Settings,
+    upload_path: Option<&str>,
 ) -> Result<(url::Url, RouteTarget)> {
-    let route_target = provider_spec.route_target(route, occurrence_id, &settings.owner_id)?;
+    let route_target =
+        provider_spec.route_target(route, occurrence_id, &settings.owner_id, upload_path)?;
     let mut url = url::Url::parse(provider_spec.api_base())?;
     {
         let mut segments = url
@@ -1308,6 +1315,9 @@ fn api_url(
     }
     if let Some(owner_id) = &route_target.owner_id_query {
         url.query_pairs_mut().append_pair("ownerId", owner_id);
+    }
+    if let Some(upload_path) = &route_target.upload_path_query {
+        url.query_pairs_mut().append_pair("path", upload_path);
     }
     Ok((url, route_target))
 }
@@ -1334,20 +1344,26 @@ fn validate_api_url(
     url: &url::Url,
     expected_path_segments: &[String],
     expected_owner_id: Option<&str>,
+    expected_upload_path: Option<&str>,
 ) -> Result<()> {
     let path_segments = url
         .path_segments()
         .ok_or_else(|| anyhow::anyhow!("Render API URL has no path segments"))?
         .collect::<Vec<_>>();
     let query = url.query_pairs().collect::<Vec<_>>();
-    let query_matches = match expected_owner_id {
-        None => query.is_empty(),
-        Some(owner_id) => {
-            query.len() == 1
-                && query.first().is_some_and(|(key, value)| {
-                    key.as_ref() == "ownerId" && value.as_ref() == owner_id
-                })
+    let query_matches = match (expected_owner_id, expected_upload_path) {
+        (None, None) => query.is_empty(),
+        (Some(owner_id), None) => {
+            query.len() == 1 && query[0].0 == "ownerId" && query[0].1 == owner_id
         }
+        (Some(owner_id), Some(path)) => {
+            query.len() == 2
+                && query[0].0 == "ownerId"
+                && query[0].1 == owner_id
+                && query[1].0 == "path"
+                && query[1].1 == path
+        }
+        (None, Some(_)) => false,
     };
     ensure!(
         url.scheme() == "https"

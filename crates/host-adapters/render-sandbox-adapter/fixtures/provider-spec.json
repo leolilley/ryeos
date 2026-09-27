@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "provider_profile": "render_sandbox_v1",
   "settings_schema_digest": "f5b4994d71a6896ddad77bf2a08716fdc3527ea4f91579f084112ca69dad7172",
   "origin_profile": "render_api_v1",
@@ -26,6 +26,33 @@
         { "literal": "sandboxes" },
         { "bound": "occurrence_id" },
         { "literal": "terminate" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" }
+      }
+    },
+    "sandbox_file_upload_token_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "files" },
+        { "literal": "upload" },
+        { "literal": "token" }
+      ],
+      "query": {
+        "ownerId": { "source": "settings.owner_id" },
+        "path": { "source": "activation.upload_path" }
+      }
+    },
+    "sandbox_run_stream_token_by_id": {
+      "segments": [
+        { "literal": "v1" },
+        { "literal": "sandboxes" },
+        { "bound": "occurrence_id" },
+        { "literal": "runs" },
+        { "literal": "stream" },
+        { "literal": "token" }
       ],
       "query": {
         "ownerId": { "source": "settings.owner_id" }
