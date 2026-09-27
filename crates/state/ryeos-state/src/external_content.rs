@@ -316,6 +316,37 @@ pub fn external_content_manifest_digest(
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
+/// Describe one already-verified blob as the ordinary file-shaped external
+/// realization. This constructs no blob or source authority: the caller must
+/// independently retain the exact bytes in CAS and verify their digest and
+/// length before publishing this manifest. Keeping the shape here makes a
+/// descriptor-backed source and a named-root capture materialize identically.
+pub fn single_file_manifest_from_verified_blob(
+    blob_hash: &str,
+    size: u64,
+    mode: u32,
+) -> anyhow::Result<ExternalContentManifestObject> {
+    if !lillux::valid_hash(blob_hash) || size > MAX_CAPTURE_FILE_BYTES {
+        anyhow::bail!("external content file blob identity exceeds its ordinary tier");
+    }
+    let manifest = ExternalContentManifestObject {
+        schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
+        kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+        entries: vec![crate::objects::ExternalContentManifestEntry {
+            path: crate::objects::FILE_REALIZATION_ENTRY_PATH.to_owned(),
+            kind: ExternalContentManifestEntryKind::File,
+            mode: Some(mode),
+            blob_hash: Some(blob_hash.to_owned()),
+            size: Some(size),
+            target: None,
+        }],
+        entry_count: 1,
+        total_bytes: size,
+    };
+    manifest.validate()?;
+    Ok(manifest)
+}
+
 /// Node-admitted bounds for one large-content import. These are supplied by
 /// signed daemon policy; state owns enforcement but no defaults or host paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -846,22 +877,7 @@ pub fn capture_file_at(
     if stored_size != size {
         anyhow::bail!("external content file {display_path} changed size during capture");
     }
-    let manifest = ExternalContentManifestObject {
-        schema: crate::objects::EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
-        kind: crate::objects::EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
-        entries: vec![crate::objects::ExternalContentManifestEntry {
-            path: crate::objects::FILE_REALIZATION_ENTRY_PATH.to_owned(),
-            kind: ExternalContentManifestEntryKind::File,
-            mode: Some(mode),
-            blob_hash: Some(blob_hash),
-            size: Some(size),
-            target: None,
-        }],
-        entry_count: 1,
-        total_bytes: size,
-    };
-    manifest.validate()?;
-    Ok(manifest)
+    single_file_manifest_from_verified_blob(&blob_hash, size, mode)
 }
 
 #[cfg(unix)]
@@ -1277,6 +1293,45 @@ mod tests {
         budget.charge_bytes(5).unwrap();
         let byte_error = budget.charge_bytes(1).unwrap_err().to_string();
         assert!(byte_error.contains("5 aggregate bytes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_file_blob_shape_matches_descriptor_relative_capture() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owner");
+        std::fs::write(&path, b"exact-owner").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let pinned = lillux::PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let mut budget = LaunchCaptureBudget::default();
+        let mut sink = DigestOnlyExternalContentSink;
+        let captured = capture_file_at(
+            &pinned,
+            OsStr::new("owner"),
+            "owner",
+            &mut budget,
+            &mut sink,
+        )
+        .unwrap();
+        let synthesized = single_file_manifest_from_verified_blob(
+            &lillux::sha256_hex(b"exact-owner"),
+            b"exact-owner".len() as u64,
+            0o755,
+        )
+        .unwrap();
+        assert_eq!(captured, synthesized);
+        assert!(single_file_manifest_from_verified_blob("bad", 11, 0o755).is_err());
+        assert!(
+            single_file_manifest_from_verified_blob(&lillux::sha256_hex(b""), 0, 0o755).is_ok()
+        );
+        assert!(single_file_manifest_from_verified_blob(
+            &lillux::sha256_hex(b"exact-owner"),
+            11,
+            0o777,
+        )
+        .is_err());
     }
 
     #[cfg(unix)]
